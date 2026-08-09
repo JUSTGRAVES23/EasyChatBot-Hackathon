@@ -1,6 +1,6 @@
 #  EasyChatBot
 
-# AI Companions. Real Connections. Lifelong Learning.
+# AI Companions. Real Connections. Lifelong Learning
 
 <p align="center">
 
