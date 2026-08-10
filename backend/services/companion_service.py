@@ -10,8 +10,25 @@ Quality Agent
 Memory Service
 
 Application orchestration layer.
+
+Live Intelligence flow:
+
+CompanionService
+        |
+        +--> ResearchAgent
+        |        |
+        |        v
+        |   IntelligenceContext
+        |
+        +--> ConversationAgent
+                 ^
+                 |
+          enriched ExecutionContext
 """
 
+from __future__ import annotations
+
+from dataclasses import replace
 
 from backend.agents.conversation_agent import (
     ConversationAgent,
@@ -41,8 +58,10 @@ from backend.memory.memory_service import (
 class CompanionService:
     """
     Coordinates AI companion experiences.
-    """
 
+    The service orchestrates agents but does not contain
+    provider-specific logic.
+    """
 
     def __init__(
         self,
@@ -75,12 +94,21 @@ class CompanionService:
             or MemoryService()
         )
 
-
     async def interact(
         self,
         context: ExecutionContext,
         use_research: bool = False,
     ):
+        """
+        Execute a complete companion interaction.
+
+        When research is requested, the Research Agent
+        produces an IntelligenceContext which is attached
+        to a new immutable ExecutionContext before the
+        Conversation Agent executes.
+
+        The original ExecutionContext is never mutated.
+        """
 
         memories = (
             self.memory_service.recall(
@@ -88,8 +116,9 @@ class CompanionService:
             )
         )
 
-
         research_result = None
+
+        conversation_context = context
 
         if use_research:
 
@@ -99,20 +128,28 @@ class CompanionService:
                 )
             )
 
+            if (
+                research_result.success
+                and research_result.output is not None
+            ):
+                conversation_context = replace(
+                    context,
+                    intelligence_context=(
+                        research_result.output
+                    ),
+                )
 
         conversation_result = (
             await self.conversation_agent.execute(
-                context
+                conversation_context
             )
         )
-
 
         quality_result = (
             await self.quality_agent.execute(
-                context
+                conversation_context
             )
         )
-
 
         self.memory_service.remember(
             user_id=context.user_id,
@@ -120,16 +157,11 @@ class CompanionService:
             content=context.request,
         )
 
-
         return {
-
-            "character":
-                self.character.name,
-
+            "character": self.character.name,
 
             "conversation":
                 conversation_result.output,
-
 
             "research":
                 (
@@ -138,12 +170,9 @@ class CompanionService:
                     else None
                 ),
 
-
             "quality":
                 quality_result.output,
 
-
             "memory_count":
                 len(memories),
-
         }

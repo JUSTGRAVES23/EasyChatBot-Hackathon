@@ -1,34 +1,70 @@
-from backend.runtime.context.execution_context import ExecutionContext
+import pytest
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
 
 
 def test_execution_context_creation():
 
     context = ExecutionContext(
         user_id="demo-user",
-        request="Discuss today's technology news"
+        request="Hello",
     )
 
-    assert context.user_id == "demo-user"
+    assert context.user_id == (
+        "demo-user"
+    )
 
     assert context.request == (
-        "Discuss today's technology news"
+        "Hello"
     )
 
-    assert context.execution_id is not None
+    assert context.execution_id
 
-    assert context.created_at is not None
+    assert context.created_at
+
+    assert context.metadata == {}
+
+    assert context.intelligence_context is None
+
+    assert context.has_intelligence_context is False
 
 
 def test_execution_context_is_immutable():
 
     context = ExecutionContext(
         user_id="demo-user",
-        request="Hello"
+        request="Hello",
     )
 
-    try:
-        context.user_id = "changed"
-        assert False
+    with pytest.raises(
+        AttributeError
+    ):
+        context.request = "Changed"
 
-    except Exception:
-        assert True
+
+def test_execution_context_can_carry_intelligence():
+
+    intelligence = IntelligenceContext(
+        query="Latest European AI regulation",
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request="Explain this to me",
+        intelligence_context=intelligence,
+    )
+
+    assert context.intelligence_context is intelligence
+
+    assert context.has_intelligence_context is True
+
+    assert (
+        context.intelligence_context.query
+        == "Latest European AI regulation"
+    )

@@ -1,0 +1,519 @@
+﻿==================== MEMORY SERVICE ====================
+
+"""
+Memory Service.
+
+Application service responsible for:
+
+- saving memories
+- retrieving memories
+- preparing context for AI agents
+"""
+
+
+from datetime import datetime
+
+
+from backend.memory.memory_record import (
+    MemoryRecord,
+)
+
+from backend.memory.memory_store import (
+    MemoryStore,
+)
+
+
+class MemoryService:
+    """
+    Controls memory operations.
+    """
+
+
+    def __init__(
+        self,
+        store=None,
+    ):
+
+        self.store = (
+            store
+            or MemoryStore()
+        )
+
+
+    def remember(
+        self,
+        user_id: str,
+        category: str,
+        content: str,
+    ):
+
+        record = MemoryRecord(
+            user_id=user_id,
+            category=category,
+            content=content,
+            created_at=datetime.utcnow(),
+        )
+
+        self.store.save(
+            record
+        )
+
+
+    def recall(
+        self,
+        user_id: str,
+    ):
+
+        return self.store.get_by_user(
+            user_id
+        )
+
+
+==================== MEMORY STORE ====================
+
+"""
+Hackathon Memory persistence.
+
+This module provides the minimal persistent Memory Store
+required by the hackathon.
+
+Architecture:
+
+MemoryService
+    |
+    v
+MemoryStore
+    |
+    v
+SQLite
+
+The store is deliberately small.
+
+It is responsible only for persistence and retrieval of
+MemoryEntry objects.
+
+It does not:
+
+- decide what should be remembered
+- call an LLM
+- perform semantic retrieval
+- execute agents
+- perform governance decisions
+- manage products
+- manage vendor links
+- process payments
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+
+class MemoryStore:
+    """
+    SQLite-backed persistence for hackathon memories.
+
+    The database schema is created automatically when the
+    store is initialised.
+    """
+
+    def __init__(
+        self,
+        database_path: str | Path,
+    ) -> None:
+        self._database_path = str(database_path)
+
+        self._initialise_database()
+
+    def _connect(self) -> sqlite3.Connection:
+        """
+        Create a SQLite connection.
+        """
+
+        connection = sqlite3.connect(
+            self._database_path
+        )
+
+        connection.row_factory = sqlite3.Row
+
+        return connection
+
+    def _initialise_database(self) -> None:
+        """
+        Create the Memory table if it does not exist.
+        """
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    memory_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_memories_user_id
+                ON memories(user_id)
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_memories_user_type
+                ON memories(user_id, memory_type)
+                """
+            )
+
+    def save(
+        self,
+        memory: MemoryEntry,
+    ) -> MemoryEntry:
+        """
+        Persist a MemoryEntry.
+
+        Existing entries with the same memory_id are
+        replaced.
+        """
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO memories (
+                    memory_id,
+                    user_id,
+                    memory_type,
+                    content,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory.memory_id,
+                    memory.user_id,
+                    memory.memory_type.value,
+                    memory.content,
+                    memory.created_at.isoformat(),
+                    memory.updated_at.isoformat(),
+                    json.dumps(
+                        memory.metadata,
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+
+        return memory
+
+    def get(
+        self,
+        memory_id: str,
+    ) -> MemoryEntry | None:
+        """
+        Retrieve a single memory by identifier.
+        """
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    memory_id,
+                    user_id,
+                    memory_type,
+                    content,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM memories
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_memory(row)
+
+    def list_for_user(
+        self,
+        user_id: str,
+        memory_type: MemoryType | None = None,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve memories belonging to a user.
+
+        Results are returned newest first.
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "Memory user_id cannot be empty."
+            )
+
+        with self._connect() as connection:
+            if memory_type is None:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        memory_id,
+                        user_id,
+                        memory_type,
+                        content,
+                        created_at,
+                        updated_at,
+                        metadata_json
+                    FROM memories
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (user_id,),
+                ).fetchall()
+
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        memory_id,
+                        user_id,
+                        memory_type,
+                        content,
+                        created_at,
+                        updated_at,
+                        metadata_json
+                    FROM memories
+                    WHERE user_id = ?
+                      AND memory_type = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (
+                        user_id,
+                        memory_type.value,
+                    ),
+                ).fetchall()
+
+        return [
+            self._row_to_memory(row)
+            for row in rows
+        ]
+
+    def delete(
+        self,
+        memory_id: str,
+    ) -> bool:
+        """
+        Delete a memory.
+
+        Returns True when a memory was deleted.
+        """
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memories
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            )
+
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _row_to_memory(
+        row: sqlite3.Row,
+    ) -> MemoryEntry:
+        """
+        Convert a SQLite row into a MemoryEntry.
+        """
+
+        return MemoryEntry(
+            memory_id=row["memory_id"],
+            user_id=row["user_id"],
+            memory_type=MemoryType(
+                row["memory_type"]
+            ),
+            content=row["content"],
+            created_at=datetime.fromisoformat(
+                row["created_at"]
+            ),
+            updated_at=datetime.fromisoformat(
+                row["updated_at"]
+            ),
+            metadata=json.loads(
+                row["metadata_json"]
+            ),
+        )
+
+
+==================== MEMORY TEST ====================
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+
+def test_memory_save_and_recall():
+
+    service = MemoryService()
+
+
+    service.remember(
+        user_id="demo-user",
+        category="learning_goal",
+        content=(
+            "Improve French conversation skills"
+        ),
+    )
+
+
+    memories = service.recall(
+        "demo-user"
+    )
+
+
+    assert len(memories) == 1
+
+
+    assert memories[0].content == (
+        "Improve French conversation skills"
+    )
+
+
+==================== COMPANION MEMORY TEST ====================
+
+import pytest
+
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+@pytest.mark.asyncio
+async def test_companion_stores_memory():
+
+    character = CharacterProfile(
+        character_id="yeti",
+        name="Yeti",
+        description="Learning companion",
+        personality="Friendly",
+        learning_style="Conversation",
+    )
+
+
+    service = CompanionService(
+        character=character
+    )
+
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request=(
+            "I want to improve French speaking"
+        ),
+    )
+
+
+    result = await service.interact(
+        context
+    )
+
+
+    assert result["character"] == (
+        "Yeti"
+    )
+
+    memories = (
+        service.memory_service.recall(
+            "demo-user"
+        )
+    )
+
+
+    assert len(memories) == 1
+
+    assert memories[0].content == (
+        "I want to improve French speaking"
+    )
+
+
+==================== QUALITY INTEGRATION TEST ====================
+
+import pytest
+
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+@pytest.mark.asyncio
+async def test_quality_is_returned():
+
+    character = CharacterProfile(
+        character_id="yeti",
+        name="Yeti",
+        description="Companion",
+        personality="Friendly",
+        learning_style="Conversation",
+    )
+
+
+    service = CompanionService(
+        character
+    )
+
+
+    result = await service.interact(
+        ExecutionContext(
+            user_id="demo-user",
+            request="Learn French",
+        )
+    )
+
+
+    assert (
+        result["quality"]["passed"]
+        is True
+    )
+
+
+    assert (
+        result["quality"]["quality_score"]
+        > 0
+    )
+

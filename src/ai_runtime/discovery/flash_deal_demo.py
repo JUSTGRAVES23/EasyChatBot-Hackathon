@@ -1,0 +1,251 @@
+"""
+Hackathon Flash Deal Card demo builder.
+
+This module provides a deterministic demonstration flow for the
+user-facing Flash Deal Card.
+
+Flow:
+
+Memory
+    |
+    v
+DealCard
+    |
+    v
+Personal relevance
+    |
+    v
+Character
+    |
+    v
+FlashDealCard
+
+The module is intentionally deterministic for the hackathon.
+
+It does not:
+- call external APIs
+- call Parallel
+- process payments
+- access SQLite directly
+- execute agents
+- create real orders
+- pretend that demo pricing is live vendor data
+
+Production discovery should provide the real DealCard and
+verified source information.
+"""
+
+from __future__ import annotations
+
+from src.ai_runtime.discovery.flash_deal_card import (
+    FlashDealCard,
+)
+
+from src.ai_runtime.discovery.models import (
+    CommerceLink,
+    DealCard,
+)
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+
+DEMO_PRODUCT_IMAGE_URL = (
+    "https://example.com/demo/iphone17-pro.jpg"
+)
+
+DEMO_VENDOR_PRODUCT_URL = (
+    "https://example.com/vendor/iphone17-pro"
+)
+
+
+def build_demo_deal() -> DealCard:
+    """
+    Create deterministic demo discovery data.
+
+    This is presentation/demo data only. It must not be
+    interpreted as a live product offer.
+    """
+
+    commerce_link = CommerceLink(
+        vendor="Demo Vendor",
+        destination_url=DEMO_VENDOR_PRODUCT_URL,
+    )
+
+    return DealCard(
+        product_name="iPhone 17 Pro",
+        vendor="Demo Vendor",
+        price=999.99,
+        currency="EUR",
+        previous_price=1199.00,
+        discount_percentage=17.0,
+        commerce_link=commerce_link,
+        source="hackathon_demo",
+        description=(
+            "Demo product used to demonstrate the "
+            "EasyChatBot discovery experience."
+        ),
+    )
+
+
+def build_demo_memory() -> MemoryEntry:
+    """
+    Create deterministic demo user memory.
+
+    The memory represents an explicit user preference that
+    can be used to explain why the discovery is relevant.
+    """
+
+    return MemoryEntry(
+        user_id="demo-user",
+        memory_type=MemoryType.PREFERENCE,
+        content=(
+            "prefers powerful mobile photography "
+            "and high-performance devices"
+        ),
+    )
+
+
+def build_demo_flash_deal_card(
+    deal: DealCard | None = None,
+) -> FlashDealCard:
+    """
+    Build the complete deterministic hackathon Flash Deal Card.
+
+    This function demonstrates the intended vertical slice:
+
+        Memory
+          +
+        DealCard
+          +
+        Character
+          =
+        Personalised FlashDealCard
+    """
+
+    if deal is None:
+        deal = build_demo_deal()
+
+    memory = build_demo_memory()
+
+    relevance_reason = (
+        "You often look for powerful mobile photography "
+        "and high-performance devices."
+    )
+
+    return FlashDealCard.from_deal(
+        deal=deal,
+        character_id="yeti",
+        character_name="Yeti",
+        character_message=(
+            "Look what I found! "
+            "This could be perfect for you."
+        ),
+        relevance_reason=relevance_reason,
+        product_image_url=DEMO_PRODUCT_IMAGE_URL,
+        tagline="Pro. Beautiful. Powerful.",
+        highlights=[
+            "Pro camera system",
+            "High-performance chip",
+            "All-day battery life",
+            "Premium display",
+        ],
+        badge="NEW FIND!",
+        metadata={
+            "demo": "true",
+            "memory_type": MemoryType.PREFERENCE.value,
+            "memory_id": memory.memory_id,
+            "source": "hackathon_demo",
+        },
+    )
+
+
+def render_demo_flash_deal_card(
+    card: FlashDealCard | None = None,
+) -> str:
+    """
+    Render a terminal-friendly representation of the Flash
+    Deal Card.
+
+    This is useful for the hackathon demonstration before a
+    graphical frontend is connected.
+    """
+
+    if card is None:
+        card = build_demo_flash_deal_card()
+
+    lines = [
+        "",
+        "=" * 72,
+        "EASYCHATBOT — FLASH DEAL",
+        "=" * 72,
+        "",
+        f"[ {card.badge} ]",
+        "",
+        f"{card.character_name}",
+        f'"{card.character_message}"',
+        "",
+        f"{card.product_name}",
+        card.tagline,
+        "",
+        "HIGHLIGHTS",
+        "-" * 72,
+    ]
+
+    for highlight in card.highlights:
+        lines.append(f"  • {highlight}")
+
+    lines.extend(
+        [
+            "",
+            "PRICE",
+            "-" * 72,
+            f"  Previous price: "
+            f"{_format_price(card.previous_price, card.currency)}",
+            f"  Discount: "
+            f"{card.display_discount or 'No verified discount'}",
+            f"  Current price: "
+            f"{_format_price(card.current_price, card.currency)}",
+            f"  Savings: "
+            f"{card.display_savings or 'Not available'}",
+            "",
+            "WHY THIS IS RELEVANT TO YOU",
+            "-" * 72,
+            f"  {card.relevance_reason}",
+            "",
+            f"AVAILABLE FROM: {card.vendor_name}",
+            "",
+            "[ GET DEAL ]",
+            f"  {card.get_deal_url}",
+            "",
+            "[ MORE INFORMATION ]",
+            f"  {card.more_information_url}",
+            "",
+            "NOTE: This is deterministic hackathon demo data.",
+            "=" * 72,
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def _format_price(
+    value: float | None,
+    currency: str,
+) -> str:
+    """
+    Format an optional price for terminal output.
+    """
+
+    if value is None:
+        return "N/A"
+
+    return f"{currency} {value:,.2f}"
+
+
+if __name__ == "__main__":
+    print(
+        render_demo_flash_deal_card()
+    )

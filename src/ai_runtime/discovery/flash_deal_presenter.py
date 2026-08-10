@@ -1,0 +1,184 @@
+"""
+Flash Deal Card presenter.
+
+Pure presentation layer for the EasyChatBot hackathon.
+
+Architecture:
+
+FlashDealCard
+      |
+      v
+FlashDealPresenter
+      |
+      v
+Markdown / terminal output
+
+Responsibilities:
+- render an existing FlashDealCard
+- present verified product and pricing information
+- present character context
+- present personal relevance
+- expose the existing vendor actions
+
+Non-responsibilities:
+- discovery
+- memory access
+- provider calls
+- database access
+- commerce execution
+- payment processing
+- URL generation
+- product data generation
+
+The presenter must never mutate the FlashDealCard.
+"""
+
+from __future__ import annotations
+
+from src.ai_runtime.discovery.flash_deal_card import (
+    FlashDealCard,
+)
+
+
+class FlashDealPresenter:
+    """
+    Pure renderer for the user-facing Flash Deal Card.
+
+    The presenter consumes the existing FlashDealCard contract
+    and produces deterministic Markdown suitable for the
+    hackathon terminal demonstration or a future chat UI.
+    """
+
+    def render(
+        self,
+        card: FlashDealCard,
+    ) -> str:
+        """
+        Render a FlashDealCard as user-facing Markdown.
+
+        No external calls or business decisions are performed.
+        """
+
+        sections: list[str] = []
+
+        sections.append(
+            f"## {card.character_name}"
+        )
+
+        sections.append(
+            f"> {card.character_message}"
+        )
+
+        sections.append(
+            f"### {card.badge}"
+        )
+
+        sections.append(
+            f"**{card.product_name}**"
+        )
+
+        sections.append(
+            f"*{card.tagline}*"
+        )
+
+        sections.append(
+            self._render_highlights(card)
+        )
+
+        sections.append(
+            self._render_price(card)
+        )
+
+        sections.append(
+            "### WHY THIS IS RELEVANT TO YOU"
+        )
+
+        sections.append(
+            card.relevance_reason
+        )
+
+        sections.append(
+            "### AVAILABLE FROM"
+        )
+
+        sections.append(
+            card.vendor_name
+        )
+
+        sections.append(
+            self._render_actions(card)
+        )
+
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _render_highlights(
+        card: FlashDealCard,
+    ) -> str:
+        """Render the product highlights."""
+
+        lines = ["### HIGHLIGHTS"]
+
+        lines.extend(
+            f"- {highlight}"
+            for highlight in card.highlights
+        )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_price(
+        card: FlashDealCard,
+    ) -> str:
+        """Render verified pricing information."""
+
+        lines = ["### PRICE"]
+
+        if card.previous_price is not None:
+            lines.append(
+                "Previous price: "
+                f"{card.currency} "
+                f"{card.previous_price:.2f}"
+            )
+
+        lines.append(
+            "Current price: "
+            f"{card.currency} "
+            f"{card.current_price:.2f}"
+        )
+
+        if card.display_discount is not None:
+            lines.append(
+                f"Discount: {card.display_discount}"
+            )
+
+        if card.display_savings is not None:
+            lines.append(
+                f"Savings: {card.display_savings}"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_actions(
+        card: FlashDealCard,
+    ) -> str:
+        """
+        Render vendor action destinations.
+
+        The presenter only exposes URLs already present on the
+        FlashDealCard. It does not create or transform them.
+        """
+
+        return "\n".join(
+            [
+                "### ACTIONS",
+                "",
+                f"[GET DEAL]({card.get_deal_url})",
+                "",
+                (
+                    "[MORE INFORMATION]"
+                    f"({card.more_information_url})"
+                ),
+            ]
+        )

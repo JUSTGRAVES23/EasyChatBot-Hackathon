@@ -1,16 +1,45 @@
 """
 Memory Service.
 
-Application service responsible for:
+Application-layer memory service.
 
-- saving memories
-- retrieving memories
-- preparing context for AI agents
+This service adapts the legacy backend MemoryRecord contract
+to the hackathon AI Runtime MemoryEntry / MemoryStore
+persistence contract.
+
+Architecture:
+
+Application
+    |
+    v
+MemoryService
+    |
+    v
+MemoryEntry / MemoryType
+    |
+    v
+MemoryStore
+    |
+    v
+SQLite
+
+Responsibilities:
+- save application memories
+- retrieve application memories
+- translate application memory categories
+- isolate persistence details from callers
+
+Does not:
+- perform semantic retrieval
+- call an LLM
+- execute agents
+- make autonomous memory decisions
 """
 
+from __future__ import annotations
 
-from datetime import datetime
-
+from datetime import datetime, timezone
+from pathlib import Path
 
 from backend.memory.memory_record import (
     MemoryRecord,
@@ -20,48 +49,183 @@ from backend.memory.memory_store import (
     MemoryStore,
 )
 
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
 
 class MemoryService:
     """
-    Controls memory operations.
+    Controls application memory operations.
+
+    The service keeps the existing MemoryRecord interface
+    for the backend application while delegating persistence
+    to the current AI Runtime MemoryStore.
     """
 
+    DEFAULT_DATABASE_PATH = (
+        Path("data") / "memory.db"
+    )
 
     def __init__(
         self,
-        store=None,
-    ):
+        store: MemoryStore | None = None,
+        database_path: str | Path | None = None,
+    ) -> None:
+        """
+        Initialise the memory service.
 
-        self.store = (
-            store
-            or MemoryStore()
+        Args:
+            store:
+                Optional injected MemoryStore.
+
+                Primarily useful for tests and controlled
+                application configuration.
+
+            database_path:
+                Optional SQLite database path.
+
+                Ignored when an explicit store is supplied.
+        """
+
+        if store is not None:
+            self.store = store
+            return
+
+        path = (
+            Path(database_path)
+            if database_path is not None
+            else self.DEFAULT_DATABASE_PATH
         )
 
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.store = MemoryStore(
+            database_path=path
+        )
 
     def remember(
         self,
         user_id: str,
         category: str,
         content: str,
-    ):
+    ) -> MemoryRecord:
+        """
+        Save an application memory.
+
+        The legacy category is preserved in metadata while
+        the persistence layer receives a supported MemoryType.
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "Memory user_id cannot be empty."
+            )
+
+        if not category.strip():
+            raise ValueError(
+                "Memory category cannot be empty."
+            )
+
+        if not content.strip():
+            raise ValueError(
+                "Memory content cannot be empty."
+            )
+
+        created_at = datetime.now(
+            timezone.utc
+        )
 
         record = MemoryRecord(
             user_id=user_id,
             category=category,
             content=content,
-            created_at=datetime.utcnow(),
+            created_at=created_at,
+        )
+
+        memory_entry = MemoryEntry(
+            user_id=user_id,
+            memory_type=self._to_memory_type(
+                category
+            ),
+            content=content,
+            created_at=created_at,
+            updated_at=created_at,
+            metadata={
+                "category": category,
+            },
         )
 
         self.store.save(
-            record
+            memory_entry
         )
 
+        return record
 
     def recall(
         self,
         user_id: str,
-    ):
+    ) -> list[MemoryRecord]:
+        """
+        Retrieve memories for a user.
 
-        return self.store.get_by_user(
+        Persistence-specific MemoryEntry objects are
+        translated back into the application-facing
+        MemoryRecord contract.
+        """
+
+        entries = self.store.list_for_user(
             user_id
+        )
+
+        return [
+            self._to_memory_record(entry)
+            for entry in entries
+        ]
+
+    @staticmethod
+    def _to_memory_type(
+        category: str,
+    ) -> MemoryType:
+        """
+        Translate application categories into the
+        supported AI Runtime memory types.
+
+        The original category remains available in
+        MemoryEntry.metadata.
+        """
+
+        normalized = category.strip().lower()
+
+        if normalized == "saved_item":
+            return MemoryType.SAVED_ITEM
+
+        if normalized == "discovery_context":
+            return MemoryType.DISCOVERY_CONTEXT
+
+        return MemoryType.PREFERENCE
+
+    @staticmethod
+    def _to_memory_record(
+        entry: MemoryEntry,
+    ) -> MemoryRecord:
+        """
+        Translate a persistent MemoryEntry into the
+        application-facing MemoryRecord.
+        """
+
+        category = entry.metadata.get(
+            "category",
+            entry.memory_type.value,
+        )
+
+        return MemoryRecord(
+            user_id=entry.user_id,
+            category=category,
+            content=entry.content,
+            created_at=entry.created_at,
         )
