@@ -41,7 +41,13 @@ Flash Deal
 Commerce Boundary
     |
     v
-Vendor Handoff
+Payment Pass
+    |
+    v
+Vendor Checkout
+    |
+    v
+DEMO ONLY - No payment executed
 """
 
 from __future__ import annotations
@@ -60,6 +66,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+
+from src.ai_runtime.commerce.flash_deal_commerce import (
+    FlashDealCommerce,
+)
+
+from src.ai_runtime.commerce.service import (
+    CommerceService,
+)
 
 from src.ai_runtime.discovery.flash_deal_demo import (
     build_demo_deal,
@@ -292,17 +306,41 @@ async def run_judge_demo() -> None:
         "commerce boundary."
     )
 
+    flash_deal_commerce = FlashDealCommerce()
+
+    payment_pass = (
+        flash_deal_commerce.create_payment_pass(
+            user_id=memory.user_id,
+            card=card,
+        )
+    )
+
+    payment_pass = CommerceService().prepare_payment(
+        payment_pass
+    )
+
     print(
-        f"[PASS] Vendor: {card.vendor_name}"
+        f"[PASS] Vendor: {payment_pass.vendor_name}"
     )
 
     print(
         "[PASS] GET DEAL -> vendor handoff"
     )
 
+    print()
+
     print(
-        "[PASS] Payment execution remains outside "
-        "this hackathon demonstration."
+        payment_pass.render_demo()
+    )
+
+    print()
+
+    print(
+        "[PASS] Payment execution: NO"
+    )
+
+    print(
+        "[PASS] Execution mode: DEMO"
     )
 
     # -----------------------------------------------------------------------
@@ -329,6 +367,12 @@ async def run_judge_demo() -> None:
         "It is an AI experience that discovers "
         "relevant things for the user and lets "
         "the user act on them."
+    )
+
+    print()
+    print(
+        "Commerce is a controlled handoff. "
+        "The hackathon does not execute payment."
     )
 
     print()

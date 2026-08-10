@@ -1,11 +1,16 @@
 """
 Acceptance tests for the Windows-safe judge-facing EasyChatBot demo.
 
-The executable demo deliberately uses ASCII-safe output because it must
-run reliably in the Windows cp1252 environment used by the hackathon.
+The judge demo now includes the Payment Pass contract. The commerce
+assertions therefore validate the current presentation contract:
 
-These tests validate the actual presentation contract rather than
-requiring Unicode-only formatting.
+GET DEAL
+    ->
+Payment Pass
+    ->
+READY / DEMO
+    ->
+No payment executed
 """
 
 from __future__ import annotations
@@ -109,11 +114,25 @@ def test_judge_demo_shows_commerce_boundary():
 
     assert "GET DEAL -> vendor handoff" in output
 
+    assert "PAYMENT PASS" in output
+
+    assert "Payment status: READY" in output
+
+    assert "Execution mode: DEMO" in output
+
+    assert "[ PROCEED TO CHECKOUT ]" in output
+
+    assert "No payment has been executed." in output
+
     assert (
-        "Payment execution remains outside "
-        "this hackathon demonstration."
+        "Vendor checkout remains outside "
+        "the hackathon demo."
         in output
     )
+
+    assert "[PASS] Payment execution: NO" in output
+
+    assert "[PASS] Execution mode: DEMO" in output
 
     assert "EasyChatBot is not a shop." in output
 
@@ -158,6 +177,10 @@ def test_judge_demo_preserves_execution_order():
         "8 - COMMERCE BOUNDARY"
     )
 
+    payment = output.index(
+        "PAYMENT PASS"
+    )
+
     success = output.index(
         "JUDGE DEMO: SUCCESS"
     )
@@ -169,4 +192,5 @@ def test_judge_demo_preserves_execution_order():
     assert discovery < character
     assert character < deal
     assert deal < commerce
-    assert commerce < success
+    assert commerce < payment
+    assert payment < success
