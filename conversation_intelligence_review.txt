@@ -1,0 +1,338 @@
+﻿==================== CONVERSATION AGENT ====================
+
+"""
+Conversation Agent.
+
+Provides character-aware conversational responses
+for the EasyChatBot hackathon runtime.
+
+The agent is intentionally lightweight.
+
+The main EasyChatBot repository already contains
+the production conversation and voice architecture.
+This hackathon agent exists as a runtime demonstration
+and contract-compatible prototype.
+
+Architecture:
+
+ExecutionContext
+        |
+        v
+ConversationAgent
+        |
+        v
+CharacterProfile
+        |
+        v
+AgentResult
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import (
+    AgentManifest,
+)
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ConversationAgent(BaseAgent):
+    """
+    Character-aware conversation agent.
+
+    The agent uses the supplied CharacterProfile to
+    construct a deterministic conversation response.
+
+    This implementation deliberately does not introduce
+    another LLM provider or voice system.
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+    ) -> None:
+        super().__init__(
+            AgentManifest(
+                agent_id="conversation_agent",
+                name="Conversation Agent",
+                description=(
+                    "Provides character-aware "
+                    "conversation responses."
+                ),
+            )
+        )
+
+        self.character = character
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the conversation agent.
+
+        Args:
+            context:
+                Runtime execution context containing
+                the user's request.
+
+        Returns:
+            AgentResult containing the character
+            conversation response.
+        """
+
+        output = {
+            "character": self.character.name,
+            "personality": self.character.personality,
+            "learning_style": (
+                self.character.learning_style
+            ),
+            "message": (
+                f"{self.character.name}: "
+                f"Let's explore this together. "
+                f"You asked: {context.request}"
+            ),
+        }
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=output,
+        )
+
+
+==================== AGENT RESULT ====================
+
+"""
+Agent Result Contract.
+
+Defines the standard output returned by AI Agents.
+
+All agents should return the same structure
+so the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """
+    Immutable result returned after agent execution.
+
+    Attributes:
+        success:
+            Indicates whether execution completed successfully.
+
+        agent_id:
+            Identifier of the agent that produced the result.
+
+        output:
+            Agent response payload.
+
+        error:
+            Error message when execution fails.
+    """
+
+    success: bool
+    agent_id: str
+    output: Any = None
+    error: str | None = None
+
+
+==================== INTELLIGENCE CONTEXT ====================
+
+"""
+Intelligence Context.
+
+Provider-independent representation of external
+information prepared for AI execution.
+
+Architecture:
+
+Research Agent
+        |
+        v
+IntelligenceContext
+        |
+        v
+AI Runtime integration
+        |
+        v
+LLMRequest.context
+
+The context must not expose provider-specific
+implementation details to the application layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceSource:
+    """
+    Normalised external information source.
+    """
+
+    title: str
+    url: str
+    source: str
+    content: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError(
+                "Intelligence source title cannot be empty."
+            )
+
+        if not self.url.strip():
+            raise ValueError(
+                "Intelligence source URL cannot be empty."
+            )
+
+        if not self.source.strip():
+            raise ValueError(
+                "Intelligence source name cannot be empty."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceContext:
+    """
+    Provider-independent intelligence context.
+
+    Represents external information that may be supplied
+    to an existing AI conversation.
+
+    This object deliberately does not contain:
+    - provider SDK objects
+    - API credentials
+    - model information
+    - runtime state
+    - persistence objects
+    """
+
+    query: str
+
+    sources: tuple[IntelligenceSource, ...] = field(
+        default_factory=tuple,
+    )
+
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.query.strip():
+            raise ValueError(
+                "Intelligence query cannot be empty."
+            )
+
+        if not isinstance(
+            self.sources,
+            tuple,
+        ):
+            raise ValueError(
+                "Intelligence sources must be a tuple."
+            )
+
+        if not isinstance(
+            self.summary,
+            str,
+        ):
+            raise ValueError(
+                "Intelligence summary must be a string."
+            )
+
+    @property
+    def has_sources(self) -> bool:
+        """
+        Return whether external sources are available.
+        """
+
+        return bool(self.sources)
+
+    @property
+    def source_count(self) -> int:
+        """
+        Return the number of external sources.
+        """
+
+        return len(self.sources)
+
+    @property
+    def has_summary(self) -> bool:
+        """
+        Return whether a summary is available.
+        """
+
+        return bool(
+            self.summary.strip()
+        )
+
+    def to_context_text(self) -> str:
+        """
+        Convert intelligence into a safe textual context.
+
+        The result is suitable for eventual inclusion
+        in an existing LLMRequest.context field.
+        """
+
+        sections: list[str] = [
+            "LIVE INTELLIGENCE",
+            f"Research query: {self.query.strip()}",
+        ]
+
+        if self.summary.strip():
+            sections.extend(
+                (
+                    "",
+                    "Summary:",
+                    self.summary.strip(),
+                )
+            )
+
+        if self.sources:
+            sections.extend(
+                (
+                    "",
+                    "Sources:",
+                )
+            )
+
+            for index, source in enumerate(
+                self.sources,
+                start=1,
+            ):
+                sections.append(
+                    f"{index}. {source.title}"
+                )
+                sections.append(
+                    f"   URL: {source.url}"
+                )
+                sections.append(
+                    f"   Source: {source.source}"
+                )
+
+                if source.content.strip():
+                    sections.append(
+                        f"   Content: {source.content.strip()}"
+                    )
+
+        return "\n".join(sections)
+

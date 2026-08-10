@@ -1,0 +1,1280 @@
+﻿==================== COMPANION SERVICE ====================
+
+"""
+Companion Service.
+
+Coordinates:
+
+Character
+Conversation Agent
+Research Agent
+Quality Agent
+Memory Service
+
+Application orchestration layer.
+"""
+
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.agents.quality_agent import (
+    QualityAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+
+class CompanionService:
+    """
+    Coordinates AI companion experiences.
+    """
+
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        conversation_agent=None,
+        research_agent=None,
+        quality_agent=None,
+        memory_service=None,
+    ):
+
+        self.character = character
+
+        self.conversation_agent = (
+            conversation_agent
+            or ConversationAgent(character)
+        )
+
+        self.research_agent = (
+            research_agent
+            or ResearchAgent()
+        )
+
+        self.quality_agent = (
+            quality_agent
+            or QualityAgent()
+        )
+
+        self.memory_service = (
+            memory_service
+            or MemoryService()
+        )
+
+
+    async def interact(
+        self,
+        context: ExecutionContext,
+        use_research: bool = False,
+    ):
+
+        memories = (
+            self.memory_service.recall(
+                context.user_id
+            )
+        )
+
+
+        research_result = None
+
+        if use_research:
+
+            research_result = (
+                await self.research_agent.execute(
+                    context
+                )
+            )
+
+
+        conversation_result = (
+            await self.conversation_agent.execute(
+                context
+            )
+        )
+
+
+        quality_result = (
+            await self.quality_agent.execute(
+                context
+            )
+        )
+
+
+        self.memory_service.remember(
+            user_id=context.user_id,
+            category="conversation",
+            content=context.request,
+        )
+
+
+        return {
+
+            "character":
+                self.character.name,
+
+
+            "conversation":
+                conversation_result.output,
+
+
+            "research":
+                (
+                    research_result.output
+                    if research_result
+                    else None
+                ),
+
+
+            "quality":
+                quality_result.output,
+
+
+            "memory_count":
+                len(memories),
+
+        }
+
+
+==================== INTELLIGENCE CONTEXT ====================
+
+"""
+Intelligence Context.
+
+Provider-independent representation of external
+information prepared for AI execution.
+
+Architecture:
+
+Research Agent
+        |
+        v
+IntelligenceContext
+        |
+        v
+AI Runtime integration
+        |
+        v
+LLMRequest.context
+
+The context must not expose provider-specific
+implementation details to the application layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceSource:
+    """
+    Normalised external information source.
+    """
+
+    title: str
+    url: str
+    source: str
+    content: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError(
+                "Intelligence source title cannot be empty."
+            )
+
+        if not self.url.strip():
+            raise ValueError(
+                "Intelligence source URL cannot be empty."
+            )
+
+        if not self.source.strip():
+            raise ValueError(
+                "Intelligence source name cannot be empty."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceContext:
+    """
+    Provider-independent intelligence context.
+
+    Represents external information that may be supplied
+    to an existing AI conversation.
+
+    This object deliberately does not contain:
+    - provider SDK objects
+    - API credentials
+    - model information
+    - runtime state
+    - persistence objects
+    """
+
+    query: str
+
+    sources: tuple[IntelligenceSource, ...] = field(
+        default_factory=tuple,
+    )
+
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.query.strip():
+            raise ValueError(
+                "Intelligence query cannot be empty."
+            )
+
+        if not isinstance(
+            self.sources,
+            tuple,
+        ):
+            raise ValueError(
+                "Intelligence sources must be a tuple."
+            )
+
+        if not isinstance(
+            self.summary,
+            str,
+        ):
+            raise ValueError(
+                "Intelligence summary must be a string."
+            )
+
+    @property
+    def has_sources(self) -> bool:
+        """
+        Return whether external sources are available.
+        """
+
+        return bool(self.sources)
+
+    @property
+    def source_count(self) -> int:
+        """
+        Return the number of external sources.
+        """
+
+        return len(self.sources)
+
+    @property
+    def has_summary(self) -> bool:
+        """
+        Return whether a summary is available.
+        """
+
+        return bool(
+            self.summary.strip()
+        )
+
+    def to_context_text(self) -> str:
+        """
+        Convert intelligence into a safe textual context.
+
+        The result is suitable for eventual inclusion
+        in an existing LLMRequest.context field.
+        """
+
+        sections: list[str] = [
+            "LIVE INTELLIGENCE",
+            f"Research query: {self.query.strip()}",
+        ]
+
+        if self.summary.strip():
+            sections.extend(
+                (
+                    "",
+                    "Summary:",
+                    self.summary.strip(),
+                )
+            )
+
+        if self.sources:
+            sections.extend(
+                (
+                    "",
+                    "Sources:",
+                )
+            )
+
+            for index, source in enumerate(
+                self.sources,
+                start=1,
+            ):
+                sections.append(
+                    f"{index}. {source.title}"
+                )
+                sections.append(
+                    f"   URL: {source.url}"
+                )
+                sections.append(
+                    f"   Source: {source.source}"
+                )
+
+                if source.content.strip():
+                    sections.append(
+                        f"   Content: {source.content.strip()}"
+                    )
+
+        return "\n".join(sections)
+
+
+==================== RESEARCH AGENT ====================
+
+"""
+Research Agent.
+
+Retrieves external information through approved
+knowledge providers and converts the result into
+provider-independent IntelligenceContext data.
+
+Architecture:
+
+Research Agent
+        |
+        v
+ParallelSearchProvider
+        |
+        v
+ParallelClientWrapper
+        |
+        v
+IntelligenceContext
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+from backend.agents.base_agent import BaseAgent
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+    IntelligenceSource,
+)
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchAgent(BaseAgent):
+    """
+    Agent responsible for world information retrieval.
+    """
+
+    def __init__(
+        self,
+        provider=None,
+    ):
+        super().__init__(
+            AgentManifest(
+                agent_id="research_agent",
+                name="Research Agent",
+                description=(
+                    "Retrieves live world information "
+                    "for AI learning experiences."
+                ),
+            )
+        )
+
+        self.provider = (
+            provider
+            or ParallelSearchProvider()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute research and produce a normalized
+        IntelligenceContext.
+        """
+
+        result = await self.provider.execute(
+            context
+        )
+
+        if not result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.manifest.agent_id,
+                output=None,
+                error=result.error,
+            )
+
+        intelligence = (
+            self._build_intelligence_context(
+                query=context.request,
+                provider_output=result.output,
+            )
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=intelligence,
+        )
+
+    @staticmethod
+    def _build_intelligence_context(
+        query: str,
+        provider_output,
+    ) -> IntelligenceContext:
+        """
+        Convert provider output into the
+        provider-independent IntelligenceContext.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            raise TypeError(
+                "Research provider output must be a dictionary."
+            )
+
+        raw_results = provider_output.get(
+            "results",
+            {},
+        )
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            raw_results = []
+
+        sources: list[IntelligenceSource] = []
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+            if not title or not url:
+                continue
+
+            content = ResearchAgent._extract_content(
+                raw_result
+            )
+
+            sources.append(
+                IntelligenceSource(
+                    title=title,
+                    url=url,
+                    source="parallel",
+                    content=content,
+                )
+            )
+
+        return IntelligenceContext(
+            query=query,
+            sources=tuple(sources),
+        )
+
+    @staticmethod
+    def _extract_content(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract available content from a normalized
+        Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+        return str(
+            excerpts or ""
+        ).strip()
+
+
+==================== EXECUTION CONTEXT ====================
+
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+
+Does not:
+- execute providers
+- manage memory
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    Attributes
+    ----------
+    user_id:
+        Identifier of the user initiating the execution.
+
+    request:
+        User request being processed.
+
+    execution_id:
+        Unique identifier for this execution.
+
+    created_at:
+        UTC timestamp when the context was created.
+
+    metadata:
+        Runtime metadata.
+
+    intelligence_context:
+        Optional provider-independent live intelligence
+        generated by the Research Agent.
+
+    Responsibilities:
+    - identify an execution
+    - carry user request information
+    - provide runtime metadata
+    - optionally carry live intelligence context
+
+    Does not:
+    - execute providers
+    - manage memory
+    - modify systems
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached
+        to this execution.
+        """
+
+        return self.intelligence_context is not None
+
+
+==================== COMPANION TESTS ====================
+
+
+==================== FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\intelligence\test_research_service.py ====================
+ import pytest
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+)
+
+from backend.intelligence.research_service import (
+    ResearchService,
+)
+
+
+class FakeResearchAgent:
+
+    async def execute(
+        self,
+        context,
+    ):
+        return AgentResult(
+            success=True,
+            agent_id="research_agent",
+            output=IntelligenceContext(
+                query=context.request,
+            ),
+        )
+
+
+class FailingResearchAgent:
+
+    async def execute(
+        self,
+        context,
+    ):
+        return AgentResult(
+            success=False,
+            agent_id="research_agent",
+            output=None,
+            error="Research unavailable",
+        )
+
+
+@pytest.mark.asyncio
+async def test_research_service_returns_intelligence_context():
+
+    service = ResearchService(
+        agent=FakeResearchAgent()
+    )
+
+    result = await service.research(
+        user_id="demo-user",
+        query="Latest European AI regulation",
+    )
+
+    assert isinstance(
+        result,
+        IntelligenceContext,
+    )
+
+    assert result.query == (
+        "Latest European AI regulation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_service_rejects_empty_query():
+
+    service = ResearchService(
+        agent=FakeResearchAgent()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Research query cannot be empty",
+    ):
+        await service.research(
+            user_id="demo-user",
+            query="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_research_service_propagates_failure():
+
+    service = ResearchService(
+        agent=FailingResearchAgent()
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Research unavailable",
+    ):
+        await service.research(
+            user_id="demo-user",
+            query="Latest European AI regulation",
+        ) 
+==================== FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\intelligence\__pycache__\test_research_service.cpython-313-pytest-9.1.1.pyc ====================
+ ó
+    ”syjì  ã                   ó  • S SK rS SKJs  Jr  S SKrS SKJr  S SK	J
+r
+  S SKJr   " S S5      r " S S5      r\R                  R                   S	 5       r\R                  R                   S
+ 5       r\R                  R                   S 5       rg)é    N©ÚAgentResult)ÚIntelligenceContext)ÚResearchServicec                   ó   • \ rS rSrS rSrg)ÚFakeResearchAgenté   c              ƒ   óB   #   • [        SS[        UR                  S9S9$ 7f)NTÚresearch_agent)Úquery)ÚsuccessÚagent_idÚoutput)r   r   Úrequest©ÚselfÚcontexts     ÚNC:\AI Folder\EasyChatBot-Hackathon\tests\intelligence\test_research_service.pyÚexecuteÚFakeResearchAgent.execute   s)   é € ô ØØ%Ü&Ø—o‘oññ
+ð 	
+ùs   ‚© N©Ú__name__Ú
+__module__Ú__qualname__Ú__firstlineno__r   Ú__static_attributes__r   ó    r   r   r      s   † õ
+
+r   r   c                   ó   • \ rS rSrS rSrg)ÚFailingResearchAgenté   c              ƒ   ó"   #   • [        SSS SS9$ 7f)NFr   úResearch unavailable)r   r   r   Úerrorr   r   s     r   r   ÚFailingResearchAgent.execute!   s    é € ô ØØ%ØØ(ñ	
+ð 	
+ùs   ‚r   Nr   r   r   r   r    r       s   † õ	
+r   r    c               ƒ   óœ  #   • [        [        5       S9n U R                  SSS9I S h  v•N n[        U[        5      o"(       Gd+  SS[
+        R                  " 5       ;   d  [        R                  " [        5      (       a  [        R                  " [        5      OSS[
+        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OSS[
+        R                  " 5       ;   d  [        R                  " [        5      (       a  [        R                  " [        5      OS[        R                  " U5      S	.-  n[        [        R                  " U5      5      eS nUR                  nSoTU:H  o"(       d»  [        R                  " S
+U4SUU45      S[
+        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS[        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=p%g  GN"7f)N©Úagentú	demo-userúLatest European AI regulation©Úuser_idr   z5assert %(py4)s
+{%(py4)s = %(py0)s(%(py1)s, %(py2)s)
+}Ú
+isinstanceÚresultr   )Úpy0Úpy1Úpy2Úpy4)ú==)z-%(py2)s
+{%(py2)s = %(py0)s.query
+} == %(py5)s)r/   r1   Úpy5zassert %(py7)sÚpy7)r   r   Úresearchr-   r   Ú@py_builtinsÚlocalsÚ
+@pytest_arÚ_should_repr_global_nameÚ	_safereprÚAssertionErrorÚ_format_explanationr   Ú_call_reprcompare)Úservicer.   Ú@py_assert3Ú@py_format5Ú@py_assert1Ú@py_assert4Ú@py_format6Ú@py_format8s           r   Ú2test_research_service_returns_intelligence_contextrF   -   sô  é € ô ÜÓ!ñ€Gð ×#Ñ#ØØ-ð $ð ÷ €Fô
+ ØÜóð ö ö ïé ÷õ ïé ðŒ:÷ ö ïé ðŒ:÷ ó ïé ÷õ ïé ðØ÷ö ïé ðØ÷ó ïé ÷õ ïé ðä÷ö ïé ðä÷ò ïé ðð ÷ ÷ ò ïé ÷ô ð
+ <‰<ð Ø'ðØ'ñ÷ ó ïé ôˆ<Ø'÷ò ïé ÷õ ïé ðˆ6÷ ö ïé ðˆ6÷ ò ïé ðˆ<÷ ð ïé ðØ'÷÷ ÷ ñ ïé ÷÷ ð òùs   ‚%I§I	¨H"Ic               ƒ   óÈ   #   • [        [        5       S9n [        R                  " [        SS9   U R                  SSS9I S h  v•N   S S S 5        g  N! , (       d  f       g = f7f)Nr'   zResearch query cannot be empty©Úmatchr)   Ú r+   )r   r   ÚpytestÚraisesÚ
+ValueErrorr6   ©r?   s    r   Ú)test_research_service_rejects_empty_queryrO   C   si   é € ô ÜÓ!ñ€Gô 
+ŠÜØ.ó
+ð ×ÑØØð ð 
+÷ 	
+ð 	
+÷	
+ð 
+ñ	
+÷	
+õ 
+üó.   ‚+A"­AÁAÁAÁ	A"ÁAÁ
+AÁA"c               ƒ   óÈ   #   • [        [        5       S9n [        R                  " [        SS9   U R                  SSS9I S h  v•N   S S S 5        g  N! , (       d  f       g = f7f)Nr'   r#   rH   r)   r*   r+   )r   r    rK   rL   ÚRuntimeErrorr6   rN   s    r   Ú(test_research_service_propagates_failurerS   T   si   é € ô Ü"Ó$ñ€Gô 
+ŠÜØ$ó
+ð ×ÑØØ1ð ð 
+÷ 	
+ð 	
+÷	
+ð 
+ñ	
+÷	
+õ 
+ürP   )Úbuiltinsr7   Ú_pytest.assertion.rewriteÚ	assertionÚrewriter9   rK   Úbackend.agents.agent_resultr   Ú)backend.intelligence.intelligence_contextr   Ú%backend.intelligence.research_servicer   r   r    ÚmarkÚasynciorF   rO   rS   r   r   r   Ú<module>r]      s‰   ðß  „ ƒõõõ÷
+
+ñ 
+÷
+ñ 
+ð ‡×Ññó ðð* ‡×Ññ
+ó ð
+ð  ‡×Ññ
+ó ñ
+r    
+==================== FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_companion_memory.py ====================
+ import pytest
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+from backend.memory.memory_store import (
+    MemoryStore,
+)
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+@pytest.mark.asyncio
+async def test_companion_stores_memory(
+    tmp_path,
+):
+
+    character = CharacterProfile(
+        character_id="yeti",
+        name="Yeti",
+        description="Learning companion",
+        personality="Friendly",
+        learning_style="Conversation",
+    )
+
+    memory_service = MemoryService(
+        store=MemoryStore(
+            database_path=(
+                tmp_path / "memory.db"
+            )
+        )
+    )
+
+    service = CompanionService(
+        character=character,
+        memory_service=memory_service,
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request=(
+            "I want to improve French speaking"
+        ),
+    )
+
+    result = await service.interact(
+        context
+    )
+
+    assert result["character"] == (
+        "Yeti"
+    )
+
+    memories = (
+        service.memory_service.recall(
+            "demo-user"
+        )
+    )
+
+    assert len(memories) == 1
+
+    assert memories[0].content == (
+        "I want to improve French speaking"
+    )
+
+    assert memories[0].category == (
+        "conversation"
+    ) 
+==================== FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_research_agent.py ====================
+ import pytest
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+    IntelligenceSource,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class FakeResearchProvider:
+    """
+    Fake research provider used for unit testing.
+
+    This keeps the test independent from the real
+    Parallel Search API.
+    """
+
+    async def execute(
+        self,
+        context,
+    ):
+        return ProviderResult(
+            success=True,
+            provider_id="fake_research",
+            output={
+                "query": context.request,
+                "results": {
+                    "results": [
+                        {
+                            "title": "European AI Regulation",
+                            "url": "https://example.com/ai",
+                            "excerpts": [
+                                "Current regulatory information."
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_research_agent_returns_intelligence_context():
+
+    agent = ResearchAgent(
+        provider=FakeResearchProvider()
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request="Latest European AI regulation",
+    )
+
+    result = await agent.execute(
+        context
+    )
+
+    assert result.success is True
+
+    assert result.agent_id == (
+        "research_agent"
+    )
+
+    assert isinstance(
+        result.output,
+        IntelligenceContext,
+    )
+
+    assert result.output.query == (
+        "Latest European AI regulation"
+    )
+
+    assert result.output.source_count == 1
+
+    assert isinstance(
+        result.output.sources[0],
+        IntelligenceSource,
+    )
+
+    assert result.output.sources[0].title == (
+        "European AI Regulation"
+    )
+
+    assert result.output.sources[0].url == (
+        "https://example.com/ai"
+    )
+
+    assert (
+        result.output.sources[0].content
+        == "Current regulatory information."
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_agent_propagates_provider_failure():
+
+    class FailingResearchProvider:
+        """
+        Fake provider representing a provider failure.
+        """
+
+        async def execute(
+            self,
+            context,
+        ):
+            return ProviderResult(
+                success=False,
+                provider_id="fake_research",
+                output=None,
+                error="Research provider unavailable",
+            )
+
+    agent = ResearchAgent(
+        provider=FailingResearchProvider()
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request="Latest European AI regulation",
+    )
+
+    result = await agent.execute(
+        context
+    )
+
+    assert result.success is False
+
+    assert result.agent_id == (
+        "research_agent"
+    )
+
+    assert result.output is None
+
+    assert result.error == (
+        "Research provider unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_agent_handles_empty_results():
+
+    class EmptyResearchProvider:
+        """
+        Fake provider returning no research results.
+        """
+
+        async def execute(
+            self,
+            context,
+        ):
+            return ProviderResult(
+                success=True,
+                provider_id="fake_research",
+                output={
+                    "query": context.request,
+                    "results": {
+                        "results": []
+                    },
+                },
+            )
+
+    agent = ResearchAgent(
+        provider=EmptyResearchProvider()
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request="A very specific research question",
+    )
+
+    result = await agent.execute(
+        context
+    )
+
+    assert result.success is True
+
+    assert isinstance(
+        result.output,
+        IntelligenceContext,
+    )
+
+    assert result.output.source_count == 0
+
+    assert result.output.has_sources is False 
+==================== FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\__pycache__\test_companion_memory.cpython-313-pytest-9.1.1.pyc ====================
+ ó
+    Q‹yj  ã                   óš   • S SK rS SKJs  Jr  S SKrS SKJr  S SK	J
+r
+  S SKJr  S SKJr  S SKJr  \R"                  R$                  S 5       rg)é    N)ÚCharacterProfile)ÚMemoryService)ÚMemoryStore)ÚCompanionService)ÚExecutionContextc              ƒ   óâ  #   • [        SSSSSS9n[        [        U S-  S9S	9n[        UUS
+9n[	        SSS9nUR                  U5      I S h  v•N nUS   nSovU:H  oˆ(       dp  [        R                  " SU4SUU45      [        R                  " U5      [        R                  " U5      S.-  n	SSU	0-  n
+[        [        R                  " U
+5      5      eS =n=p‡UR                  R                  S5      n[        U5      nSoÈU:H  oÝ(       Gd  [        R                  " SU4SXŒ45      S[        R                  " 5       ;   d  [        R                   " [        5      (       a  [        R                  " [        5      OSS[        R                  " 5       ;   d  [        R                   " U5      (       a  [        R                  " U5      OS[        R                  " U5      [        R                  " U5      S.-  n
+SSU
+0-  n[        [        R                  " U5      5      eS =n=pÜUS   ofR"                  nSoÈU:H  oÝ(       d…  [        R                  " SU4SUU45      [        R                  " U5      [        R                  " U5      [        R                  " U5      S.-  n
+SSU
+0-  n[        [        R                  " U5      5      eS =n=n=pÜUS   ofR$                  nSoÈU:H  oÝ(       d…  [        R                  " SU4SUU45      [        R                  " U5      [        R                  " U5      [        R                  " U5      S.-  n
+SSU
+0-  n[        [        R                  " U5      5      eS =n=n=pÜg  GN!7f) NÚyetiÚYetizLearning companionÚFriendlyÚConversation)Úcharacter_idÚnameÚdescriptionÚpersonalityÚlearning_stylez	memory.db)Údatabase_path)Ústore)Ú	characterÚmemory_servicez	demo-userz!I want to improve French speaking)Úuser_idÚrequestr   )ú==)z%(py1)s == %(py4)s)Úpy1Úpy4zassert %(py6)sÚpy6é   )z0%(py3)s
+{%(py3)s = %(py0)s(%(py1)s)
+} == %(py6)sÚlenÚmemories)Úpy0r   Úpy3r   zassert %(py8)sÚpy8r   )z/%(py3)s
+{%(py3)s = %(py1)s.content
+} == %(py6)s)r   r    r   Úconversation)z0%(py3)s
+{%(py3)s = %(py1)s.category
+} == %(py6)s)r   r   r   r   r   ÚinteractÚ
+@pytest_arÚ_call_reprcompareÚ	_safereprÚAssertionErrorÚ_format_explanationr   Úrecallr   Ú@py_builtinsÚlocalsÚ_should_repr_global_nameÚcontentÚcategory)Útmp_pathr   r   ÚserviceÚcontextÚresultÚ@py_assert0Ú@py_assert3Ú@py_assert2Ú@py_format5Ú@py_format7r   Ú@py_assert5Ú@py_assert4Ú@py_format9s                  ÚIC:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_companion_memory.pyÚtest_companion_stores_memoryr<      s  é € ô
+ !ØØØ(ØØ%ñ€Iô #Üà˜;Ñ&ñ
+ñ€Nô ØØ%ñ€Gô
+ Øà/ñ€Gð ×#Ñ#Øó÷ €Fð +Ñð ØðØñ÷ ó ïé ôÐØ÷ñ ïé ðÐ÷ ð ïé ðØ÷÷ ÷ ñ ïé ÷÷ ð
+ 	×Ñ×%Ñ%Øó	
+ð ô ˆx‹=Ð˜AÐ˜AÑ×××Óˆ=×××××ÕŒ3×××ÑŒ3×××××Öˆx×××Ñˆx××Õˆ=××Ó˜A××××××ÓàA‰;ð ×Ñð Ø+ðØ+ñ÷ ó ïé ôÐØ+÷ñ ïé ðˆ;÷ ð ïé ðÐ÷ ð ïé ðØ+÷÷ ÷ ñ ïé ÷÷ ñ ð A‰;ð ×Ñð ØðØñ÷ ó ïé ôÐØ÷ñ ïé ðˆ;÷ ð ïé ðÐ÷ ð ïé ðØ÷÷ ÷ ñ ïé ÷÷ ò ò)ùs   ‚A	M/ÁM,ÁL!M/)Úbuiltinsr*   Ú_pytest.assertion.rewriteÚ	assertionÚrewriter$   ÚpytestÚ$backend.characters.character_profiler   Úbackend.memory.memory_servicer   Úbackend.memory.memory_storer   Ú"backend.services.companion_servicer   Ú)backend.runtime.context.execution_contextr   ÚmarkÚasyncior<   © ó    r;   Ú<module>rK      sC   ðß  „ ƒõõõõõð
+ ‡×Ññ6ó ñ6rJ    
+==================== FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\__pycache__\test_research_agent.cpython-313-pytest-9.1.1.pyc ====================
+ ó
+    ‹ryj  ã                   ó  • S SK rS SKJs  Jr  S SKrS SKJr  S SK	J
+r
+Jr  S SKJr  S SKJr   " S S5      r\R"                  R$                  S 5       r\R"                  R$                  S	 5       r\R"                  R$                  S
+ 5       rg)é    N)ÚResearchAgent)ÚIntelligenceContextÚIntelligenceSource©ÚProviderResult)ÚExecutionContextc                   ó   • \ rS rSrSrS rSrg)ÚFakeResearchProvideré   zs
+Fake research provider used for unit testing.
+
+This keeps the test independent from the real
+Parallel Search API.
+c           
+   ƒ   óJ   #   • [        SSUR                  SSSS/S./0S.S	9$ 7f)
+NTÚfake_researchÚresultsúEuropean AI Regulationúhttps://example.com/aiúCurrent regulatory information.)ÚtitleÚurlÚexcerpts©Úqueryr   ©ÚsuccessÚprovider_idÚoutput©r   Úrequest©ÚselfÚcontexts     ÚGC:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_research_agent.pyÚexecuteÚFakeResearchProvider.execute   sF   é € ô ØØ'à Ÿ™àà%=Ø#;à Að)ñð ð
+ññ
+ð 	
+ùs   ‚!#© N©Ú__name__Ú
+__module__Ú__qualname__Ú__firstlineno__Ú__doc__r!   Ú__static_attributes__r#   ó    r    r
+   r
+      s   † ñõ
+r+   r
+   c               ƒ   óB  #   • [        [        5       S9n [        SSS9nU R                  U5      I S h  v•N nUR                  nSoCUL oU(       dº  [
+        R                  " SU4SX445      S[        R                  " 5       ;   d  [
+        R                  " U5      (       a  [
+        R                  " U5      OS[
+        R                  " U5      [
+        R                  " U5      S	.-  nS
+SU0-  n[        [
+        R                  " U5      5      eS =n=pTUR                  nSoCU:H  oU(       d»  [
+        R                  " SU4SUU45      S[        R                  " 5       ;   d  [
+        R                  " U5      (       a  [
+        R                  " U5      OS[
+        R                  " U5      [
+        R                  " U5      S	.-  nS
+SU0-  n[        [
+        R                  " U5      5      eS =n=pTUR                  n[        U[         5      o™(       Gd@  SS[        R                  " 5       ;   d  [
+        R                  " [        5      (       a  [
+        R                  " [        5      OSS[        R                  " 5       ;   d  [
+        R                  " U5      (       a  [
+        R                  " U5      OS[
+        R                  " U5      S[        R                  " 5       ;   d  [
+        R                  " [         5      (       a  [
+        R                  " [         5      OS[
+        R                  " U	5      S.-  n
+[        [
+        R                  " U
+5      5      eS =p‰UR                  o3R"                  nSoµU:H  o™(       dÐ  [
+        R                  " SU	4SUU45      S[        R                  " 5       ;   d  [
+        R                  " U5      (       a  [
+        R                  " U5      OS[
+        R                  " U5      [
+        R                  " U5      [
+        R                  " U5      S.-  nSSU0-  n[        [
+        R                  " U5      5      eS =n=n=p›UR                  o3R$                  nSoµU:H  o™(       dÏ  [
+        R                  " SU	4SX[45      S[        R                  " 5       ;   d  [
+        R                  " U5      (       a  [
+        R                  " U5      OS[
+        R                  " U5      [
+        R                  " U5      [
+        R                  " U5      S.-  nSSU0-  n[        [
+        R                  " U5      5      eS =n=n=p›UR                  R&                  S   n[        U[(        5      oD(       dõ  SS[        R                  " 5       ;   d  [
+        R                  " [        5      (       a  [
+        R                  " [        5      OS[
+        R                  " U5      S[        R                  " 5       ;   d  [
+        R                  " [(        5      (       a  [
+        R                  " [(        5      OS[
+        R                  " U5      S.-  n[        [
+        R                  " U5      5      eS =p4UR                  R&                  S   oÝR*                  nSo˜U	:H  oD(       d…  [
+        R                  " SU4SUU	45      [
+        R                  " U5      [
+        R                  " U5      [
+        R                  " U	5      S.-  n
+S S!U
+0-  n[        [
+        R                  " U5      5      eS =n=n=pIUR                  R&                  S   oÝR,                  nS"o˜U	:H  oD(       d…  [
+        R                  " SU4S#UU	45      [
+        R                  " U5      [
+        R                  " U5      [
+        R                  " U	5      S.-  n
+S S!U
+0-  n[        [
+        R                  " U5      5      eS =n=n=pIUR                  R&                  S   nUR.                  nS$n	UU	:H  oD(       d…  [
+        R                  " SU4S%UU	45      [
+        R                  " U5      [
+        R                  " U5      [
+        R                  " U	5      S.-  n
+S S!U
+0-  n[        [
+        R                  " U5      5      eS =n=n=pIg  GNj7f)&N©Úproviderú	demo-userúLatest European AI regulation©Úuser_idr   T©Úis©z/%(py2)s
+{%(py2)s = %(py0)s.success
+} is %(py5)sÚresult©Úpy0Úpy2Úpy5úassert %(py7)sÚpy7Úresearch_agent©ú==©z0%(py2)s
+{%(py2)s = %(py0)s.agent_id
+} == %(py5)súQassert %(py6)s
+{%(py6)s = %(py0)s(%(py3)s
+{%(py3)s = %(py1)s.output
+}, %(py4)s)
+}Ú
+isinstancer   ©r8   Úpy1Úpy3Úpy4Úpy6)zI%(py4)s
+{%(py4)s = %(py2)s
+{%(py2)s = %(py0)s.output
+}.query
+} == %(py7)s©r8   r9   rF   r<   úassert %(py9)sÚpy9é   ©zP%(py4)s
+{%(py4)s = %(py2)s
+{%(py2)s = %(py0)s.output
+}.source_count
+} == %(py7)sr   z5assert %(py5)s
+{%(py5)s = %(py0)s(%(py2)s, %(py3)s)
+}r   )r8   r9   rE   r:   r   )z-%(py3)s
+{%(py3)s = %(py1)s.title
+} == %(py6)s)rD   rE   rG   zassert %(py8)sÚpy8r   )z+%(py3)s
+{%(py3)s = %(py1)s.url
+} == %(py6)sr   )z/%(py3)s
+{%(py3)s = %(py1)s.content
+} == %(py6)s)r   r
+   r   r!   r   Ú
+@pytest_arÚ_call_reprcompareÚ@py_builtinsÚlocalsÚ_should_repr_global_nameÚ	_safereprÚAssertionErrorÚ_format_explanationÚagent_idr   rB   r   r   Úsource_countÚsourcesr   r   r   Úcontent)Úagentr   r6   Ú@py_assert1Ú@py_assert4Ú@py_assert3Ú@py_format6Ú@py_format8Ú@py_assert2Ú@py_assert5Ú@py_format7Ú@py_assert6Ú@py_format10Ú@py_assert0Ú@py_format9s                  r    Ú0test_research_agent_returns_intelligence_contextrg   5   s  é € ô Ü%Ó'ñ€Eô ØØ/ñ€Gð
+ —=‘=Øó÷ €Fð >‰>Ð!˜TÐ!˜TÐ!×!×!×!Ò!ˆ>×!×!×!×!×!Õ!ˆ6×!×!×!Ñ!ˆ6×!×!Õ!ˆ>×!×!Ó!˜T×!×!×!×!×!×!Ó!à?‰?ð ØðØñ÷ ó ïé ôˆ?Ø÷ò ïé ÷õ ïé ðˆ6÷ ö ïé ðˆ6÷ ò ïé ðˆ?÷ ð ïé ðØ÷÷ ÷ ñ ïé ÷÷ ð
+ 	‰ðŒ:ØÜóð ö ö ïé ÷õ ïé ðŒ:÷ ö ïé ðŒ:÷ ó ïé ÷õ ïé ðØ÷ö ïé ðØ÷ò ïé ðØ÷ñ ïé ÷õ ïé ðä÷ö ïé ðä÷ò ïé ðð ÷ ÷ ò ïé ÷õ ð
+ =‰=ð ×Ñð Ø'ðØ'ñ÷ ó ïé ôÐØ'÷ò ïé ÷õ ïé ðˆ6÷ ö ïé ðˆ6÷ ò ïé ðˆ=÷ ð ïé ðÐ÷ ð ïé ðØ'÷÷ ÷ ñ ïé ÷÷ ñ ð =‰=Ð*×%Ñ%Ð*¨Ð*¨Ñ*×*×*×*Ò*Ð%×*×*×*×*×*Õ*ˆ6×*×*×*Ñ*ˆ6×*×*Õ*ˆ=×*×*Ó*Ð%×*×*Ó*¨×*×*×*×*×*×*Õ*ð 	‰×Ñ˜aÑ ðŒ:Ø Üóð õ ö ïé ÷õ ïé ðŒ:÷ ö ïé ðŒ:÷ ò ïé ðØ ÷ñ ïé ÷õ ïé ðä÷ö ïé ðä÷ò ïé ðð ÷ ÷ ò ïé ÷õ ð
+ =‰=× Ñ  Ñ#ð ×)Ñ)ð Ø ðØ ñ÷ ó ïé ôÐ)Ø ÷ñ ïé ðÐ#÷ ð ïé ðÐ)÷ ð ïé ðØ ÷÷ ÷ ñ ïé ÷÷ ñ ð =‰=× Ñ  Ñ#ð ×'Ñ'ð Ø ðØ ñ÷ ó ïé ôÐ'Ø ÷ñ ïé ðÐ#÷ ð ïé ðÐ'÷ ð ïé ðØ ÷÷ ÷ ñ ïé ÷÷ ñ ð
+ 	‰×Ñ˜aÑ ðØ ×(Ñ(ðà,ðØ(Ø,ñ	-÷ó ïé ôØ(Ø,÷ñ ïé ðØ ÷ð ïé ðØ(÷ð ïé ðà,÷÷ ÷ ñ ïé ÷÷ ò òEùs   ‚0b²b³a*bc               ƒ   ó@  #   •  " S S5      n [        U " 5       S9n[        SSS9nUR                  U5      I S h  v•N nUR                  nSoTUL of(       dº  [        R
+                  " SU4S	XE45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=peUR                  nSoTU:H  of(       d»  [        R
+                  " SU4SUU45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=peUR                  nS oTUL of(       dº  [        R
+                  " SU4SXE45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=peUR                  nSoTU:H  of(       d»  [        R
+                  " SU4SUU45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=peg  GNb7f)Nc                   ó   • \ rS rSrSrS rSrg)ÚPtest_research_agent_propagates_provider_failure.<locals>.FailingResearchProviderél   z0
+Fake provider representing a provider failure.
+c              “   ó"   #   • [        SSS SS9$ 7f)NFr   úResearch provider unavailable)r   r   r   Úerrorr   r   s     r    r!   ÚXtest_research_agent_propagates_provider_failure.<locals>.FailingResearchProvider.executeq   s    é € ô "ØØ+ØØ5ñ	ð ùs   ‚r#   Nr$   r#   r+   r    ÚFailingResearchProviderrj   l   s   † ñ	õ		r+   rp   r-   r/   r0   r1   Fr3   r5   r6   r7   r;   r<   r=   r>   r@   )z.%(py2)s
+{%(py2)s = %(py0)s.output
+} is %(py5)srm   )z-%(py2)s
+{%(py2)s = %(py0)s.error
+} == %(py5)s)r   r   r!   r   rN   rO   rP   rQ   rR   rS   rT   rU   rV   r   rn   )	rp   rZ   r   r6   r[   r\   r]   r^   r_   s	            r    Ú/test_research_agent_propagates_provider_failurerq   i   s©  é € ÷ñ ô  Ù(Ó*ñ€Eô ØØ/ñ€Gð
+ —=‘=Øó÷ €Fð >‰>Ð"˜UÐ"˜UÐ"×"×"×"Ò"ˆ>×"×"×"×"×"Õ"ˆ6×"×"×"Ñ"ˆ6×"×"Õ"ˆ>×"×"Ó"˜U×"×"×"×"×"×"Ó"à?‰?ð ØðØñ÷ ó ïé ôˆ?Ø÷ò ïé ÷õ ïé ðˆ6÷ ö ïé ðˆ6÷ ò ïé ðˆ?÷ ð ïé ðØ÷÷ ÷ ñ ïé ÷÷ ð =‰=Ð ˜DÐ ˜DÐ × × × Ò ˆ=× × × × × Õ ˆ6× × × Ñ ˆ6× × Õ ˆ=× × Ó ˜D× × × × × × Ó à<‰<ð Ø'ðØ'ñ÷ ó ïé ôˆ<Ø'÷ò ïé ÷õ ïé ðˆ6÷ ö ïé ðˆ6÷ ò ïé ðˆ<÷ ð ïé ðØ'÷÷ ÷ ñ ïé ÷÷ ð òùs   ‚7N¹NºM"Nc               ƒ   óâ  #   •  " S S5      n [        U " 5       S9n[        SSS9nUR                  U5      I S h  v•N nUR                  nSoTUL of(       dº  [        R
+                  " SU4S	XE45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=peUR                  n	[        U	[        5      oª(       Gd@  SS[        R                  " 5       ;   d  [        R                  " [        5      (       a  [        R                  " [        5      OSS
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U	5      S[        R                  " 5       ;   d  [        R                  " [        5      (       a  [        R                  " [        5      OS[        R                  " U
+5      S.-  n[        [        R                  " U5      5      eS =pšUR                  oDR                  nSoÆU:H  oª(       dÏ  [        R
+                  " SU
+4SXl45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=n=p¬UR                  oDR                   nSoÆUL oª(       dÏ  [        R
+                  " SU
+4SXl45      S
+[        R                  " 5       ;   d  [        R                  " U5      (       a  [        R                  " U5      OS
+[        R                  " U5      [        R                  " U5      [        R                  " U5      S.-  nSSU0-  n[        [        R                  " U5      5      eS =n=n=p¬g  GN37f)Nc                   ó   • \ rS rSrSrS rSrg)ÚHtest_research_agent_handles_empty_results.<locals>.EmptyResearchProvideré™   z.
+Fake provider returning no research results.
+c              “   ó>   #   • [        SSUR                  S/ 0S.S9$ 7f)NTr   r   r   r   r   r   s     r    r!   ÚPtest_research_agent_handles_empty_results.<locals>.EmptyResearchProvider.executež   s0   é € ô "ØØ+à$Ÿ_™_à! 2ð ññ	ð 	ùs   ‚r#   Nr$   r#   r+   r    ÚEmptyResearchProviderrt   ™   s   † ñ	õ	r+   rx   r-   r/   z!A very specific research questionr1   Tr3   r5   r6   r7   r;   r<   rA   rB   r   rC   r   r>   rL   rH   rI   rJ   F)zO%(py4)s
+{%(py4)s = %(py2)s
+{%(py2)s = %(py0)s.output
+}.has_sources
+} is %(py7)s)r   r   r!   r   rN   rO   rP   rQ   rR   rS   rT   rU   r   rB   r   rW   Úhas_sources)rx   rZ   r   r6   r[   r\   r]   r^   r_   r`   ra   rb   rc   rd   s                 r    Ú)test_research_agent_handles_empty_resultsrz   –   sä  é € ÷ñ ô( Ù&Ó(ñ€Eô ØØ3ñ€Gð
+ —=‘=Øó÷ €Fð >‰>Ð!˜TÐ!˜TÐ!×!×!×!Ò!ˆ>×!×!×!×!×!Õ!ˆ6×!×!×!Ñ!ˆ6×!×!Õ!ˆ>×!×!Ó!˜T×!×!×!×!×!×!Ó!ð 	‰ðŒ:ØÜóð ö ö ïé ÷õ ïé ðŒ:÷ ö ïé ðŒ:÷ ó ïé ÷õ ïé ðØ÷ö ïé ðØ÷ò ïé ðØ÷ñ ïé ÷õ ïé ðä÷ö ïé ðä÷ò ïé ðð ÷ ÷ ò ïé ÷õ ð
+ =‰=Ð*×%Ñ%Ð*¨Ð*¨Ñ*×*×*×*Ò*Ð%×*×*×*×*×*Õ*ˆ6×*×*×*Ñ*ˆ6×*×*Õ*ˆ=×*×*Ó*Ð%×*×*Ó*¨×*×*×*×*×*×*Õ*à=‰=Ð-×$Ñ$Ð-¨Ð-¨Ð-×-×-×-Ò-Ð$×-×-×-×-×-Õ-ˆ6×-×-×-Ñ-ˆ6×-×-Õ-ˆ=×-×-Ó-Ð$×-×-Ó-¨×-×-×-×-×-×-Ö-òùs   ‚7Q/¹Q,ºP3Q/)ÚbuiltinsrP   Ú_pytest.assertion.rewriteÚ	assertionÚrewriterN   ÚpytestÚbackend.agents.research_agentr   Ú)backend.intelligence.intelligence_contextr   r   Ú!backend.providers.provider_resultr   Ú)backend.runtime.context.execution_contextr   r
+   ÚmarkÚasynciorg   rq   rz   r#   r+   r    Ú<module>r†      s‡   ðß  „ ƒõ÷õ
+õ÷
+
+ñ 
+ð@ ‡×Ññ0ó ð0ðf ‡×Ññ)ó ð)ðX ‡×Ññ,.ó ñ,.r+   
+

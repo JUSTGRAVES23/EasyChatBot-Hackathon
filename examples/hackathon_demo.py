@@ -105,6 +105,37 @@ from src.providers.search_provider.interface import (
     SearchResult,
 )
 
+from src.ai_runtime.discovery.flash_deal_demo import (
+    build_demo_deal,
+    build_demo_memory,
+)
+
+from src.ai_runtime.discovery.service import (
+    CharacterContext,
+    DiscoveryRequest,
+    DiscoveryService,
+)
+
+from src.ai_runtime.discovery.notification import (
+    DiscoveryNotification,
+)
+
+from src.ai_runtime.discovery.flash_deal_presenter import (
+    FlashDealPresenter,
+)
+
+from src.ai_runtime.commerce.flash_deal_commerce import (
+    FlashDealCommerce,
+)
+
+from src.ai_runtime.commerce.service import (
+    CommerceService,
+)
+
+from src.ai_runtime.commerce.models import (
+    CommerceActionStatus,
+)
+
 
 class DemoSearchProvider:
     """
@@ -389,7 +420,162 @@ async def run_demo() -> None:
     print(report)
 
     # -----------------------------------------------------------------------
-    # STEP 4 — Final result
+    # STEP 4 — PERSONALISED FLASH DEAL
+    # -----------------------------------------------------------------------
+
+    print("STEP 4 — PERSONALISED DISCOVERY")
+    print("-" * 72)
+    print(
+        "Yeti found something that matches "
+        "what this learner likes."
+    )
+    print(
+        "Here is the personalised discovery:"
+    )
+    print()
+
+    # Build the same domain inputs that a real discovery
+    # application flow would receive.
+    demo_deal = build_demo_deal()
+    demo_memory = build_demo_memory()
+
+    discovery_request = DiscoveryRequest(
+        user_id=demo_memory.user_id,
+        deal=demo_deal,
+        character=CharacterContext(
+            character_id="yeti",
+            character_name="Yeti",
+            message=(
+                "Look what I found! "
+                "This could be perfect for you."
+            ),
+        ),
+        product_image_url=(
+            "https://example.com/demo/iphone17-pro.jpg"
+        ),
+        tagline="Pro. Beautiful. Powerful.",
+        highlights=(
+            "Pro camera system",
+            "High-performance chip",
+            "All-day battery life",
+            "Premium display",
+        ),
+    )
+
+    flash_deal_card = DiscoveryService().create_flash_deal(
+        discovery_request,
+        memories=[demo_memory],
+    )
+
+    print(
+        FlashDealPresenter().render(
+            flash_deal_card
+        )
+    )
+
+    # -----------------------------------------------------------------------
+    # STEP 4A — CHARACTER DISCOVERY NOTIFICATION
+    # -----------------------------------------------------------------------
+
+    discovery_notification = (
+        DiscoveryNotification.from_flash_deal(
+            notification_id="demo-notification-001",
+            user_id=demo_memory.user_id,
+            deal=flash_deal_card,
+        )
+    )
+
+    print()
+    print("CHARACTER NOTIFICATION")
+    print("-" * 72)
+    print(
+        discovery_notification.render()
+    )
+    print()
+
+    assert (
+        discovery_notification.user_id
+        == demo_memory.user_id
+    )
+    assert (
+        discovery_notification.character_id
+        == flash_deal_card.character_id
+    )
+    assert (
+        discovery_notification.deal
+        is flash_deal_card
+    )
+
+    assert flash_deal_card.character_id == "yeti"
+    assert flash_deal_card.deal_id == demo_deal.deal_id
+    assert flash_deal_card.product_name
+    assert demo_memory.user_id == "demo-user"
+    assert flash_deal_card.relevance_reason
+    assert flash_deal_card.get_deal_url
+    assert flash_deal_card.more_information_url
+
+    # -----------------------------------------------------------------------
+    # STEP 5 — COMMERCE ACTION
+    # -----------------------------------------------------------------------
+
+    print(
+        "The learner can now inspect the vendor "
+        "information or proceed through the deal link."
+    )
+    print()
+
+    print("STEP 5 — COMMERCE ACTION")
+    print("-" * 72)
+
+    commerce_action = FlashDealCommerce().create_action(
+        user_id="demo-user",
+        card=flash_deal_card,
+    )
+
+    print(
+        f"Product: {flash_deal_card.product_name}"
+    )
+    print(
+        f"Vendor: {flash_deal_card.vendor_name}"
+    )
+    print(
+        f"Commerce action: "
+        f"{commerce_action.action_type.value.upper()}"
+    )
+
+    commerce_result = CommerceService().initiate(
+        commerce_action
+    )
+
+    print(
+        f"Status: "
+        f"{commerce_result.status.value.upper()}"
+    )
+
+    print()
+    print("GET DEAL")
+    print("  -> Approved commerce boundary")
+    print("  -> Vendor handoff")
+    print()
+    print(
+        "Payment is not executed in the hackathon demo."
+    )
+
+    assert (
+        commerce_result.status
+        == CommerceActionStatus.REDIRECT
+    )
+    assert (
+        commerce_result.deal_id
+        == flash_deal_card.deal_id
+    )
+    assert (
+        commerce_result.next_url
+        == flash_deal_card.get_deal_url
+    )
+
+    # -----------------------------------------------------------------------
+    # STEP 6 — Final result
     # -----------------------------------------------------------------------
 
     print()
@@ -400,8 +586,13 @@ async def run_demo() -> None:
         print()
         # ASCII-safe output keeps the executable reliable when
         # stdout is captured by Windows pytest/subprocess.
+        # Preserve the stable hackathon readiness marker.
         print(
             "Governance -> Intelligence -> Learning -> Evaluation"
+        )
+        print(
+            "Governance -> Intelligence -> Learning -> "
+            "Evaluation -> Personalised Discovery"
         )
         print(
             "All demonstrated capabilities completed successfully."

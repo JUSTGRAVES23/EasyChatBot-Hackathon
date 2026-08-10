@@ -1,12 +1,19 @@
 import pytest
 
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+from backend.memory.memory_store import (
+    MemoryStore,
+)
 
 from backend.services.companion_service import (
     CompanionService,
-)
-
-from backend.characters.character_profile import (
-    CharacterProfile,
 )
 
 from backend.runtime.context.execution_context import (
@@ -15,7 +22,9 @@ from backend.runtime.context.execution_context import (
 
 
 @pytest.mark.asyncio
-async def test_quality_is_returned():
+async def test_quality_is_returned(
+    tmp_path,
+):
 
     character = CharacterProfile(
         character_id="yeti",
@@ -25,11 +34,18 @@ async def test_quality_is_returned():
         learning_style="Conversation",
     )
 
-
-    service = CompanionService(
-        character
+    memory_service = MemoryService(
+        store=MemoryStore(
+            database_path=(
+                tmp_path / "memory.db"
+            )
+        )
     )
 
+    service = CompanionService(
+        character=character,
+        memory_service=memory_service,
+    )
 
     result = await service.interact(
         ExecutionContext(
@@ -38,12 +54,10 @@ async def test_quality_is_returned():
         )
     )
 
-
     assert (
         result["quality"]["passed"]
         is True
     )
-
 
     assert (
         result["quality"]["quality_score"]

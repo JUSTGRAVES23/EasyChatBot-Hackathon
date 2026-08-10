@@ -27,6 +27,23 @@ router = APIRouter()
 character_registry = CharacterRegistry()
 
 
+def create_companion_service(
+    character,
+) -> CompanionService:
+    """
+    Create the application-level CompanionService.
+
+    Kept as a small dependency seam so API tests can
+    replace the service without invoking external providers.
+
+    Production behaviour remains the same.
+    """
+
+    return CompanionService(
+        character=character
+    )
+
+
 @router.get("/characters")
 def get_characters():
     """
@@ -92,11 +109,11 @@ async def chat(
             detail=str(exc),
         ) from exc
 
-
-    companion_service = CompanionService(
-        character=character
+    companion_service = (
+        create_companion_service(
+            character
+        )
     )
-
 
     context = ExecutionContext(
         user_id=payload.get(
@@ -106,7 +123,6 @@ async def chat(
         request=message,
     )
 
-
     result = await companion_service.interact(
         context,
         use_research=payload.get(
@@ -114,6 +130,5 @@ async def chat(
             False,
         ),
     )
-
 
     return result
