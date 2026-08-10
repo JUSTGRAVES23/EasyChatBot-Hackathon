@@ -2,11 +2,12 @@
 Hackathon Commerce Service.
 
 Provides the controlled application boundary for commerce
-actions.
+actions and demo-only payment handoffs.
 
 The service does not process money itself.
 
-It prepares a commerce action for an approved integration.
+It prepares commerce actions and payment handoffs for an
+approved integration.
 """
 
 from __future__ import annotations
@@ -17,16 +18,21 @@ from src.ai_runtime.commerce.models import (
     CommerceActionStatus,
 )
 
+from src.ai_runtime.commerce.payment_pass import (
+    PaymentPass,
+)
+
 
 class CommerceService:
     """
     Controlled commerce application service.
 
-    For the hackathon, the service supports a safe
-    external-vendor handoff.
+    For the hackathon, the service supports:
+    - safe external-vendor handoff
+    - demo-only payment preparation
 
-    A future payment/partner adapter can be injected
-    without changing DealCard or FlashIdea.
+    A future payment/partner adapter can be injected without
+    changing DealCard or FlashDeal.
     """
 
     def initiate(
@@ -36,8 +42,8 @@ class CommerceService:
         """
         Prepare a commerce action.
 
-        For now this establishes the external-vendor
-        boundary rather than executing a payment.
+        This establishes the external-vendor boundary rather
+        than executing a payment.
         """
 
         return CommerceActionResult(
@@ -50,3 +56,27 @@ class CommerceService:
                 "to complete the purchase."
             ),
         )
+
+    def prepare_payment(
+        self,
+        payment_pass: PaymentPass,
+    ) -> PaymentPass:
+        """
+        Prepare a demo-only payment handoff.
+
+        No payment provider is called and no transaction is
+        executed. The PaymentPass contract itself enforces
+        READY + DEMO semantics.
+        """
+
+        if not payment_pass.is_ready:
+            raise ValueError(
+                "PaymentPass must be READY."
+            )
+
+        if not payment_pass.is_demo_only:
+            raise ValueError(
+                "Hackathon payment must use DEMO execution mode."
+            )
+
+        return payment_pass

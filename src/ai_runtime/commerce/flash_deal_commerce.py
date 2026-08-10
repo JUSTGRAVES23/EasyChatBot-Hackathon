@@ -1,8 +1,8 @@
 """
 Flash Deal commerce integration boundary.
 
-Converts a user-facing FlashDealCard into an explicit
-CommerceAction.
+Converts a user-facing FlashDealCard into explicit commerce
+contracts.
 
 Architecture:
 
@@ -11,14 +11,15 @@ FlashDealCard
       v
 FlashDealCommerce
       |
-      v
-CommerceAction
+      +----> CommerceAction
       |
-      v
-CommerceService
-      |
-      v
-Approved vendor/payment integration
+      +----> PaymentPass
+                    |
+                    v
+             CommerceService
+                    |
+                    v
+             Vendor / Checkout
 
 This module does not:
 - process payments
@@ -36,6 +37,10 @@ from __future__ import annotations
 from src.ai_runtime.commerce.models import (
     CommerceAction,
     CommerceActionType,
+)
+
+from src.ai_runtime.commerce.payment_pass import (
+    PaymentPass,
 )
 
 from src.ai_runtime.discovery.flash_deal_card import (
@@ -78,4 +83,42 @@ class FlashDealCommerce:
                 "character_id": card.character_id,
                 "vendor": card.vendor_name,
             },
+        )
+
+    def create_payment_pass(
+        self,
+        *,
+        user_id: str,
+        card: FlashDealCard,
+        payment_pass_id: str | None = None,
+    ) -> PaymentPass:
+        """
+        Create a demo-only payment handoff from a Flash Deal.
+
+        No payment occurs here.
+
+        The resulting PaymentPass is always:
+        - READY
+        - DEMO
+        - not executed
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "Commerce user_id cannot be empty."
+            )
+
+        return PaymentPass(
+            payment_pass_id=(
+                payment_pass_id
+                if payment_pass_id is not None
+                else f"payment-pass-{card.deal_id}"
+            ),
+            deal_id=card.deal_id,
+            user_id=user_id,
+            product_name=card.product_name,
+            vendor_name=card.vendor_name,
+            amount=card.current_price,
+            currency=card.currency,
+            checkout_url=card.get_deal_url,
         )
