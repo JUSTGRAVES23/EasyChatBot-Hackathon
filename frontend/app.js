@@ -1,6 +1,21 @@
 let character = "Yeti";
 
 
+const recommendation = {
+
+    productName: "iPhone 17",
+
+    vendor: "eBay",
+
+    dealUrl:
+        "https://example.com/affiliate/iphone17",
+
+    informationUrl:
+        "https://example.com/iphone17"
+
+};
+
+
 window.onload = function () {
 
     console.log(
@@ -21,6 +36,7 @@ window.onload = function () {
         );
 
         return;
+
     }
 
 
@@ -34,6 +50,7 @@ window.onload = function () {
         );
 
         return;
+
     }
 
 
@@ -54,7 +71,7 @@ window.onload = function () {
                 function () {
 
                     selectCharacter(
-                        item.name
+                        item.id
                     );
 
                 };
@@ -67,13 +84,56 @@ window.onload = function () {
         }
     );
 
+
+    selectCharacter(
+        "yeti"
+    );
+
 };
 
 
+function getCharacter(
+    characterId
+) {
 
-function selectCharacter(name) {
+    return characters.find(
+        function (item) {
 
-    character = name;
+            return (
+                item.id ===
+                characterId
+            );
+
+        }
+    );
+
+}
+
+
+function selectCharacter(
+    characterId
+) {
+
+    const selected =
+        getCharacter(
+            characterId
+        );
+
+
+    if (!selected) {
+
+        console.error(
+            "Character not found:",
+            characterId
+        );
+
+        return;
+
+    }
+
+
+    character =
+        selected.name;
 
 
     console.log(
@@ -92,12 +152,131 @@ function selectCharacter(name) {
 
         selectedCharacter.textContent =
             "Selected companion: " +
-            character;
+            selected.name;
+
+    }
+
+
+    updateRecommendationCharacter(
+        selected
+    );
+
+}
+
+
+function updateRecommendationCharacter(
+    selected
+) {
+
+    const recommendationData =
+        selected.recommendation;
+
+
+    const openingPhrase =
+        recommendationData
+            ? recommendationData.openingPhrase
+            : "I found something for you.";
+
+
+    const notificationTitle =
+        document.getElementById(
+            "notification-title"
+        );
+
+
+    const notificationMessage =
+        document.getElementById(
+            "notification-message"
+        );
+
+
+    const recommendationOpening =
+        document.getElementById(
+            "recommendation-opening"
+        );
+
+
+    const characterBadge =
+        document.querySelector(
+            ".character-badge"
+        );
+
+
+    if (notificationTitle) {
+
+        notificationTitle.textContent =
+            selected.name +
+            " found something for you";
+
+    }
+
+
+    if (notificationMessage) {
+
+        notificationMessage.textContent =
+            openingPhrase;
+
+    }
+
+
+    if (recommendationOpening) {
+
+        recommendationOpening.textContent =
+            openingPhrase;
+
+    }
+
+
+    if (characterBadge) {
+
+        characterBadge.textContent =
+            selected.name;
 
     }
 
 }
 
+
+function openRecommendation() {
+
+    const section =
+        document.getElementById(
+            "recommendation-section"
+        );
+
+
+    if (section) {
+
+        section.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+
+    }
+
+}
+
+
+function getDeal() {
+
+    window.open(
+        recommendation.dealUrl,
+        "_blank",
+        "noopener,noreferrer"
+    );
+
+}
+
+
+function moreInformation() {
+
+    window.open(
+        recommendation.informationUrl,
+        "_blank",
+        "noopener,noreferrer"
+    );
+
+}
 
 
 async function sendMessage() {

@@ -1,0 +1,644 @@
+﻿===== FILE: src/ai_runtime/composition.py =====
+"""
+External AI Runtime composition.
+
+This module is the composition root for the external/user-assistance
+AI Runtime used by EasyChatBot.
+
+The composition root wires together:
+
+    Governance
+        |
+        v
+    CapabilityGateway
+        |
+        v
+    CapabilityRegistry
+        |
+        +--> Live Intelligence
+        +--> Podcast Discovery
+        +--> Learning Generation
+        +--> Podcast Listening Proposal
+
+This module is responsible for dependency injection only.
+
+It does not:
+
+- implement capability business logic;
+- implement provider logic;
+- retrieve learner memory;
+- make governance decisions;
+- execute agents directly;
+- perform external side effects;
+- modify the internal AI Agents framework.
+
+The internal AI Agents framework remains a separate system.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+from src.ai_agents.live_intelligence_agent.handler import (
+    LiveIntelligenceAgent,
+)
+
+from src.ai_runtime.capabilities.executor import (
+    CapabilityExecutor,
+)
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.listening_proposal_executor import (
+    ListeningProposalExecutor,
+)
+
+from src.ai_runtime.capabilities.live_intelligence_executor import (
+    LiveIntelligenceExecutor,
+)
+
+from src.ai_runtime.capabilities.podcast_discovery_executor import (
+    PodcastDiscoveryExecutor,
+)
+
+from src.ai_runtime.capabilities.podcast_learning_challenge_executor import (
+    PodcastLearningChallengeExecutor,
+)
+
+from src.ai_runtime.capabilities.registry import (
+    CapabilityRegistry,
+)
+
+from src.ai_runtime.podcast.agent import (
+    PodcastDiscoveryAgent,
+)
+
+from src.ai_runtime.podcast.providers import (
+    PodcastProvider,
+)
+
+
+def create_capability_executors(
+    *,
+    live_intelligence_agent: LiveIntelligenceAgent,
+    podcast_discovery_agent: PodcastDiscoveryAgent,
+    podcast_providers: Sequence[PodcastProvider],
+) -> tuple[CapabilityExecutor, ...]:
+    """
+    Create Runtime capability executors.
+
+    Dependencies are injected from the composition layer.
+
+    This function does not:
+
+    - create providers;
+    - create agents;
+    - access external systems;
+    - retrieve learner data.
+
+    Raises:
+        ValueError:
+            If required dependencies are missing.
+    """
+
+    if live_intelligence_agent is None:
+        raise ValueError(
+            "LiveIntelligenceAgent cannot be None."
+        )
+
+    if podcast_discovery_agent is None:
+        raise ValueError(
+            "PodcastDiscoveryAgent cannot be None."
+        )
+
+    if not podcast_providers:
+        raise ValueError(
+            "At least one PodcastProvider is required."
+        )
+
+    return (
+        LiveIntelligenceExecutor(
+            agent=live_intelligence_agent,
+        ),
+
+        PodcastDiscoveryExecutor(
+            agent=podcast_discovery_agent,
+            providers=podcast_providers,
+        ),
+
+        PodcastLearningChallengeExecutor(),
+
+        ListeningProposalExecutor(),
+    )
+
+
+def create_capability_registry(
+    *,
+    live_intelligence_agent: LiveIntelligenceAgent,
+    podcast_discovery_agent: PodcastDiscoveryAgent,
+    podcast_providers: Sequence[PodcastProvider],
+) -> CapabilityRegistry:
+    """
+    Create the Runtime capability registry.
+
+    Registry owns capability lookup only.
+
+    It does not:
+
+    - execute governance;
+    - select providers;
+    - manage application state.
+    """
+
+    executors = create_capability_executors(
+        live_intelligence_agent=(
+            live_intelligence_agent
+        ),
+        podcast_discovery_agent=(
+            podcast_discovery_agent
+        ),
+        podcast_providers=(
+            podcast_providers
+        ),
+    )
+
+    return CapabilityRegistry(
+        executors=list(executors),
+    )
+
+
+def create_capability_gateway(
+    *,
+    registry: CapabilityRegistry,
+    governance: Any,
+) -> CapabilityGateway:
+    """
+    Create Runtime gateway.
+
+    Governance is injected.
+
+    The gateway remains responsible for:
+
+    - capability access control;
+    - governance enforcement;
+    - execution delegation.
+    """
+
+    if registry is None:
+        raise ValueError(
+            "CapabilityRegistry cannot be None."
+        )
+
+    if governance is None:
+        raise ValueError(
+            "Governance cannot be None."
+        )
+
+    return CapabilityGateway(
+        registry=registry,
+        governance=governance,
+    )
+
+
+def create_external_runtime_gateway(
+    *,
+    live_intelligence_agent: LiveIntelligenceAgent,
+    podcast_discovery_agent: PodcastDiscoveryAgent,
+    podcast_providers: Sequence[PodcastProvider],
+    governance: Any,
+) -> CapabilityGateway:
+    """
+    Main Runtime composition entry point.
+
+    Flow:
+
+        Dependencies
+             |
+             v
+        Executors
+             |
+             v
+        Registry
+             |
+             v
+        Gateway
+             |
+             v
+        Application Service
+
+    Returns:
+        Configured CapabilityGateway.
+    """
+
+    registry = create_capability_registry(
+        live_intelligence_agent=(
+            live_intelligence_agent
+        ),
+        podcast_discovery_agent=(
+            podcast_discovery_agent
+        ),
+        podcast_providers=(
+            podcast_providers
+        ),
+    )
+
+    return create_capability_gateway(
+        registry=registry,
+        governance=governance,
+    )
+===== FILE: src/ai_agents/live_intelligence_agent/handler.py =====
+"""
+Live Intelligence Agent Handler.
+
+Responsible for executing the Live Intelligence Agent workflow.
+
+Architecture:
+
+AI Runtime
+    |
+    v
+Live Intelligence Agent Handler
+    |
+    +--> Search Provider Interface
+    |
+    +--> Knowledge Processing
+    |
+    v
+Structured Intelligence Output
+
+Responsibilities:
+- Validate agent input
+- Call approved provider interfaces
+- Normalise research output
+- Return explicit structured results
+
+Non-responsibilities:
+- Provider SDK management
+- Direct external API handling
+- Autonomous actions
+- Configuration changes
+"""
+
+from dataclasses import dataclass
+from typing import List, Protocol
+
+from src.providers.search_provider.interface import (
+    SearchProvider,
+    SearchResult,
+)
+
+
+@dataclass(frozen=True)
+class LiveIntelligenceRequest:
+    """
+    Input contract for Live Intelligence Agent.
+    """
+
+    topic: str
+    language: str = "French"
+    learner_level: str = "B2"
+
+
+@dataclass(frozen=True)
+class LiveIntelligenceResponse:
+    """
+    Output contract from Live Intelligence Agent.
+    """
+
+    topic: str
+    summary: str
+    sources: List[SearchResult]
+    key_information: List[str]
+
+
+class IntelligenceProcessor(Protocol):
+    """
+    Contract for future LLM-based processing.
+
+    Keeps the agent independent from
+    any specific model/provider.
+    """
+
+    async def summarise(
+        self,
+        results: List[SearchResult],
+        language: str,
+        learner_level: str,
+    ) -> tuple[str, List[str]]:
+        ...
+
+
+class LiveIntelligenceAgent:
+    """
+    Live Intelligence Agent implementation.
+    """
+
+    def __init__(
+        self,
+        search_provider: SearchProvider,
+        processor: IntelligenceProcessor,
+    ) -> None:
+        self._search_provider = search_provider
+        self._processor = processor
+
+    async def execute(
+        self,
+        request: LiveIntelligenceRequest,
+    ) -> LiveIntelligenceResponse:
+        """
+        Execute research workflow.
+
+        Flow:
+
+        Request
+          |
+          v
+        Search Provider
+          |
+          v
+        Intelligence Processor
+          |
+          v
+        Structured Response
+        """
+
+        self._validate_request(request)
+
+        search_results = await self._search_provider.search(
+            query=request.topic,
+            max_results=5,
+        )
+
+        summary, key_information = await self._processor.summarise(
+            results=search_results,
+            language=request.language,
+            learner_level=request.learner_level,
+        )
+
+        return LiveIntelligenceResponse(
+            topic=request.topic,
+            summary=summary,
+            sources=search_results,
+            key_information=key_information,
+        )
+
+    @staticmethod
+    def _validate_request(
+        request: LiveIntelligenceRequest,
+    ) -> None:
+        """
+        Validate required input.
+        """
+
+        if not request.topic.strip():
+            raise ValueError(
+                "Topic cannot be empty"
+            )
+===== FILE: src/ai_runtime/podcast/agent.py =====
+"""
+EasyChatBot Hackathon â€” Podcast Discovery Agent.
+
+The Agent converts explicit learner context and preference memory into
+provider-neutral search intent.
+
+It does not call Apple/Spotify, write memory, select a provider, or invent
+podcast metadata.
+"""
+
+from __future__ import annotations
+
+import re
+
+from src.ai_runtime.memory.models import MemoryEntry, MemoryType
+from src.ai_runtime.podcast.models import (
+    LearningContext,
+    PodcastSearchIntent,
+)
+
+
+class PodcastDiscoveryAgent:
+    """Build provider-neutral podcast discovery intent."""
+
+    _STOP_WORDS = {
+        "a", "an", "and", "are", "be", "for", "from", "i", "in", "is",
+        "like", "of", "on", "podcasts", "prefers", "prefer", "the", "to",
+        "with", "you", "your",
+    }
+
+    def build_search_intent(
+        self,
+        *,
+        user_id: str,
+        learning_context: LearningContext,
+        memories: list[MemoryEntry],
+        max_results: int = 10,
+    ) -> PodcastSearchIntent:
+        """
+        Convert explicit preferences + learning-world context into intent.
+
+        Only PREFERENCE memories are used, matching the existing
+        EasyChatBot discovery contract.
+        """
+
+        if not user_id.strip():
+            raise ValueError("Podcast Agent user_id cannot be empty.")
+
+        preferences = [
+            memory
+            for memory in memories
+            if memory.user_id == user_id
+            and memory.memory_type == MemoryType.PREFERENCE
+        ]
+
+        topics: list[str] = []
+        keywords: list[str] = []
+
+        for memory in preferences:
+            topics.extend(
+                self._metadata_terms(
+                    memory.metadata,
+                    "topics",
+                    "interests",
+                    "preferred_topics",
+                )
+            )
+            keywords.extend(
+                self._metadata_terms(
+                    memory.metadata,
+                    "keywords",
+                )
+            )
+
+            if not topics and not keywords:
+                keywords.extend(
+                    self._content_keywords(memory.content)
+                )
+
+        # The learning world is always part of the search context.
+        topics.append(learning_context.world_id)
+
+        # Target language is deliberately a hard eligibility constraint,
+        # not just another search keyword.
+        return PodcastSearchIntent(
+            user_id=user_id,
+            learning_context=learning_context,
+            topics=tuple(self._dedupe(topics)),
+            keywords=tuple(self._dedupe(keywords)),
+            language_required=True,
+            max_results=max_results,
+        )
+
+    @staticmethod
+    def _metadata_terms(
+        metadata: dict[str, str],
+        *keys: str,
+    ) -> list[str]:
+        terms: list[str] = []
+        for key in keys:
+            raw = metadata.get(key, "")
+            if raw:
+                terms.extend(
+                    item.strip()
+                    for item in re.split(r"[,;|]", raw)
+                    if item.strip()
+                )
+        return terms
+
+    @classmethod
+    def _content_keywords(cls, content: str) -> list[str]:
+        words = re.findall(
+            r"[A-Za-zÃ€-Ã¿0-9][A-Za-zÃ€-Ã¿0-9'-]{2,}",
+            content.lower(),
+        )
+        return [
+            word for word in words
+            if word not in cls._STOP_WORDS
+        ][:8]
+
+    @staticmethod
+    def _dedupe(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            key = value.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                result.append(value.strip())
+        return result
+===== FILE: tests/api/test_podcast_discovery_endpoint.py =====
+"""
+Tests for the Podcast Discovery API endpoint.
+
+The API endpoint must remain a thin transport boundary.
+
+Architecture:
+
+HTTP
+ |
+ v
+API Schema
+ |
+ v
+ExternalRuntimeService
+ |
+ v
+CapabilityGateway
+ |
+ v
+PodcastDiscoveryExecutor
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, Mock, patch
+
+from fastapi.testclient import TestClient
+
+from backend.api.main import app
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityResult,
+    CapabilityType,
+)
+
+
+client = TestClient(app)
+
+
+def test_podcast_discovery_endpoint_exists():
+    """
+    Verify that the Podcast Discovery endpoint exists.
+    """
+
+    response = client.post(
+        "/capabilities/podcast/discover",
+        json={
+            "query": "French learning podcast",
+            "target_language": "fr",
+            "learner_level": "B2",
+        },
+    )
+
+    assert response.status_code != 404
+
+
+def test_podcast_discovery_endpoint_delegates_to_runtime_service():
+    """
+    Verify that the endpoint delegates execution to the
+    ExternalRuntimeService boundary.
+    """
+
+    expected_result = CapabilityResult(
+        request_id="podcast-api-test-001",
+        capability=CapabilityType.PODCAST_DISCOVERY,
+        status=CapabilityExecutionStatus.COMPLETED,
+        output={
+            "podcast": "French Podcast",
+        },
+    )
+
+    service = Mock()
+
+    service.execute = AsyncMock(
+        return_value=expected_result,
+    )
+
+    with patch(
+        "backend.api.routes.create_external_runtime_service",
+        return_value=service,
+    ):
+        response = client.post(
+            "/capabilities/podcast/discover",
+            json={
+                "query": "French learning podcast",
+                "target_language": "fr",
+                "learner_level": "B2",
+            },
+        )
+
+    assert response.status_code == 200
+
+    service.execute.assert_awaited_once()
+
+
+def test_podcast_discovery_endpoint_rejects_missing_query():
+    """
+    Verify that missing query input is rejected.
+    """
+
+    response = client.post(
+        "/capabilities/podcast/discover",
+        json={
+            "target_language": "fr",
+            "learner_level": "B2",
+        },
+    )
+
+    assert response.status_code in (
+        400,
+        422,
+    )

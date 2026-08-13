@@ -12,6 +12,7 @@ AI Runtime
 Capability Executor Interface
     |
     +---- Live Intelligence Executor
+    +---- Podcast Discovery Executor
     +---- Learning Executor
     +---- Evaluation Executor
     +---- Future Executors
@@ -19,14 +20,24 @@ Capability Executor Interface
 The Runtime depends on this contract.
 
 It does not depend directly on:
-- agents
-- providers
-- SDKs
-- external APIs
+
+- agents;
+- providers;
+- SDKs;
+- external APIs.
 
 Concrete executors are responsible for translating the
 provider-independent CapabilityRequest into the appropriate
 capability implementation.
+
+This module defines contracts only.
+
+It does not:
+
+- execute capabilities;
+- call providers;
+- apply governance;
+- manage runtime state.
 """
 
 from __future__ import annotations
@@ -44,17 +55,36 @@ class CapabilityExecutor(ABC):
     """
     Abstract executor for one Runtime capability.
 
-    Each concrete executor must declare which capability
-    it handles and implement asynchronous execution.
+    Each concrete executor must:
+
+    - declare the capability it handles;
+    - implement asynchronous execution;
+    - return a provider-independent result.
+
+    Executors must not bypass:
+
+        CapabilityGateway
+            |
+            v
+        Governance
     """
 
     @property
     @abstractmethod
-    def capability(self) -> CapabilityType:
+    def capability(
+        self,
+    ) -> CapabilityType:
         """
         Return the capability handled by this executor.
+
+        Returns:
+
+            CapabilityType
         """
-        raise NotImplementedError
+
+        raise NotImplementedError(
+            "Capability must be implemented."
+        )
 
     @abstractmethod
     async def execute(
@@ -64,9 +94,19 @@ class CapabilityExecutor(ABC):
         """
         Execute a capability request.
 
-        Implementations must return a provider-independent
-        CapabilityResult.
+        Implementations must:
 
-        They must not bypass the Runtime governance boundary.
+        - consume CapabilityRequest;
+        - return CapabilityResult;
+        - remain provider-independent.
+
+        Implementations must not:
+
+        - bypass Runtime governance;
+        - directly modify application state;
+        - create uncontrolled external side effects.
         """
-        raise NotImplementedError
+
+        raise NotImplementedError(
+            "Executor execution must be implemented."
+        )

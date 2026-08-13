@@ -1,0 +1,365 @@
+﻿============================================================
+SPRINT 1.3 — API COMPOSITION REVIEW
+Purpose: Review existing API and application composition before adding Runtime execution endpoint.
+============================================================
+
+
+============================================================
+FILE: .\backend\api\schemas.py
+============================================================
+"""
+EasyChatBot API Schemas.
+
+Defines the HTTP request and response contracts
+for the EasyChatBot API.
+
+The API schema layer is responsible only for
+transport validation and serialisation.
+
+It does not:
+
+- execute agents
+- select providers
+- build prompts
+- manage memory
+- perform research
+- call provider SDKs
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel
+from pydantic import Field
+
+
+class ChatRequest(BaseModel):
+    """
+    Request payload for a companion interaction.
+
+    The message field remains optional at the Pydantic
+    transport layer so the API route can preserve the
+    existing EasyChatBot HTTP contract:
+
+        missing message -> HTTP 400
+
+    This maintains backward compatibility with the
+    existing API behaviour and tests.
+    """
+
+    user_id: str = Field(
+        default="demo-user",
+        min_length=1,
+        description="Learner/user identifier.",
+    )
+
+    character: str = Field(
+        default="yeti",
+        min_length=1,
+        description="Selected EasyChatBot character identifier.",
+    )
+
+    message: str | None = Field(
+        default=None,
+        description="Learner message.",
+    )
+
+    research: bool = Field(
+        default=False,
+        description="Whether live research should be performed.",
+    )
+
+
+class ChatResponse(BaseModel):
+    """
+    Response payload for a companion interaction.
+
+    Agent output remains flexible during Beta 1 because
+    the underlying result contracts are intentionally
+    extensible.
+    """
+
+    character: str
+
+    conversation: Any
+
+    research: Any = None
+
+    quality: Any
+
+    memory_count: int
+
+    memory_context_count: int = 0
+
+
+class PodcastDiscoveryRequest(BaseModel):
+    """
+    HTTP request contract for Podcast Discovery.
+
+    This schema is responsible only for transport
+    validation.
+
+    It does not:
+
+    - execute discovery;
+    - select providers;
+    - apply governance;
+    - execute agents.
+    """
+
+    query: str = Field(
+        min_length=1,
+        description="Podcast discovery query.",
+    )
+
+    target_language: str = Field(
+        min_length=1,
+        description="Target language for the learner.",
+    )
+
+    learner_level: str = Field(
+        min_length=1,
+        description="Learner proficiency level.",
+    )
+
+
+class PodcastDiscoveryResponse(BaseModel):
+    """
+    HTTP response contract for Podcast Discovery.
+
+    The Runtime remains the source of the capability
+    result. The API schema only serialises the result
+    for HTTP transport.
+    """
+
+    request_id: str
+
+    capability: Any
+
+    status: Any
+
+    output: Any = None
+
+
+============================================================
+FILE: .\backend\api\main.py
+============================================================
+"""
+EasyChatBot API Application.
+
+Hosts the user interaction layer.
+
+The API application is responsible only for:
+
+- creating the FastAPI application;
+- registering API routes;
+- exposing the application health endpoint;
+- triggering application composition bootstrap.
+
+Business logic belongs to application services.
+
+Agent execution belongs to the agent/runtime layer.
+
+Provider construction belongs to the composition layer.
+"""
+
+from __future__ import annotations
+
+from fastapi import FastAPI
+
+from backend.api.routes import (
+    router,
+)
+
+
+def create_app() -> FastAPI:
+    """
+    Create the EasyChatBot FastAPI application.
+
+    Application composition is intentionally separated
+    from the HTTP layer.
+
+    This function only creates the application object
+    and registers routes.
+    """
+
+    application = FastAPI(
+        title="EasyChatBot",
+        description="AI companion learning platform",
+    )
+
+    application.include_router(
+        router,
+    )
+
+    return application
+
+
+app = create_app()
+
+
+@app.get("/")
+def health() -> dict[str, str]:
+    """
+    Return the application health status.
+    """
+
+    return {
+        "status": "EasyChatBot running",
+        "architecture": (
+            "Runtime + Agents + Memory"
+        ),
+    }
+
+
+============================================================
+FILE: .\backend\application\factory.py
+============================================================
+"""
+EasyChatBot Application Factory.
+
+Provides the application composition boundary.
+
+Responsibilities:
+
+- create application services;
+- compose the external AI Runtime;
+- inject already-created dependencies;
+- keep API routes free from Runtime construction logic.
+
+This module does not:
+
+- execute agents;
+- execute capabilities;
+- contain capability business logic;
+- implement governance;
+- implement provider logic.
+
+The established Runtime composition function remains the
+authoritative mechanism for constructing the external Runtime.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Sequence
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+from src.ai_runtime.podcast.providers import (
+    PodcastProvider,
+)
+
+
+class ApplicationFactory:
+    """
+    Application composition factory.
+
+    The factory creates application-layer services from
+    explicitly supplied dependencies.
+
+    This preserves:
+
+    - dependency injection;
+    - testability;
+    - Runtime/application separation;
+    - provider independence;
+    - governance separation.
+    """
+
+    def create_external_runtime_service(
+        self,
+        *,
+        gateway: CapabilityGateway,
+    ) -> ExternalRuntimeService:
+        """
+        Create an ExternalRuntimeService from an existing
+        CapabilityGateway.
+
+        Args:
+            gateway:
+                Configured external Runtime gateway.
+
+        Returns:
+            ExternalRuntimeService.
+
+        Raises:
+            ValueError:
+                If gateway is missing.
+        """
+
+        if gateway is None:
+            raise ValueError(
+                "CapabilityGateway cannot be None."
+            )
+
+        return ExternalRuntimeService(
+            gateway=gateway,
+        )
+
+    def create_external_runtime(
+        self,
+        *,
+        live_intelligence_agent: Any,
+        podcast_discovery_agent: Any,
+        podcast_providers: Sequence[PodcastProvider],
+        governance: Any,
+    ) -> ExternalRuntimeService:
+        """
+        Compose the complete external Runtime application service.
+
+        Runtime gateway construction remains delegated to the
+        established Runtime composition function.
+
+        The ApplicationFactory does not create:
+
+        - agents;
+        - providers;
+        - governance implementations.
+
+        Those dependencies must be supplied by the application
+        composition root.
+
+        Args:
+            live_intelligence_agent:
+                Configured Live Intelligence agent.
+
+            podcast_discovery_agent:
+                Configured Podcast Discovery agent.
+
+            podcast_providers:
+                Configured Podcast providers.
+
+            governance:
+                Approved Runtime governance dependency.
+
+        Returns:
+            Fully configured ExternalRuntimeService.
+        """
+
+        gateway = create_external_runtime_gateway(
+            live_intelligence_agent=(
+                live_intelligence_agent
+            ),
+            podcast_discovery_agent=(
+                podcast_discovery_agent
+            ),
+            podcast_providers=(
+                podcast_providers
+            ),
+            governance=governance,
+        )
+
+        return self.create_external_runtime_service(
+            gateway=gateway,
+        )

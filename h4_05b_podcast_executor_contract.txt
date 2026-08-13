@@ -1,0 +1,534 @@
+============================================================
+FILE: .\src\ai_runtime\podcast\agent.py
+============================================================
+"""
+EasyChatBot Hackathon — Podcast Discovery Agent.
+
+The Agent converts explicit learner context and preference memory into
+provider-neutral search intent.
+
+It does not call Apple/Spotify, write memory, select a provider, or invent
+podcast metadata.
+"""
+
+from __future__ import annotations
+
+import re
+
+from src.ai_runtime.memory.models import MemoryEntry, MemoryType
+from src.ai_runtime.podcast.models import (
+    LearningContext,
+    PodcastSearchIntent,
+)
+
+
+class PodcastDiscoveryAgent:
+    """Build provider-neutral podcast discovery intent."""
+
+    _STOP_WORDS = {
+        "a", "an", "and", "are", "be", "for", "from", "i", "in", "is",
+        "like", "of", "on", "podcasts", "prefers", "prefer", "the", "to",
+        "with", "you", "your",
+    }
+
+    def build_search_intent(
+        self,
+        *,
+        user_id: str,
+        learning_context: LearningContext,
+        memories: list[MemoryEntry],
+        max_results: int = 10,
+    ) -> PodcastSearchIntent:
+        """
+        Convert explicit preferences + learning-world context into intent.
+
+        Only PREFERENCE memories are used, matching the existing
+        EasyChatBot discovery contract.
+        """
+
+        if not user_id.strip():
+            raise ValueError("Podcast Agent user_id cannot be empty.")
+
+        preferences = [
+            memory
+            for memory in memories
+            if memory.user_id == user_id
+            and memory.memory_type == MemoryType.PREFERENCE
+        ]
+
+        topics: list[str] = []
+        keywords: list[str] = []
+
+        for memory in preferences:
+            topics.extend(
+                self._metadata_terms(
+                    memory.metadata,
+                    "topics",
+                    "interests",
+                    "preferred_topics",
+                )
+            )
+            keywords.extend(
+                self._metadata_terms(
+                    memory.metadata,
+                    "keywords",
+                )
+            )
+
+            if not topics and not keywords:
+                keywords.extend(
+                    self._content_keywords(memory.content)
+                )
+
+        # The learning world is always part of the search context.
+        topics.append(learning_context.world_id)
+
+        # Target language is deliberately a hard eligibility constraint,
+        # not just another search keyword.
+        return PodcastSearchIntent(
+            user_id=user_id,
+            learning_context=learning_context,
+            topics=tuple(self._dedupe(topics)),
+            keywords=tuple(self._dedupe(keywords)),
+            language_required=True,
+            max_results=max_results,
+        )
+
+    @staticmethod
+    def _metadata_terms(
+        metadata: dict[str, str],
+        *keys: str,
+    ) -> list[str]:
+        terms: list[str] = []
+        for key in keys:
+            raw = metadata.get(key, "")
+            if raw:
+                terms.extend(
+                    item.strip()
+                    for item in re.split(r"[,;|]", raw)
+                    if item.strip()
+                )
+        return terms
+
+    @classmethod
+    def _content_keywords(cls, content: str) -> list[str]:
+        words = re.findall(
+            r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'-]{2,}",
+            content.lower(),
+        )
+        return [
+            word for word in words
+            if word not in cls._STOP_WORDS
+        ][:8]
+
+    @staticmethod
+    def _dedupe(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            key = value.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                result.append(value.strip())
+        return result
+
+
+============================================================
+FILE: .\src\ai_runtime\podcast\service.py
+============================================================
+"""
+EasyChatBot Hackathon — personalised podcast recommendation service.
+
+This is the application-level selection boundary.
+
+Language is a HARD filter because EasyChatBot is a language-learning
+platform. Preference/topic relevance is evaluated only after a candidate
+is language-eligible.
+"""
+
+from __future__ import annotations
+
+import re
+from uuid import uuid4
+
+from src.ai_runtime.podcast.models import (
+    PodcastRecommendation,
+    PodcastSearchIntent,
+    PodcastSearchResult,
+    normalise_language,
+)
+from src.ai_runtime.podcast.providers import PodcastProvider
+
+
+class PodcastRecommendationService:
+    """Search providers and select a personalised candidate."""
+
+    def __init__(self, providers: list[PodcastProvider]) -> None:
+        if not providers:
+            raise ValueError(
+                "PodcastRecommendationService requires at least one provider."
+            )
+        self._providers = list(providers)
+
+    def recommend(
+        self,
+        *,
+        intent: PodcastSearchIntent,
+        character_id: str,
+        character_name: str,
+        character_message: str,
+    ) -> PodcastRecommendation:
+        candidates: list[PodcastSearchResult] = []
+
+        for provider in self._providers:
+            candidates.extend(provider.search(intent))
+
+        ranked = self.rank_candidates(
+            candidates=candidates,
+            intent=intent,
+        )
+
+        if not ranked:
+            raise LookupError(
+                "No podcast matched the learner's language and preferences."
+            )
+
+        result, score, reason = ranked[0]
+
+        return PodcastRecommendation(
+            recommendation_id=str(uuid4()),
+            user_id=intent.user_id,
+            character_id=character_id,
+            character_name=character_name,
+            character_message=character_message,
+            result=result,
+            relevance_reason=reason,
+            match_score=score,
+        )
+
+    @classmethod
+    def rank_candidates(
+        cls,
+        *,
+        candidates: list[PodcastSearchResult],
+        intent: PodcastSearchIntent,
+    ) -> list[tuple[PodcastSearchResult, float, str]]:
+        ranked: list[tuple[PodcastSearchResult, float, str]] = []
+
+        target_language = normalise_language(
+            intent.learning_context.target_language
+        )
+
+        preference_terms = [
+            term.lower()
+            for term in list(intent.topics) + list(intent.keywords)
+            if term.strip()
+        ]
+
+        for candidate in candidates:
+            candidate_languages = {
+                normalise_language(language)
+                for language in candidate.languages
+            }
+
+            # Critical learning-platform rule:
+            # unknown/wrong-language content is not eligible.
+            if (
+                intent.language_required
+                and target_language not in candidate_languages
+            ):
+                continue
+
+            haystack = " ".join(
+                [
+                    candidate.title,
+                    candidate.description,
+                    candidate.publisher,
+                ]
+            ).lower()
+
+            matched_terms = [
+                term
+                for term in preference_terms
+                if cls._term_matches(term, haystack)
+            ]
+
+            score = 50.0
+
+            if matched_terms:
+                score += min(30.0, len(matched_terms) * 10.0)
+
+            if intent.learning_context.world_id.lower() in haystack:
+                score += 10.0
+
+            level = intent.learning_context.learner_level.lower()
+            if level and level in haystack:
+                score += 10.0
+
+            reason = cls._build_reason(
+                language=intent.learning_context.target_language,
+                matched_terms=matched_terms,
+                world_id=intent.learning_context.world_id,
+            )
+
+            ranked.append(
+                (candidate, min(score, 100.0), reason)
+            )
+
+        ranked.sort(
+            key=lambda item: (
+                item[1],
+                item[0].published_at or "",
+            ),
+            reverse=True,
+        )
+
+        return ranked[: intent.max_results]
+
+    @staticmethod
+    def _term_matches(term: str, haystack: str) -> bool:
+        term = term.strip().lower()
+        if not term:
+            return False
+        if term in haystack:
+            return True
+
+        words = [
+            word
+            for word in re.findall(r"[a-z0-9À-ÿ'-]+", term)
+            if len(word) > 2
+        ]
+        return bool(words) and any(
+            word in haystack
+            for word in words
+        )
+
+    @staticmethod
+    def _build_reason(
+        *,
+        language: str,
+        matched_terms: list[str],
+        world_id: str,
+    ) -> str:
+        reasons = [f"It is available in {language}."]
+
+        if matched_terms:
+            reasons.append(
+                "It matches your interests in "
+                + ", ".join(matched_terms[:3])
+                + "."
+            )
+
+        reasons.append(
+            f"It fits your {world_id} learning world."
+        )
+
+        return " ".join(reasons)
+
+
+============================================================
+FILE: .\src\ai_runtime\podcast\models.py
+============================================================
+"""
+EasyChatBot Hackathon — provider-neutral podcast contracts.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Final
+from uuid import uuid4
+
+
+class PodcastProviderName(str, Enum):
+    APPLE = "apple_podcasts"
+    SPOTIFY = "spotify"
+
+
+@dataclass(frozen=True)
+class LearningContext:
+    """Explicit learning-world context for podcast discovery."""
+
+    world_id: str
+    target_language: str
+    learner_level: str
+    learning_goal: str = ""
+    preferred_languages: tuple[str, ...] = ()
+    country_code: str = "LU"
+
+    def __post_init__(self) -> None:
+        if not self.world_id.strip():
+            raise ValueError("LearningContext world_id cannot be empty.")
+        if not self.target_language.strip():
+            raise ValueError(
+                "LearningContext target_language cannot be empty."
+            )
+        if not self.learner_level.strip():
+            raise ValueError(
+                "LearningContext learner_level cannot be empty."
+            )
+        if len(self.country_code.strip()) != 2:
+            raise ValueError(
+                "LearningContext country_code must be a two-letter code."
+            )
+
+
+@dataclass(frozen=True)
+class PodcastSearchIntent:
+    """
+    Provider-neutral search intent produced by the Podcast Agent.
+
+    The Agent does not know whether Apple or Spotify will execute it.
+    """
+
+    user_id: str
+    learning_context: LearningContext
+    topics: tuple[str, ...]
+    keywords: tuple[str, ...] = ()
+    language_required: bool = True
+    max_results: int = 10
+    intent_id: str = field(default_factory=lambda: str(uuid4()))
+
+    def __post_init__(self) -> None:
+        if not self.user_id.strip():
+            raise ValueError("PodcastSearchIntent user_id cannot be empty.")
+        if not self.topics and not self.keywords:
+            raise ValueError(
+                "PodcastSearchIntent requires at least one topic or keyword."
+            )
+        if self.max_results < 1:
+            raise ValueError(
+                "PodcastSearchIntent max_results must be at least 1."
+            )
+
+
+@dataclass(frozen=True)
+class PodcastSearchResult:
+    """Normalised podcast/episode candidate from any provider."""
+
+    provider: PodcastProviderName
+    external_id: str
+    title: str
+    description: str
+    publisher: str
+    languages: tuple[str, ...]
+    url: str
+    image_url: str | None = None
+    published_at: str | None = None
+    duration_seconds: int | None = None
+    explicit: bool = False
+    metadata: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name, value in {
+            "external_id": self.external_id,
+            "title": self.title,
+            "publisher": self.publisher,
+            "url": self.url,
+        }.items():
+            if not value.strip():
+                raise ValueError(
+                    f"PodcastSearchResult {name} cannot be empty."
+                )
+
+        if not (
+            self.url.startswith("https://")
+            or self.url.startswith("http://")
+        ):
+            raise ValueError(
+                "PodcastSearchResult url must use HTTP or HTTPS."
+            )
+
+        if not self.languages:
+            raise ValueError(
+                "PodcastSearchResult requires at least one language."
+            )
+
+
+@dataclass(frozen=True)
+class PodcastRecommendation:
+    """Character-facing recommendation selected from verified candidates."""
+
+    recommendation_id: str
+    user_id: str
+    character_id: str
+    character_name: str
+    character_message: str
+    result: PodcastSearchResult
+    relevance_reason: str
+    match_score: float
+
+    def __post_init__(self) -> None:
+        for name, value in {
+            "recommendation_id": self.recommendation_id,
+            "user_id": self.user_id,
+            "character_id": self.character_id,
+            "character_name": self.character_name,
+            "character_message": self.character_message,
+            "relevance_reason": self.relevance_reason,
+        }.items():
+            if not value.strip():
+                raise ValueError(
+                    f"PodcastRecommendation {name} cannot be empty."
+                )
+
+        if not 0 <= self.match_score <= 100:
+            raise ValueError(
+                "PodcastRecommendation match_score must be between 0 and 100."
+            )
+
+
+LANGUAGE_ALIASES: Final[dict[str, str]] = {
+    "fr": "fr", "fra": "fr", "fre": "fr",
+    "french": "fr", "français": "fr", "francais": "fr",
+    "en": "en", "eng": "en", "english": "en",
+    "es": "es", "spa": "es", "spanish": "es", "español": "es",
+    "de": "de", "deu": "de", "ger": "de", "german": "de",
+    "it": "it", "ita": "it", "italian": "it",
+    "ru": "ru", "rus": "ru", "russian": "ru",
+    "pt": "pt", "por": "pt", "portuguese": "pt",
+}
+
+
+def normalise_language(value: str) -> str:
+    """Return a stable ISO-639-1-style code when recognised."""
+    return LANGUAGE_ALIASES.get(
+        value.strip().lower(),
+        value.strip().lower(),
+    )
+
+
+============================================================
+FILE: .\src\ai_runtime\podcast\providers.py
+============================================================
+"""
+EasyChatBot Hackathon — podcast provider boundary.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from src.ai_runtime.podcast.models import (
+    PodcastSearchIntent,
+    PodcastSearchResult,
+)
+
+
+class PodcastProvider(Protocol):
+    """
+    Provider-independent catalogue interface.
+
+    Apple and Spotify adapters implement this boundary; the Agent never
+    depends on either provider.
+    """
+
+    def search(
+        self,
+        intent: PodcastSearchIntent,
+    ) -> list[PodcastSearchResult]:
+        """Search the provider catalogue using provider-neutral intent."""
+        ...
+
+

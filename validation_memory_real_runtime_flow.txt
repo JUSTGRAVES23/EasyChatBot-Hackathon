@@ -1,0 +1,800 @@
+﻿=== COMPANION SERVICE ===
+"""
+Companion Service.
+
+Application orchestration layer for EasyChatBot.
+
+Coordinates:
+
+Character
+Conversation Agent
+Research Agent
+Quality Agent
+Memory Service
+Memory Context Builder
+
+Live Intelligence + Memory flow:
+
+CompanionService
+|
++--> MemoryService
+|        |
+|        v
+|   MemoryRecord[]
+|        |
+|        v
+|   MemoryContextBuilder
+|        |
+|        v
+|   MemoryContext
+|
++--> ResearchAgent
+|        |
+|        v
+|   IntelligenceContext
+|
++--> ConversationAgent
+|        |
+|        v
+|   LLMService
+|        |
+|        v
+|   LLMProvider
+|
++--> QualityAgent
+|
+v
+Interaction Result
+
+Responsibilities:
+
+- orchestrate companion interactions
+- retrieve memories
+- build bounded learner memory context
+- optionally execute research
+- enrich the execution context with memory
+- enrich the execution context with live intelligence
+- execute the ConversationAgent
+- execute the QualityAgent
+- persist the interaction
+- return the combined result
+
+Does not:
+
+- create LLM providers
+- select LLM providers
+- call provider SDKs
+- call OpenAI directly
+- call Ollama directly
+- manage provider routing
+- build provider-specific prompts
+- persist memory directly
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.agents.quality_agent import (
+    QualityAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from src.ai_runtime.memory.context_builder import (
+    MemoryContextBuilder,
+)
+
+
+class CompanionService:
+    """
+    Coordinates AI companion experiences.
+
+    The service orchestrates agents but does not contain
+    provider-specific logic.
+
+    Providers are injected into agents by the composition
+    layer.
+
+    Memory retrieval remains owned by MemoryService.
+
+    MemoryContextBuilder converts already-retrieved memory
+    into bounded runtime context.
+
+    ExecutionContext remains immutable. Enrichment is
+    performed using dataclasses.replace().
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        conversation_agent: ConversationAgent | None = None,
+        research_agent: ResearchAgent | None = None,
+        quality_agent: QualityAgent | None = None,
+        memory_service: MemoryService | None = None,
+        memory_context_builder: (
+            MemoryContextBuilder | None
+        ) = None,
+    ) -> None:
+        """
+        Initialise the CompanionService.
+
+        Dependencies are injectable so the service can be
+        tested without invoking real infrastructure.
+        """
+
+        self.character = character
+
+        self.conversation_agent = (
+            conversation_agent
+            if conversation_agent is not None
+            else ConversationAgent(
+                character
+            )
+        )
+
+        self.research_agent = (
+            research_agent
+            if research_agent is not None
+            else ResearchAgent()
+        )
+
+        self.quality_agent = (
+            quality_agent
+            if quality_agent is not None
+            else QualityAgent()
+        )
+
+        self.memory_service = (
+            memory_service
+            if memory_service is not None
+            else MemoryService()
+        )
+
+        self.memory_context_builder = (
+            memory_context_builder
+            if memory_context_builder is not None
+            else MemoryContextBuilder()
+        )
+
+    async def interact(
+        self,
+        context: ExecutionContext,
+        use_research: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Execute a complete companion interaction.
+
+        Flow:
+
+        MemoryService
+            â†“
+        MemoryContextBuilder
+            â†“
+        optional memory-enriched ExecutionContext
+            â†“
+        optional ResearchAgent
+            â†“
+        optional intelligence-enriched ExecutionContext
+            â†“
+        ConversationAgent
+            â†“
+        QualityAgent
+            â†“
+        MemoryService.remember()
+
+        The original ExecutionContext is never mutated.
+
+        Parameters
+        ----------
+        context:
+            Runtime execution context.
+
+        use_research:
+            Whether live research should be performed
+            before the conversation response.
+
+        Returns
+        -------
+        dict[str, Any]
+            Combined companion interaction result.
+
+        Raises
+        ------
+        ValueError
+            If the execution context is missing.
+        """
+
+        if context is None:
+            raise ValueError(
+                "Execution context cannot be None."
+            )
+
+        # -----------------------------------------------------
+        # Step 1 â€” Retrieve existing learner memory
+        # -----------------------------------------------------
+
+        memories = self.memory_service.recall(
+            context.user_id
+        )
+
+        # -----------------------------------------------------
+        # Step 2 â€” Build bounded learner memory context
+        # -----------------------------------------------------
+
+        memory_context = (
+            self.memory_context_builder.build(
+                user_id=context.user_id,
+                request=context.request,
+                memories=memories,
+            )
+        )
+
+        # -----------------------------------------------------
+        # Step 3 â€” Attach memory only when relevant memory
+        # exists.
+        #
+        # If there is no relevant memory, preserve the
+        # original ExecutionContext object.
+        # -----------------------------------------------------
+
+        if memory_context.is_empty:
+            conversation_context = context
+        else:
+            conversation_context = replace(
+                context,
+                memory_context=memory_context,
+            )
+
+        # -----------------------------------------------------
+        # Step 4 â€” Optional Live Intelligence
+        #
+        # Research receives the current runtime context but
+        # does not receive or manage memory itself.
+        #
+        # If research succeeds, create another immutable
+        # context preserving the existing memory_context.
+        # -----------------------------------------------------
+
+        research_result = None
+
+        if use_research:
+            research_result = (
+                await self.research_agent.execute(
+                    conversation_context
+                )
+            )
+
+            if (
+                research_result.success
+                and research_result.output is not None
+            ):
+                conversation_context = replace(
+                    conversation_context,
+                    intelligence_context=(
+                        research_result.output
+                    ),
+                )
+
+        # -----------------------------------------------------
+        # Step 5 â€” Conversation Agent
+        #
+        # ConversationAgent can now receive:
+        #
+        #   memory_context
+        #   intelligence_context
+        #
+        # independently or together.
+        # -----------------------------------------------------
+
+        conversation_result = (
+            await self.conversation_agent.execute(
+                conversation_context
+            )
+        )
+
+        # -----------------------------------------------------
+        # Step 6 â€” Quality Agent
+        # -----------------------------------------------------
+
+        quality_result = (
+            await self.quality_agent.execute(
+                conversation_context
+            )
+        )
+
+        # -----------------------------------------------------
+        # Step 7 â€” Persist interaction
+        #
+        # Memory persistence remains owned by MemoryService.
+        # -----------------------------------------------------
+
+        self.memory_service.remember(
+            user_id=context.user_id,
+            category="conversation",
+            content=context.request,
+        )
+
+        # -----------------------------------------------------
+        # Step 8 â€” Return combined result
+        # -----------------------------------------------------
+
+        return {
+            "character": self.character.name,
+
+            "conversation": (
+                conversation_result.output
+            ),
+
+            "research": (
+                research_result.output
+                if (
+                    research_result is not None
+                    and research_result.success
+                )
+                else None
+            ),
+
+            "quality": (
+                quality_result.output
+            ),
+
+            "memory_count": len(memories),
+
+            "memory_context_count": (
+                memory_context.memory_count
+            ),
+        }
+
+=== EXECUTION CONTEXT ===
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+- optionally carry bounded learner memory context
+
+Does not:
+- execute providers
+- manage memory persistence
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from src.ai_runtime.memory.context_builder import (
+    MemoryContext,
+)
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    The context is immutable. Enrichment must therefore use
+    dataclasses.replace() rather than mutating an existing
+    instance.
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    memory_context: MemoryContext | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached.
+        """
+
+        return (
+            self.intelligence_context is not None
+        )
+
+    @property
+    def has_memory_context(self) -> bool:
+        """
+        Return whether bounded learner memory context
+        is attached.
+        """
+
+        return (
+            self.memory_context is not None
+            and not self.memory_context.is_empty
+        )
+
+=== CONVERSATION AGENT ===
+"""
+Conversation Agent.
+
+Provides character-aware conversational responses
+for the EasyChatBot hackathon runtime.
+
+The agent remains provider-independent.
+
+Architecture:
+
+ExecutionContext
+|
+v
+ConversationAgent
+|
++--> CharacterProfile
+|
++--> Optional MemoryContext
+|
++--> Optional IntelligenceContext
+|
+v
+ConversationRequest
+|
+v
+LLMService
+|
+v
+LLMProvider
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import (
+    AgentManifest,
+)
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.services.llm_service import (
+    LLMService,
+)
+
+
+class ConversationAgent(BaseAgent):
+    """
+    Character-aware conversation agent.
+
+    The agent consumes the provider-independent
+    ExecutionContext.
+
+    Memory and Live Intelligence remain application/runtime
+    concerns. The agent only receives their prepared context.
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        llm_service: LLMService | None = None,
+        llm_provider: LLMProvider | None = None,
+    ) -> None:
+
+        super().__init__(
+            AgentManifest(
+                agent_id="conversation_agent",
+                name="Conversation Agent",
+                description=(
+                    "Provides character-aware "
+                    "conversation responses."
+                ),
+            )
+        )
+
+        if (
+            llm_service is not None
+            and llm_provider is not None
+        ):
+            raise ValueError(
+                "Provide either llm_service or "
+                "llm_provider, not both."
+            )
+
+        self.character = character
+
+        if llm_service is not None:
+            self.llm_service = llm_service
+
+        elif llm_provider is not None:
+            self.llm_service = LLMService(
+                llm_provider
+            )
+
+        else:
+            self.llm_service = None
+
+    def build_request(
+        self,
+        context: ExecutionContext,
+    ) -> ConversationRequest:
+        """
+        Build a provider-independent conversation request.
+
+        Memory and intelligence are explicitly represented
+        as contextual information.
+
+        Neither is treated as an instruction.
+        """
+
+        system_instruction = (
+            f"You are {self.character.name}, "
+            f"a character in EasyChatBot. "
+            f"Your personality is: "
+            f"{self.character.personality} "
+            f"Your learning style is: "
+            f"{self.character.learning_style} "
+            f"Communicate in a way that is consistent "
+            f"with this character."
+        )
+
+        context_sections: list[str] = []
+
+        # -------------------------------------------------
+        # Learner memory
+        # -------------------------------------------------
+
+        if context.has_memory_context:
+            memory_text = (
+                context.memory_context.text
+            )
+
+            if memory_text.strip():
+                context_sections.append(
+                    "Learner memory context:\n"
+                    + memory_text
+                )
+
+        # -------------------------------------------------
+        # Live intelligence
+        # -------------------------------------------------
+
+        if context.has_intelligence_context:
+            intelligence_text = (
+                context.intelligence_context
+                .to_context_text()
+            )
+
+            if intelligence_text.strip():
+                context_sections.append(
+                    "Current live intelligence:\n"
+                    + intelligence_text
+                )
+
+        # -------------------------------------------------
+        # Combined contextual information
+        # -------------------------------------------------
+
+        conversation_context = None
+
+        if context_sections:
+            conversation_context = (
+                "\n\n".join(
+                    context_sections
+                )
+            )
+
+        return ConversationRequest(
+            system_instruction=system_instruction,
+            user_prompt=context.request,
+            conversation_context=(
+                conversation_context
+            ),
+            character_id=(
+                self.character.character_id
+            ),
+            character_name=(
+                self.character.name
+            ),
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the conversation agent.
+        """
+
+        conversation_request = (
+            self.build_request(context)
+        )
+
+        provider_result = None
+
+        if self.llm_service is not None:
+            provider_result = (
+                await self.llm_service.generate(
+                    conversation_request
+                )
+            )
+
+            if not provider_result.success:
+                return AgentResult(
+                    success=False,
+                    agent_id=(
+                        self.manifest.agent_id
+                    ),
+                    output={
+                        "character": (
+                            self.character.name
+                        ),
+
+                        "character_profile": {
+                            "character_id": (
+                                self.character.character_id
+                            ),
+                            "name": (
+                                self.character.name
+                            ),
+                            "description": (
+                                self.character.description
+                            ),
+                            "personality": (
+                                self.character.personality
+                            ),
+                            "learning_style": (
+                                self.character.learning_style
+                            ),
+                        },
+
+                        "personality": (
+                            self.character.personality
+                        ),
+
+                        "learning_style": (
+                            self.character.learning_style
+                        ),
+
+                        "message": (
+                            "The conversation provider "
+                            "could not generate a response."
+                        ),
+
+                        "intelligence_context": (
+                            conversation_request
+                            .conversation_context
+                        ),
+
+                        "conversation_request": (
+                            conversation_request
+                        ),
+
+                        "provider_id": (
+                            provider_result.provider_id
+                        ),
+
+                        "provider_error": (
+                            provider_result.error
+                        ),
+                    },
+                )
+
+        if provider_result is not None:
+            message = provider_result.output
+
+        else:
+            message = (
+                f"{self.character.name}: "
+                f"Let's explore this together. "
+                f"You asked: "
+                f"{context.request}"
+            )
+
+        output = {
+            "character": (
+                self.character.name
+            ),
+
+            "character_profile": {
+                "character_id": (
+                    self.character.character_id
+                ),
+                "name": (
+                    self.character.name
+                ),
+                "description": (
+                    self.character.description
+                ),
+                "personality": (
+                    self.character.personality
+                ),
+                "learning_style": (
+                    self.character.learning_style
+                ),
+            },
+
+            "personality": (
+                self.character.personality
+            ),
+
+            "learning_style": (
+                self.character.learning_style
+            ),
+
+            "message": message,
+
+            "intelligence_context": (
+                conversation_request
+                .conversation_context
+            ),
+
+            "conversation_request": (
+                conversation_request
+            ),
+        }
+
+        if provider_result is not None:
+            output["provider_id"] = (
+                provider_result.provider_id
+            )
+
+        return AgentResult(
+            success=True,
+            agent_id=(
+                self.manifest.agent_id
+            ),
+            output=output,
+        )

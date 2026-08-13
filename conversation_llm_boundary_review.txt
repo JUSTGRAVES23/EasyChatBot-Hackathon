@@ -1,0 +1,816 @@
+﻿==================== CONVERSATION REQUEST ====================
+
+"""
+Provider-independent conversation request.
+
+Represents the information required to generate a
+character-aware conversational response.
+
+This contract belongs to the application/runtime boundary.
+
+It deliberately does not know about:
+
+- Gemini
+- OpenAI
+- Ollama
+- Parallel
+- voice
+- HTTP
+- persistence
+- provider SDKs
+
+Architecture:
+
+CharacterProfile
+        +
+ExecutionContext
+        +
+Optional IntelligenceContext
+        |
+        v
+ConversationRequest
+        |
+        v
+Future / existing EasyChatBot LLM service
+
+The production EasyChatBot conversation and voice
+architecture remains outside this hackathon runtime.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRequest:
+    """
+    Immutable provider-independent conversation request.
+
+    Attributes
+    ----------
+    system_instruction:
+        Stable instruction defining how the character
+        should behave.
+
+    user_prompt:
+        User-facing request to be answered.
+
+    conversation_context:
+        Optional contextual information, such as live
+        intelligence retrieved by the Research Agent.
+
+    character_id:
+        Identifier of the character producing the response.
+
+    character_name:
+        Display name of the character.
+    """
+
+    system_instruction: str
+
+    user_prompt: str
+
+    conversation_context: str | None = None
+
+    character_id: str = ""
+
+    character_name: str = ""
+
+    def __post_init__(self) -> None:
+        """
+        Validate request invariants.
+        """
+
+        if not isinstance(
+            self.system_instruction,
+            str,
+        ):
+            raise ValueError(
+                "system_instruction must be a string."
+            )
+
+        if not isinstance(
+            self.user_prompt,
+            str,
+        ):
+            raise ValueError(
+                "user_prompt must be a string."
+            )
+
+        system_instruction = (
+            self.system_instruction.strip()
+        )
+
+        user_prompt = (
+            self.user_prompt.strip()
+        )
+
+        if not system_instruction:
+            raise ValueError(
+                "system_instruction cannot be empty."
+            )
+
+        if not user_prompt:
+            raise ValueError(
+                "user_prompt cannot be empty."
+            )
+
+        object.__setattr__(
+            self,
+            "system_instruction",
+            system_instruction,
+        )
+
+        object.__setattr__(
+            self,
+            "user_prompt",
+            user_prompt,
+        )
+
+        if self.conversation_context is not None:
+            context = (
+                self.conversation_context.strip()
+            )
+
+            if not context:
+                raise ValueError(
+                    "conversation_context cannot be blank."
+                )
+
+            object.__setattr__(
+                self,
+                "conversation_context",
+                context,
+            )
+
+        if not isinstance(
+            self.character_id,
+            str,
+        ):
+            raise ValueError(
+                "character_id must be a string."
+            )
+
+        if not isinstance(
+            self.character_name,
+            str,
+        ):
+            raise ValueError(
+                "character_name must be a string."
+            )
+
+        object.__setattr__(
+            self,
+            "character_id",
+            self.character_id.strip(),
+        )
+
+        object.__setattr__(
+            self,
+            "character_name",
+            self.character_name.strip(),
+        )
+
+    @property
+    def has_conversation_context(self) -> bool:
+        """
+        Return whether contextual information exists.
+        """
+
+        return bool(
+            self.conversation_context
+        )
+
+    @property
+    def context_length(self) -> int:
+        """
+        Return the length of the conversation context.
+
+        Useful for diagnostics and future token estimation.
+        """
+
+        if not self.conversation_context:
+            return 0
+
+        return len(
+            self.conversation_context
+        )
+
+    def summary(self) -> dict[str, str]:
+        """
+        Return a safe diagnostic summary.
+
+        Prompt and context content are deliberately
+        excluded from the summary.
+        """
+
+        return {
+            "character_id": self.character_id,
+            "character_name": self.character_name,
+            "has_context": str(
+                self.has_conversation_context
+            ),
+            "system_instruction_length": str(
+                len(self.system_instruction)
+            ),
+            "user_prompt_length": str(
+                len(self.user_prompt)
+            ),
+            "context_length": str(
+                self.context_length
+            ),
+        }
+
+
+==================== CONVERSATION AGENT ====================
+
+"""
+Conversation Agent.
+
+Provides character-aware conversational responses
+for the EasyChatBot hackathon runtime.
+
+The agent remains provider-independent.
+
+Architecture:
+
+ExecutionContext
+|
+v
+ConversationAgent
+|
++--> CharacterProfile
+|
++--> Optional IntelligenceContext
+|
+v
+ConversationRequest
+|
+v
+AgentResult
+
+The actual LLM execution remains outside this
+hackathon agent and can later consume ConversationRequest
+through the appropriate EasyChatBot LLM service.
+
+The ConversationRequest remains part of the internal
+agent result contract. Public API responses must decide
+separately which fields are exposed externally.
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import (
+    AgentManifest,
+)
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ConversationAgent(BaseAgent):
+    """
+    Character-aware conversation agent.
+
+    Responsibilities:
+
+    - apply character identity
+    - construct a provider-independent conversation request
+    - include optional live intelligence
+    - return a standard AgentResult
+
+    Does not:
+
+    - call an LLM provider
+    - call Parallel directly
+    - manage voice
+    - manage memory
+    - execute external workflows
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+    ) -> None:
+
+        super().__init__(
+            AgentManifest(
+                agent_id="conversation_agent",
+                name="Conversation Agent",
+                description=(
+                    "Provides character-aware "
+                    "conversation responses."
+                ),
+            )
+        )
+
+        self.character = character
+
+    def build_request(
+        self,
+        context: ExecutionContext,
+    ) -> ConversationRequest:
+        """
+        Build a provider-independent conversation request.
+
+        This method translates runtime state and character
+        identity into the application-level conversation
+        contract.
+
+        No provider-specific terminology is introduced.
+        """
+
+        system_instruction = (
+            f"You are {self.character.name}, "
+            f"a character in EasyChatBot. "
+            f"Your personality is: "
+            f"{self.character.personality} "
+            f"Your learning style is: "
+            f"{self.character.learning_style} "
+            f"Communicate in a way that is consistent "
+            f"with this character."
+        )
+
+        conversation_context = None
+
+        if context.has_intelligence_context:
+            conversation_context = (
+                context.intelligence_context.to_context_text()
+            )
+
+        return ConversationRequest(
+            system_instruction=system_instruction,
+            user_prompt=context.request,
+            conversation_context=conversation_context,
+            character_id=self.character.character_id,
+            character_name=self.character.name,
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the conversation agent.
+
+        The current hackathon implementation prepares a
+        provider-independent ConversationRequest.
+
+        Actual LLM generation remains outside this agent.
+
+        The ConversationRequest is retained in the
+        AgentResult as an internal runtime contract.
+        Public API serialization should not expose this
+        internal request directly.
+        """
+
+        conversation_request = self.build_request(
+            context
+        )
+
+        output = {
+            "character": self.character.name,
+
+            "character_profile": {
+                "character_id": (
+                    self.character.character_id
+                ),
+                "name": self.character.name,
+                "description": (
+                    self.character.description
+                ),
+                "personality": (
+                    self.character.personality
+                ),
+                "learning_style": (
+                    self.character.learning_style
+                ),
+            },
+
+            "personality": (
+                self.character.personality
+            ),
+
+            "learning_style": (
+                self.character.learning_style
+            ),
+
+            "message": (
+                f"{self.character.name}: "
+                f"Let's explore this together. "
+                f"You asked: {context.request}"
+            ),
+
+            "intelligence_context": (
+                conversation_request.conversation_context
+            ),
+
+            "conversation_request": (
+                conversation_request
+            ),
+        }
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=output,
+        )
+
+
+==================== AGENT BASE ====================
+
+"""
+Base AI Agent Contract.
+
+All EasyChatBot AI Agents inherit this contract.
+
+The BaseAgent defines:
+- agent identity
+- execution interface
+- runtime interaction
+
+Agents do not:
+- call providers directly
+- manage memory
+- modify external systems
+
+The AI Runtime controls execution.
+"""
+
+from abc import ABC, abstractmethod
+
+from backend.runtime.context.execution_context import ExecutionContext
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+
+
+class BaseAgent(ABC):
+    """
+    Abstract base class for EasyChatBot agents.
+    """
+
+    def __init__(
+        self,
+        manifest: AgentManifest,
+    ):
+        """
+        Initialise an agent.
+
+        Args:
+            manifest:
+                Agent identity definition.
+        """
+
+        self.manifest = manifest
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the agent.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            AgentResult.
+        """
+
+        pass
+
+
+==================== AGENT RESULT ====================
+
+"""
+Agent Result Contract.
+
+Defines the standard output returned by AI Agents.
+
+All agents should return the same structure
+so the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """
+    Immutable result returned after agent execution.
+
+    Attributes:
+        success:
+            Indicates whether execution completed successfully.
+
+        agent_id:
+            Identifier of the agent that produced the result.
+
+        output:
+            Agent response payload.
+
+        error:
+            Error message when execution fails.
+    """
+
+    success: bool
+    agent_id: str
+    output: Any = None
+    error: str | None = None
+
+
+==================== RUNTIME EXECUTION CONTEXT ====================
+
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+
+Does not:
+- execute providers
+- manage memory
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    Attributes
+    ----------
+    user_id:
+        Identifier of the user initiating the execution.
+
+    request:
+        User request being processed.
+
+    execution_id:
+        Unique identifier for this execution.
+
+    created_at:
+        UTC timestamp when the context was created.
+
+    metadata:
+        Runtime metadata.
+
+    intelligence_context:
+        Optional provider-independent live intelligence
+        generated by the Research Agent.
+
+    Responsibilities:
+    - identify an execution
+    - carry user request information
+    - provide runtime metadata
+    - optionally carry live intelligence context
+
+    Does not:
+    - execute providers
+    - manage memory
+    - modify systems
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached
+        to this execution.
+        """
+
+        return self.intelligence_context is not None
+
+
+==================== COMPANION SERVICE ====================
+
+"""
+Companion Service.
+
+Coordinates:
+
+Character
+Conversation Agent
+Research Agent
+Quality Agent
+Memory Service
+
+Application orchestration layer.
+
+Live Intelligence flow:
+
+CompanionService
+        |
+        +--> ResearchAgent
+        |        |
+        |        v
+        |   IntelligenceContext
+        |
+        +--> ConversationAgent
+                 ^
+                 |
+          enriched ExecutionContext
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.agents.quality_agent import (
+    QualityAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+
+class CompanionService:
+    """
+    Coordinates AI companion experiences.
+
+    The service orchestrates agents but does not contain
+    provider-specific logic.
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        conversation_agent=None,
+        research_agent=None,
+        quality_agent=None,
+        memory_service=None,
+    ):
+
+        self.character = character
+
+        self.conversation_agent = (
+            conversation_agent
+            or ConversationAgent(character)
+        )
+
+        self.research_agent = (
+            research_agent
+            or ResearchAgent()
+        )
+
+        self.quality_agent = (
+            quality_agent
+            or QualityAgent()
+        )
+
+        self.memory_service = (
+            memory_service
+            or MemoryService()
+        )
+
+    async def interact(
+        self,
+        context: ExecutionContext,
+        use_research: bool = False,
+    ):
+        """
+        Execute a complete companion interaction.
+
+        When research is requested, the Research Agent
+        produces an IntelligenceContext which is attached
+        to a new immutable ExecutionContext before the
+        Conversation Agent executes.
+
+        The original ExecutionContext is never mutated.
+        """
+
+        memories = (
+            self.memory_service.recall(
+                context.user_id
+            )
+        )
+
+        research_result = None
+
+        conversation_context = context
+
+        if use_research:
+
+            research_result = (
+                await self.research_agent.execute(
+                    context
+                )
+            )
+
+            if (
+                research_result.success
+                and research_result.output is not None
+            ):
+                conversation_context = replace(
+                    context,
+                    intelligence_context=(
+                        research_result.output
+                    ),
+                )
+
+        conversation_result = (
+            await self.conversation_agent.execute(
+                conversation_context
+            )
+        )
+
+        quality_result = (
+            await self.quality_agent.execute(
+                conversation_context
+            )
+        )
+
+        self.memory_service.remember(
+            user_id=context.user_id,
+            category="conversation",
+            content=context.request,
+        )
+
+        return {
+            "character": self.character.name,
+
+            "conversation":
+                conversation_result.output,
+
+            "research":
+                (
+                    research_result.output
+                    if research_result
+                    else None
+                ),
+
+            "quality":
+                quality_result.output,
+
+            "memory_count":
+                len(memories),
+        }
+

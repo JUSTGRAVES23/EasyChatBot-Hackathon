@@ -5,12 +5,18 @@ The registry maps logical Runtime capabilities to their
 concrete executors.
 
 The registry:
-- resolves executors by capability
-- prevents duplicate registrations
-- provides explicit dependency injection
-- does not execute capabilities
-- does not perform governance decisions
-- does not know about providers
+
+- resolves executors by capability;
+- prevents duplicate registrations;
+- provides explicit dependency injection;
+- validates registrations.
+
+The registry does not:
+
+- execute capabilities;
+- perform governance decisions;
+- know about providers;
+- manage application state.
 """
 
 from __future__ import annotations
@@ -32,19 +38,37 @@ from src.ai_runtime.capabilities.models import (
 class CapabilityRegistry:
     """
     Dependency-injection registry for Runtime capabilities.
+
+    The registry is intentionally simple.
+
+    Composition creates it.
+    Gateway consumes it.
+
+    It does not own lifecycle management.
     """
 
     def __init__(
         self,
         executors: list[CapabilityExecutor] | None = None,
     ) -> None:
+        """
+        Create capability registry.
+
+        Args:
+
+            executors:
+                Optional initial executor collection.
+        """
+
         self._executors: dict[
             CapabilityType,
             CapabilityExecutor,
         ] = {}
 
         for executor in executors or []:
-            self.register(executor)
+            self.register(
+                executor,
+            )
 
     def register(
         self,
@@ -52,9 +76,31 @@ class CapabilityRegistry:
     ) -> None:
         """
         Register an executor for its declared capability.
+
+        Raises:
+
+            ValueError:
+                If executor is invalid.
+
+            CapabilityAlreadyRegisteredError:
+                If capability already exists.
         """
 
+        if executor is None:
+            raise ValueError(
+                "CapabilityExecutor cannot be None."
+            )
+
         capability = executor.capability
+
+        if not isinstance(
+            capability,
+            CapabilityType,
+        ):
+            raise ValueError(
+                "Executor capability must be a valid "
+                "CapabilityType."
+            )
 
         if capability in self._executors:
             raise CapabilityAlreadyRegisteredError(
@@ -70,10 +116,24 @@ class CapabilityRegistry:
     ) -> CapabilityExecutor:
         """
         Resolve the executor responsible for a capability.
+
+        Raises:
+
+            CapabilityNotRegisteredError:
+                When no executor exists.
         """
+
+        if not isinstance(
+            capability,
+            CapabilityType,
+        ):
+            raise ValueError(
+                "Capability must be a valid CapabilityType."
+            )
 
         try:
             return self._executors[capability]
+
         except KeyError as exc:
             raise CapabilityNotRegisteredError(
                 "No executor registered for capability: "
@@ -95,6 +155,11 @@ class CapabilityRegistry:
     ) -> tuple[CapabilityType, ...]:
         """
         Return all registered capabilities.
+
+        Returned as immutable tuple to prevent
+        external mutation.
         """
 
-        return tuple(self._executors.keys())
+        return tuple(
+            self._executors.keys()
+        )

@@ -1,0 +1,515 @@
+============================================================
+FILE: .\backend\services\companion_service.py
+============================================================
+"""
+Companion Service.
+
+Application orchestration layer for EasyChatBot.
+
+Coordinates:
+
+Character
+Conversation Agent
+Research Agent
+Quality Agent
+Memory Service
+
+Live Intelligence flow:
+
+CompanionService
+|
++--> MemoryService
+|
++--> ResearchAgent
+|        |
+|        v
+|   IntelligenceContext
+|
++--> ConversationAgent
+|        |
+|        v
+|   LLMService
+|        |
+|        v
+|   LLMProvider
+|
++--> QualityAgent
+|
+v
+Interaction Result
+
+Responsibilities:
+
+- orchestrate companion interactions
+- retrieve memories
+- optionally execute research
+- enrich the execution context with live intelligence
+- execute the ConversationAgent
+- execute the QualityAgent
+- persist the interaction
+- return the combined result
+
+Does not:
+
+- create LLM providers
+- select LLM providers
+- call provider SDKs
+- call OpenAI directly
+- call Ollama directly
+- manage provider routing
+- build provider-specific prompts
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.agents.quality_agent import (
+    QualityAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class CompanionService:
+    """
+    Coordinates AI companion experiences.
+
+    The service orchestrates agents but does not contain
+    provider-specific logic.
+
+    Providers are injected into agents by the composition
+    layer.
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        conversation_agent: ConversationAgent | None = None,
+        research_agent: ResearchAgent | None = None,
+        quality_agent: QualityAgent | None = None,
+        memory_service: MemoryService | None = None,
+    ) -> None:
+        """
+        Initialise the CompanionService.
+
+        Dependencies are injectable so the service can be
+        tested without invoking real infrastructure.
+        """
+
+        self.character = character
+
+        self.conversation_agent = (
+            conversation_agent
+            if conversation_agent is not None
+            else ConversationAgent(
+                character
+            )
+        )
+
+        self.research_agent = (
+            research_agent
+            if research_agent is not None
+            else ResearchAgent()
+        )
+
+        self.quality_agent = (
+            quality_agent
+            if quality_agent is not None
+            else QualityAgent()
+        )
+
+        self.memory_service = (
+            memory_service
+            if memory_service is not None
+            else MemoryService()
+        )
+
+    async def interact(
+        self,
+        context: ExecutionContext,
+        use_research: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Execute a complete companion interaction.
+
+        When research is requested, the Research Agent
+        produces an IntelligenceContext which is attached
+        to a new immutable ExecutionContext before the
+        Conversation Agent executes.
+
+        The original ExecutionContext is never mutated.
+
+        Parameters
+        ----------
+        context:
+            Runtime execution context.
+
+        use_research:
+            Whether live research should be performed
+            before the conversation response.
+        """
+
+        memories = self.memory_service.recall(
+            context.user_id
+        )
+
+        research_result = None
+
+        conversation_context = context
+
+        if use_research:
+            research_result = (
+                await self.research_agent.execute(
+                    context
+                )
+            )
+
+            if (
+                research_result.success
+                and research_result.output is not None
+            ):
+                conversation_context = replace(
+                    context,
+                    intelligence_context=(
+                        research_result.output
+                    ),
+                )
+
+        conversation_result = (
+            await self.conversation_agent.execute(
+                conversation_context
+            )
+        )
+
+        quality_result = (
+            await self.quality_agent.execute(
+                conversation_context
+            )
+        )
+
+        self.memory_service.remember(
+            user_id=context.user_id,
+            category="conversation",
+            content=context.request,
+        )
+
+        return {
+            "character": self.character.name,
+
+            "conversation": (
+                conversation_result.output
+            ),
+
+            "research": (
+                research_result.output
+                if research_result is not None
+                else None
+            ),
+
+            "quality": (
+                quality_result.output
+            ),
+
+            "memory_count": len(memories),
+        }
+
+============================================================
+FILE: .\backend\runtime\context\execution_context.py
+============================================================
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+
+Does not:
+- execute providers
+- manage memory
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    Attributes
+    ----------
+    user_id:
+        Identifier of the user initiating the execution.
+
+    request:
+        User request being processed.
+
+    execution_id:
+        Unique identifier for this execution.
+
+    created_at:
+        UTC timestamp when the context was created.
+
+    metadata:
+        Runtime metadata.
+
+    intelligence_context:
+        Optional provider-independent live intelligence
+        generated by the Research Agent.
+
+    Responsibilities:
+    - identify an execution
+    - carry user request information
+    - provide runtime metadata
+    - optionally carry live intelligence context
+
+    Does not:
+    - execute providers
+    - manage memory
+    - modify systems
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached
+        to this execution.
+        """
+
+        return self.intelligence_context is not None
+
+============================================================
+FILE: .\backend\intelligence\intelligence_context.py
+============================================================
+"""
+Intelligence Context.
+
+Provider-independent representation of external
+information prepared for AI execution.
+
+Architecture:
+
+Research Agent
+        |
+        v
+IntelligenceContext
+        |
+        v
+AI Runtime integration
+        |
+        v
+LLMRequest.context
+
+The context must not expose provider-specific
+implementation details to the application layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceSource:
+    """
+    Normalised external information source.
+    """
+
+    title: str
+    url: str
+    source: str
+    content: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError(
+                "Intelligence source title cannot be empty."
+            )
+
+        if not self.url.strip():
+            raise ValueError(
+                "Intelligence source URL cannot be empty."
+            )
+
+        if not self.source.strip():
+            raise ValueError(
+                "Intelligence source name cannot be empty."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceContext:
+    """
+    Provider-independent intelligence context.
+
+    Represents external information that may be supplied
+    to an existing AI conversation.
+
+    This object deliberately does not contain:
+    - provider SDK objects
+    - API credentials
+    - model information
+    - runtime state
+    - persistence objects
+    """
+
+    query: str
+
+    sources: tuple[IntelligenceSource, ...] = field(
+        default_factory=tuple,
+    )
+
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.query.strip():
+            raise ValueError(
+                "Intelligence query cannot be empty."
+            )
+
+        if not isinstance(
+            self.sources,
+            tuple,
+        ):
+            raise ValueError(
+                "Intelligence sources must be a tuple."
+            )
+
+        if not isinstance(
+            self.summary,
+            str,
+        ):
+            raise ValueError(
+                "Intelligence summary must be a string."
+            )
+
+    @property
+    def has_sources(self) -> bool:
+        """
+        Return whether external sources are available.
+        """
+
+        return bool(self.sources)
+
+    @property
+    def source_count(self) -> int:
+        """
+        Return the number of external sources.
+        """
+
+        return len(self.sources)
+
+    @property
+    def has_summary(self) -> bool:
+        """
+        Return whether a summary is available.
+        """
+
+        return bool(
+            self.summary.strip()
+        )
+
+    def to_context_text(self) -> str:
+        """
+        Convert intelligence into a safe textual context.
+
+        The result is suitable for eventual inclusion
+        in an existing LLMRequest.context field.
+        """
+
+        sections: list[str] = [
+            "LIVE INTELLIGENCE",
+            f"Research query: {self.query.strip()}",
+        ]
+
+        if self.summary.strip():
+            sections.extend(
+                (
+                    "",
+                    "Summary:",
+                    self.summary.strip(),
+                )
+            )
+
+        if self.sources:
+            sections.extend(
+                (
+                    "",
+                    "Sources:",
+                )
+            )
+
+            for index, source in enumerate(
+                self.sources,
+                start=1,
+            ):
+                sections.append(
+                    f"{index}. {source.title}"
+                )
+                sections.append(
+                    f"   URL: {source.url}"
+                )
+                sections.append(
+                    f"   Source: {source.source}"
+                )
+
+                if source.content.strip():
+                    sections.append(
+                        f"   Content: {source.content.strip()}"
+                    )
+
+        return "\n".join(sections)
+
+============================================================
+COMPANION / MEMORY / CONTEXT TESTS
+============================================================
+============================================================
+TEST FILE: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\memory\test_memory_context_builder.py

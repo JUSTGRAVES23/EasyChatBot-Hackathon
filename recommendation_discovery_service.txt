@@ -1,0 +1,210 @@
+"""
+Hackathon Discovery Service.
+
+This module provides the application-level orchestration boundary
+for personalised product discovery.
+
+Architecture:
+
+Discovery inputs
+    |
+    +--> DealCard
+    |
+    +--> Memory context
+    |
+    +--> Character context
+    |
+    v
+DiscoveryService
+    |
+    v
+FlashDealCard
+
+Responsibilities:
+- orchestrate existing discovery components
+- apply explicit memory context
+- apply explicit character context
+- create the user-facing FlashDealCard
+- preserve domain data and identifiers
+
+Non-responsibilities:
+- provider SDK calls
+- web searching
+- memory persistence
+- payment processing
+- vendor APIs
+- autonomous purchasing
+- character business logic
+
+The service deliberately receives already-discovered DealCard data.
+Provider integration remains in the provider/agent layers.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from src.ai_runtime.discovery.flash_deal_card import (
+    FlashDealCard,
+)
+
+from src.ai_runtime.discovery.models import (
+    DealCard,
+)
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+
+@dataclass(frozen=True)
+class CharacterContext:
+    """
+    Explicit character presentation context.
+
+    The character is a presentation/personality concern.
+    It does not perform discovery or commerce operations.
+    """
+
+    character_id: str
+    character_name: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if not self.character_id.strip():
+            raise ValueError(
+                "Character context character_id cannot be empty."
+            )
+
+        if not self.character_name.strip():
+            raise ValueError(
+                "Character context character_name cannot be empty."
+            )
+
+        if not self.message.strip():
+            raise ValueError(
+                "Character context message cannot be empty."
+            )
+
+
+@dataclass(frozen=True)
+class DiscoveryRequest:
+    """
+    Application-level request for personalised discovery.
+
+    The request contains already-discovered product information
+    and explicit user context.
+
+    No external search is performed by DiscoveryService.
+    """
+
+    user_id: str
+    deal: DealCard
+    character: CharacterContext
+    product_image_url: str
+    tagline: str
+    highlights: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.user_id.strip():
+            raise ValueError(
+                "Discovery request user_id cannot be empty."
+            )
+
+        if not self.product_image_url.strip():
+            raise ValueError(
+                "Discovery request product_image_url "
+                "cannot be empty."
+            )
+
+        if not self.tagline.strip():
+            raise ValueError(
+                "Discovery request tagline cannot be empty."
+            )
+
+        if not self.highlights:
+            raise ValueError(
+                "Discovery request must contain at least "
+                "one highlight."
+            )
+
+
+class DiscoveryService:
+    """
+    Orchestrates personalised discovery.
+
+    This service intentionally contains no provider logic and no
+    persistence logic. It composes the existing DealCard,
+    MemoryEntry and FlashDealCard contracts.
+    """
+
+    def create_flash_deal(
+        self,
+        request: DiscoveryRequest,
+        memories: list[MemoryEntry] | None = None,
+    ) -> FlashDealCard:
+        """
+        Create a personalised FlashDealCard.
+
+        Memory is read-only input to this operation.
+
+        Preference memory is used to generate the personal
+        relevance explanation. Other memory types are not
+        automatically treated as preferences.
+        """
+
+        memory_context = memories or []
+
+        relevance_reason = self._build_relevance_reason(
+            memory_context
+        )
+
+        return FlashDealCard.from_deal(
+            deal=request.deal,
+            character_id=request.character.character_id,
+            character_name=request.character.character_name,
+            character_message=request.character.message,
+            relevance_reason=relevance_reason,
+            product_image_url=request.product_image_url,
+            tagline=request.tagline,
+            highlights=request.highlights,
+            metadata={
+                "user_id": request.user_id,
+                "discovery_service": "hackathon",
+            },
+        )
+
+    @staticmethod
+    def _build_relevance_reason(
+        memories: list[MemoryEntry],
+    ) -> str:
+        """
+        Build a deterministic relevance explanation.
+
+        Only explicit preference memories are used.
+
+        This is deliberately deterministic for the hackathon;
+        an LLM-based personalisation layer can be introduced later
+        behind an explicit interface.
+        """
+
+        preferences = [
+            memory
+            for memory in memories
+            if memory.memory_type
+            == MemoryType.PREFERENCE
+        ]
+
+        if not preferences:
+            return (
+                "This discovery may be relevant to your "
+                "interests."
+            )
+
+        preference = preferences[0].content.strip()
+
+        return (
+            "This may be relevant because you "
+            f"{preference.rstrip('.') }."
+        )

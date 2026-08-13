@@ -1,0 +1,1674 @@
+﻿==================== OPENAI PROVIDER ====================
+
+"""
+OpenAI LLM Provider.
+
+Concrete LLM provider implementation for the EasyChatBot
+hackathon runtime.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+OpenAIProvider
+        |
+        v
+OpenAI API
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- execute ConversationRequest through OpenAI
+- use the configured OpenAI model
+- translate the OpenAI response into ProviderResult
+- isolate the OpenAI SDK from the application layer
+
+Does not:
+
+- build prompts
+- manage characters
+- manage memory
+- perform research
+- perform routing
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from openai import AsyncOpenAI
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIProvider(LLMProvider):
+    """
+    OpenAI implementation of the LLMProvider contract.
+
+    The OpenAI SDK is deliberately isolated inside this
+    infrastructure adapter.
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5-mini",
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        """
+        Initialise the OpenAI provider.
+
+        Args:
+            model:
+                OpenAI model identifier.
+
+            client:
+                Optional injected AsyncOpenAI client.
+
+                Dependency injection allows unit tests to
+                provide a fake client without making a real
+                API call.
+        """
+
+        super().__init__(
+            provider_id="openai",
+        )
+
+        if not model.strip():
+            raise ValueError(
+                "OpenAI model cannot be empty."
+            )
+
+        self.model = model.strip()
+
+        self._client = (
+            client
+            if client is not None
+            else AsyncOpenAI(
+                api_key=os.getenv(
+                    "OPENAI_API_KEY"
+                )
+            )
+        )
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate a response using OpenAI.
+
+        The provider translates the provider-independent
+        ConversationRequest into the OpenAI Responses API
+        request.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated text
+            or an error description.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": request.system_instruction,
+            },
+        ]
+
+        if request.conversation_context:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Additional context:\n"
+                        f"{request.conversation_context}"
+                    ),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": request.user_prompt,
+            }
+        )
+
+        try:
+            response = await self._client.responses.create(
+                model=self.model,
+                input=messages,
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "OpenAI provider execution failed."
+            )
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=str(exc),
+            )
+
+        output_text = (
+            getattr(
+                response,
+                "output_text",
+                None,
+            )
+        )
+
+        if not output_text:
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=(
+                    "OpenAI returned an empty response."
+                ),
+            )
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output=output_text,
+        )
+
+==================== LLM PROVIDER CONTRACT ====================
+
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+
+==================== PROVIDER RESULT ====================
+
+"""
+Provider Result Contract.
+
+Defines the standard response returned
+by external providers.
+
+All providers return this structure so
+the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    """
+    Immutable provider execution result.
+
+    Attributes:
+
+        success:
+            Indicates whether provider execution succeeded.
+
+        provider_id:
+            Identifier of the provider.
+
+        output:
+            Provider response payload.
+
+        error:
+            Error details if execution failed.
+    """
+
+    success: bool
+    provider_id: str
+    output: Any = None
+    error: str | None = None
+
+==================== CONVERSATION REQUEST ====================
+
+"""
+Provider-independent conversation request.
+
+Represents the information required to generate a
+character-aware conversational response.
+
+This contract belongs to the application/runtime boundary.
+
+It deliberately does not know about:
+
+- Gemini
+- OpenAI
+- Ollama
+- Parallel
+- voice
+- HTTP
+- persistence
+- provider SDKs
+
+Architecture:
+
+CharacterProfile
+        +
+ExecutionContext
+        +
+Optional IntelligenceContext
+        |
+        v
+ConversationRequest
+        |
+        v
+Future / existing EasyChatBot LLM service
+
+The production EasyChatBot conversation and voice
+architecture remains outside this hackathon runtime.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRequest:
+    """
+    Immutable provider-independent conversation request.
+
+    Attributes
+    ----------
+    system_instruction:
+        Stable instruction defining how the character
+        should behave.
+
+    user_prompt:
+        User-facing request to be answered.
+
+    conversation_context:
+        Optional contextual information, such as live
+        intelligence retrieved by the Research Agent.
+
+    character_id:
+        Identifier of the character producing the response.
+
+    character_name:
+        Display name of the character.
+    """
+
+    system_instruction: str
+
+    user_prompt: str
+
+    conversation_context: str | None = None
+
+    character_id: str = ""
+
+    character_name: str = ""
+
+    def __post_init__(self) -> None:
+        """
+        Validate request invariants.
+        """
+
+        if not isinstance(
+            self.system_instruction,
+            str,
+        ):
+            raise ValueError(
+                "system_instruction must be a string."
+            )
+
+        if not isinstance(
+            self.user_prompt,
+            str,
+        ):
+            raise ValueError(
+                "user_prompt must be a string."
+            )
+
+        system_instruction = (
+            self.system_instruction.strip()
+        )
+
+        user_prompt = (
+            self.user_prompt.strip()
+        )
+
+        if not system_instruction:
+            raise ValueError(
+                "system_instruction cannot be empty."
+            )
+
+        if not user_prompt:
+            raise ValueError(
+                "user_prompt cannot be empty."
+            )
+
+        object.__setattr__(
+            self,
+            "system_instruction",
+            system_instruction,
+        )
+
+        object.__setattr__(
+            self,
+            "user_prompt",
+            user_prompt,
+        )
+
+        if self.conversation_context is not None:
+            context = (
+                self.conversation_context.strip()
+            )
+
+            if not context:
+                raise ValueError(
+                    "conversation_context cannot be blank."
+                )
+
+            object.__setattr__(
+                self,
+                "conversation_context",
+                context,
+            )
+
+        if not isinstance(
+            self.character_id,
+            str,
+        ):
+            raise ValueError(
+                "character_id must be a string."
+            )
+
+        if not isinstance(
+            self.character_name,
+            str,
+        ):
+            raise ValueError(
+                "character_name must be a string."
+            )
+
+        object.__setattr__(
+            self,
+            "character_id",
+            self.character_id.strip(),
+        )
+
+        object.__setattr__(
+            self,
+            "character_name",
+            self.character_name.strip(),
+        )
+
+    @property
+    def has_conversation_context(self) -> bool:
+        """
+        Return whether contextual information exists.
+        """
+
+        return bool(
+            self.conversation_context
+        )
+
+    @property
+    def context_length(self) -> int:
+        """
+        Return the length of the conversation context.
+
+        Useful for diagnostics and future token estimation.
+        """
+
+        if not self.conversation_context:
+            return 0
+
+        return len(
+            self.conversation_context
+        )
+
+    def summary(self) -> dict[str, str]:
+        """
+        Return a safe diagnostic summary.
+
+        Prompt and context content are deliberately
+        excluded from the summary.
+        """
+
+        return {
+            "character_id": self.character_id,
+            "character_name": self.character_name,
+            "has_context": str(
+                self.has_conversation_context
+            ),
+            "system_instruction_length": str(
+                len(self.system_instruction)
+            ),
+            "user_prompt_length": str(
+                len(self.user_prompt)
+            ),
+            "context_length": str(
+                self.context_length
+            ),
+        }
+
+==================== OPENAI PROVIDER TEST REFERENCES ====================
+
+
+
+"""
+Tests for OpenAIProvider.
+
+These tests never call the real OpenAI API.
+
+The OpenAI AsyncOpenAI client is injected with a fake client
+so provider behaviour can be tested deterministically.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.openai_provider import (
+    OpenAIProvider,
+)
+
+
+class FakeResponses:
+    """Fake OpenAI Responses API."""
+
+    def __init__(
+        self,
+        response=None,
+        error=None,
+    ):
+        self.response = response
+        self.error = error
+        self.received_kwargs = None
+
+    async def create(
+        self,
+        **kwargs,
+    ):
+        self.received_kwargs = kwargs
+
+        if self.error is not None:
+            raise self.error
+
+        return self.response
+
+
+class FakeOpenAIClient:
+    """Fake AsyncOpenAI client."""
+
+    def __init__(
+        self,
+        response=None,
+        error=None,
+    ):
+        self.responses = FakeResponses(
+            response=response,
+            error=error,
+        )
+
+
+def create_request(
+    *,
+    context=None,
+):
+    """Create a valid conversation request."""
+
+    return ConversationRequest(
+        system_instruction=(
+            "You are Yeti, a friendly AI companion."
+        ),
+        user_prompt=(
+            "Explain artificial intelligence."
+        ),
+        conversation_context=context,
+        character_id="yeti",
+        character_name="Yeti",
+    )
+
+
+def test_openai_provider_initialises():
+    """Provider should initialise with a valid model."""
+
+    client = FakeOpenAIClient()
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    assert provider.provider_id == "openai"
+    assert provider.model == "gpt-5-mini"
+
+
+def test_openai_provider_rejects_empty_model():
+    """Provider should reject an empty model identifier."""
+
+    client = FakeOpenAIClient()
+
+    with pytest.raises(
+        ValueError,
+        match="OpenAI model cannot be empty",
+    ):
+        OpenAIProvider(
+            model="",
+            client=client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_generates_response():
+    """Successful OpenAI response should become ProviderResult."""
+
+    response = SimpleNamespace(
+        output_text="Artificial intelligence is the field of AI.",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is True
+    assert result.provider_id == "openai"
+    assert (
+        result.output
+        == "Artificial intelligence is the field of AI."
+    )
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_builds_correct_request():
+    """Provider should correctly translate ConversationRequest."""
+
+    response = SimpleNamespace(
+        output_text="Test response.",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    request = create_request(
+        context=(
+            "LIVE INTELLIGENCE\n"
+            "Research query: AI regulation"
+        ),
+    )
+
+    result = await provider.generate(
+        request,
+    )
+
+    assert result.success is True
+
+    sent = (
+        client.responses.received_kwargs
+    )
+
+    assert sent is not None
+
+    assert sent["model"] == "gpt-5-mini"
+
+    messages = sent["input"]
+
+    assert messages[0] == {
+        "role": "system",
+        "content": (
+            "You are Yeti, a friendly AI companion."
+        ),
+    }
+
+    assert messages[1] == {
+        "role": "user",
+        "content": (
+            "Additional context:\n"
+            "LIVE INTELLIGENCE\n"
+            "Research query: AI regulation"
+        ),
+    }
+
+    assert messages[2] == {
+        "role": "user",
+        "content": (
+            "Explain artificial intelligence."
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_without_context():
+    """Provider should not create a context message when absent."""
+
+    response = SimpleNamespace(
+        output_text="Test response.",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is True
+
+    messages = (
+        client.responses.received_kwargs["input"]
+    )
+
+    assert len(messages) == 2
+
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_handles_api_error():
+    """OpenAI exceptions should become failed ProviderResult."""
+
+    client = FakeOpenAIClient(
+        error=RuntimeError(
+            "OpenAI service unavailable"
+        ),
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is False
+    assert result.provider_id == "openai"
+    assert result.output is None
+    assert (
+        result.error
+        == "OpenAI service unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_handles_empty_response():
+    """Empty OpenAI output should produce a failed result."""
+
+    response = SimpleNamespace(
+        output_text="",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is False
+    assert result.provider_id == "openai"
+    assert result.output is None
+    assert (
+        result.error
+        == "OpenAI returned an empty response."
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_rejects_none_request():
+    """Provider should reject a missing conversation request."""
+
+    client = FakeOpenAIClient()
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Conversation request cannot be None",
+    ):
+        await provider.generate(None)
+"""
+Tests for OpenAIProvider.
+
+These tests never call the real OpenAI API.
+
+The OpenAI AsyncOpenAI client is injected with a fake client
+so provider behaviour can be tested deterministically.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.openai_provider import (
+    OpenAIProvider,
+)
+
+
+class FakeResponses:
+    """Fake OpenAI Responses API."""
+
+    def __init__(
+        self,
+        response=None,
+        error=None,
+    ):
+        self.response = response
+        self.error = error
+        self.received_kwargs = None
+
+    async def create(
+        self,
+        **kwargs,
+    ):
+        self.received_kwargs = kwargs
+
+        if self.error is not None:
+            raise self.error
+
+        return self.response
+
+
+class FakeOpenAIClient:
+    """Fake AsyncOpenAI client."""
+
+    def __init__(
+        self,
+        response=None,
+        error=None,
+    ):
+        self.responses = FakeResponses(
+            response=response,
+            error=error,
+        )
+
+
+def create_request(
+    *,
+    context=None,
+):
+    """Create a valid conversation request."""
+
+    return ConversationRequest(
+        system_instruction=(
+            "You are Yeti, a friendly AI companion."
+        ),
+        user_prompt=(
+            "Explain artificial intelligence."
+        ),
+        conversation_context=context,
+        character_id="yeti",
+        character_name="Yeti",
+    )
+
+
+def test_openai_provider_initialises():
+    """Provider should initialise with a valid model."""
+
+    client = FakeOpenAIClient()
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    assert provider.provider_id == "openai"
+    assert provider.model == "gpt-5-mini"
+
+
+def test_openai_provider_rejects_empty_model():
+    """Provider should reject an empty model identifier."""
+
+    client = FakeOpenAIClient()
+
+    with pytest.raises(
+        ValueError,
+        match="OpenAI model cannot be empty",
+    ):
+        OpenAIProvider(
+            model="",
+            client=client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_generates_response():
+    """Successful OpenAI response should become ProviderResult."""
+
+    response = SimpleNamespace(
+        output_text="Artificial intelligence is the field of AI.",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is True
+    assert result.provider_id == "openai"
+    assert (
+        result.output
+        == "Artificial intelligence is the field of AI."
+    )
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_builds_correct_request():
+    """Provider should correctly translate ConversationRequest."""
+
+    response = SimpleNamespace(
+        output_text="Test response.",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    request = create_request(
+        context=(
+            "LIVE INTELLIGENCE\n"
+            "Research query: AI regulation"
+        ),
+    )
+
+    result = await provider.generate(
+        request,
+    )
+
+    assert result.success is True
+
+    sent = (
+        client.responses.received_kwargs
+    )
+
+    assert sent is not None
+
+    assert sent["model"] == "gpt-5-mini"
+
+    messages = sent["input"]
+
+    assert messages[0] == {
+        "role": "system",
+        "content": (
+            "You are Yeti, a friendly AI companion."
+        ),
+    }
+
+    assert messages[1] == {
+        "role": "user",
+        "content": (
+            "Additional context:\n"
+            "LIVE INTELLIGENCE\n"
+            "Research query: AI regulation"
+        ),
+    }
+
+    assert messages[2] == {
+        "role": "user",
+        "content": (
+            "Explain artificial intelligence."
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_without_context():
+    """Provider should not create a context message when absent."""
+
+    response = SimpleNamespace(
+        output_text="Test response.",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is True
+
+    messages = (
+        client.responses.received_kwargs["input"]
+    )
+
+    assert len(messages) == 2
+
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_handles_api_error():
+    """OpenAI exceptions should become failed ProviderResult."""
+
+    client = FakeOpenAIClient(
+        error=RuntimeError(
+            "OpenAI service unavailable"
+        ),
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is False
+    assert result.provider_id == "openai"
+    assert result.output is None
+    assert (
+        result.error
+        == "OpenAI service unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_handles_empty_response():
+    """Empty OpenAI output should produce a failed result."""
+
+    response = SimpleNamespace(
+        output_text="",
+    )
+
+    client = FakeOpenAIClient(
+        response=response,
+    )
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    result = await provider.generate(
+        create_request(),
+    )
+
+    assert result.success is False
+    assert result.provider_id == "openai"
+    assert result.output is None
+    assert (
+        result.error
+        == "OpenAI returned an empty response."
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_rejects_none_request():
+    """Provider should reject a missing conversation request."""
+
+    client = FakeOpenAIClient()
+
+    provider = OpenAIProvider(
+        model="gpt-5-mini",
+        client=client,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Conversation request cannot be None",
+    ):
+        await provider.generate(None)
+"""
+Model Identifier.
+
+Defines a stable identifier for AI models.
+
+The identifier is independent from provider execution logic.
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ModelId:
+    """
+    Unique identifier for an AI model.
+
+    Examples:
+
+    gemini-2.5-flash
+    gpt-5-mini
+    llama3
+
+    """
+
+    provider: str
+    name: str
+
+    def full_name(self) -> str:
+        """
+        Returns the complete model identifier.
+        """
+
+        return f"{self.provider}:{self.name}"
+"""
+Provider-independent conversation request.
+
+Represents the information required to generate a
+character-aware conversational response.
+
+This contract belongs to the application/runtime boundary.
+
+It deliberately does not know about:
+
+- Gemini
+- OpenAI
+- Ollama
+- Parallel
+- voice
+- HTTP
+- persistence
+- provider SDKs
+
+Architecture:
+
+CharacterProfile
+        +
+ExecutionContext
+        +
+Optional IntelligenceContext
+        |
+        v
+ConversationRequest
+        |
+        v
+Future / existing EasyChatBot LLM service
+
+The production EasyChatBot conversation and voice
+architecture remains outside this hackathon runtime.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRequest:
+    """
+    Immutable provider-independent conversation request.
+
+    Attributes
+    ----------
+    system_instruction:
+        Stable instruction defining how the character
+        should behave.
+
+    user_prompt:
+        User-facing request to be answered.
+
+    conversation_context:
+        Optional contextual information, such as live
+        intelligence retrieved by the Research Agent.
+
+    character_id:
+        Identifier of the character producing the response.
+
+    character_name:
+        Display name of the character.
+    """
+
+    system_instruction: str
+
+    user_prompt: str
+
+    conversation_context: str | None = None
+
+    character_id: str = ""
+
+    character_name: str = ""
+
+    def __post_init__(self) -> None:
+        """
+        Validate request invariants.
+        """
+
+        if not isinstance(
+            self.system_instruction,
+            str,
+        ):
+            raise ValueError(
+                "system_instruction must be a string."
+            )
+
+        if not isinstance(
+            self.user_prompt,
+            str,
+        ):
+            raise ValueError(
+                "user_prompt must be a string."
+            )
+
+        system_instruction = (
+            self.system_instruction.strip()
+        )
+
+        user_prompt = (
+            self.user_prompt.strip()
+        )
+
+        if not system_instruction:
+            raise ValueError(
+                "system_instruction cannot be empty."
+            )
+
+        if not user_prompt:
+            raise ValueError(
+                "user_prompt cannot be empty."
+            )
+
+        object.__setattr__(
+            self,
+            "system_instruction",
+            system_instruction,
+        )
+
+        object.__setattr__(
+            self,
+            "user_prompt",
+            user_prompt,
+        )
+
+        if self.conversation_context is not None:
+            context = (
+                self.conversation_context.strip()
+            )
+
+            if not context:
+                raise ValueError(
+                    "conversation_context cannot be blank."
+                )
+
+            object.__setattr__(
+                self,
+                "conversation_context",
+                context,
+            )
+
+        if not isinstance(
+            self.character_id,
+            str,
+        ):
+            raise ValueError(
+                "character_id must be a string."
+            )
+
+        if not isinstance(
+            self.character_name,
+            str,
+        ):
+            raise ValueError(
+                "character_name must be a string."
+            )
+
+        object.__setattr__(
+            self,
+            "character_id",
+            self.character_id.strip(),
+        )
+
+        object.__setattr__(
+            self,
+            "character_name",
+            self.character_name.strip(),
+        )
+
+    @property
+    def has_conversation_context(self) -> bool:
+        """
+        Return whether contextual information exists.
+        """
+
+        return bool(
+            self.conversation_context
+        )
+
+    @property
+    def context_length(self) -> int:
+        """
+        Return the length of the conversation context.
+
+        Useful for diagnostics and future token estimation.
+        """
+
+        if not self.conversation_context:
+            return 0
+
+        return len(
+            self.conversation_context
+        )
+
+    def summary(self) -> dict[str, str]:
+        """
+        Return a safe diagnostic summary.
+
+        Prompt and context content are deliberately
+        excluded from the summary.
+        """
+
+        return {
+            "character_id": self.character_id,
+            "character_name": self.character_name,
+            "has_context": str(
+                self.has_conversation_context
+            ),
+            "system_instruction_length": str(
+                len(self.system_instruction)
+            ),
+            "user_prompt_length": str(
+                len(self.user_prompt)
+            ),
+            "context_length": str(
+                self.context_length
+            ),
+        }
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
