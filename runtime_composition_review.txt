@@ -1,0 +1,646 @@
+﻿============================================================
+FILE: .\backend\runtime\runtime_engine.py
+============================================================
+"""
+EasyChatBot Runtime Engine.
+
+The Runtime is responsible for orchestrating
+agent execution.
+
+Responsibilities:
+- receive execution requests
+- provide execution context
+- call approved agents
+- return structured results
+
+The Runtime does not:
+- implement business logic
+- call providers directly
+- manage user interfaces
+"""
+
+from backend.agents.base_agent import BaseAgent
+from backend.agents.agent_result import AgentResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class RuntimeEngine:
+    """
+    Central execution orchestrator.
+
+    Agents execute through the Runtime.
+    """
+
+    async def execute(
+        self,
+        agent: BaseAgent,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute an agent using runtime control.
+
+        Args:
+            agent:
+                Agent implementation.
+
+            context:
+                Runtime execution context.
+
+        Returns:
+            AgentResult.
+        """
+
+        return await agent.execute(context)
+
+============================================================
+FILE: .\backend\runtime\context\execution_context.py
+============================================================
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+- optionally carry bounded learner memory context
+
+Does not:
+- execute providers
+- manage memory persistence
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from src.ai_runtime.memory.context_builder import (
+    MemoryContext,
+)
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    The context is immutable. Enrichment must therefore use
+    dataclasses.replace() rather than mutating an existing
+    instance.
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    memory_context: MemoryContext | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached.
+        """
+
+        return (
+            self.intelligence_context is not None
+        )
+
+    @property
+    def has_memory_context(self) -> bool:
+        """
+        Return whether bounded learner memory context
+        is attached.
+        """
+
+        return (
+            self.memory_context is not None
+            and not self.memory_context.is_empty
+        )
+
+============================================================
+FILE: .\backend\api\routes.py
+============================================================
+"""
+EasyChatBot API Routes.
+
+The API layer exposes the application.
+
+Routes do not contain agent logic.
+
+The API composition layer is responsible for wiring
+infrastructure dependencies into application services.
+
+Architecture:
+
+API
+|
+v
+CompanionService
+|
+v
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProviderFactory
+|
+v
+Concrete Provider
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+from fastapi import HTTPException
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.api.schemas import (
+    ChatRequest,
+    ChatResponse,
+)
+
+from backend.characters.character_registry import (
+    CharacterRegistry,
+)
+
+from backend.providers.llm.llm_provider_factory import (
+    LLMProviderFactory,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.services.llm_service import (
+    LLMService,
+)
+
+
+router = APIRouter()
+
+character_registry = CharacterRegistry()
+
+
+def create_llm_service() -> LLMService:
+    """
+    Create the application LLM service.
+
+    Provider construction is isolated through the
+    LLMProviderFactory.
+
+    The LLMService remains provider-independent.
+    """
+
+    llm_provider = (
+        LLMProviderFactory.create()
+    )
+
+    return LLMService(
+        llm_provider
+    )
+
+
+def create_companion_service(
+    character,
+) -> CompanionService:
+    """
+    Create the application-level CompanionService.
+
+    This function is the API composition boundary.
+
+    Infrastructure dependencies are created here and
+    injected into application services and agents.
+
+    The application service remains unaware of:
+
+    - OpenAI
+    - Ollama
+    - provider SDKs
+    - API credentials
+    """
+
+    llm_service = create_llm_service()
+
+    conversation_agent = ConversationAgent(
+        character=character,
+        llm_service=llm_service,
+    )
+
+    return CompanionService(
+        character=character,
+        conversation_agent=conversation_agent,
+    )
+
+
+@router.get("/characters")
+def get_characters():
+    """
+    Return available AI companions.
+    """
+
+    characters = (
+        character_registry.list_characters()
+    )
+
+    return {
+        "characters": [
+            {
+                "id": character.character_id,
+                "name": character.name,
+                "description": character.description,
+                "personality": character.personality,
+                "learning_style": character.learning_style,
+            }
+            for character in characters
+        ]
+    }
+
+
+@router.post(
+    "/chat",
+    response_model=ChatResponse,
+)
+async def chat(
+    payload: ChatRequest,
+) -> ChatResponse:
+    """
+    Execute an EasyChatBot companion interaction.
+
+    Expected payload:
+
+    {
+        "user_id": "demo-user",
+        "character": "yeti",
+        "message": "Explain AI",
+        "research": false
+    }
+
+    Request schema validation is handled by ChatRequest.
+
+    The explicit message validation below preserves
+    the existing EasyChatBot API contract:
+
+        missing message -> HTTP 400
+
+    Application orchestration remains delegated to
+    CompanionService.
+    """
+
+    # ---------------------------------------------------------
+    # API boundary validation
+    #
+    # ChatRequest intentionally allows message=None so that
+    # the existing API contract can return HTTP 400 rather
+    # than FastAPI's automatic HTTP 422 response.
+    #
+    # Invalid transport data must be rejected before it
+    # reaches application/domain services.
+    # ---------------------------------------------------------
+
+    if payload.message is None:
+        raise HTTPException(
+            status_code=400,
+            detail="message is required",
+        )
+
+    # Defensive empty-string validation.
+    #
+    # This preserves the previous behaviour for:
+    #
+    #     "message": ""
+    #
+    # and prevents invalid input from reaching the
+    # MemoryContextBuilder.
+    if not payload.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="message is required",
+        )
+
+    # ---------------------------------------------------------
+    # Character validation
+    # ---------------------------------------------------------
+
+    try:
+        character = (
+            character_registry.get(
+                payload.character
+            )
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    # ---------------------------------------------------------
+    # Application composition
+    # ---------------------------------------------------------
+
+    companion_service = (
+        create_companion_service(
+            character
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Runtime context
+    # ---------------------------------------------------------
+
+    context = ExecutionContext(
+        user_id=payload.user_id,
+        request=payload.message,
+    )
+
+    # ---------------------------------------------------------
+    # Application orchestration
+    # ---------------------------------------------------------
+
+    result = await companion_service.interact(
+        context,
+        use_research=payload.research,
+    )
+
+    # ---------------------------------------------------------
+    # API response contract
+    # ---------------------------------------------------------
+
+    return ChatResponse(
+        character=result["character"],
+        conversation=result["conversation"],
+        research=result["research"],
+        quality=result["quality"],
+        memory_count=result["memory_count"],
+        memory_context_count=result.get(
+            "memory_context_count",
+            0,
+        ),
+    )
+
+============================================================
+FILE: .\src\ai_runtime\capabilities\registry.py
+============================================================
+"""
+AI Runtime capability registry.
+
+The registry maps logical Runtime capabilities to their
+concrete executors.
+
+The registry:
+- resolves executors by capability
+- prevents duplicate registrations
+- provides explicit dependency injection
+- does not execute capabilities
+- does not perform governance decisions
+- does not know about providers
+"""
+
+from __future__ import annotations
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityAlreadyRegisteredError,
+    CapabilityNotRegisteredError,
+)
+
+from src.ai_runtime.capabilities.executor import (
+    CapabilityExecutor,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityType,
+)
+
+
+class CapabilityRegistry:
+    """
+    Dependency-injection registry for Runtime capabilities.
+    """
+
+    def __init__(
+        self,
+        executors: list[CapabilityExecutor] | None = None,
+    ) -> None:
+        self._executors: dict[
+            CapabilityType,
+            CapabilityExecutor,
+        ] = {}
+
+        for executor in executors or []:
+            self.register(executor)
+
+    def register(
+        self,
+        executor: CapabilityExecutor,
+    ) -> None:
+        """
+        Register an executor for its declared capability.
+        """
+
+        capability = executor.capability
+
+        if capability in self._executors:
+            raise CapabilityAlreadyRegisteredError(
+                "Capability executor already registered: "
+                f"{capability.value}"
+            )
+
+        self._executors[capability] = executor
+
+    def resolve(
+        self,
+        capability: CapabilityType,
+    ) -> CapabilityExecutor:
+        """
+        Resolve the executor responsible for a capability.
+        """
+
+        try:
+            return self._executors[capability]
+        except KeyError as exc:
+            raise CapabilityNotRegisteredError(
+                "No executor registered for capability: "
+                f"{capability.value}"
+            ) from exc
+
+    def contains(
+        self,
+        capability: CapabilityType,
+    ) -> bool:
+        """
+        Return whether an executor is registered.
+        """
+
+        return capability in self._executors
+
+    def capabilities(
+        self,
+    ) -> tuple[CapabilityType, ...]:
+        """
+        Return all registered capabilities.
+        """
+
+        return tuple(self._executors.keys())
+
+============================================================
+FILE: .\src\ai_runtime\capabilities\gateway.py
+============================================================
+"""
+AI Runtime Capability Gateway.
+
+Controlled execution boundary between applications and
+concrete AI capabilities.
+
+Flow:
+
+Application
+    â†“
+CapabilityRequest
+    â†“
+CapabilityGateway
+    â†“
+Governance
+    â†“
+CapabilityRegistry
+    â†“
+CapabilityExecutor
+    â†“
+CapabilityResult
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityExecutionError,
+    CapabilityGovernanceError,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+)
+
+from src.ai_runtime.capabilities.registry import (
+    CapabilityRegistry,
+)
+
+
+class GovernanceDecisionResult(Protocol):
+    """
+    Minimal governance result required by the Runtime.
+    """
+
+    @property
+    def allowed(self) -> bool:
+        """
+        Whether execution is permitted.
+        """
+        ...
+
+
+class CapabilityGovernance(Protocol):
+    """
+    Governance boundary required by the Runtime gateway.
+    """
+
+    def evaluate(
+        self,
+        request: CapabilityRequest,
+    ) -> GovernanceDecisionResult:
+        """
+        Evaluate whether a capability may execute.
+        """
+        ...
+
+
+class CapabilityGateway:
+    """
+    Controlled Runtime entry point for capability execution.
+    """
+
+    def __init__(
+        self,
+        registry: CapabilityRegistry,
+        governance: CapabilityGovernance,
+    ) -> None:
+        self._registry = registry
+        self._governance = governance
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        """
+        Execute an approved capability.
+
+        Governance is evaluated before resolving and executing
+        the capability.
+        """
+
+        try:
+            governance_result = (
+                self._governance.evaluate(request)
+            )
+        except Exception as exc:
+            raise CapabilityGovernanceError(
+                "Governance evaluation failed."
+            ) from exc
+
+        if not governance_result.allowed:
+            return CapabilityResult(
+                request_id=request.request_id,
+                capability=request.capability,
+                status=CapabilityExecutionStatus.REJECTED,
+                error=(
+                    "Capability execution was rejected "
+                    "by governance."
+                ),
+                metadata={
+                    "governance_decision": "rejected",
+                },
+            )
+
+        executor = self._registry.resolve(
+            request.capability
+        )
+
+        try:
+            return await executor.execute(request)
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "Capability executor failed: "
+                f"{request.capability.value}"
+            ) from exc
+

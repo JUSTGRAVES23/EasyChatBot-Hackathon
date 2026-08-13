@@ -8,6 +8,10 @@ from backend.characters.character_profile import (
     CharacterProfile,
 )
 
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
 from backend.intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
@@ -18,11 +22,7 @@ from backend.runtime.context.execution_context import (
 )
 
 
-def create_yeti() -> CharacterProfile:
-    """
-    Create the character used by the conversation tests.
-    """
-
+def create_character():
     return CharacterProfile(
         character_id="yeti",
         name="Yeti",
@@ -41,7 +41,7 @@ def create_yeti() -> CharacterProfile:
 @pytest.mark.asyncio
 async def test_conversation_agent():
 
-    character = create_yeti()
+    character = create_character()
 
     agent = ConversationAgent(
         character
@@ -76,15 +76,33 @@ async def test_conversation_agent():
         "Conversation based learning"
     )
 
-    assert result.output[
-        "intelligence_context"
-    ] is None
+    assert isinstance(
+        result.output["conversation_request"],
+        ConversationRequest,
+    )
+
+    request = (
+        result.output["conversation_request"]
+    )
+
+    assert request.character_id == "yeti"
+
+    assert request.character_name == "Yeti"
+
+    assert request.user_prompt == (
+        "Explain artificial intelligence"
+    )
+
+    assert (
+        request.has_conversation_context
+        is False
+    )
 
 
 @pytest.mark.asyncio
-async def test_conversation_agent_includes_intelligence_context():
+async def test_conversation_agent_includes_live_intelligence():
 
-    character = create_yeti()
+    character = create_character()
 
     agent = ConversationAgent(
         character
@@ -96,29 +114,24 @@ async def test_conversation_agent_includes_intelligence_context():
         ),
         sources=(
             IntelligenceSource(
-                title=(
-                    "European AI Regulation"
-                ),
-                url=(
-                    "https://example.com/ai"
-                ),
-                source="example",
+                title="European AI Regulation",
+                url="https://example.com/ai",
+                source="parallel",
                 content=(
-                    "Current regulatory "
-                    "information."
+                    "Current regulatory information."
                 ),
             ),
         ),
         summary=(
-            "Recent developments in "
-            "European AI regulation."
+            "Recent regulatory developments."
         ),
     )
 
     context = ExecutionContext(
         user_id="demo-user",
         request=(
-            "Explain the latest AI regulation"
+            "Explain the latest European "
+            "AI regulation"
         ),
         intelligence_context=intelligence,
     )
@@ -129,46 +142,115 @@ async def test_conversation_agent_includes_intelligence_context():
 
     assert result.success is True
 
-    assert result.agent_id == (
-        "conversation_agent"
+    request = (
+        result.output["conversation_request"]
     )
 
-    assert result.output["character"] == (
-        "Yeti"
+    assert isinstance(
+        request,
+        ConversationRequest,
     )
 
     assert (
-        result.output["intelligence_context"]
-        is not None
-    )
-
-    intelligence_text = (
-        result.output[
-            "intelligence_context"
-        ]
+        request.has_conversation_context
+        is True
     )
 
     assert (
         "LIVE INTELLIGENCE"
-        in intelligence_text
-    )
-
-    assert (
-        "Latest European AI regulation"
-        in intelligence_text
+        in request.conversation_context
     )
 
     assert (
         "European AI Regulation"
-        in intelligence_text
-    )
-
-    assert (
-        "https://example.com/ai"
-        in intelligence_text
+        in request.conversation_context
     )
 
     assert (
         "Current regulatory information."
-        in intelligence_text
+        in request.conversation_context
+    )
+
+    assert (
+        result.output["intelligence_context"]
+        == request.conversation_context
+    )
+
+
+def test_conversation_agent_build_request_without_intelligence():
+
+    character = create_character()
+
+    agent = ConversationAgent(
+        character
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request="Explain AI",
+    )
+
+    request = agent.build_request(
+        context
+    )
+
+    assert isinstance(
+        request,
+        ConversationRequest,
+    )
+
+    assert request.character_id == "yeti"
+
+    assert request.character_name == "Yeti"
+
+    assert request.user_prompt == (
+        "Explain AI"
+    )
+
+    assert (
+        request.conversation_context
+        is None
+    )
+
+
+def test_conversation_agent_build_request_with_intelligence():
+
+    character = create_character()
+
+    agent = ConversationAgent(
+        character
+    )
+
+    intelligence = IntelligenceContext(
+        query="Latest AI regulation",
+        sources=(
+            IntelligenceSource(
+                title="AI Act",
+                url="https://example.com/ai-act",
+                source="parallel",
+                content="AI regulation information.",
+            ),
+        ),
+    )
+
+    context = ExecutionContext(
+        user_id="demo-user",
+        request="Explain the AI Act",
+        intelligence_context=intelligence,
+    )
+
+    request = agent.build_request(
+        context
+    )
+
+    assert request.has_conversation_context
+
+    assert (
+        "LIVE INTELLIGENCE"
+        in request.conversation_context
+    )
+
+    assert (
+        request.character_name
+        == "Yeti"
     )

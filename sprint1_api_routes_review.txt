@@ -1,0 +1,232 @@
+﻿"""
+EasyChatBot API Routes.
+
+The API layer exposes application capabilities.
+
+Routes do not contain:
+
+- agent logic;
+- capability execution logic;
+- provider construction;
+- Runtime composition.
+
+Architecture:
+
+API
+|
+v
+Application Factory
+|
++--> CompanionService
+|
++--> ExternalRuntimeService
+        |
+        v
+   CapabilityGateway
+        |
+        v
+   Capability Executors
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+from fastapi import HTTPException
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.api.schemas import (
+    ChatRequest,
+    ChatResponse,
+)
+
+from backend.application.factory import (
+    ApplicationFactory,
+)
+
+from backend.characters.character_registry import (
+    CharacterRegistry,
+)
+
+from backend.providers.llm.llm_provider_factory import (
+    LLMProviderFactory,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from backend.services.llm_service import (
+    LLMService,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+
+router = APIRouter()
+
+character_registry = CharacterRegistry()
+
+application_factory = ApplicationFactory()
+
+
+def create_llm_service() -> LLMService:
+    """
+    Create the application LLM service.
+
+    Provider construction remains isolated behind the
+    LLMProviderFactory.
+    """
+
+    llm_provider = (
+        LLMProviderFactory.create()
+    )
+
+    return LLMService(
+        llm_provider,
+    )
+
+
+def create_companion_service(
+    character,
+) -> CompanionService:
+    """
+    Create the CompanionService.
+
+    Existing companion composition remains unchanged.
+    """
+
+    llm_service = create_llm_service()
+
+    conversation_agent = ConversationAgent(
+        character=character,
+        llm_service=llm_service,
+    )
+
+    return CompanionService(
+        character=character,
+        conversation_agent=conversation_agent,
+    )
+
+
+def create_external_runtime_service() -> ExternalRuntimeService:
+    """
+    Create the External Runtime application service.
+
+    Runtime capability construction remains outside the API
+    layer through the Runtime composition module.
+
+    This function is temporary until the full application
+    composition root is moved behind startup dependency
+    injection.
+    """
+
+    gateway = create_external_runtime_gateway()
+
+    return application_factory.create_external_runtime_service(
+        gateway=gateway,
+    )
+
+
+@router.get("/characters")
+def get_characters():
+    """
+    Return available AI companions.
+    """
+
+    characters = (
+        character_registry.list_characters()
+    )
+
+    return {
+        "characters": [
+            {
+                "id": character.character_id,
+                "name": character.name,
+                "description": character.description,
+                "personality": character.personality,
+                "learning_style": character.learning_style,
+            }
+            for character in characters
+        ]
+    }
+
+
+@router.post(
+    "/chat",
+    response_model=ChatResponse,
+)
+async def chat(
+    payload: ChatRequest,
+) -> ChatResponse:
+    """
+    Execute an EasyChatBot companion interaction.
+
+    The existing chat journey remains delegated to
+    CompanionService.
+    """
+
+    if payload.message is None:
+        raise HTTPException(
+            status_code=400,
+            detail="message is required",
+        )
+
+    if not payload.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="message is required",
+        )
+
+    try:
+        character = (
+            character_registry.get(
+                payload.character,
+            )
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    companion_service = (
+        create_companion_service(
+            character,
+        )
+    )
+
+    context = ExecutionContext(
+        user_id=payload.user_id,
+        request=payload.message,
+    )
+
+    result = await companion_service.interact(
+        context,
+        use_research=payload.research,
+    )
+
+    return ChatResponse(
+        character=result["character"],
+        conversation=result["conversation"],
+        research=result["research"],
+        quality=result["quality"],
+        memory_count=result["memory_count"],
+        memory_context_count=result.get(
+            "memory_context_count",
+            0,
+        ),
+    )

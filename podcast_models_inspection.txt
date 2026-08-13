@@ -1,0 +1,169 @@
+"""
+EasyChatBot Hackathon — provider-neutral podcast contracts.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Final
+from uuid import uuid4
+
+
+class PodcastProviderName(str, Enum):
+    APPLE = "apple_podcasts"
+    SPOTIFY = "spotify"
+
+
+@dataclass(frozen=True)
+class LearningContext:
+    """Explicit learning-world context for podcast discovery."""
+
+    world_id: str
+    target_language: str
+    learner_level: str
+    learning_goal: str = ""
+    preferred_languages: tuple[str, ...] = ()
+    country_code: str = "LU"
+
+    def __post_init__(self) -> None:
+        if not self.world_id.strip():
+            raise ValueError("LearningContext world_id cannot be empty.")
+        if not self.target_language.strip():
+            raise ValueError(
+                "LearningContext target_language cannot be empty."
+            )
+        if not self.learner_level.strip():
+            raise ValueError(
+                "LearningContext learner_level cannot be empty."
+            )
+        if len(self.country_code.strip()) != 2:
+            raise ValueError(
+                "LearningContext country_code must be a two-letter code."
+            )
+
+
+@dataclass(frozen=True)
+class PodcastSearchIntent:
+    """
+    Provider-neutral search intent produced by the Podcast Agent.
+
+    The Agent does not know whether Apple or Spotify will execute it.
+    """
+
+    user_id: str
+    learning_context: LearningContext
+    topics: tuple[str, ...]
+    keywords: tuple[str, ...] = ()
+    language_required: bool = True
+    max_results: int = 10
+    intent_id: str = field(default_factory=lambda: str(uuid4()))
+
+    def __post_init__(self) -> None:
+        if not self.user_id.strip():
+            raise ValueError("PodcastSearchIntent user_id cannot be empty.")
+        if not self.topics and not self.keywords:
+            raise ValueError(
+                "PodcastSearchIntent requires at least one topic or keyword."
+            )
+        if self.max_results < 1:
+            raise ValueError(
+                "PodcastSearchIntent max_results must be at least 1."
+            )
+
+
+@dataclass(frozen=True)
+class PodcastSearchResult:
+    """Normalised podcast/episode candidate from any provider."""
+
+    provider: PodcastProviderName
+    external_id: str
+    title: str
+    description: str
+    publisher: str
+    languages: tuple[str, ...]
+    url: str
+    image_url: str | None = None
+    published_at: str | None = None
+    duration_seconds: int | None = None
+    explicit: bool = False
+    metadata: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name, value in {
+            "external_id": self.external_id,
+            "title": self.title,
+            "publisher": self.publisher,
+            "url": self.url,
+        }.items():
+            if not value.strip():
+                raise ValueError(
+                    f"PodcastSearchResult {name} cannot be empty."
+                )
+
+        if not (
+            self.url.startswith("https://")
+            or self.url.startswith("http://")
+        ):
+            raise ValueError(
+                "PodcastSearchResult url must use HTTP or HTTPS."
+            )
+
+        if not self.languages:
+            raise ValueError(
+                "PodcastSearchResult requires at least one language."
+            )
+
+
+@dataclass(frozen=True)
+class PodcastRecommendation:
+    """Character-facing recommendation selected from verified candidates."""
+
+    recommendation_id: str
+    user_id: str
+    character_id: str
+    character_name: str
+    character_message: str
+    result: PodcastSearchResult
+    relevance_reason: str
+    match_score: float
+
+    def __post_init__(self) -> None:
+        for name, value in {
+            "recommendation_id": self.recommendation_id,
+            "user_id": self.user_id,
+            "character_id": self.character_id,
+            "character_name": self.character_name,
+            "character_message": self.character_message,
+            "relevance_reason": self.relevance_reason,
+        }.items():
+            if not value.strip():
+                raise ValueError(
+                    f"PodcastRecommendation {name} cannot be empty."
+                )
+
+        if not 0 <= self.match_score <= 100:
+            raise ValueError(
+                "PodcastRecommendation match_score must be between 0 and 100."
+            )
+
+
+LANGUAGE_ALIASES: Final[dict[str, str]] = {
+    "fr": "fr", "fra": "fr", "fre": "fr",
+    "french": "fr", "français": "fr", "francais": "fr",
+    "en": "en", "eng": "en", "english": "en",
+    "es": "es", "spa": "es", "spanish": "es", "español": "es",
+    "de": "de", "deu": "de", "ger": "de", "german": "de",
+    "it": "it", "ita": "it", "italian": "it",
+    "ru": "ru", "rus": "ru", "russian": "ru",
+    "pt": "pt", "por": "pt", "portuguese": "pt",
+}
+
+
+def normalise_language(value: str) -> str:
+    """Return a stable ISO-639-1-style code when recognised."""
+    return LANGUAGE_ALIASES.get(
+        value.strip().lower(),
+        value.strip().lower(),
+    )
+

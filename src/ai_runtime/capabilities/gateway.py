@@ -7,18 +7,39 @@ concrete AI capabilities.
 Flow:
 
 Application
-    ↓
+    |
+    v
 CapabilityRequest
-    ↓
+    |
+    v
 CapabilityGateway
-    ↓
+    |
+    v
 Governance
-    ↓
+    |
+    v
 CapabilityRegistry
-    ↓
+    |
+    v
 CapabilityExecutor
-    ↓
+    |
+    v
 CapabilityResult
+
+The gateway:
+
+- validates execution requests;
+- enforces governance before execution;
+- resolves registered capabilities;
+- delegates execution.
+
+The gateway does not:
+
+- implement capability logic;
+- call providers;
+- manage memory;
+- modify agents;
+- perform external side effects.
 """
 
 from __future__ import annotations
@@ -43,7 +64,7 @@ from src.ai_runtime.capabilities.registry import (
 
 class GovernanceDecisionResult(Protocol):
     """
-    Minimal governance result required by the Runtime.
+    Minimal governance result required by Runtime.
     """
 
     @property
@@ -56,7 +77,7 @@ class GovernanceDecisionResult(Protocol):
 
 class CapabilityGovernance(Protocol):
     """
-    Governance boundary required by the Runtime gateway.
+    Governance boundary required by Runtime gateway.
     """
 
     def evaluate(
@@ -72,6 +93,14 @@ class CapabilityGovernance(Protocol):
 class CapabilityGateway:
     """
     Controlled Runtime entry point for capability execution.
+
+    Responsibilities:
+
+    - governance enforcement;
+    - capability resolution;
+    - execution delegation.
+
+    It is intentionally not a business layer.
     """
 
     def __init__(
@@ -79,6 +108,22 @@ class CapabilityGateway:
         registry: CapabilityRegistry,
         governance: CapabilityGovernance,
     ) -> None:
+        """
+        Create capability gateway.
+
+        Dependencies are injected from composition.
+        """
+
+        if registry is None:
+            raise ValueError(
+                "CapabilityRegistry cannot be None."
+            )
+
+        if governance is None:
+            raise ValueError(
+                "CapabilityGovernance cannot be None."
+            )
+
         self._registry = registry
         self._governance = governance
 
@@ -89,14 +134,29 @@ class CapabilityGateway:
         """
         Execute an approved capability.
 
-        Governance is evaluated before resolving and executing
-        the capability.
+        Execution order:
+
+        1. Validate request
+        2. Evaluate governance
+        3. Resolve executor
+        4. Execute capability
+
+        Governance is always evaluated before
+        capability execution.
         """
+
+        if request is None:
+            raise ValueError(
+                "CapabilityRequest cannot be None."
+            )
 
         try:
             governance_result = (
-                self._governance.evaluate(request)
+                self._governance.evaluate(
+                    request,
+                )
             )
+
         except Exception as exc:
             raise CapabilityGovernanceError(
                 "Governance evaluation failed."
@@ -106,7 +166,9 @@ class CapabilityGateway:
             return CapabilityResult(
                 request_id=request.request_id,
                 capability=request.capability,
-                status=CapabilityExecutionStatus.REJECTED,
+                status=(
+                    CapabilityExecutionStatus.REJECTED
+                ),
                 error=(
                     "Capability execution was rejected "
                     "by governance."
@@ -116,12 +178,22 @@ class CapabilityGateway:
                 },
             )
 
-        executor = self._registry.resolve(
-            request.capability
-        )
+        try:
+            executor = self._registry.resolve(
+                request.capability,
+            )
+
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "Capability resolution failed: "
+                f"{request.capability.value}"
+            ) from exc
 
         try:
-            return await executor.execute(request)
+            return await executor.execute(
+                request,
+            )
+
         except Exception as exc:
             raise CapabilityExecutionError(
                 "Capability executor failed: "

@@ -1,0 +1,1753 @@
+﻿===== EXISTING GOVERNANCE / RUNTIME IMPLEMENTATIONS =====
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\engine.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/engine.py
+
+Purpose:
+Coordinates the evaluation of Runtime Policies.
+
+The PolicyEngine delegates decision making to registered Policy
+implementations while remaining independent of execution, providers,
+models and business logic.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from runtime.policies.policy import (
+    PolicyContext,
+    PolicyDecision,
+)
+from runtime.policies.registry import PolicyRegistry
+
+
+class PolicyEngine:
+    """
+    Central runtime policy evaluator.
+
+    The PolicyEngine is responsible for resolving a registered
+    policy and returning its PolicyDecision.
+
+    It deliberately contains no business rules itself.
+    """
+
+    def __init__(
+        self,
+        registry: PolicyRegistry,
+    ) -> None:
+        """
+        Initialize the PolicyEngine.
+
+        Parameters
+        ----------
+        registry:
+            Registry containing all available runtime policies.
+        """
+        self._registry = registry
+
+    def evaluate(
+        self,
+        policy_name: str,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """
+        Evaluate a registered policy.
+
+        Parameters
+        ----------
+        policy_name:
+            Name of the registered policy.
+
+        context:
+            Immutable policy evaluation context.
+
+        Returns
+        -------
+        PolicyDecision
+            Decision produced by the selected policy.
+
+        Raises
+        ------
+        KeyError
+            If the requested policy is not registered.
+        """
+
+        policy = self._registry.get(policy_name)
+
+        return policy.evaluate(context)
+
+    def exists(
+        self,
+        policy_name: str,
+    ) -> bool:
+        """
+        Determine whether a policy is registered.
+        """
+
+        return self._registry.exists(policy_name)
+
+    def list(self) -> tuple[str, ...]:
+        """
+        Return all registered policies.
+        """
+
+        return self._registry.list()
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}"
+            f"(registered={len(self._registry)})"
+        )
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\policy.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/policy.py
+
+Purpose:
+Defines the common policy contracts used throughout the AI Runtime.
+
+Policies evaluate a PolicyContext and return a PolicyDecision.
+
+The policy subsystem centralizes runtime decisions such as:
+
+- Provider selection
+- Model selection
+- Retry behaviour
+- Approval decisions
+- Cost governance
+- Fallback behaviour
+
+Policies contain decision logic only.
+They never execute providers, modify runtime state or perform business logic.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyContext:
+    """
+    Immutable context supplied to policy evaluation.
+
+    The context contains the information required for making
+    runtime decisions. Additional fields may be introduced
+    over time without affecting the Policy interface.
+    """
+
+    agent_id: str
+    capability: str
+
+    provider_id: str | None = None
+    model_id: str | None = None
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyDecision:
+    """
+    Result returned by policy evaluation.
+
+    The decision represents recommendations only.
+    It never performs execution.
+    """
+
+    approved: bool = True
+
+    provider_id: str | None = None
+    model_id: str | None = None
+
+    retry: bool = False
+    max_retries: int = 0
+
+    fallback_provider: str | None = None
+
+    reason: str | None = None
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class Policy(ABC):
+    """
+    Base class for all runtime policies.
+
+    Each policy evaluates a PolicyContext and returns
+    a standardized PolicyDecision.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """
+        Human-readable policy name.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def evaluate(
+        self,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """
+        Evaluate the supplied policy context.
+
+        Parameters
+        ----------
+        context:
+            Immutable policy evaluation context.
+
+        Returns
+        -------
+        PolicyDecision
+            Decision produced by the policy.
+        """
+        raise NotImplementedError
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\registry.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/registry.py
+
+Purpose:
+Maintains the collection of available Runtime Policies.
+
+Policies register themselves once during application startup and can
+later be retrieved by name by the PolicyEngine.
+
+The registry is intentionally lightweight and contains no policy
+evaluation logic.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from runtime.policies.policy import Policy
+
+
+class PolicyRegistry:
+    """
+    Stores all available Runtime Policies.
+
+    The registry is responsible for registering, retrieving,
+    listing and validating policies.
+    """
+
+    def __init__(self) -> None:
+        self._policies: dict[str, Policy] = {}
+
+    def register(
+        self,
+        policy: Policy,
+    ) -> None:
+        """
+        Register a policy.
+
+        Raises
+        ------
+        ValueError
+            If a policy with the same name is already registered.
+        """
+
+        if policy.name in self._policies:
+            raise ValueError(
+                f"Policy '{policy.name}' is already registered."
+            )
+
+        self._policies[policy.name] = policy
+
+    def get(
+        self,
+        name: str,
+    ) -> Policy:
+        """
+        Retrieve a registered policy.
+
+        Raises
+        ------
+        KeyError
+            If the policy does not exist.
+        """
+
+        try:
+            return self._policies[name]
+
+        except KeyError as exc:
+            raise KeyError(
+                f"Policy '{name}' is not registered."
+            ) from exc
+
+    def exists(
+        self,
+        name: str,
+    ) -> bool:
+        """
+        Determine whether a policy exists.
+        """
+
+        return name in self._policies
+
+    def unregister(
+        self,
+        name: str,
+    ) -> None:
+        """
+        Remove a policy.
+
+        Raises
+        ------
+        KeyError
+            If the policy is not registered.
+        """
+
+        if name not in self._policies:
+            raise KeyError(
+                f"Policy '{name}' is not registered."
+            )
+
+        del self._policies[name]
+
+    def list(self) -> tuple[str, ...]:
+        """
+        Return all registered policy names.
+        """
+
+        return tuple(sorted(self._policies.keys()))
+
+    def clear(self) -> None:
+        """
+        Remove all registered policies.
+        """
+
+        self._policies.clear()
+
+    def __contains__(
+        self,
+        name: str,
+    ) -> bool:
+        return name in self._policies
+
+    def __len__(self) -> int:
+        return len(self._policies)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}"
+            f"(registered={len(self)})"
+        )
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\runtime_policies.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/runtime_policies.py
+
+Purpose:
+Contains the built-in Runtime Policy implementations shipped with the
+EasyChatBot AI Runtime.
+
+Runtime Policies encapsulate reusable decision logic used during AI
+execution. They evaluate a PolicyContext and produce a standardized
+PolicyDecision that guides the runtime without performing execution.
+
+These policies are intentionally stateless, deterministic whenever
+possible, and independent from providers, models and infrastructure.
+
+Typical responsibilities include:
+
+â€¢ Provider routing
+â€¢ Model selection
+â€¢ Retry recommendations
+â€¢ Approval decisions
+â€¢ Cost governance
+â€¢ Fallback recommendations
+
+New runtime policies should inherit from the Policy base class defined
+in runtime.policies.policy.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from runtime.policies.policy import (
+    Policy,
+    PolicyContext,
+    PolicyDecision,
+)
+
+
+class RoutingPolicy(Policy):
+    """
+    Default Runtime Routing Policy.
+
+    This policy determines which provider and model should be used for
+    an execution request.
+
+    The initial implementation is intentionally conservative. It simply
+    returns the provider and model already supplied in the PolicyContext.
+
+    Future versions may incorporate:
+
+    - Capability-based routing
+    - Provider availability
+    - Local vs cloud execution
+    - Cost optimisation
+    - Governance constraints
+    - Preferred provider ordering
+    - Model capability matching
+    """
+
+    @property
+    def name(self) -> str:
+        """
+        Unique runtime policy name.
+        """
+        return "routing"
+
+    def evaluate(
+        self,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """
+        Evaluate the routing policy.
+
+        Parameters
+        ----------
+        context:
+            Immutable policy evaluation context.
+
+        Returns
+        -------
+        PolicyDecision
+            Routing decision for the current execution request.
+        """
+
+        return PolicyDecision(
+            approved=True,
+            provider_id=context.provider_id,
+            model_id=context.model_id,
+            reason="Default Runtime Routing Policy applied.",
+        )
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\context\runtime_context_data.py
+============================================================
+"""
+===============================================================================
+AI ENGINEERING PLATFORM
+===============================================================================
+
+Folder:
+runtime/context
+
+File:
+runtime_context_data.py
+
+Layer:
+Runtime Context Layer
+
+Purpose:
+Defines the Runtime execution context envelope.
+
+RuntimeContextData aggregates contextual information required during
+agent execution.
+
+The Runtime owns this object.
+
+Agents consume this object but do not manage it.
+
+Design Principles:
+
+- Immutable
+- Framework independent
+- Provider independent
+- Runtime controlled
+- Future memory compatible
+
+
+Author:
+EasyChatBot AI Runtime
+===============================================================================
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from runtime.context.project_context import (
+    ProjectContext,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeContextData:
+    """
+    Runtime-owned contextual information.
+
+    This object represents everything the Runtime knows about an execution
+    beyond the original request.
+    """
+
+    project_context: ProjectContext | None = None
+
+    execution_metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    agent_metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    memory_context: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    governance_context: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+    def validate(self) -> None:
+        """
+        Validate runtime context data.
+        """
+
+        if self.project_context is not None:
+            self.project_context.validate()
+
+
+    def has_project_context(self) -> bool:
+        """
+        Returns whether project context exists.
+        """
+
+        return self.project_context is not None
+
+
+    def get_project_name(
+        self,
+    ) -> str | None:
+        """
+        Returns the project name if available.
+        """
+
+        if self.project_context is None:
+            return None
+
+        return self.project_context.project_name
+
+
+    def summary(self) -> dict[str, Any]:
+        """
+        Return a safe context summary.
+
+        Used for logging and observability.
+        """
+
+        return {
+            "project":
+                self.get_project_name(),
+
+            "has_project_context":
+                self.has_project_context(),
+
+            "memory_entries":
+                len(self.memory_context),
+
+            "governance_entries":
+                len(self.governance_context),
+        }
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\contracts\agent_metadata.py
+============================================================
+"""
+===============================================================================
+AI ENGINEERING PLATFORM
+===============================================================================
+
+Folder:
+runtime/contracts
+
+File:
+agent_metadata.py
+
+Layer:
+Domain / Runtime Core Layer
+
+Purpose:
+Defines the canonical metadata contract for AI Agents.
+
+AgentMetadata provides the Runtime with the information required to:
+
+- Discover agents.
+- Identify capabilities.
+- Apply governance policies.
+- Track ownership.
+- Support observability.
+- Manage agent lifecycle.
+
+The Runtime uses metadata to understand agents without depending on their
+implementation details.
+
+Flow:
+
+Agent Manifest
+        |
+        v
+AgentMetadata
+        |
+        v
+Agent Registry
+        |
+        v
+Runtime Execution
+
+
+Author:
+EasyChatBot AI Runtime
+===============================================================================
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass, field
+
+from datetime import datetime, timezone
+
+from typing import Any
+
+
+from runtime.contracts.agent_descriptor import (
+    AgentDescriptor,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class AgentMetadata:
+    """
+    Standard metadata definition for an AI Agent.
+
+    This object represents:
+
+    - Agent identity.
+    - Governance profile.
+    - Runtime capabilities.
+    """
+
+    # ==========================================================================
+    # Identity
+    # ==========================================================================
+
+    agent_id: str
+
+    name: str
+
+    version: str = "1.0.0"
+
+    description: str = ""
+
+
+    # ==========================================================================
+    # Classification
+    # ==========================================================================
+
+    category: str = ""
+
+    domain: str = ""
+
+    capabilities: tuple[str, ...] = ()
+
+
+
+    # ==========================================================================
+    # Ownership
+    # ==========================================================================
+
+    owner: str = "EasyChatBot AI Runtime"
+
+    team: str = "AI Engineering"
+
+
+
+    # ==========================================================================
+    # Governance
+    # ==========================================================================
+
+    requires_approval: bool = True
+
+    can_modify_repository: bool = False
+
+    can_execute_external_actions: bool = False
+
+
+
+    # ==========================================================================
+    # Lifecycle
+    # ==========================================================================
+
+    created_at: datetime = field(
+        default_factory=lambda:
+            datetime.now(
+                timezone.utc
+            )
+    )
+
+
+
+    # ==========================================================================
+    # Runtime Information
+    # ==========================================================================
+
+    supported_providers: tuple[str, ...] = ()
+
+    supported_models: tuple[str, ...] = ()
+
+
+
+    # ==========================================================================
+    # Additional Metadata
+    # ==========================================================================
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+
+    # ==========================================================================
+    # Runtime Compatibility
+    # ==========================================================================
+
+    @property
+    def descriptor(
+        self,
+    ) -> AgentDescriptor:
+        """
+        Return immutable agent descriptor.
+
+        Used by Runtime agent contracts.
+        """
+
+        return AgentDescriptor(
+
+            agent_id=self.agent_id,
+
+            name=self.name,
+
+            version=self.version,
+
+            description=self.description,
+
+            capabilities=self.capabilities,
+
+        )
+
+
+
+    # ==========================================================================
+    # Validation
+    # ==========================================================================
+
+    def validate(
+        self,
+    ) -> None:
+        """
+        Validate agent metadata integrity.
+
+        Raises
+        ------
+        ValueError:
+            If metadata violates Runtime rules.
+        """
+
+        if not self.agent_id.strip():
+
+            raise ValueError(
+                "AgentMetadata requires an agent_id."
+            )
+
+
+        if not self.name.strip():
+
+            raise ValueError(
+                "AgentMetadata requires a name."
+            )
+
+
+        if not self.version.strip():
+
+            raise ValueError(
+                "AgentMetadata requires a version."
+            )
+
+
+        if self.can_modify_repository:
+
+            raise ValueError(
+                "Agents cannot directly modify repositories."
+            )
+
+
+        for capability in self.capabilities:
+
+            if not capability.strip():
+
+                raise ValueError(
+                    "Agent capabilities cannot contain empty values."
+                )
+
+
+
+    # ==========================================================================
+    # Helpers
+    # ==========================================================================
+
+    @property
+    def is_governed(
+        self,
+    ) -> bool:
+        """
+        Indicates whether governance approval is required.
+        """
+
+        return self.requires_approval
+
+
+
+    @property
+    def capability_count(
+        self,
+    ) -> int:
+        """
+        Return number of supported capabilities.
+        """
+
+        return len(
+            self.capabilities
+        )
+
+
+
+    def supports_provider(
+        self,
+        provider_id: str,
+    ) -> bool:
+        """
+        Check whether agent supports provider.
+        """
+
+        return provider_id in self.supported_providers
+
+
+
+    def supports_model(
+        self,
+        model_id: str,
+    ) -> bool:
+        """
+        Check whether agent supports model.
+        """
+
+        return model_id in self.supported_models
+
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\contracts\capability_definition.py
+============================================================
+"""
+===============================================================================
+AI ENGINEERING PLATFORM
+===============================================================================
+
+Folder:
+runtime/contracts
+
+File:
+capability_definition.py
+
+Layer:
+Domain / Runtime Contract Layer
+
+Purpose:
+Defines the canonical contract describing an AI Runtime capability.
+
+A CapabilityDefinition represents a reusable AI capability exposed by the
+Runtime workforce.
+
+Architecture:
+
+Agent
+
+    |
+
+    v
+
+CapabilityDefinition
+
+    |
+
+    v
+
+CapabilityRegistry
+
+    |
+
+    v
+
+Runtime Execution
+
+
+Responsibilities:
+
+- Define capability identity.
+- Describe capability purpose.
+- Define ownership metadata.
+- Provide governance information.
+- Support capability discovery.
+
+
+This module does NOT:
+
+- Execute capabilities.
+- Resolve agents.
+- Generate prompts.
+- Call providers.
+- Manage memory.
+- Contain business logic.
+
+
+Design Principles:
+
+- Immutable contracts.
+- Runtime ownership.
+- Provider independence.
+- Explicit boundaries.
+- Testability.
+- Governance readiness.
+
+
+Author:
+EasyChatBot AI Runtime
+===============================================================================
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass, field
+
+
+from typing import Any
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class CapabilityDefinition:
+    """
+    Canonical definition of an AI Runtime capability.
+
+    A capability represents a specific AI workforce function.
+
+    Examples:
+
+    - project_management
+    - architecture_review
+    - security_analysis
+    - language_tutoring
+
+
+    The Runtime uses this contract to understand:
+
+    - What capability exists.
+    - Who owns it.
+    - What purpose it serves.
+    - Whether it is enabled.
+    """
+
+
+
+    # ==========================================================================
+    # Identity
+    # ==========================================================================
+
+
+    capability_id: str
+    """
+    Unique Runtime capability identifier.
+
+    Example:
+
+        project_management
+    """
+
+
+    name: str
+    """
+    Human-readable capability name.
+
+    Example:
+
+        Project Management Analysis
+    """
+
+
+    description: str
+    """
+    Capability purpose description.
+    """
+
+
+
+    # ==========================================================================
+    # Ownership / Governance
+    # ==========================================================================
+
+
+    owner: str = "Engineering Council"
+    """
+    Capability owner.
+
+    Used for governance and audit purposes.
+    """
+
+
+    version: str = "1.0"
+    """
+    Capability definition version.
+    """
+
+
+    enabled: bool = True
+    """
+    Indicates whether Runtime may use this capability.
+    """
+
+
+
+    # ==========================================================================
+    # Runtime Mapping
+    # ==========================================================================
+
+
+    agent_id: str = ""
+    """
+    Associated Runtime agent identifier.
+
+    Example:
+
+        project_manager
+    """
+
+
+    tags: tuple[str, ...] = field(
+        default_factory=tuple,
+    )
+    """
+    Capability classification tags.
+    """
+
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict,
+    )
+    """
+    Additional governance metadata.
+    """
+
+
+
+    # ==========================================================================
+    # Validation
+    # ==========================================================================
+
+
+    def validate(
+        self,
+    ) -> None:
+        """
+        Validate capability definition.
+
+        Raises
+        ------
+
+        ValueError:
+            If capability definition is invalid.
+        """
+
+        if not self.capability_id.strip():
+
+            raise ValueError(
+                "CapabilityDefinition requires capability_id."
+            )
+
+
+        if not self.name.strip():
+
+            raise ValueError(
+                "CapabilityDefinition requires name."
+            )
+
+
+        if not self.description.strip():
+
+            raise ValueError(
+                "CapabilityDefinition requires description."
+            )
+
+
+        if not self.version.strip():
+
+            raise ValueError(
+                "CapabilityDefinition requires version."
+            )
+
+
+        if self.agent_id and not self.agent_id.strip():
+
+            raise ValueError(
+                "agent_id cannot contain only whitespace."
+            )
+
+
+
+    # ==========================================================================
+    # Helpers
+    # ==========================================================================
+
+
+    def is_available(
+        self,
+    ) -> bool:
+        """
+        Determine whether capability can be used by Runtime.
+        """
+
+        return self.enabled
+
+
+
+    def has_agent_binding(
+        self,
+    ) -> bool:
+        """
+        Check whether capability is linked to an agent.
+        """
+
+        return bool(
+            self.agent_id
+        )
+
+
+
+    def has_tag(
+        self,
+        tag: str,
+    ) -> bool:
+        """
+        Check whether capability contains a tag.
+        """
+
+        if not isinstance(
+            tag,
+            str,
+        ):
+
+            return False
+
+
+        return tag in self.tags
+
+MISSING FILE: C:\AI Folder\ai_agents\runtime\configuration.py
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\src\governance\models.py
+============================================================
+"""
+AI Governance Domain Models.
+
+Defines provider-independent governance contracts for
+EasyChatBot AI capabilities.
+
+Architecture:
+
+AI Capability
+      |
+      v
+Governance Policy
+      |
+      v
+Governance Decision
+
+This module contains domain models only.
+
+It must not:
+- execute agents
+- call LLMs
+- call external providers
+- modify production systems
+- depend on the Conversation Agent
+"""
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class RiskLevel(str, Enum):
+    """
+    AI operation risk classification.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class GovernanceDecision(str, Enum):
+    """
+    Decision produced by governance evaluation.
+    """
+
+    ALLOW = "allow"
+    REVIEW = "review"
+    BLOCK = "block"
+
+
+@dataclass(frozen=True)
+class GovernancePolicy:
+    """
+    Defines governance requirements for an AI capability.
+    """
+
+    capability: str
+    risk_level: RiskLevel
+    requires_human_review: bool = False
+    allows_external_calls: bool = False
+    allows_side_effects: bool = False
+
+
+@dataclass(frozen=True)
+class GovernanceResult:
+    """
+    Result of applying governance policy to an operation.
+    """
+
+    capability: str
+    decision: GovernanceDecision
+    risk_level: RiskLevel
+    reasons: tuple[str, ...]
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\src\governance\engine.py
+============================================================
+"""
+AI Governance Policy Engine.
+
+Applies explicit governance policies to AI capabilities.
+
+Architecture:
+
+Capability Request
+        |
+        v
+Governance Policy Engine
+        |
+        v
+Governance Result
+
+Decision model:
+- ALLOW   â†’ capability is permitted
+- REVIEW  â†’ human review is required
+- BLOCK   â†’ capability is prohibited
+
+This module does not:
+- execute agents
+- call LLMs
+- call external providers
+- modify application state
+- perform external side effects
+"""
+
+from src.governance.models import (
+    GovernanceDecision,
+    GovernancePolicy,
+    GovernanceResult,
+    RiskLevel,
+)
+
+
+class GovernancePolicyEngine:
+    """
+    Deterministic governance decision engine.
+    """
+
+    def evaluate(
+        self,
+        policy: GovernancePolicy,
+    ) -> GovernanceResult:
+        """
+        Evaluate a governance policy.
+
+        Decision precedence:
+
+        1. Side effects are blocked by default.
+        2. Critical risk requires blocking.
+        3. Explicit human review requires REVIEW.
+        4. Otherwise the capability is ALLOWED.
+        """
+
+        reasons: list[str] = []
+
+        # ---------------------------------------------------------
+        # Side effects
+        # ---------------------------------------------------------
+
+        if policy.allows_side_effects:
+            return GovernanceResult(
+                capability=policy.capability,
+                decision=GovernanceDecision.BLOCK,
+                risk_level=policy.risk_level,
+                reasons=(
+                    "Uncontrolled side effects are prohibited.",
+                ),
+            )
+
+        # ---------------------------------------------------------
+        # Critical risk
+        # ---------------------------------------------------------
+
+        if policy.risk_level == RiskLevel.CRITICAL:
+            return GovernanceResult(
+                capability=policy.capability,
+                decision=GovernanceDecision.BLOCK,
+                risk_level=policy.risk_level,
+                reasons=(
+                    "Critical-risk capabilities require "
+                    "stronger controls than this policy permits.",
+                ),
+            )
+
+        # ---------------------------------------------------------
+        # High-risk operations
+        # ---------------------------------------------------------
+
+        if policy.risk_level == RiskLevel.HIGH:
+            reasons.append(
+                "High-risk capability requires human review."
+            )
+
+            return GovernanceResult(
+                capability=policy.capability,
+                decision=GovernanceDecision.REVIEW,
+                risk_level=policy.risk_level,
+                reasons=tuple(reasons),
+            )
+
+        # ---------------------------------------------------------
+        # Explicit human review
+        # ---------------------------------------------------------
+
+        if policy.requires_human_review:
+            reasons.append(
+                "Policy explicitly requires human review."
+            )
+
+            return GovernanceResult(
+                capability=policy.capability,
+                decision=GovernanceDecision.REVIEW,
+                risk_level=policy.risk_level,
+                reasons=tuple(reasons),
+            )
+
+        # ---------------------------------------------------------
+        # External calls
+        # ---------------------------------------------------------
+
+        if policy.allows_external_calls:
+            reasons.append(
+                "External calls are explicitly permitted."
+            )
+        else:
+            reasons.append(
+                "No external calls are required."
+            )
+
+        # ---------------------------------------------------------
+        # Default allow
+        # ---------------------------------------------------------
+
+        reasons.append(
+            "No blocking governance condition was detected."
+        )
+
+        return GovernanceResult(
+            capability=policy.capability,
+            decision=GovernanceDecision.ALLOW,
+            risk_level=policy.risk_level,
+            reasons=tuple(reasons),
+        )
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\gateway.py
+============================================================
+"""
+AI Runtime Capability Gateway.
+
+Controlled execution boundary between applications and
+concrete AI capabilities.
+
+Flow:
+
+Application
+    â†“
+CapabilityRequest
+    â†“
+CapabilityGateway
+    â†“
+Governance
+    â†“
+CapabilityRegistry
+    â†“
+CapabilityExecutor
+    â†“
+CapabilityResult
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityExecutionError,
+    CapabilityGovernanceError,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+)
+
+from src.ai_runtime.capabilities.registry import (
+    CapabilityRegistry,
+)
+
+
+class GovernanceDecisionResult(Protocol):
+    """
+    Minimal governance result required by the Runtime.
+    """
+
+    @property
+    def allowed(self) -> bool:
+        """
+        Whether execution is permitted.
+        """
+        ...
+
+
+class CapabilityGovernance(Protocol):
+    """
+    Governance boundary required by the Runtime gateway.
+    """
+
+    def evaluate(
+        self,
+        request: CapabilityRequest,
+    ) -> GovernanceDecisionResult:
+        """
+        Evaluate whether a capability may execute.
+        """
+        ...
+
+
+class CapabilityGateway:
+    """
+    Controlled Runtime entry point for capability execution.
+    """
+
+    def __init__(
+        self,
+        registry: CapabilityRegistry,
+        governance: CapabilityGovernance,
+    ) -> None:
+        self._registry = registry
+        self._governance = governance
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        """
+        Execute an approved capability.
+
+        Governance is evaluated before resolving and executing
+        the capability.
+        """
+
+        try:
+            governance_result = (
+                self._governance.evaluate(request)
+            )
+        except Exception as exc:
+            raise CapabilityGovernanceError(
+                "Governance evaluation failed."
+            ) from exc
+
+        if not governance_result.allowed:
+            return CapabilityResult(
+                request_id=request.request_id,
+                capability=request.capability,
+                status=CapabilityExecutionStatus.REJECTED,
+                error=(
+                    "Capability execution was rejected "
+                    "by governance."
+                ),
+                metadata={
+                    "governance_decision": "rejected",
+                },
+            )
+
+        executor = self._registry.resolve(
+            request.capability
+        )
+
+        try:
+            return await executor.execute(request)
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "Capability executor failed: "
+                f"{request.capability.value}"
+            ) from exc
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py
+============================================================
+"""
+AI Runtime capability contracts.
+
+This module defines the provider-independent contract used by
+the AI Runtime to request execution of an approved capability.
+
+Architecture:
+
+Application
+    |
+    v
+AI Runtime
+    |
+    v
+Capability Request
+    |
+    v
+Governance
+    |
+    v
+Capability Execution
+
+This module contains contracts only.
+
+It does not:
+
+- execute agents
+- call providers
+- evaluate governance policies
+- perform external side effects
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Mapping
+
+
+class CapabilityType(StrEnum):
+    """
+    Supported AI Runtime capability categories.
+
+    Capabilities are explicit Runtime contracts. Adding a new
+    capability requires an explicit enum member so that the
+    capability can be registered, governed, resolved, executed,
+    and tested through the Runtime.
+
+    The capability itself does not imply autonomous execution.
+    In particular, PODCAST_LISTENING_PROPOSAL represents a
+    passive proposal to the learner.
+    """
+
+    LIVE_INTELLIGENCE = "live_intelligence"
+
+    PODCAST_DISCOVERY = "podcast_discovery"
+
+    PODCAST_LISTENING_PROPOSAL = (
+        "podcast_listening_proposal"
+    )
+
+    LEARNING_GENERATION = "learning_generation"
+
+    EVALUATION = "evaluation"
+
+
+class CapabilityExecutionStatus(StrEnum):
+    """
+    Runtime-level execution status.
+    """
+
+    ACCEPTED = "accepted"
+
+    COMPLETED = "completed"
+
+    REJECTED = "rejected"
+
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityRequest:
+    """
+    Provider-independent request submitted to the AI Runtime.
+
+    Attributes:
+        capability:
+            Logical capability requested by the application.
+
+        request_id:
+            Correlation identifier for the execution.
+
+        payload:
+            Explicit capability input.
+
+        metadata:
+            Non-business execution metadata.
+
+        requested_by:
+            Component or application requesting execution.
+    """
+
+    capability: CapabilityType
+
+    request_id: str
+
+    payload: Mapping[str, Any]
+
+    metadata: Mapping[str, Any] = field(
+        default_factory=dict
+    )
+
+    requested_by: str = "application"
+
+    def __post_init__(self) -> None:
+        if not self.request_id.strip():
+            raise ValueError(
+                "Capability request_id cannot be empty."
+            )
+
+        if not self.requested_by.strip():
+            raise ValueError(
+                "Capability requested_by cannot be empty."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResult:
+    """
+    Provider-independent result returned by the AI Runtime.
+
+    The result contains execution information but does not expose
+    provider-specific response objects.
+    """
+
+    request_id: str
+
+    capability: CapabilityType
+
+    status: CapabilityExecutionStatus
+
+    output: Any = None
+
+    error: str | None = None
+
+    metadata: Mapping[str, Any] = field(
+        default_factory=dict
+    )
+
+    @property
+    def succeeded(self) -> bool:
+        """
+        Return True when execution completed successfully.
+        """
+
+        return (
+            self.status
+            == CapabilityExecutionStatus.COMPLETED
+        )
+
+    @property
+    def failed(self) -> bool:
+        """
+        Return True when execution failed.
+        """
+
+        return (
+            self.status
+            == CapabilityExecutionStatus.FAILED
+        )
+
+    @property
+    def rejected(self) -> bool:
+        """
+        Return True when execution was rejected before
+        capability execution.
+        """
+
+        return (
+            self.status
+            == CapabilityExecutionStatus.REJECTED
+        )

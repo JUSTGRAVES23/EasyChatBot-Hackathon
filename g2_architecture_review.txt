@@ -1,0 +1,1124 @@
+﻿==================== research_agent.py ====================
+
+"""
+Research Agent.
+
+Retrieves external information through approved
+knowledge providers and converts the result into
+provider-independent IntelligenceContext data.
+
+Architecture:
+
+Research Agent
+        |
+        v
+ParallelSearchProvider
+        |
+        v
+ParallelClientWrapper
+        |
+        v
+IntelligenceContext
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+from backend.agents.base_agent import BaseAgent
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+    IntelligenceSource,
+)
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchAgent(BaseAgent):
+    """
+    Agent responsible for world information retrieval.
+    """
+
+    def __init__(
+        self,
+        provider=None,
+    ):
+        super().__init__(
+            AgentManifest(
+                agent_id="research_agent",
+                name="Research Agent",
+                description=(
+                    "Retrieves live world information "
+                    "for AI learning experiences."
+                ),
+            )
+        )
+
+        self.provider = (
+            provider
+            or ParallelSearchProvider()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute research and produce a normalized
+        IntelligenceContext.
+        """
+
+        result = await self.provider.execute(
+            context
+        )
+
+        if not result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.manifest.agent_id,
+                output=None,
+                error=result.error,
+            )
+
+        intelligence = (
+            self._build_intelligence_context(
+                query=context.request,
+                provider_output=result.output,
+            )
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=intelligence,
+        )
+
+    @staticmethod
+    def _build_intelligence_context(
+        query: str,
+        provider_output,
+    ) -> IntelligenceContext:
+        """
+        Convert provider output into the
+        provider-independent IntelligenceContext.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            raise TypeError(
+                "Research provider output must be a dictionary."
+            )
+
+        raw_results = provider_output.get(
+            "results",
+            {},
+        )
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            raw_results = []
+
+        sources: list[IntelligenceSource] = []
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+            if not title or not url:
+                continue
+
+            content = ResearchAgent._extract_content(
+                raw_result
+            )
+
+            sources.append(
+                IntelligenceSource(
+                    title=title,
+                    url=url,
+                    source="parallel",
+                    content=content,
+                )
+            )
+
+        return IntelligenceContext(
+            query=query,
+            sources=tuple(sources),
+        )
+
+    @staticmethod
+    def _extract_content(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract available content from a normalized
+        Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+        return str(
+            excerpts or ""
+        ).strip()
+
+==================== research_service.py ====================
+
+"""
+Research Service.
+
+Coordinates the Research Agent and exposes a
+provider-independent intelligence capability.
+
+Architecture:
+
+Application / Runtime
+        |
+        v
+ResearchService
+        |
+        v
+ResearchAgent
+        |
+        v
+Search Provider
+        |
+        v
+IntelligenceContext
+
+The service does not know about Parallel SDK details.
+"""
+
+from __future__ import annotations
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchService:
+    """
+    Application-facing service for live research.
+
+    The service coordinates the Research Agent but does
+    not implement provider-specific search behaviour.
+    """
+
+    def __init__(
+        self,
+        agent: ResearchAgent | None = None,
+    ) -> None:
+        self.agent = (
+            agent
+            or ResearchAgent()
+        )
+
+    async def research(
+        self,
+        user_id: str,
+        query: str,
+    ) -> IntelligenceContext:
+        """
+        Execute research and return normalized intelligence.
+
+        Args:
+            user_id:
+                Identifier for the current user/session.
+
+            query:
+                Research question.
+
+        Returns:
+            Provider-independent IntelligenceContext.
+
+        Raises:
+            ValueError:
+                If the query is empty.
+
+            RuntimeError:
+                If the Research Agent fails.
+        """
+
+        if not query.strip():
+            raise ValueError(
+                "Research query cannot be empty."
+            )
+
+        context = ExecutionContext(
+            user_id=user_id,
+            request=query,
+        )
+
+        result = await self.agent.execute(
+            context
+        )
+
+        if not result.success:
+            raise RuntimeError(
+                result.error
+                or "Research execution failed."
+            )
+
+        if not isinstance(
+            result.output,
+            IntelligenceContext,
+        ):
+            raise TypeError(
+                "Research Agent did not return "
+                "an IntelligenceContext."
+            )
+
+        return result.output
+
+==================== intelligence_context.py ====================
+
+"""
+Intelligence Context.
+
+Provider-independent representation of external
+information prepared for AI execution.
+
+Architecture:
+
+Research Agent
+        |
+        v
+IntelligenceContext
+        |
+        v
+AI Runtime integration
+        |
+        v
+LLMRequest.context
+
+The context must not expose provider-specific
+implementation details to the application layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceSource:
+    """
+    Normalised external information source.
+    """
+
+    title: str
+    url: str
+    source: str
+    content: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError(
+                "Intelligence source title cannot be empty."
+            )
+
+        if not self.url.strip():
+            raise ValueError(
+                "Intelligence source URL cannot be empty."
+            )
+
+        if not self.source.strip():
+            raise ValueError(
+                "Intelligence source name cannot be empty."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceContext:
+    """
+    Provider-independent intelligence context.
+
+    Represents external information that may be supplied
+    to an existing AI conversation.
+
+    This object deliberately does not contain:
+    - provider SDK objects
+    - API credentials
+    - model information
+    - runtime state
+    - persistence objects
+    """
+
+    query: str
+
+    sources: tuple[IntelligenceSource, ...] = field(
+        default_factory=tuple,
+    )
+
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.query.strip():
+            raise ValueError(
+                "Intelligence query cannot be empty."
+            )
+
+        if not isinstance(
+            self.sources,
+            tuple,
+        ):
+            raise ValueError(
+                "Intelligence sources must be a tuple."
+            )
+
+        if not isinstance(
+            self.summary,
+            str,
+        ):
+            raise ValueError(
+                "Intelligence summary must be a string."
+            )
+
+    @property
+    def has_sources(self) -> bool:
+        """
+        Return whether external sources are available.
+        """
+
+        return bool(self.sources)
+
+    @property
+    def source_count(self) -> int:
+        """
+        Return the number of external sources.
+        """
+
+        return len(self.sources)
+
+    @property
+    def has_summary(self) -> bool:
+        """
+        Return whether a summary is available.
+        """
+
+        return bool(
+            self.summary.strip()
+        )
+
+    def to_context_text(self) -> str:
+        """
+        Convert intelligence into a safe textual context.
+
+        The result is suitable for eventual inclusion
+        in an existing LLMRequest.context field.
+        """
+
+        sections: list[str] = [
+            "LIVE INTELLIGENCE",
+            f"Research query: {self.query.strip()}",
+        ]
+
+        if self.summary.strip():
+            sections.extend(
+                (
+                    "",
+                    "Summary:",
+                    self.summary.strip(),
+                )
+            )
+
+        if self.sources:
+            sections.extend(
+                (
+                    "",
+                    "Sources:",
+                )
+            )
+
+            for index, source in enumerate(
+                self.sources,
+                start=1,
+            ):
+                sections.append(
+                    f"{index}. {source.title}"
+                )
+                sections.append(
+                    f"   URL: {source.url}"
+                )
+                sections.append(
+                    f"   Source: {source.source}"
+                )
+
+                if source.content.strip():
+                    sections.append(
+                        f"   Content: {source.content.strip()}"
+                    )
+
+        return "\n".join(sections)
+
+==================== parallel_provider.py ====================
+
+"""
+Parallel Search Provider.
+
+Provides live world information
+through the Parallel Search API.
+"""
+
+from backend.providers.base_provider import (
+    BaseProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ParallelSearchProvider(BaseProvider):
+    """
+    Provider implementation using Parallel Search.
+
+    The SDK client is created only when required.
+    This allows tests to run without API credentials.
+    """
+
+    def __init__(
+        self,
+        client=None,
+    ):
+        super().__init__(
+            provider_id="parallel_search"
+        )
+
+        self.client = client
+
+
+    def _get_client(self):
+        """
+        Lazy-load the real Parallel client.
+
+        Avoids requiring API keys during unit tests.
+        """
+
+        if self.client is None:
+
+            from backend.providers.parallel.parallel_client import (
+                ParallelClientWrapper,
+            )
+
+            self.client = ParallelClientWrapper()
+
+        return self.client
+
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute a live Parallel search.
+        """
+
+        try:
+
+            client = self._get_client()
+
+            result = await client.search(
+                query=context.request
+            )
+
+            return ProviderResult(
+                success=True,
+                provider_id=self.provider_id,
+                output=result,
+            )
+
+        except Exception as exc:
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error=str(exc),
+            )
+
+==================== parallel_client.py ====================
+
+"""
+Parallel Search API Client Wrapper.
+
+This module isolates the official Parallel SDK.
+
+The rest of EasyChatBot does not directly depend on
+the Parallel SDK implementation.
+
+Architecture:
+
+Research Agent
+        |
+        v
+Parallel Provider
+        |
+        v
+Parallel Client Wrapper
+        |
+        v
+Parallel API
+"""
+
+import asyncio
+import os
+from typing import Any
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+class ParallelClientWrapper:
+    """
+    Wrapper around the official Parallel Search SDK.
+
+    Responsibilities:
+    - authenticate with Parallel
+    - execute searches
+    - normalize SDK responses
+
+    Does not:
+    - create learning content
+    - manage agents
+    - decide workflows
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+    ):
+        """
+        Initialise the Parallel SDK client.
+        """
+
+        self.api_key = (
+            api_key
+            or os.getenv("PARALLEL_API_KEY")
+        )
+
+        if not self.api_key:
+            raise ValueError(
+                "PARALLEL_API_KEY environment variable is required"
+            )
+
+        self._client = self._create_client()
+
+
+    def _create_client(self):
+        """
+        Create the official Parallel SDK client.
+
+        SDK:
+            parallel-web 1.1.0
+        """
+
+        from parallel import Parallel
+
+        return Parallel(
+            api_key=self.api_key
+        )
+
+
+    @staticmethod
+    def _normalize_response(
+        response: Any,
+    ) -> Any:
+        """
+        Convert the Parallel SDK response into
+        application-safe data.
+
+        Pydantic SDK models are converted to dictionaries.
+        Other JSON-compatible values are returned unchanged.
+        """
+
+        if hasattr(response, "model_dump"):
+            return response.model_dump()
+
+        if hasattr(response, "dict"):
+            return response.dict()
+
+        return response
+
+
+    async def search(
+        self,
+        query: str,
+    ) -> dict[str, Any]:
+        """
+        Execute a Parallel web search.
+
+        Args:
+            query:
+                Natural-language research objective.
+
+        Returns:
+            Normalized application-level search result.
+        """
+
+        search_query = self._build_search_query(
+            query
+        )
+
+        response = await asyncio.to_thread(
+            self._client.search,
+            search_queries=[
+                search_query
+            ],
+            mode="advanced",
+            objective=query,
+        )
+
+        return {
+            "query": query,
+            "search_queries": [
+                search_query
+            ],
+            "results": self._normalize_response(
+                response
+            ),
+        }
+
+
+    @staticmethod
+    def _build_search_query(
+        query: str,
+    ) -> str:
+        """
+        Build a concise search query from the
+        user's research request.
+
+        The full request remains the Parallel
+        objective while the search query is kept
+        concise.
+        """
+
+        words = query.strip().split()
+
+        if len(words) <= 6:
+            return query.strip()
+
+        return " ".join(words[:6])
+
+==================== conversation_agent.py ====================
+
+"""
+Conversation Agent.
+
+Provides character-aware conversational responses
+for the EasyChatBot hackathon runtime.
+
+The agent remains provider-independent.
+
+Architecture:
+
+ExecutionContext
+|
+v
+ConversationAgent
+|
++--> CharacterProfile
+|
++--> Optional MemoryContext
+|
++--> Optional IntelligenceContext
+|
+v
+ConversationRequest
+|
+v
+LLMService
+|
+v
+LLMProvider
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import (
+    AgentManifest,
+)
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.services.llm_service import (
+    LLMService,
+)
+
+
+class ConversationAgent(BaseAgent):
+    """
+    Character-aware conversation agent.
+
+    The agent consumes the provider-independent
+    ExecutionContext.
+
+    Memory and Live Intelligence remain application/runtime
+    concerns. The agent only receives their prepared context.
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        llm_service: LLMService | None = None,
+        llm_provider: LLMProvider | None = None,
+    ) -> None:
+
+        super().__init__(
+            AgentManifest(
+                agent_id="conversation_agent",
+                name="Conversation Agent",
+                description=(
+                    "Provides character-aware "
+                    "conversation responses."
+                ),
+            )
+        )
+
+        if (
+            llm_service is not None
+            and llm_provider is not None
+        ):
+            raise ValueError(
+                "Provide either llm_service or "
+                "llm_provider, not both."
+            )
+
+        self.character = character
+
+        if llm_service is not None:
+            self.llm_service = llm_service
+
+        elif llm_provider is not None:
+            self.llm_service = LLMService(
+                llm_provider
+            )
+
+        else:
+            self.llm_service = None
+
+    def build_request(
+        self,
+        context: ExecutionContext,
+    ) -> ConversationRequest:
+        """
+        Build a provider-independent conversation request.
+
+        Memory and intelligence are explicitly represented
+        as contextual information.
+
+        Neither is treated as an instruction.
+        """
+
+        system_instruction = (
+            f"You are {self.character.name}, "
+            f"a character in EasyChatBot. "
+            f"Your personality is: "
+            f"{self.character.personality} "
+            f"Your learning style is: "
+            f"{self.character.learning_style} "
+            f"Communicate in a way that is consistent "
+            f"with this character."
+        )
+
+        context_sections: list[str] = []
+
+        # -------------------------------------------------
+        # Learner memory
+        # -------------------------------------------------
+
+        if context.has_memory_context:
+            memory_text = (
+                context.memory_context.text
+            )
+
+            if memory_text.strip():
+                context_sections.append(
+                    "Learner memory context:\n"
+                    + memory_text
+                )
+
+        # -------------------------------------------------
+        # Live intelligence
+        # -------------------------------------------------
+
+        if context.has_intelligence_context:
+            intelligence_text = (
+                context.intelligence_context
+                .to_context_text()
+            )
+
+            if intelligence_text.strip():
+                context_sections.append(
+                    "Current live intelligence:\n"
+                    + intelligence_text
+                )
+
+        # -------------------------------------------------
+        # Combined contextual information
+        # -------------------------------------------------
+
+        conversation_context = None
+
+        if context_sections:
+            conversation_context = (
+                "\n\n".join(
+                    context_sections
+                )
+            )
+
+        return ConversationRequest(
+            system_instruction=system_instruction,
+            user_prompt=context.request,
+            conversation_context=(
+                conversation_context
+            ),
+            character_id=(
+                self.character.character_id
+            ),
+            character_name=(
+                self.character.name
+            ),
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the conversation agent.
+        """
+
+        conversation_request = (
+            self.build_request(context)
+        )
+
+        provider_result = None
+
+        if self.llm_service is not None:
+            provider_result = (
+                await self.llm_service.generate(
+                    conversation_request
+                )
+            )
+
+            if not provider_result.success:
+                return AgentResult(
+                    success=False,
+                    agent_id=(
+                        self.manifest.agent_id
+                    ),
+                    output={
+                        "character": (
+                            self.character.name
+                        ),
+
+                        "character_profile": {
+                            "character_id": (
+                                self.character.character_id
+                            ),
+                            "name": (
+                                self.character.name
+                            ),
+                            "description": (
+                                self.character.description
+                            ),
+                            "personality": (
+                                self.character.personality
+                            ),
+                            "learning_style": (
+                                self.character.learning_style
+                            ),
+                        },
+
+                        "personality": (
+                            self.character.personality
+                        ),
+
+                        "learning_style": (
+                            self.character.learning_style
+                        ),
+
+                        "message": (
+                            "The conversation provider "
+                            "could not generate a response."
+                        ),
+
+                        "intelligence_context": (
+                            conversation_request
+                            .conversation_context
+                        ),
+
+                        "conversation_request": (
+                            conversation_request
+                        ),
+
+                        "provider_id": (
+                            provider_result.provider_id
+                        ),
+
+                        "provider_error": (
+                            provider_result.error
+                        ),
+                    },
+                )
+
+        if provider_result is not None:
+            message = provider_result.output
+
+        else:
+            message = (
+                f"{self.character.name}: "
+                f"Let's explore this together. "
+                f"You asked: "
+                f"{context.request}"
+            )
+
+        output = {
+            "character": (
+                self.character.name
+            ),
+
+            "character_profile": {
+                "character_id": (
+                    self.character.character_id
+                ),
+                "name": (
+                    self.character.name
+                ),
+                "description": (
+                    self.character.description
+                ),
+                "personality": (
+                    self.character.personality
+                ),
+                "learning_style": (
+                    self.character.learning_style
+                ),
+            },
+
+            "personality": (
+                self.character.personality
+            ),
+
+            "learning_style": (
+                self.character.learning_style
+            ),
+
+            "message": message,
+
+            "intelligence_context": (
+                conversation_request
+                .conversation_context
+            ),
+
+            "conversation_request": (
+                conversation_request
+            ),
+        }
+
+        if provider_result is not None:
+            output["provider_id"] = (
+                provider_result.provider_id
+            )
+
+        return AgentResult(
+            success=True,
+            agent_id=(
+                self.manifest.agent_id
+            ),
+            output=output,
+        )

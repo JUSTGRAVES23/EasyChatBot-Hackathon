@@ -1,0 +1,1006 @@
+﻿==================== CHALLENGE GENERATOR ====================
+
+"""
+Challenge Engine Generator.
+
+Transforms structured intelligence output into
+a learner-facing challenge.
+
+Architecture:
+
+Live Intelligence Agent
+        |
+        v
+Challenge Generator
+        |
+        v
+LearningChallenge
+
+Responsibilities:
+- Convert research intelligence into learning structure
+- Apply learner level/language context
+- Produce deterministic challenge objects
+
+Non-responsibilities:
+- Search
+- Provider calls
+- Agent orchestration
+- Direct LLM dependency
+
+Future extension:
+- Inject LLM-based content generation service
+- Add templates/configuration-driven challenges
+"""
+
+from typing import Protocol, List
+
+from src.ai_agents.live_intelligence_agent.handler import (
+    LiveIntelligenceResponse,
+)
+
+from src.challenge_engine.models import (
+    DiscussionQuestion,
+    LearningChallenge,
+    VocabularyItem,
+)
+
+
+class ChallengeContentGenerator(Protocol):
+    """
+    Contract for optional AI-powered content generation.
+
+    Keeps Challenge Engine independent from
+    a specific LLM provider.
+    """
+
+    async def generate_vocabulary(
+        self,
+        summary: str,
+        language: str,
+        learner_level: str,
+    ) -> List[VocabularyItem]:
+        ...
+
+    async def generate_questions(
+        self,
+        summary: str,
+        language: str,
+        learner_level: str,
+    ) -> List[DiscussionQuestion]:
+        ...
+
+
+class ChallengeGenerator:
+    """
+    Generates learning challenges from intelligence output.
+    """
+
+    def __init__(
+        self,
+        content_generator: ChallengeContentGenerator,
+    ) -> None:
+        self._content_generator = content_generator
+
+    async def generate(
+        self,
+        intelligence: LiveIntelligenceResponse,
+        language: str = "French",
+        learner_level: str = "B2",
+    ) -> LearningChallenge:
+        """
+        Transform intelligence into learning challenge.
+
+        Flow:
+
+        Research Output
+              |
+              v
+        Vocabulary Generation
+              |
+              v
+        Discussion Generation
+              |
+              v
+        Learning Challenge
+        """
+
+        if not intelligence.summary.strip():
+            raise ValueError(
+                "Intelligence summary cannot be empty"
+            )
+
+        vocabulary = await self._content_generator.generate_vocabulary(
+            summary=intelligence.summary,
+            language=language,
+            learner_level=learner_level,
+        )
+
+        questions = await self._content_generator.generate_questions(
+            summary=intelligence.summary,
+            language=language,
+            learner_level=learner_level,
+        )
+
+        return LearningChallenge(
+            title=f"{intelligence.topic} Learning Challenge",
+            topic=intelligence.topic,
+            language=language,
+            learner_level=learner_level,
+            summary=intelligence.summary,
+            vocabulary=vocabulary,
+            discussion_questions=questions,
+        )
+
+
+==================== CHALLENGE MODELS ====================
+
+"""
+Challenge Engine Data Models.
+
+Defines the provider-independent contracts used by the
+Challenge Generation layer.
+
+Architecture:
+
+Live Intelligence Agent
+        |
+        v
+Challenge Engine Models
+        |
+        v
+Challenge Generator
+        |
+        v
+Learning Challenge Output
+
+Responsibilities:
+- Define structured learning challenge data
+- Keep challenge generation independent from providers/models
+- Provide stable contracts for application layers
+
+Non-responsibilities:
+- LLM calls
+- Search operations
+- Agent execution
+- User interface handling
+"""
+
+from dataclasses import dataclass
+from typing import List
+
+
+@dataclass(frozen=True)
+class VocabularyItem:
+    """
+    Vocabulary item generated from learning content.
+    """
+
+    term: str
+    definition: str
+    example: str | None = None
+
+
+@dataclass(frozen=True)
+class DiscussionQuestion:
+    """
+    Conversation practice question.
+    """
+
+    question: str
+    difficulty: str = "B2"
+
+
+@dataclass(frozen=True)
+class LearningChallenge:
+    """
+    Complete learning challenge output.
+
+    This is the main contract returned
+    by the Challenge Engine.
+    """
+
+    title: str
+    topic: str
+    language: str
+    learner_level: str
+
+    summary: str
+
+    vocabulary: List[VocabularyItem]
+
+    discussion_questions: List[DiscussionQuestion]
+
+    created_by_agent: str = "live_intelligence_agent"
+
+
+==================== DISCOVERY SERVICE ====================
+
+"""
+Hackathon Discovery Service.
+
+This module provides the application-level orchestration boundary
+for personalised product discovery.
+
+Architecture:
+
+Discovery inputs
+    |
+    +--> DealCard
+    |
+    +--> Memory context
+    |
+    +--> Character context
+    |
+    v
+DiscoveryService
+    |
+    v
+FlashDealCard
+
+Responsibilities:
+- orchestrate existing discovery components
+- apply explicit memory context
+- apply explicit character context
+- create the user-facing FlashDealCard
+- preserve domain data and identifiers
+
+Non-responsibilities:
+- provider SDK calls
+- web searching
+- memory persistence
+- payment processing
+- vendor APIs
+- autonomous purchasing
+- character business logic
+
+The service deliberately receives already-discovered DealCard data.
+Provider integration remains in the provider/agent layers.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from src.ai_runtime.discovery.flash_deal_card import (
+    FlashDealCard,
+)
+
+from src.ai_runtime.discovery.models import (
+    DealCard,
+)
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+
+@dataclass(frozen=True)
+class CharacterContext:
+    """
+    Explicit character presentation context.
+
+    The character is a presentation/personality concern.
+    It does not perform discovery or commerce operations.
+    """
+
+    character_id: str
+    character_name: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if not self.character_id.strip():
+            raise ValueError(
+                "Character context character_id cannot be empty."
+            )
+
+        if not self.character_name.strip():
+            raise ValueError(
+                "Character context character_name cannot be empty."
+            )
+
+        if not self.message.strip():
+            raise ValueError(
+                "Character context message cannot be empty."
+            )
+
+
+@dataclass(frozen=True)
+class DiscoveryRequest:
+    """
+    Application-level request for personalised discovery.
+
+    The request contains already-discovered product information
+    and explicit user context.
+
+    No external search is performed by DiscoveryService.
+    """
+
+    user_id: str
+    deal: DealCard
+    character: CharacterContext
+    product_image_url: str
+    tagline: str
+    highlights: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.user_id.strip():
+            raise ValueError(
+                "Discovery request user_id cannot be empty."
+            )
+
+        if not self.product_image_url.strip():
+            raise ValueError(
+                "Discovery request product_image_url "
+                "cannot be empty."
+            )
+
+        if not self.tagline.strip():
+            raise ValueError(
+                "Discovery request tagline cannot be empty."
+            )
+
+        if not self.highlights:
+            raise ValueError(
+                "Discovery request must contain at least "
+                "one highlight."
+            )
+
+
+class DiscoveryService:
+    """
+    Orchestrates personalised discovery.
+
+    This service intentionally contains no provider logic and no
+    persistence logic. It composes the existing DealCard,
+    MemoryEntry and FlashDealCard contracts.
+    """
+
+    def create_flash_deal(
+        self,
+        request: DiscoveryRequest,
+        memories: list[MemoryEntry] | None = None,
+    ) -> FlashDealCard:
+        """
+        Create a personalised FlashDealCard.
+
+        Memory is read-only input to this operation.
+
+        Preference memory is used to generate the personal
+        relevance explanation. Other memory types are not
+        automatically treated as preferences.
+        """
+
+        memory_context = memories or []
+
+        relevance_reason = self._build_relevance_reason(
+            memory_context
+        )
+
+        return FlashDealCard.from_deal(
+            deal=request.deal,
+            character_id=request.character.character_id,
+            character_name=request.character.character_name,
+            character_message=request.character.message,
+            relevance_reason=relevance_reason,
+            product_image_url=request.product_image_url,
+            tagline=request.tagline,
+            highlights=request.highlights,
+            metadata={
+                "user_id": request.user_id,
+                "discovery_service": "hackathon",
+            },
+        )
+
+    @staticmethod
+    def _build_relevance_reason(
+        memories: list[MemoryEntry],
+    ) -> str:
+        """
+        Build a deterministic relevance explanation.
+
+        Only explicit preference memories are used.
+
+        This is deliberately deterministic for the hackathon;
+        an LLM-based personalisation layer can be introduced later
+        behind an explicit interface.
+        """
+
+        preferences = [
+            memory
+            for memory in memories
+            if memory.memory_type
+            == MemoryType.PREFERENCE
+        ]
+
+        if not preferences:
+            return (
+                "This discovery may be relevant to your "
+                "interests."
+            )
+
+        preference = preferences[0].content.strip()
+
+        return (
+            "This may be relevant because you "
+            f"{preference.rstrip('.') }."
+        )
+
+
+==================== DISCOVERY MODELS ====================
+
+"""
+Hackathon Discovery domain models.
+
+These models represent the small discovery layer required
+for the hackathon experience.
+
+The hackathon is NOT a marketplace.
+
+EasyChatBot:
+    discovers products
+    evaluates opportunities
+    presents character-led flash ideas
+    provides an outbound vendor link
+
+The external vendor:
+    owns the product page
+    owns checkout
+    owns payment
+    fulfils the purchase
+
+Architecture:
+
+Discovery Intelligence
+        |
+        v
+     DealCard
+        |
+        +--> CommerceLink
+        |
+        v
+    FlashIdea
+        |
+        v
+     Character
+        |
+        v
+       User
+        |
+        v
+ External Vendor
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from uuid import uuid4
+
+
+class CommerceLinkType(str, Enum):
+    """
+    Type of outbound commerce link.
+    """
+
+    DIRECT = "direct"
+
+    AFFILIATE = "affiliate"
+
+
+@dataclass(frozen=True)
+class CommerceLink:
+    """
+    Outbound link to the external vendor.
+
+    EasyChatBot does not process the transaction.
+
+    The destination remains the vendor's website.
+    """
+
+    vendor: str
+
+    destination_url: str
+
+    link_type: CommerceLinkType = (
+        CommerceLinkType.DIRECT
+    )
+
+    tracking_url: str | None = None
+
+    def __post_init__(self) -> None:
+        """
+        Validate the commerce link.
+        """
+
+        if not self.vendor.strip():
+            raise ValueError(
+                "Commerce vendor cannot be empty."
+            )
+
+        if not self.destination_url.strip():
+            raise ValueError(
+                "Commerce destination URL "
+                "cannot be empty."
+            )
+
+        if not (
+            self.destination_url.startswith(
+                "https://"
+            )
+            or self.destination_url.startswith(
+                "http://"
+            )
+        ):
+            raise ValueError(
+                "Commerce destination URL must "
+                "use HTTP or HTTPS."
+            )
+
+        if self.tracking_url is not None:
+            if not self.tracking_url.strip():
+                raise ValueError(
+                    "Commerce tracking URL cannot "
+                    "be empty when provided."
+                )
+
+            if not (
+                self.tracking_url.startswith(
+                    "https://"
+                )
+                or self.tracking_url.startswith(
+                    "http://"
+                )
+            ):
+                raise ValueError(
+                    "Commerce tracking URL must "
+                    "use HTTP or HTTPS."
+                )
+
+    @property
+    def click_url(self) -> str:
+        """
+        Return the URL that should be opened by the user.
+
+        A tracking URL takes precedence when one is
+        available.
+        """
+
+        return (
+            self.tracking_url
+            if self.tracking_url is not None
+            else self.destination_url
+        )
+
+
+@dataclass(frozen=True)
+class DealCard:
+    """
+    Compact representation of a discovered product opportunity.
+
+    This is intentionally not a product catalogue entity.
+
+    It represents a single discovery opportunity surfaced
+    to a user.
+    """
+
+    product_name: str
+
+    vendor: str
+
+    price: float
+
+    currency: str
+
+    commerce_link: CommerceLink
+
+    deal_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    previous_price: float | None = None
+
+    discount_percentage: float | None = None
+
+    source: str | None = None
+
+    description: str | None = None
+
+    discovered_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    metadata: dict[str, str] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        """
+        Validate the DealCard.
+        """
+
+        if not self.product_name.strip():
+            raise ValueError(
+                "Deal product name cannot be empty."
+            )
+
+        if not self.vendor.strip():
+            raise ValueError(
+                "Deal vendor cannot be empty."
+            )
+
+        if self.price < 0:
+            raise ValueError(
+                "Deal price cannot be negative."
+            )
+
+        if not self.currency.strip():
+            raise ValueError(
+                "Deal currency cannot be empty."
+            )
+
+        if (
+            self.previous_price is not None
+            and self.previous_price < 0
+        ):
+            raise ValueError(
+                "Deal previous price cannot "
+                "be negative."
+            )
+
+        if (
+            self.discount_percentage is not None
+            and not 0 <= self.discount_percentage <= 100
+        ):
+            raise ValueError(
+                "Deal discount percentage must "
+                "be between 0 and 100."
+            )
+
+        if (
+            self.commerce_link.vendor
+            != self.vendor
+        ):
+            raise ValueError(
+                "Deal vendor must match the "
+                "commerce link vendor."
+            )
+
+
+@dataclass(frozen=True)
+class FlashIdea:
+    """
+    Character-led presentation of a discovered deal.
+
+    A FlashIdea is the user-facing discovery message.
+
+    It is not a transaction.
+    """
+
+    character_id: str
+
+    deal_id: str
+
+    message: str
+
+    title: str = "Flash idea"
+
+    idea_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    metadata: dict[str, str] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        """
+        Validate the FlashIdea.
+        """
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "FlashIdea character_id "
+                "cannot be empty."
+            )
+
+        if not self.deal_id.strip():
+            raise ValueError(
+                "FlashIdea deal_id "
+                "cannot be empty."
+            )
+
+        if not self.message.strip():
+            raise ValueError(
+                "FlashIdea message "
+                "cannot be empty."
+            )
+
+
+==================== PROVIDER BASE ====================
+
+"""
+Base Provider Contract.
+
+Defines the interface for external AI and knowledge providers.
+
+Examples:
+- Gemini
+- Parallel Search
+- Future LLM providers
+
+The Runtime communicates with providers through this contract.
+
+Providers are replaceable implementations.
+The Agent layer must remain independent from provider details.
+"""
+
+from abc import ABC, abstractmethod
+
+from backend.providers.provider_result import ProviderResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class BaseProvider(ABC):
+    """
+    Abstract base class for EasyChatBot providers.
+
+    Providers are responsible for communicating
+    with external services.
+
+    They are NOT responsible for:
+    - agent decisions
+    - workflow orchestration
+    - memory management
+    - user interaction
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ):
+        """
+        Initialise provider.
+
+        Args:
+            provider_id:
+                Unique provider identifier.
+        """
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute provider operation.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            ProviderResult containing provider output.
+        """
+
+        pass
+
+
+==================== PROVIDER RESULT ====================
+
+"""
+Provider Result Contract.
+
+Defines the standard response returned
+by external providers.
+
+All providers return this structure so
+the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    """
+    Immutable provider execution result.
+
+    Attributes:
+
+        success:
+            Indicates whether provider execution succeeded.
+
+        provider_id:
+            Identifier of the provider.
+
+        output:
+            Provider response payload.
+
+        error:
+            Error details if execution failed.
+    """
+
+    success: bool
+    provider_id: str
+    output: Any = None
+    error: str | None = None
+
+
+==================== MODEL CAPABILITIES ====================
+
+"""
+Model Capability Definition.
+
+Describes what an AI model can support.
+
+Used by the Runtime to select appropriate models.
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """
+    Capabilities supported by a model.
+    """
+
+    text_generation: bool = True
+    reasoning: bool = False
+    tool_usage: bool = False
+    vision: bool = False
+    audio: bool = False
+
+
+==================== PROVIDER CONTRACT TESTS ====================
+
+import pytest
+
+from backend.providers.base_provider import BaseProvider
+from backend.providers.provider_result import ProviderResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class DemoProvider(BaseProvider):
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output="Provider response",
+        )
+
+
+@pytest.mark.asyncio
+async def test_provider_execution():
+
+    provider = DemoProvider(
+        provider_id="demo_provider"
+    )
+
+    context = ExecutionContext(
+        user_id="user1",
+        request="Generate response"
+    )
+
+    result = await provider.execute(context)
+
+    assert result.success is True
+    assert result.provider_id == "demo_provider"
+    assert result.output == "Provider response"
+
+
+==================== CHALLENGE GENERATOR TESTS ====================
+
+"""
+Tests for Challenge Generator.
+"""
+
+import pytest
+
+from src.ai_agents.live_intelligence_agent.handler import (
+    LiveIntelligenceResponse,
+)
+
+from src.challenge_engine.generator import (
+    ChallengeGenerator,
+)
+
+from src.challenge_engine.models import (
+    DiscussionQuestion,
+    VocabularyItem,
+)
+
+
+class FakeContentGenerator:
+
+    async def generate_vocabulary(
+        self,
+        summary,
+        language,
+        learner_level,
+    ):
+        return [
+            VocabularyItem(
+                term="innovation",
+                definition="A new idea or approach.",
+            )
+        ]
+
+    async def generate_questions(
+        self,
+        summary,
+        language,
+        learner_level,
+    ):
+        return [
+            DiscussionQuestion(
+                question="Quel est votre avis ?"
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_generate_learning_challenge():
+
+    generator = ChallengeGenerator(
+        content_generator=FakeContentGenerator()
+    )
+
+    intelligence = LiveIntelligenceResponse(
+        topic="AI Regulation",
+        summary="AI regulation is evolving.",
+        sources=[],
+        key_information=[
+            "governance"
+        ],
+    )
+
+    result = await generator.generate(
+        intelligence
+    )
+
+    assert result.topic == "AI Regulation"
+    assert result.language == "French"
+    assert result.vocabulary[0].term == "innovation"
+    assert len(result.discussion_questions) == 1
+
+
+@pytest.mark.asyncio
+async def test_generator_rejects_empty_summary():
+
+    generator = ChallengeGenerator(
+        content_generator=FakeContentGenerator()
+    )
+
+    intelligence = LiveIntelligenceResponse(
+        topic="AI",
+        summary="",
+        sources=[],
+        key_information=[],
+    )
+
+    with pytest.raises(ValueError):
+        await generator.generate(
+            intelligence
+        )
+

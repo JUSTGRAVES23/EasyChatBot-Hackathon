@@ -22,17 +22,17 @@ LiveIntelligenceResponse
 
 The adapter:
 
-- validates the Runtime capability
-- translates Runtime payloads into LiveIntelligenceRequest
-- invokes the existing Live Intelligence Agent
-- translates the agent response into CapabilityResult
+- validates the Runtime capability;
+- translates Runtime payloads into LiveIntelligenceRequest;
+- invokes the existing Live Intelligence Agent;
+- translates the agent response into CapabilityResult.
 
 It does not:
 
-- implement intelligence logic
-- call Parallel directly
-- modify the LiveIntelligenceAgent
-- perform governance decisions
+- implement intelligence logic;
+- call providers directly;
+- modify the LiveIntelligenceAgent;
+- perform governance decisions.
 """
 
 from __future__ import annotations
@@ -65,10 +65,23 @@ class LiveIntelligenceExecutor(
         self,
         agent: LiveIntelligenceAgent,
     ) -> None:
+        """
+        Create Runtime executor.
+
+        Agent dependency is injected from composition.
+        """
+
+        if agent is None:
+            raise ValueError(
+                "LiveIntelligenceAgent cannot be None."
+            )
+
         self._agent = agent
 
     @property
-    def capability(self) -> CapabilityType:
+    def capability(
+        self,
+    ) -> CapabilityType:
         """
         Return the capability handled by this executor.
         """
@@ -83,6 +96,11 @@ class LiveIntelligenceExecutor(
         Translate and execute a Live Intelligence request.
         """
 
+        if request is None:
+            raise ValueError(
+                "CapabilityRequest cannot be None."
+            )
+
         if (
             request.capability
             != CapabilityType.LIVE_INTELLIGENCE
@@ -94,17 +112,21 @@ class LiveIntelligenceExecutor(
             )
 
         agent_request = (
-            self._build_agent_request(request)
+            self._build_agent_request(
+                request,
+            )
         )
 
         response = await self._agent.execute(
-            agent_request
+            agent_request,
         )
 
         return CapabilityResult(
             request_id=request.request_id,
             capability=request.capability,
-            status=CapabilityExecutionStatus.COMPLETED,
+            status=(
+                CapabilityExecutionStatus.COMPLETED
+            ),
             output=response,
             metadata={
                 "executor": (
@@ -124,12 +146,23 @@ class LiveIntelligenceExecutor(
 
         payload = request.payload
 
-        topic = payload.get("topic")
+        topic = payload.get(
+            "topic",
+        )
 
-        if not isinstance(topic, str):
+        if not isinstance(
+            topic,
+            str,
+        ):
             raise ValueError(
                 "Live Intelligence capability requires "
                 "a string 'topic'."
+            )
+
+        if not topic.strip():
+            raise ValueError(
+                "Live Intelligence 'topic' cannot "
+                "be empty."
             )
 
         language = payload.get(
@@ -142,7 +175,10 @@ class LiveIntelligenceExecutor(
             "B2",
         )
 
-        if not isinstance(language, str):
+        if not isinstance(
+            language,
+            str,
+        ):
             raise ValueError(
                 "Live Intelligence 'language' "
                 "must be a string."

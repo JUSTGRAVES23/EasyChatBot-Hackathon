@@ -1,0 +1,1485 @@
+============================================================
+FILE: .\src\ai_runtime\capabilities\gateway.py
+============================================================
+"""
+AI Runtime Capability Gateway.
+
+Controlled execution boundary between applications and
+concrete AI capabilities.
+
+Flow:
+
+Application
+    ↓
+CapabilityRequest
+    ↓
+CapabilityGateway
+    ↓
+Governance
+    ↓
+CapabilityRegistry
+    ↓
+CapabilityExecutor
+    ↓
+CapabilityResult
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityExecutionError,
+    CapabilityGovernanceError,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+)
+
+from src.ai_runtime.capabilities.registry import (
+    CapabilityRegistry,
+)
+
+
+class GovernanceDecisionResult(Protocol):
+    """
+    Minimal governance result required by the Runtime.
+    """
+
+    @property
+    def allowed(self) -> bool:
+        """
+        Whether execution is permitted.
+        """
+        ...
+
+
+class CapabilityGovernance(Protocol):
+    """
+    Governance boundary required by the Runtime gateway.
+    """
+
+    def evaluate(
+        self,
+        request: CapabilityRequest,
+    ) -> GovernanceDecisionResult:
+        """
+        Evaluate whether a capability may execute.
+        """
+        ...
+
+
+class CapabilityGateway:
+    """
+    Controlled Runtime entry point for capability execution.
+    """
+
+    def __init__(
+        self,
+        registry: CapabilityRegistry,
+        governance: CapabilityGovernance,
+    ) -> None:
+        self._registry = registry
+        self._governance = governance
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        """
+        Execute an approved capability.
+
+        Governance is evaluated before resolving and executing
+        the capability.
+        """
+
+        try:
+            governance_result = (
+                self._governance.evaluate(request)
+            )
+        except Exception as exc:
+            raise CapabilityGovernanceError(
+                "Governance evaluation failed."
+            ) from exc
+
+        if not governance_result.allowed:
+            return CapabilityResult(
+                request_id=request.request_id,
+                capability=request.capability,
+                status=CapabilityExecutionStatus.REJECTED,
+                error=(
+                    "Capability execution was rejected "
+                    "by governance."
+                ),
+                metadata={
+                    "governance_decision": "rejected",
+                },
+            )
+
+        executor = self._registry.resolve(
+            request.capability
+        )
+
+        try:
+            return await executor.execute(request)
+        except Exception as exc:
+            raise CapabilityExecutionError(
+                "Capability executor failed: "
+                f"{request.capability.value}"
+            ) from exc
+
+============================================================
+FILE: .\src\ai_runtime\capabilities\executor.py
+============================================================
+"""
+AI Runtime capability execution contract.
+
+This module defines the interface between the AI Runtime
+and concrete capability executors.
+
+Architecture:
+
+AI Runtime
+    |
+    v
+Capability Executor Interface
+    |
+    +---- Live Intelligence Executor
+    +---- Learning Executor
+    +---- Evaluation Executor
+    +---- Future Executors
+
+The Runtime depends on this contract.
+
+It does not depend directly on:
+- agents
+- providers
+- SDKs
+- external APIs
+
+Concrete executors are responsible for translating the
+provider-independent CapabilityRequest into the appropriate
+capability implementation.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityRequest,
+    CapabilityResult,
+    CapabilityType,
+)
+
+
+class CapabilityExecutor(ABC):
+    """
+    Abstract executor for one Runtime capability.
+
+    Each concrete executor must declare which capability
+    it handles and implement asynchronous execution.
+    """
+
+    @property
+    @abstractmethod
+    def capability(self) -> CapabilityType:
+        """
+        Return the capability handled by this executor.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        """
+        Execute a capability request.
+
+        Implementations must return a provider-independent
+        CapabilityResult.
+
+        They must not bypass the Runtime governance boundary.
+        """
+        raise NotImplementedError
+
+============================================================
+FILE: .\src\ai_runtime\capabilities\registry.py
+============================================================
+"""
+AI Runtime capability registry.
+
+The registry maps logical Runtime capabilities to their
+concrete executors.
+
+The registry:
+- resolves executors by capability
+- prevents duplicate registrations
+- provides explicit dependency injection
+- does not execute capabilities
+- does not perform governance decisions
+- does not know about providers
+"""
+
+from __future__ import annotations
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityAlreadyRegisteredError,
+    CapabilityNotRegisteredError,
+)
+
+from src.ai_runtime.capabilities.executor import (
+    CapabilityExecutor,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityType,
+)
+
+
+class CapabilityRegistry:
+    """
+    Dependency-injection registry for Runtime capabilities.
+    """
+
+    def __init__(
+        self,
+        executors: list[CapabilityExecutor] | None = None,
+    ) -> None:
+        self._executors: dict[
+            CapabilityType,
+            CapabilityExecutor,
+        ] = {}
+
+        for executor in executors or []:
+            self.register(executor)
+
+    def register(
+        self,
+        executor: CapabilityExecutor,
+    ) -> None:
+        """
+        Register an executor for its declared capability.
+        """
+
+        capability = executor.capability
+
+        if capability in self._executors:
+            raise CapabilityAlreadyRegisteredError(
+                "Capability executor already registered: "
+                f"{capability.value}"
+            )
+
+        self._executors[capability] = executor
+
+    def resolve(
+        self,
+        capability: CapabilityType,
+    ) -> CapabilityExecutor:
+        """
+        Resolve the executor responsible for a capability.
+        """
+
+        try:
+            return self._executors[capability]
+        except KeyError as exc:
+            raise CapabilityNotRegisteredError(
+                "No executor registered for capability: "
+                f"{capability.value}"
+            ) from exc
+
+    def contains(
+        self,
+        capability: CapabilityType,
+    ) -> bool:
+        """
+        Return whether an executor is registered.
+        """
+
+        return capability in self._executors
+
+    def capabilities(
+        self,
+    ) -> tuple[CapabilityType, ...]:
+        """
+        Return all registered capabilities.
+        """
+
+        return tuple(self._executors.keys())
+
+============================================================
+CAPABILITY GATEWAY TESTS
+============================================================
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_errors.py
+============================================================
+"""
+Tests for Runtime capability errors.
+"""
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityAlreadyRegisteredError,
+    CapabilityExecutionError,
+    CapabilityGovernanceError,
+    CapabilityNotRegisteredError,
+    InvalidCapabilityRequestError,
+    RuntimeCapabilityError,
+)
+
+
+def test_all_runtime_errors_extend_runtime_capability_error():
+
+    errors = (
+        InvalidCapabilityRequestError,
+        CapabilityNotRegisteredError,
+        CapabilityAlreadyRegisteredError,
+        CapabilityExecutionError,
+        CapabilityGovernanceError,
+    )
+
+    for error_type in errors:
+        assert issubclass(
+            error_type,
+            RuntimeCapabilityError,
+        )
+
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_executor.py
+============================================================
+"""
+Tests for the AI Runtime capability executor contract.
+"""
+
+import pytest
+
+from src.ai_runtime.capabilities.executor import (
+    CapabilityExecutor,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+    CapabilityType,
+)
+
+
+class FakeCapabilityExecutor(CapabilityExecutor):
+    """
+    Minimal executor used only to verify the contract.
+    """
+
+    @property
+    def capability(self) -> CapabilityType:
+        return CapabilityType.LIVE_INTELLIGENCE
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+
+        return CapabilityResult(
+            request_id=request.request_id,
+            capability=request.capability,
+            status=CapabilityExecutionStatus.COMPLETED,
+            output={
+                "executed": True,
+            },
+        )
+
+
+def test_executor_declares_capability():
+
+    executor = FakeCapabilityExecutor()
+
+    assert (
+        executor.capability
+        == CapabilityType.LIVE_INTELLIGENCE
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_returns_provider_independent_result():
+
+    executor = FakeCapabilityExecutor()
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="req-executor-001",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    result = await executor.execute(request)
+
+    assert isinstance(
+        result,
+        CapabilityResult,
+    )
+
+    assert (
+        result.request_id
+        == "req-executor-001"
+    )
+
+    assert (
+        result.capability
+        == CapabilityType.LIVE_INTELLIGENCE
+    )
+
+    assert (
+        result.status
+        == CapabilityExecutionStatus.COMPLETED
+    )
+
+    assert result.output == {
+        "executed": True,
+    }
+
+
+def test_executor_is_abstract():
+
+    with pytest.raises(TypeError):
+
+        CapabilityExecutor()
+
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py
+============================================================
+"""
+Tests for the AI Runtime Capability Gateway.
+"""
+
+import pytest
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityExecutionError,
+    CapabilityGovernanceError,
+)
+
+from src.ai_runtime.capabilities.executor import (
+    CapabilityExecutor,
+)
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+    CapabilityType,
+)
+
+from src.ai_runtime.capabilities.registry import (
+    CapabilityRegistry,
+)
+
+
+class FakeGovernanceResult:
+    """
+    Minimal governance result for gateway tests.
+    """
+
+    def __init__(
+        self,
+        allowed: bool,
+    ) -> None:
+        self.allowed = allowed
+
+
+class FakeGovernance:
+    """
+    Deterministic governance implementation for tests.
+    """
+
+    def __init__(
+        self,
+        allowed: bool,
+    ) -> None:
+        self.allowed = allowed
+        self.calls = 0
+
+    def evaluate(
+        self,
+        request: CapabilityRequest,
+    ) -> FakeGovernanceResult:
+
+        self.calls += 1
+
+        return FakeGovernanceResult(
+            allowed=self.allowed
+        )
+
+
+class FailingGovernance:
+    """
+    Governance implementation that fails unexpectedly.
+    """
+
+    def evaluate(
+        self,
+        request: CapabilityRequest,
+    ) -> FakeGovernanceResult:
+
+        raise RuntimeError(
+            "governance infrastructure failure"
+        )
+
+
+class FakeExecutor(CapabilityExecutor):
+    """
+    Fake executor used to verify gateway orchestration.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_request: CapabilityRequest | None = None
+
+    @property
+    def capability(self) -> CapabilityType:
+        return CapabilityType.LIVE_INTELLIGENCE
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+
+        self.calls += 1
+        self.last_request = request
+
+        return CapabilityResult(
+            request_id=request.request_id,
+            capability=request.capability,
+            status=CapabilityExecutionStatus.COMPLETED,
+            output={
+                "executed": True,
+            },
+        )
+
+
+class FailingExecutor(CapabilityExecutor):
+    """
+    Executor that fails unexpectedly.
+    """
+
+    @property
+    def capability(self) -> CapabilityType:
+        return CapabilityType.LIVE_INTELLIGENCE
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+
+        raise RuntimeError(
+            "provider failure"
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_executes_allowed_capability():
+
+    executor = FakeExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    governance = FakeGovernance(
+        allowed=True
+    )
+
+    gateway = CapabilityGateway(
+        registry=registry,
+        governance=governance,
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="gateway-001",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    result = await gateway.execute(
+        request
+    )
+
+    assert (
+        result.status
+        == CapabilityExecutionStatus.COMPLETED
+    )
+
+    assert result.succeeded is True
+
+    assert governance.calls == 1
+
+    assert executor.calls == 1
+
+    assert executor.last_request is request
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_blocked_capability():
+
+    executor = FakeExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    governance = FakeGovernance(
+        allowed=False
+    )
+
+    gateway = CapabilityGateway(
+        registry=registry,
+        governance=governance,
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="gateway-002",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    result = await gateway.execute(
+        request
+    )
+
+    assert (
+        result.status
+        == CapabilityExecutionStatus.REJECTED
+    )
+
+    assert result.rejected is True
+
+    assert executor.calls == 0
+
+    assert governance.calls == 1
+
+    assert (
+        result.metadata["governance_decision"]
+        == "rejected"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_passes_original_request_to_executor():
+
+    executor = FakeExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    governance = FakeGovernance(
+        allowed=True
+    )
+
+    gateway = CapabilityGateway(
+        registry=registry,
+        governance=governance,
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="gateway-003",
+        payload={
+            "topic": "European AI regulation",
+            "language": "French",
+        },
+        metadata={
+            "trace_id": "trace-003",
+        },
+        requested_by="learning_application",
+    )
+
+    await gateway.execute(
+        request
+    )
+
+    assert executor.last_request is request
+
+    assert (
+        executor.last_request.payload["language"]
+        == "French"
+    )
+
+    assert (
+        executor.last_request.metadata["trace_id"]
+        == "trace-003"
+    )
+
+
+@pytest.mark.asyncio
+async def test_governance_is_evaluated_before_execution():
+
+    executor = FakeExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    governance = FakeGovernance(
+        allowed=False
+    )
+
+    gateway = CapabilityGateway(
+        registry=registry,
+        governance=governance,
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="gateway-004",
+        payload={},
+    )
+
+    result = await gateway.execute(
+        request
+    )
+
+    assert result.rejected is True
+
+    assert governance.calls == 1
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_wraps_governance_failure():
+
+    executor = FakeExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    gateway = CapabilityGateway(
+        registry=registry,
+        governance=FailingGovernance(),
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="gateway-error-001",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    with pytest.raises(
+        CapabilityGovernanceError,
+        match="Governance evaluation failed",
+    ):
+        await gateway.execute(request)
+
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_wraps_executor_failure():
+
+    executor = FailingExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    gateway = CapabilityGateway(
+        registry=registry,
+        governance=FakeGovernance(
+            allowed=True
+        ),
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="gateway-error-002",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    with pytest.raises(
+        CapabilityExecutionError,
+        match="Capability executor failed",
+    ):
+        await gateway.execute(request)
+
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py
+============================================================
+"""
+Tests for the Runtime Live Intelligence executor adapter.
+"""
+
+import pytest
+
+from src.ai_runtime.capabilities.live_intelligence_executor import (
+    LiveIntelligenceExecutor,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityType,
+)
+
+
+class FakeLiveIntelligenceAgent:
+    """
+    Fake implementation of the existing agent contract.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_request = None
+
+    async def execute(
+        self,
+        request,
+    ):
+        self.calls += 1
+        self.last_request = request
+
+        return {
+            "topic": request.topic,
+            "language": request.language,
+            "learner_level": request.learner_level,
+            "summary": "AI Act learning content",
+        }
+
+
+def test_executor_declares_live_intelligence():
+
+    executor = LiveIntelligenceExecutor(
+        agent=FakeLiveIntelligenceAgent()
+    )
+
+    assert (
+        executor.capability
+        == CapabilityType.LIVE_INTELLIGENCE
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_translates_runtime_request():
+
+    agent = FakeLiveIntelligenceAgent()
+
+    executor = LiveIntelligenceExecutor(
+        agent=agent
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="live-runtime-001",
+        payload={
+            "topic": "AI Act",
+            "language": "French",
+            "learner_level": "B2",
+        },
+    )
+
+    result = await executor.execute(
+        request
+    )
+
+    assert (
+        result.status
+        == CapabilityExecutionStatus.COMPLETED
+    )
+
+    assert result.succeeded is True
+
+    assert agent.calls == 1
+
+    assert agent.last_request.topic == "AI Act"
+
+    assert (
+        agent.last_request.language
+        == "French"
+    )
+
+    assert (
+        agent.last_request.learner_level
+        == "B2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_applies_default_language_and_level():
+
+    agent = FakeLiveIntelligenceAgent()
+
+    executor = LiveIntelligenceExecutor(
+        agent=agent
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="live-runtime-002",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    result = await executor.execute(
+        request
+    )
+
+    assert result.succeeded is True
+
+    assert (
+        agent.last_request.language
+        == "French"
+    )
+
+    assert (
+        agent.last_request.learner_level
+        == "B2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_returns_agent_output():
+
+    agent = FakeLiveIntelligenceAgent()
+
+    executor = LiveIntelligenceExecutor(
+        agent=agent
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="live-runtime-003",
+        payload={
+            "topic": "European AI regulation",
+        },
+    )
+
+    result = await executor.execute(
+        request
+    )
+
+    assert result.output == {
+        "topic": "European AI regulation",
+        "language": "French",
+        "learner_level": "B2",
+        "summary": "AI Act learning content",
+    }
+
+    assert (
+        result.metadata["executor"]
+        == "live_intelligence_executor"
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_wrong_capability():
+
+    agent = FakeLiveIntelligenceAgent()
+
+    executor = LiveIntelligenceExecutor(
+        agent=agent
+    )
+
+    request = CapabilityRequest(
+        capability=CapabilityType.EVALUATION,
+        request_id="live-runtime-004",
+        payload={},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported capability",
+    ):
+        await executor.execute(request)
+
+    assert agent.calls == 0
+
+
+def test_executor_requires_topic():
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="live-runtime-005",
+        payload={},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires a string 'topic'",
+    ):
+        LiveIntelligenceExecutor._build_agent_request(
+            request
+        )
+
+
+def test_executor_rejects_non_string_topic():
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="live-runtime-006",
+        payload={
+            "topic": 123,
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires a string 'topic'",
+    ):
+        LiveIntelligenceExecutor._build_agent_request(
+            request
+        )
+
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py
+============================================================
+"""
+Tests for AI Runtime capability contracts.
+"""
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+    CapabilityType,
+)
+
+
+def test_capability_request_accepts_valid_request():
+
+    request = CapabilityRequest(
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        request_id="req-001",
+        payload={
+            "topic": "AI Act",
+        },
+    )
+
+    assert (
+        request.capability
+        == CapabilityType.LIVE_INTELLIGENCE
+    )
+
+    assert request.request_id == "req-001"
+
+    assert request.payload == {
+        "topic": "AI Act",
+    }
+
+    assert request.requested_by == "application"
+
+
+def test_capability_request_supports_metadata():
+
+    request = CapabilityRequest(
+        capability=CapabilityType.EVALUATION,
+        request_id="req-002",
+        payload={
+            "challenge_id": "challenge-001",
+        },
+        metadata={
+            "trace_id": "trace-001",
+        },
+        requested_by="learning_application",
+    )
+
+    assert request.metadata["trace_id"] == "trace-001"
+
+    assert (
+        request.requested_by
+        == "learning_application"
+    )
+
+
+def test_empty_request_id_is_rejected():
+
+    try:
+        CapabilityRequest(
+            capability=CapabilityType.LIVE_INTELLIGENCE,
+            request_id="",
+            payload={},
+        )
+    except ValueError as exc:
+        assert "request_id" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty request_id to be rejected."
+        )
+
+
+def test_empty_requester_is_rejected():
+
+    try:
+        CapabilityRequest(
+            capability=CapabilityType.LIVE_INTELLIGENCE,
+            request_id="req-003",
+            payload={},
+            requested_by="",
+        )
+    except ValueError as exc:
+        assert "requested_by" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty requested_by to be rejected."
+        )
+
+
+def test_capability_result_reports_success():
+
+    result = CapabilityResult(
+        request_id="req-004",
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        status=CapabilityExecutionStatus.COMPLETED,
+        output={
+            "summary": "AI Act research",
+        },
+    )
+
+    assert result.succeeded is True
+    assert result.failed is False
+    assert result.rejected is False
+
+
+def test_capability_result_reports_failure():
+
+    result = CapabilityResult(
+        request_id="req-005",
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        status=CapabilityExecutionStatus.FAILED,
+        error="Provider unavailable.",
+    )
+
+    assert result.succeeded is False
+    assert result.failed is True
+    assert result.rejected is False
+
+
+def test_capability_result_reports_rejection():
+
+    result = CapabilityResult(
+        request_id="req-006",
+        capability=CapabilityType.LIVE_INTELLIGENCE,
+        status=CapabilityExecutionStatus.REJECTED,
+        error="Governance policy blocked execution.",
+    )
+
+    assert result.succeeded is False
+    assert result.failed is False
+    assert result.rejected is True
+
+
+def test_capability_result_preserves_metadata():
+
+    result = CapabilityResult(
+        request_id="req-007",
+        capability=CapabilityType.EVALUATION,
+        status=CapabilityExecutionStatus.ACCEPTED,
+        metadata={
+            "governance_decision": "allow",
+        },
+    )
+
+    assert (
+        result.metadata["governance_decision"]
+        == "allow"
+    )
+
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_registry.py
+============================================================
+"""
+Tests for the AI Runtime capability registry.
+"""
+
+import pytest
+
+from src.ai_runtime.capabilities.errors import (
+    CapabilityAlreadyRegisteredError,
+    CapabilityNotRegisteredError,
+)
+
+from src.ai_runtime.capabilities.executor import (
+    CapabilityExecutor,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+    CapabilityType,
+)
+
+from src.ai_runtime.capabilities.registry import (
+    CapabilityRegistry,
+)
+
+
+class FakeLiveIntelligenceExecutor(CapabilityExecutor):
+    """
+    Fake executor used to test dependency injection.
+    """
+
+    @property
+    def capability(self) -> CapabilityType:
+        return CapabilityType.LIVE_INTELLIGENCE
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        return CapabilityResult(
+            request_id=request.request_id,
+            capability=request.capability,
+            status=CapabilityExecutionStatus.COMPLETED,
+            output={"ok": True},
+        )
+
+
+class FakePodcastDiscoveryExecutor(CapabilityExecutor):
+    """
+    Fake Podcast Discovery executor used only to verify
+    Runtime capability registration.
+
+    The real PodcastDiscoveryExecutor is tested separately.
+    """
+
+    @property
+    def capability(self) -> CapabilityType:
+        return CapabilityType.PODCAST_DISCOVERY
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        return CapabilityResult(
+            request_id=request.request_id,
+            capability=request.capability,
+            status=CapabilityExecutionStatus.COMPLETED,
+            output={
+                "podcast": "test-podcast",
+            },
+        )
+
+
+class FakeEvaluationExecutor(CapabilityExecutor):
+    """
+    Second fake executor used to verify multiple
+    capability registrations.
+    """
+
+    @property
+    def capability(self) -> CapabilityType:
+        return CapabilityType.EVALUATION
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        return CapabilityResult(
+            request_id=request.request_id,
+            capability=request.capability,
+            status=CapabilityExecutionStatus.COMPLETED,
+            output={"evaluated": True},
+        )
+
+
+def test_registry_registers_executor():
+    executor = FakeLiveIntelligenceExecutor()
+
+    registry = CapabilityRegistry()
+
+    registry.register(executor)
+
+    assert registry.contains(
+        CapabilityType.LIVE_INTELLIGENCE
+    )
+
+
+def test_registry_registers_podcast_discovery_executor():
+    executor = FakePodcastDiscoveryExecutor()
+
+    registry = CapabilityRegistry()
+
+    registry.register(executor)
+
+    assert registry.contains(
+        CapabilityType.PODCAST_DISCOVERY
+    )
+
+
+def test_registry_resolves_registered_executor():
+    executor = FakeLiveIntelligenceExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    resolved = registry.resolve(
+        CapabilityType.LIVE_INTELLIGENCE
+    )
+
+    assert resolved is executor
+
+
+def test_registry_resolves_podcast_discovery_executor():
+    executor = FakePodcastDiscoveryExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[executor]
+    )
+
+    resolved = registry.resolve(
+        CapabilityType.PODCAST_DISCOVERY
+    )
+
+    assert resolved is executor
+
+
+def test_registry_supports_multiple_capabilities():
+    live_executor = FakeLiveIntelligenceExecutor()
+    podcast_executor = FakePodcastDiscoveryExecutor()
+    evaluation_executor = FakeEvaluationExecutor()
+
+    registry = CapabilityRegistry(
+        executors=[
+            live_executor,
+            podcast_executor,
+            evaluation_executor,
+        ]
+    )
+
+    assert (
+        registry.resolve(
+            CapabilityType.LIVE_INTELLIGENCE
+        )
+        is live_executor
+    )
+
+    assert (
+        registry.resolve(
+            CapabilityType.PODCAST_DISCOVERY
+        )
+        is podcast_executor
+    )
+
+    assert (
+        registry.resolve(
+            CapabilityType.EVALUATION
+        )
+        is evaluation_executor
+    )
+
+
+def test_duplicate_capability_registration_is_rejected():
+    registry = CapabilityRegistry()
+
+    registry.register(
+        FakeLiveIntelligenceExecutor()
+    )
+
+    with pytest.raises(
+        CapabilityAlreadyRegisteredError,
+        match="already registered",
+    ):
+        registry.register(
+            FakeLiveIntelligenceExecutor()
+        )
+
+
+def test_duplicate_podcast_capability_registration_is_rejected():
+    registry = CapabilityRegistry()
+
+    registry.register(
+        FakePodcastDiscoveryExecutor()
+    )
+
+    with pytest.raises(
+        CapabilityAlreadyRegisteredError,
+        match="already registered",
+    ):
+        registry.register(
+            FakePodcastDiscoveryExecutor()
+        )
+
+
+def test_unknown_capability_resolution_is_rejected():
+    registry = CapabilityRegistry()
+
+    with pytest.raises(
+        CapabilityNotRegisteredError,
+        match="No executor registered",
+    ):
+        registry.resolve(
+            CapabilityType.LEARNING_GENERATION
+        )
+
+
+def test_contains_returns_false_for_unknown_capability():
+    registry = CapabilityRegistry()
+
+    assert (
+        registry.contains(
+            CapabilityType.EVALUATION
+        )
+        is False
+    )
+
+    assert (
+        registry.contains(
+            CapabilityType.PODCAST_DISCOVERY
+        )
+        is False
+    )
+
+
+def test_capabilities_returns_registered_capabilities():
+    registry = CapabilityRegistry(
+        executors=[
+            FakeLiveIntelligenceExecutor(),
+            FakePodcastDiscoveryExecutor(),
+            FakeEvaluationExecutor(),
+        ]
+    )
+
+    capabilities = registry.capabilities()
+
+    assert (
+        CapabilityType.LIVE_INTELLIGENCE
+        in capabilities
+    )
+
+    assert (
+        CapabilityType.PODCAST_DISCOVERY
+        in capabilities
+    )
+
+    assert (
+        CapabilityType.EVALUATION
+        in capabilities
+    )
+
+    assert (
+        CapabilityType.LEARNING_GENERATION
+        not in capabilities
+    )
+
+============================================================
+TEST: C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\__init__.py
+============================================================
+

@@ -1,0 +1,218 @@
+﻿"""
+Research Agent.
+
+Retrieves external information through approved
+knowledge providers and converts the result into
+provider-independent IntelligenceContext data.
+
+Architecture:
+
+Research Agent
+        |
+        v
+ParallelSearchProvider
+        |
+        v
+ParallelClientWrapper
+        |
+        v
+IntelligenceContext
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+from backend.agents.base_agent import BaseAgent
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+    IntelligenceSource,
+)
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchAgent(BaseAgent):
+    """
+    Agent responsible for world information retrieval.
+    """
+
+    def __init__(
+        self,
+        provider=None,
+    ):
+        super().__init__(
+            AgentManifest(
+                agent_id="research_agent",
+                name="Research Agent",
+                description=(
+                    "Retrieves live world information "
+                    "for AI learning experiences."
+                ),
+            )
+        )
+
+        self.provider = (
+            provider
+            or ParallelSearchProvider()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute research and produce a normalized
+        IntelligenceContext.
+        """
+
+        result = await self.provider.execute(
+            context
+        )
+
+        if not result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.manifest.agent_id,
+                output=None,
+                error=result.error,
+            )
+
+        intelligence = (
+            self._build_intelligence_context(
+                query=context.request,
+                provider_output=result.output,
+            )
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=intelligence,
+        )
+
+    @staticmethod
+    def _build_intelligence_context(
+        query: str,
+        provider_output,
+    ) -> IntelligenceContext:
+        """
+        Convert provider output into the
+        provider-independent IntelligenceContext.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            raise TypeError(
+                "Research provider output must be a dictionary."
+            )
+
+        raw_results = provider_output.get(
+            "results",
+            {},
+        )
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            raw_results = []
+
+        sources: list[IntelligenceSource] = []
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+            if not title or not url:
+                continue
+
+            content = ResearchAgent._extract_content(
+                raw_result
+            )
+
+            sources.append(
+                IntelligenceSource(
+                    title=title,
+                    url=url,
+                    source="parallel",
+                    content=content,
+                )
+            )
+
+        return IntelligenceContext(
+            query=query,
+            sources=tuple(sources),
+        )
+
+    @staticmethod
+    def _extract_content(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract available content from a normalized
+        Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+        return str(
+            excerpts or ""
+        ).strip()

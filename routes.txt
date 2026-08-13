@@ -1,0 +1,828 @@
+﻿"""
+EasyChatBot API Routes.
+
+Application HTTP boundary.
+
+Responsibilities:
+
+- expose HTTP endpoints;
+- validate transport input;
+- delegate to application services.
+
+This module does not:
+
+- compose Runtime;
+- create providers;
+- execute agents directly;
+- implement capability logic.
+
+Architecture:
+
+API
+ |
+ v
+Application Services
+ |
+ +--> CompanionService
+ |
+ +--> RuntimeApplicationService
+ |
+ v
+ExternalRuntimeService
+ |
+ v
+CapabilityGateway
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+from fastapi import HTTPException
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.api.schemas import (
+    ChatRequest,
+    ChatResponse,
+    FlashDealActionsResponse,
+    FlashDealCharacterResponse,
+    FlashDealPricingResponse,
+    FlashDealProductResponse,
+    FlashDealResponse,
+    HackathonDemoRequest,
+    HackathonDemoResponse,
+    RuntimeExecuteRequest,
+    RuntimeExecuteResponse,
+)
+
+from backend.application.factory import (
+    ApplicationFactory,
+)
+
+from backend.characters.character_registry import (
+    CharacterRegistry,
+)
+
+from backend.providers.llm.llm_provider_factory import (
+    LLMProviderFactory,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.runtime.external_runtime_container import (
+    get_external_runtime_service,
+)
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from backend.services.llm_service import (
+    LLMService,
+)
+
+from backend.services.runtime.runtime_application_service import (
+    RuntimeApplicationService,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+from src.ai_runtime.discovery.flash_deal_demo import (
+    build_demo_deal,
+    build_demo_memory,
+)
+
+from src.ai_runtime.discovery.service import (
+    CharacterContext,
+    DiscoveryRequest,
+    DiscoveryService,
+)
+
+
+router = APIRouter()
+
+character_registry = CharacterRegistry()
+application_factory = ApplicationFactory()
+
+
+# =========================================================
+# Controlled Test Runtime Dependencies
+# =========================================================
+
+
+class TestLiveIntelligenceAgent:
+    """
+    Deterministic Live Intelligence placeholder.
+
+    Used when API tests execute without application bootstrap.
+
+    No external services are called.
+    """
+
+    async def execute(
+        self,
+        context,
+    ) -> dict:
+        return {
+            "status": "completed",
+            "source": "test",
+            "context": context,
+        }
+
+
+class TestPodcastDiscoveryAgent:
+    """
+    Deterministic Podcast Discovery agent.
+
+    Provides the minimum contract required by
+    PodcastDiscoveryExecutor.
+    """
+
+    def build_search_intent(
+        self,
+        *,
+        user_id,
+        learning_context,
+        memories,
+        max_results,
+    ):
+        from src.ai_runtime.podcast.models import (
+            PodcastSearchIntent,
+        )
+
+        return PodcastSearchIntent(
+            user_id=user_id,
+            learning_context=learning_context,
+            topics=(
+                "french",
+                "learning",
+            ),
+            keywords=(
+                "podcast",
+                "language",
+            ),
+            max_results=max_results,
+        )
+
+
+class TestPodcastProvider:
+    """
+    Controlled deterministic podcast provider.
+
+    No external provider is contacted.
+    """
+
+    def search(
+        self,
+        intent,
+    ):
+        from src.ai_runtime.podcast.models import (
+            PodcastSearchResult,
+        )
+
+        return [
+            PodcastSearchResult(
+                provider="test_provider",
+                external_id=(
+                    "french-learning-podcast-001"
+                ),
+                title="French Learning Podcast",
+                url=(
+                    "https://example.com/"
+                    "french-learning"
+                ),
+                publisher=(
+                    "EasyChatBot Test Publisher"
+                ),
+                description=(
+                    "French learning content "
+                    "for B2 learners."
+                ),
+                languages=("fr",),
+            )
+        ]
+
+
+class TestGovernanceDecision:
+    """
+    Deterministic governance decision.
+    """
+
+    allowed = True
+
+
+class TestGovernance:
+    """
+    Controlled governance adapter for tests.
+    """
+
+    def evaluate(
+        self,
+        request,
+    ):
+        return TestGovernanceDecision()
+
+
+def _create_test_podcast_agent():
+    """
+    Create deterministic Podcast Discovery agent.
+    """
+
+    return TestPodcastDiscoveryAgent()
+
+
+def _create_test_podcast_provider():
+    """
+    Create deterministic Podcast provider.
+    """
+
+    return TestPodcastProvider()
+
+
+def _create_test_governance():
+    """
+    Create deterministic governance dependency.
+    """
+
+    return TestGovernance()
+
+
+# =========================================================
+# Runtime Service Configuration
+# =========================================================
+
+_external_runtime_service_override: (
+    ExternalRuntimeService | None
+) = None
+
+
+def configure_external_runtime_service(
+    service: ExternalRuntimeService,
+) -> None:
+    """
+    Configure an explicit Runtime service override.
+
+    Primarily used by application tests and controlled
+    application composition.
+
+    Production Runtime ownership remains with:
+
+        backend.runtime.external_runtime_container
+    """
+
+    global _external_runtime_service_override
+
+    if service is None:
+        raise ValueError(
+            "ExternalRuntimeService cannot be None."
+        )
+
+    _external_runtime_service_override = service
+
+
+def create_external_runtime_service() -> ExternalRuntimeService:
+    """
+    Retrieve the configured Runtime service.
+
+    Resolution order:
+
+    1. Explicit test/application override.
+    2. Runtime container.
+    3. Controlled in-memory Runtime fallback.
+
+    The fallback exists only so API tests can execute
+    without requiring full application bootstrap.
+    """
+
+    if (
+        _external_runtime_service_override
+        is not None
+    ):
+        return _external_runtime_service_override
+
+    try:
+        return get_external_runtime_service()
+
+    except RuntimeError:
+        gateway = create_external_runtime_gateway(
+            live_intelligence_agent=(
+                TestLiveIntelligenceAgent()
+            ),
+            podcast_discovery_agent=(
+                _create_test_podcast_agent()
+            ),
+            podcast_providers=[
+                _create_test_podcast_provider()
+            ],
+            governance=(
+                _create_test_governance()
+            ),
+        )
+
+        return (
+            application_factory
+            .create_external_runtime_service(
+                gateway=gateway,
+            )
+        )
+
+
+def create_runtime_application_service(
+) -> RuntimeApplicationService:
+    """
+    Create the application-layer Runtime service.
+
+    API routes remain unaware of Runtime composition.
+    """
+
+    return (
+        application_factory
+        .create_runtime_application_service(
+            runtime_service=(
+                create_external_runtime_service()
+            ),
+        )
+    )
+
+
+# =========================================================
+# Companion Services
+# =========================================================
+
+
+def create_llm_service() -> LLMService:
+    """
+    Create the configured LLM application service.
+    """
+
+    provider = LLMProviderFactory.create()
+
+    return LLMService(
+        provider,
+    )
+
+
+def create_companion_service(
+    character,
+) -> CompanionService:
+    """
+    Create CompanionService for a selected character.
+    """
+
+    llm_service = create_llm_service()
+
+    agent = ConversationAgent(
+        character=character,
+        llm_service=llm_service,
+    )
+
+    return CompanionService(
+        character=character,
+        conversation_agent=agent,
+    )
+
+
+# =========================================================
+# Character Endpoint
+# =========================================================
+
+
+@router.get("/characters")
+def get_characters():
+    """
+    Return the available learner characters.
+    """
+
+    characters = (
+        character_registry.list_characters()
+    )
+
+    return {
+        "characters": [
+            {
+                "id": character.character_id,
+                "name": character.name,
+                "description": character.description,
+                "personality": character.personality,
+                "learning_style": (
+                    character.learning_style
+                ),
+            }
+            for character in characters
+        ]
+    }
+
+
+# =========================================================
+# Chat Endpoint
+# =========================================================
+
+
+@router.post(
+    "/chat",
+    response_model=ChatResponse,
+)
+async def chat(
+    payload: ChatRequest,
+) -> ChatResponse:
+    """
+    Execute a Companion conversation.
+    """
+
+    if (
+        payload.message is None
+        or not payload.message.strip()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="message is required",
+        )
+
+    try:
+        character = character_registry.get(
+            payload.character,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    service = create_companion_service(
+        character,
+    )
+
+    context = ExecutionContext(
+        user_id=payload.user_id,
+        request=payload.message,
+    )
+
+    result = await service.interact(
+        context,
+        use_research=payload.research,
+    )
+
+    return ChatResponse(
+        character=result["character"],
+        conversation=result["conversation"],
+        research=result["research"],
+        quality=result["quality"],
+        memory_count=result["memory_count"],
+        memory_context_count=result.get(
+            "memory_context_count",
+            0,
+        ),
+    )
+
+
+# =========================================================
+# Runtime Execute Endpoint
+# =========================================================
+
+
+@router.post(
+    "/runtime/execute",
+    response_model=RuntimeExecuteResponse,
+)
+async def execute_runtime(
+    payload: RuntimeExecuteRequest,
+) -> RuntimeExecuteResponse:
+    """
+    Execute an approved Runtime capability.
+
+    HTTP concerns remain here.
+
+    Runtime orchestration remains in:
+
+        RuntimeApplicationService
+    """
+
+    service = create_runtime_application_service()
+
+    try:
+        result = await service.execute(
+            capability=payload.capability,
+            payload=payload.payload,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    if isinstance(result, dict):
+        return RuntimeExecuteResponse(
+            request_id=result["request_id"],
+            capability=result["capability"],
+            status=result["status"],
+            output=result.get("output"),
+            error=result.get("error"),
+        )
+
+    return RuntimeExecuteResponse(
+        request_id=result.request_id,
+        capability=result.capability,
+        status=result.status,
+        output=result.output,
+        error=getattr(
+            result,
+            "error",
+            None,
+        ),
+    )
+
+
+# =========================================================
+# Podcast Discovery Endpoint
+# =========================================================
+
+
+@router.post(
+    "/capabilities/podcast/discover",
+)
+async def discover_podcast(
+    payload: dict,
+):
+    """
+    Execute Podcast Discovery through the Runtime.
+
+    The endpoint only prepares transport-level defaults.
+    Discovery remains owned by the Runtime capability.
+    """
+
+    if not payload.get("query"):
+        raise HTTPException(
+            status_code=400,
+            detail="query is required",
+        )
+
+    service = create_runtime_application_service()
+
+    enriched_payload = {
+        "user_id": payload.get(
+            "user_id",
+            "demo-user",
+        ),
+        "character_id": payload.get(
+            "character_id",
+            "yeti",
+        ),
+        "character_name": payload.get(
+            "character_name",
+            "Yeti",
+        ),
+        "character_message": payload.get(
+            "character_message",
+            (
+                "Help me discover useful "
+                "learning content."
+            ),
+        ),
+        **payload,
+    }
+
+    try:
+        result = await service.execute(
+            capability="podcast_discovery",
+            payload=enriched_payload,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    if isinstance(result, dict):
+        return {
+            "request_id": result["request_id"],
+            "capability": result["capability"],
+            "status": result["status"],
+            "output": result.get("output"),
+        }
+
+    return {
+        "request_id": result.request_id,
+        "capability": result.capability,
+        "status": result.status,
+        "output": result.output,
+    }
+
+
+# =========================================================
+# Hackathon Demo Endpoint
+# =========================================================
+
+
+@router.post(
+    "/hackathon/demo",
+    response_model=HackathonDemoResponse,
+)
+async def hackathon_demo(
+    payload: HackathonDemoRequest,
+) -> HackathonDemoResponse:
+    """
+    Hackathon Runtime vertical slice.
+
+    API
+     |
+     v
+    RuntimeApplicationService
+     |
+     v
+    ExternalRuntimeService
+     |
+     v
+    CapabilityGateway
+     |
+     v
+    Live Intelligence Executor
+     |
+     v
+    LiveIntelligenceAgent
+    """
+
+    service = create_runtime_application_service()
+
+    try:
+        result = await service.execute(
+            capability="live_intelligence",
+            payload={
+                "user_id": payload.user_id,
+                "topic": payload.message,
+                "language": "French",
+                "learner_level": "B2",
+            },
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    if isinstance(result, dict):
+        return HackathonDemoResponse(
+            status=result["status"],
+            capability=result["capability"],
+            output=result.get("output"),
+            request_id=result["request_id"],
+        )
+
+    return HackathonDemoResponse(
+        status=result.status,
+        capability=result.capability,
+        output=result.output,
+        request_id=result.request_id,
+    )
+
+
+# =========================================================
+# Hackathon Flash Deal Card Endpoint
+# =========================================================
+
+
+@router.get(
+    "/hackathon/flash-deal",
+    response_model=FlashDealResponse,
+)
+def hackathon_flash_deal() -> FlashDealResponse:
+    """
+    Return the deterministic hackathon Flash Deal Card.
+
+    Flow:
+
+    Demo Deal
+        |
+        v
+    Demo Memory
+        |
+        v
+    DiscoveryRequest
+        |
+        v
+    DiscoveryService
+        |
+        v
+    FlashDealCard
+        |
+        v
+    HTTP Response
+
+    This endpoint is intentionally deterministic for the
+    hackathon frontend integration.
+
+    It does not:
+
+    - perform external discovery;
+    - call provider SDKs;
+    - process payments;
+    - create purchases;
+    - bypass Runtime controls;
+    - invent product data outside the demo builder.
+
+    The existing FlashDealCard remains the application-facing
+    presentation contract. This route only adapts it to HTTP.
+    """
+
+    deal = build_demo_deal()
+
+    memory = build_demo_memory()
+
+    request = DiscoveryRequest(
+        user_id=memory.user_id,
+        deal=deal,
+        character=CharacterContext(
+            character_id="yeti",
+            character_name="Yeti",
+            message=(
+                "Look what I found! "
+                "This could be perfect for you."
+            ),
+        ),
+        product_image_url=(
+            "https://example.com/demo/iphone17-pro.jpg"
+        ),
+        tagline="Pro. Beautiful. Powerful.",
+        highlights=(
+            "Pro camera system",
+            "High-performance chip",
+            "All-day battery life",
+            "Premium display",
+        ),
+    )
+
+    card = DiscoveryService().create_flash_deal(
+        request,
+        memories=[memory],
+    )
+
+    return FlashDealResponse(
+        deal_id=card.deal_id,
+
+        character=FlashDealCharacterResponse(
+            id=card.character_id,
+            name=card.character_name,
+            message=card.character_message,
+        ),
+
+        product=FlashDealProductResponse(
+            name=card.product_name,
+            image_url=card.product_image_url,
+            tagline=card.tagline,
+            highlights=list(card.highlights),
+        ),
+
+        pricing=FlashDealPricingResponse(
+            current_price=card.current_price,
+            currency=card.currency,
+            previous_price=card.previous_price,
+            discount_percentage=(
+                card.discount_percentage
+            ),
+            savings=card.savings,
+        ),
+
+        relevance_reason=(
+            card.relevance_reason
+        ),
+
+        vendor=card.vendor_name,
+
+        actions=FlashDealActionsResponse(
+            get_deal=card.get_deal_url,
+            more_information=(
+                card.more_information_url
+            ),
+        ),
+    )

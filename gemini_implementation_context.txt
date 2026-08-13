@@ -1,0 +1,782 @@
+﻿
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py
+======================================================================
+
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py
+======================================================================
+
+"""
+LLM Provider Factory.
+
+Creates approved LLM provider implementations.
+
+The factory is the composition boundary between
+application/runtime code and infrastructure providers.
+
+Architecture:
+
+Application/API
+|
+v
+LLMProviderFactory
+|
+v
+LLMProvider
+|
++--> OpenAIProvider
++--> Future OllamaProvider
++--> Future GeminiProvider
+
+Responsibilities:
+
+- create configured LLM providers
+- isolate provider construction
+- provide provider independence
+- obtain approved provider configuration
+
+Does not:
+
+- execute LLM requests
+- build prompts
+- manage conversations
+- manage memory
+- apply routing decisions
+- call provider SDKs directly
+"""
+
+from __future__ import annotations
+
+from backend.providers.llm.config import (
+    get_llm_model,
+    get_llm_provider_name,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.llm.openai_provider import (
+    OpenAIProvider,
+)
+
+
+class LLMProviderFactory:
+    """
+    Factory responsible for creating LLM providers.
+
+    Provider selection and configuration are centralised
+    here so application/runtime code does not depend
+    directly on concrete infrastructure implementations.
+    """
+
+    @staticmethod
+    def create(
+        provider: str | None = None,
+    ) -> LLMProvider:
+        """
+        Create a configured LLM provider.
+
+        Parameters
+        ----------
+        provider:
+            Optional provider identifier.
+
+            When omitted, the configured provider from
+            LLM provider configuration is used.
+
+        Returns
+        -------
+        LLMProvider
+            Configured provider implementation.
+
+        Raises
+        ------
+        ValueError
+            If provider is invalid or unsupported.
+        """
+
+        if provider is None:
+            provider_name = (
+                get_llm_provider_name()
+            )
+        else:
+            if not isinstance(
+                provider,
+                str,
+            ):
+                raise ValueError(
+                    "Provider name must be a string."
+                )
+
+            provider_name = (
+                provider.strip().lower()
+            )
+
+            if not provider_name:
+                raise ValueError(
+                    "Provider name cannot be empty."
+                )
+
+        if provider_name == "openai":
+            return OpenAIProvider(
+                model=get_llm_model(),
+            )
+
+        raise ValueError(
+            (
+                "Unsupported LLM provider: "
+                f"{provider_name}"
+            )
+        )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py
+======================================================================
+
+"""
+LLM Service.
+
+Application-level service responsible for executing
+provider-independent ConversationRequest objects.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+Concrete LLM Provider
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- receive a ConversationRequest
+- delegate execution to an injected LLMProvider
+- return the provider-independent ProviderResult
+- keep provider execution behind an application service boundary
+
+Does not:
+
+- build prompts
+- manage characters
+- perform research
+- select providers
+- create providers
+- call provider SDKs directly
+- manage memory
+- manage conversations
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class LLMService:
+    """
+    Application service for LLM execution.
+
+    The service depends only on the provider-independent
+    LLMProvider contract.
+
+    Provider construction and provider selection remain
+    outside this service.
+    """
+
+    def __init__(
+        self,
+        llm_provider: LLMProvider,
+    ) -> None:
+        """
+        Initialise the LLM service.
+
+        Parameters
+        ----------
+        llm_provider:
+            Provider implementing the LLMProvider contract.
+        """
+
+        if llm_provider is None:
+            raise ValueError(
+                "LLM provider cannot be None."
+            )
+
+        self.llm_provider = llm_provider
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        The service delegates execution to the injected
+        provider without knowing the provider's concrete
+        implementation.
+
+        Parameters
+        ----------
+        request:
+            Provider-independent conversation request.
+
+        Returns
+        -------
+        ProviderResult
+            Standard provider execution result.
+
+        Raises
+        ------
+        ValueError
+            If the conversation request is None.
+
+        RuntimeError
+            If the provider returns no result.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        logger.info(
+            "LLM generation started."
+        )
+
+        result = await self.llm_provider.generate(
+            request
+        )
+
+        if result is None:
+            raise RuntimeError(
+                "LLM provider returned no result."
+            )
+
+        logger.info(
+            (
+                "LLM generation completed. "
+                "success=%s provider=%s"
+            ),
+            result.success,
+            result.provider_id,
+        )
+
+        return result
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\application\bootstrap.py
+======================================================================
+
+"""
+EasyChatBot Application Bootstrap.
+
+Responsible for application startup composition.
+
+Responsibilities:
+
+- create application-level services;
+- compose approved Runtime dependencies;
+- register configured services.
+
+This module does not:
+
+- execute agents;
+- execute capabilities;
+- contain business logic;
+- expose runtime state;
+- serve API requests.
+
+Runtime construction remains delegated to:
+
+    src.ai_runtime.composition
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from backend.application.factory import (
+    ApplicationFactory,
+)
+
+from backend.runtime.external_runtime_container import (
+    configure_external_runtime_service,
+    get_external_runtime_service as _get_external_runtime_service,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+from src.ai_runtime.podcast.parallel import (
+    ParallelPodcastProvider,
+)
+
+from src.ai_agents.live_intelligence_agent.handler import (
+    IntelligenceProcessor,
+    LiveIntelligenceAgent,
+)
+
+from src.providers.search_provider.interface import (
+    SearchProvider,
+    SearchResult,
+)
+
+
+_bootstrapped = False
+
+
+def bootstrap_application() -> None:
+    """
+    Bootstrap application dependencies.
+
+    Creates the ExternalRuntimeService and registers it
+    inside the application runtime container.
+    """
+
+    global _bootstrapped
+
+    if _bootstrapped:
+        return
+
+    factory = ApplicationFactory()
+
+    gateway = create_external_runtime_gateway(
+        live_intelligence_agent=(
+            create_live_intelligence_agent()
+        ),
+        podcast_discovery_agent=(
+            create_podcast_discovery_agent()
+        ),
+        podcast_providers=(
+            create_podcast_providers()
+        ),
+        governance=(
+            create_governance()
+        ),
+    )
+
+    runtime_service = (
+        factory.create_external_runtime_service(
+            gateway=gateway,
+        )
+    )
+
+    configure_external_runtime_service(
+        runtime_service,
+    )
+
+    _bootstrapped = True
+
+
+def get_external_runtime_service() -> ExternalRuntimeService:
+    """
+    Backward-compatible Runtime accessor.
+    """
+
+    return _get_external_runtime_service()
+
+
+def reset_bootstrap() -> None:
+    """
+    Test-only reset.
+    """
+
+    global _bootstrapped
+
+    _bootstrapped = False
+
+
+# =========================================================
+# Live Intelligence Runtime Dependencies
+# =========================================================
+
+
+class BootstrapLiveIntelligenceSearchProvider(
+    SearchProvider,
+):
+    """
+    Deterministic hackathon search provider.
+
+    Implements the provider-independent contract.
+
+    Production replacement:
+        real search provider adapter.
+
+    This class does not belong to Runtime.
+    It exists only as bootstrap wiring.
+    """
+
+    async def search(
+        self,
+        query: str,
+        max_results: int = 5,
+    ) -> list[SearchResult]:
+
+        results = [
+            SearchResult(
+                title=(
+                    "AI Regulation Update"
+                ),
+                url=(
+                    "https://example.com/"
+                    "ai-regulation"
+                ),
+                content=(
+                    "Latest developments in "
+                    "artificial intelligence "
+                    "regulation and technology."
+                ),
+                source="hackathon-demo",
+            ),
+            SearchResult(
+                title=(
+                    "Artificial Intelligence "
+                    "Technology News"
+                ),
+                url=(
+                    "https://example.com/"
+                    "ai-news"
+                ),
+                content=(
+                    "Recent artificial "
+                    "intelligence technology "
+                    "updates."
+                ),
+                source="hackathon-demo",
+            ),
+        ]
+
+        return results[:max_results]
+
+
+class BootstrapIntelligenceProcessor(
+    IntelligenceProcessor,
+):
+    """
+    Deterministic intelligence processor.
+
+    Temporary hackathon implementation.
+
+    Future replacement:
+        approved LLM-based processor.
+    """
+
+    async def summarise(
+        self,
+        results: list[SearchResult],
+        language: str,
+        learner_level: str,
+    ) -> tuple[str, list[str]]:
+
+        summary = (
+            f"AI intelligence summary "
+            f"adapted for {learner_level} "
+            f"learner in {language}."
+        )
+
+        key_information = [
+            "Artificial intelligence regulation",
+            "Technology developments",
+        ]
+
+        return (
+            summary,
+            key_information,
+        )
+
+
+def create_live_intelligence_agent() -> LiveIntelligenceAgent:
+    """
+    Create Live Intelligence Agent.
+
+    Runtime receives the configured agent.
+    Runtime does not create agents.
+    """
+
+    return LiveIntelligenceAgent(
+        search_provider=(
+            BootstrapLiveIntelligenceSearchProvider()
+        ),
+        processor=(
+            BootstrapIntelligenceProcessor()
+        ),
+    )
+
+
+# =========================================================
+# Podcast Runtime Dependencies
+# =========================================================
+
+
+class BootstrapPlaceholderPodcastAgent:
+    """
+    Temporary Podcast Discovery Agent adapter.
+
+    Kept only for hackathon compatibility.
+    """
+
+    def build_search_intent(
+        self,
+        *,
+        user_id: str,
+        learning_context,
+        memories,
+        max_results: int,
+    ):
+
+        from src.ai_runtime.podcast.models import (
+            PodcastSearchIntent,
+        )
+
+        return PodcastSearchIntent(
+            user_id=user_id,
+            learning_context=learning_context,
+            topics=(
+                "French learning podcast",
+            ),
+            keywords=(
+                "French",
+                "learning",
+                "listening",
+            ),
+            max_results=max_results,
+        )
+
+
+def create_podcast_discovery_agent():
+    """
+    Create Podcast Discovery Agent.
+    """
+
+    return BootstrapPlaceholderPodcastAgent()
+
+
+def create_podcast_providers() -> Sequence:
+    """
+    Create Podcast provider collection.
+    """
+
+    return [
+        ParallelPodcastProvider(
+            client=BootstrapParallelClient(),
+        ),
+    ]
+
+
+class BootstrapParallelClient:
+    """
+    Deterministic hackathon Parallel client.
+
+    Not the provider.
+
+    Represents the external provider boundary.
+    """
+
+    def search(
+        self,
+        intent,
+    ) -> list[dict[str, object]]:
+
+        return [
+            {
+                "id": (
+                    "demo-french-podcast-001"
+                ),
+                "title": (
+                    "French Learning Podcast"
+                ),
+                "description": (
+                    "French listening practice "
+                    "for B2 learners."
+                ),
+                "publisher": (
+                    "EasyChatBot Demo"
+                ),
+                "languages": [
+                    "fr",
+                ],
+                "url": (
+                    "https://example.com/"
+                    "french-learning-podcast"
+                ),
+            }
+        ]
+
+
+# =========================================================
+# Governance
+# =========================================================
+
+
+class BootstrapGovernanceDecision:
+    """
+    Runtime governance decision.
+    """
+
+    def __init__(
+        self,
+        allowed: bool,
+    ) -> None:
+
+        self.allowed = allowed
+
+
+class BootstrapGovernance:
+    """
+    Temporary hackathon governance implementation.
+    """
+
+    def evaluate(
+        self,
+        request,
+    ) -> BootstrapGovernanceDecision:
+
+        return BootstrapGovernanceDecision(
+            allowed=True,
+        )
+
+
+def create_governance():
+    """
+    Create Runtime governance dependency.
+    """
+
+    return BootstrapGovernance()

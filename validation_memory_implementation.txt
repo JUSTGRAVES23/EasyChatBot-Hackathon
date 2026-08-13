@@ -1,0 +1,971 @@
+﻿============================================================
+FILE: src/ai_runtime/memory/models.py
+============================================================
+"""
+Hackathon Memory contracts.
+
+This module defines the minimal persistent memory model
+required by the hackathon discovery flow.
+
+This is intentionally lightweight.
+
+It is NOT the production EasyChatBot memory architecture.
+
+Hackathon responsibilities:
+
+- represent user memories
+- distinguish memory categories
+- provide stable identifiers
+- preserve timestamps
+- support future persistence
+
+Out of scope:
+
+- vector embeddings
+- semantic retrieval
+- LLM-generated memory extraction
+- autonomous memory writes
+- purchase transactions
+- production learner-memory architecture
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from uuid import uuid4
+
+
+class MemoryType(str, Enum):
+    """
+    Supported hackathon memory categories.
+    """
+
+    PREFERENCE = "preference"
+
+    DISCOVERY_CONTEXT = "discovery_context"
+
+    SAVED_ITEM = "saved_item"
+
+
+@dataclass(frozen=True)
+class MemoryEntry:
+    """
+    Persistent user memory entry.
+
+    Memory is explicit application state.
+
+    Agents must not directly mutate this object or
+    the underlying persistence layer.
+    """
+
+    user_id: str
+
+    memory_type: MemoryType
+
+    content: str
+
+    memory_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    metadata: dict[str, str] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        """
+        Validate the memory contract.
+        """
+
+        if not self.user_id.strip():
+            raise ValueError(
+                "Memory user_id cannot be empty."
+            )
+
+        if not self.content.strip():
+            raise ValueError(
+                "Memory content cannot be empty."
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        """
+        Convert the memory entry into a persistence-safe
+        representation.
+        """
+
+        return {
+            "memory_id": self.memory_id,
+            "user_id": self.user_id,
+            "memory_type": self.memory_type.value,
+            "content": self.content,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "metadata": dict(self.metadata),
+        }
+
+============================================================
+FILE: src/ai_runtime/memory/service.py
+============================================================
+"""
+Hackathon Memory Service.
+
+Application-facing service for the lightweight hackathon
+memory capability.
+
+Architecture:
+
+Character / Discovery
+        |
+        v
+MemoryService
+        |
+        v
+MemoryStore
+        |
+        v
+SQLite
+
+The service owns memory application behaviour.
+
+It does not:
+- access SQLite directly
+- call providers
+- call agents
+- generate memories autonomously
+- implement shopping logic
+- implement recommendation logic
+"""
+
+from __future__ import annotations
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+from src.ai_runtime.memory.store import (
+    MemoryStore,
+)
+
+
+class MemoryService:
+    """
+    Application service for hackathon memory.
+
+    Memory writes are explicit.
+
+    This is intentional: an agent should not silently
+    create persistent user state merely because it generated
+    a response.
+    """
+
+    def __init__(
+        self,
+        store: MemoryStore,
+    ) -> None:
+        self._store = store
+
+    def remember(
+        self,
+        *,
+        user_id: str,
+        memory_type: MemoryType,
+        content: str,
+        metadata: dict[str, str] | None = None,
+    ) -> MemoryEntry:
+        """
+        Create and persist a new memory entry.
+        """
+
+        memory = MemoryEntry(
+            user_id=user_id,
+            memory_type=memory_type,
+            content=content,
+            metadata=(
+                dict(metadata)
+                if metadata is not None
+                else {}
+            ),
+        )
+
+        return self._store.save(
+            memory
+        )
+
+    def get(
+        self,
+        memory_id: str,
+    ) -> MemoryEntry | None:
+        """
+        Retrieve a memory by identifier.
+        """
+
+        return self._store.get(
+            memory_id
+        )
+
+    def list_for_user(
+        self,
+        *,
+        user_id: str,
+        memory_type: MemoryType | None = None,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve memories for a user.
+
+        Optionally restrict results to one memory type.
+        """
+
+        return self._store.list_for_user(
+            user_id=user_id,
+            memory_type=memory_type,
+        )
+
+    def preferences(
+        self,
+        *,
+        user_id: str,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve user preference memories.
+        """
+
+        return self.list_for_user(
+            user_id=user_id,
+            memory_type=MemoryType.PREFERENCE,
+        )
+
+    def discovery_context(
+        self,
+        *,
+        user_id: str,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve current discovery context.
+        """
+
+        return self.list_for_user(
+            user_id=user_id,
+            memory_type=MemoryType.DISCOVERY_CONTEXT,
+        )
+
+    def saved_items(
+        self,
+        *,
+        user_id: str,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve saved discovery items.
+        """
+
+        return self.list_for_user(
+            user_id=user_id,
+            memory_type=MemoryType.SAVED_ITEM,
+        )
+
+    def delete(
+        self,
+        memory_id: str,
+    ) -> bool:
+        """
+        Delete a memory.
+        """
+
+        return self._store.delete(
+            memory_id
+        )
+
+============================================================
+FILE: src/ai_runtime/memory/store.py
+============================================================
+"""
+Hackathon Memory persistence.
+
+This module provides the minimal persistent Memory Store
+required by the hackathon.
+
+Architecture:
+
+MemoryService
+      |
+      v
+MemoryStore
+      |
+      v
+SQLite
+
+The store is deliberately small.
+
+It is responsible only for persistence and retrieval of
+MemoryEntry objects.
+
+It does not:
+- decide what should be remembered
+- call an LLM
+- perform semantic retrieval
+- execute agents
+- perform governance decisions
+- manage purchases
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+
+class MemoryStore:
+    """
+    SQLite-backed persistence for hackathon memories.
+
+    The database schema is created automatically when the
+    store is initialised.
+    """
+
+    def __init__(
+        self,
+        database_path: str | Path,
+    ) -> None:
+        self._database_path = str(database_path)
+
+        self._initialise_database()
+
+    def _connect(self) -> sqlite3.Connection:
+        """
+        Create a SQLite connection.
+        """
+
+        connection = sqlite3.connect(
+            self._database_path
+        )
+
+        connection.row_factory = sqlite3.Row
+
+        return connection
+
+    def _initialise_database(self) -> None:
+        """
+        Create the Memory table if it does not exist.
+        """
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    memory_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_memories_user_id
+                ON memories(user_id)
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_memories_user_type
+                ON memories(user_id, memory_type)
+                """
+            )
+
+    def save(
+        self,
+        memory: MemoryEntry,
+    ) -> MemoryEntry:
+        """
+        Persist a MemoryEntry.
+
+        Existing entries with the same memory_id are
+        replaced.
+        """
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO memories (
+                    memory_id,
+                    user_id,
+                    memory_type,
+                    content,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory.memory_id,
+                    memory.user_id,
+                    memory.memory_type.value,
+                    memory.content,
+                    memory.created_at.isoformat(),
+                    memory.updated_at.isoformat(),
+                    json.dumps(
+                        memory.metadata,
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+
+        return memory
+
+    def get(
+        self,
+        memory_id: str,
+    ) -> MemoryEntry | None:
+        """
+        Retrieve a single memory by identifier.
+        """
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    memory_id,
+                    user_id,
+                    memory_type,
+                    content,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM memories
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_memory(row)
+
+    def list_for_user(
+        self,
+        user_id: str,
+        memory_type: MemoryType | None = None,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve memories belonging to a user.
+
+        Results are returned newest first.
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "Memory user_id cannot be empty."
+            )
+
+        with self._connect() as connection:
+
+            if memory_type is None:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        memory_id,
+                        user_id,
+                        memory_type,
+                        content,
+                        created_at,
+                        updated_at,
+                        metadata_json
+                    FROM memories
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (user_id,),
+                ).fetchall()
+
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        memory_id,
+                        user_id,
+                        memory_type,
+                        content,
+                        created_at,
+                        updated_at,
+                        metadata_json
+                    FROM memories
+                    WHERE user_id = ?
+                      AND memory_type = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (
+                        user_id,
+                        memory_type.value,
+                    ),
+                ).fetchall()
+
+        return [
+            self._row_to_memory(row)
+            for row in rows
+        ]
+
+    def delete(
+        self,
+        memory_id: str,
+    ) -> bool:
+        """
+        Delete a memory.
+
+        Returns True when a memory was deleted.
+        """
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memories
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            )
+
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _row_to_memory(
+        row: sqlite3.Row,
+    ) -> MemoryEntry:
+        """
+        Convert a SQLite row into a MemoryEntry.
+        """
+
+        return MemoryEntry(
+            memory_id=row["memory_id"],
+            user_id=row["user_id"],
+            memory_type=MemoryType(
+                row["memory_type"]
+            ),
+            content=row["content"],
+            created_at=(
+                __import__("datetime")
+                .datetime.fromisoformat(
+                    row["created_at"]
+                )
+            ),
+            updated_at=(
+                __import__("datetime")
+                .datetime.fromisoformat(
+                    row["updated_at"]
+                )
+            ),
+            metadata=json.loads(
+                row["metadata_json"]
+            ),
+        )
+
+============================================================
+FILE: src/ai_runtime/memory/context_builder.py
+============================================================
+"""
+EasyChatBot â€” Memory Context Builder.
+
+H3-01 â€” Memory-Aware Live Intelligence.
+
+The builder operates on the APPLICATION memory contract:
+
+    MemoryService
+        â†“
+    MemoryRecord
+        â†“
+    MemoryContextBuilder
+        â†“
+    MemoryContext
+
+It deliberately does NOT consume MemoryEntry directly.
+
+MemoryEntry belongs to the persistence/runtime storage boundary.
+MemoryRecord is the application-facing memory contract.
+
+Responsibilities:
+- validate already-retrieved memory
+- enforce user isolation
+- determine deterministic relevance
+- bound memory count
+- bound context size
+- produce provider-independent context
+
+Does not:
+- retrieve memory
+- persist memory
+- call an LLM
+- call a provider
+- execute an agent
+- mutate ExecutionContext
+- perform semantic/vector search
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+import re
+
+from backend.memory.memory_record import (
+    MemoryRecord,
+)
+
+
+DEFAULT_MAX_MEMORY_ITEMS = 5
+DEFAULT_MAX_CONTEXT_CHARACTERS = 4000
+
+_WORD_PATTERN = re.compile(
+    r"[\wÃ€-Ã¿'-]+",
+    re.UNICODE,
+)
+
+
+# Application-level memory categories.
+#
+# These are deliberately strings because MemoryService exposes
+# MemoryRecord.category rather than MemoryEntry.memory_type.
+_MEMORY_CATEGORY_PRIORITY: dict[str, int] = {
+    "preference": 30,
+    "learning_goal": 30,
+    "discovery_context": 20,
+    "saved_item": 10,
+    "conversation": 10,
+}
+
+
+@dataclass(frozen=True)
+class MemoryContext:
+    """
+    Bounded, provider-independent learner context.
+    """
+
+    entries: tuple[MemoryRecord, ...]
+    text: str
+
+    @property
+    def is_empty(self) -> bool:
+        """Return True when no memory was selected."""
+        return not self.entries
+
+    @property
+    def memory_count(self) -> int:
+        """Return the number of selected memories."""
+        return len(self.entries)
+
+
+class MemoryContextBuilder:
+    """
+    Build bounded learner context from MemoryRecord objects.
+
+    The builder is stateless and deterministic.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_memory_items: int = DEFAULT_MAX_MEMORY_ITEMS,
+        max_context_characters: int = (
+            DEFAULT_MAX_CONTEXT_CHARACTERS
+        ),
+    ) -> None:
+        if max_memory_items < 1:
+            raise ValueError(
+                "max_memory_items must be greater than zero."
+            )
+
+        if max_context_characters < 1:
+            raise ValueError(
+                "max_context_characters must be greater than zero."
+            )
+
+        self._max_memory_items = max_memory_items
+        self._max_context_characters = (
+            max_context_characters
+        )
+
+    def build(
+        self,
+        *,
+        user_id: str,
+        request: str,
+        memories: list[MemoryRecord]
+        | tuple[MemoryRecord, ...],
+    ) -> MemoryContext:
+        """
+        Build bounded learner context.
+
+        Memory is supplied by the caller.
+
+        The builder does not retrieve or persist memory.
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "user_id cannot be empty."
+            )
+
+        if not request.strip():
+            raise ValueError(
+                "request cannot be empty."
+            )
+
+        if not memories:
+            return MemoryContext(
+                entries=(),
+                text="",
+            )
+
+        request_tokens = self._tokens(
+            request
+        )
+
+        candidates: list[
+            tuple[
+                int,
+                datetime,
+                str,
+                MemoryRecord,
+            ]
+        ] = []
+
+        for memory in memories:
+
+            if not isinstance(
+                memory,
+                MemoryRecord,
+            ):
+                continue
+
+            # Defence in depth.
+            if memory.user_id != user_id:
+                continue
+
+            if not memory.category.strip():
+                continue
+
+            if not memory.content.strip():
+                continue
+
+            score = self._score(
+                memory=memory,
+                request_tokens=request_tokens,
+            )
+
+            # A memory category alone does NOT make the memory
+            # relevant to the current request.
+            if score <= 0:
+                continue
+
+            candidates.append(
+                (
+                    score,
+                    memory.created_at,
+                    memory.content,
+                    memory,
+                )
+            )
+
+        # Deterministic ordering:
+        #
+        # 1. relevance descending
+        # 2. newest memory first
+        # 3. content as stable tie-breaker
+        candidates.sort(
+            key=lambda item: (
+                -item[0],
+                -item[1].timestamp(),
+                item[2].casefold(),
+            )
+        )
+
+        selected: list[MemoryRecord] = []
+        rendered_items: list[str] = []
+
+        current_length = len(
+            "Learner context:\n"
+        )
+
+        for (
+            _score,
+            _created_at,
+            _content,
+            memory,
+        ) in candidates:
+
+            if (
+                len(selected)
+                >= self._max_memory_items
+            ):
+                break
+
+            line = self._render_memory(
+                memory
+            )
+
+            separator_length = (
+                1
+                if rendered_items
+                else 0
+            )
+
+            projected_length = (
+                current_length
+                + separator_length
+                + len(line)
+            )
+
+            if (
+                projected_length
+                > self._max_context_characters
+            ):
+                # Do not partially truncate an individual
+                # memory because that could alter meaning.
+                continue
+
+            selected.append(memory)
+            rendered_items.append(line)
+
+            current_length = projected_length
+
+        if not selected:
+            return MemoryContext(
+                entries=(),
+                text="",
+            )
+
+        text = (
+            "Learner context:\n"
+            + "\n".join(
+                f"- {item}"
+                for item in rendered_items
+            )
+        )
+
+        if (
+            len(text)
+            > self._max_context_characters
+        ):
+            raise AssertionError(
+                "MemoryContextBuilder produced "
+                "an oversized context."
+            )
+
+        return MemoryContext(
+            entries=tuple(selected),
+            text=text,
+        )
+
+    @staticmethod
+    def _tokens(
+        value: str,
+    ) -> set[str]:
+        """
+        Return normalised tokens for deterministic matching.
+        """
+
+        return {
+            token.casefold()
+            for token in _WORD_PATTERN.findall(
+                value
+            )
+            if len(token) > 1
+        }
+
+    @classmethod
+    def _score(
+        cls,
+        *,
+        memory: MemoryRecord,
+        request_tokens: set[str],
+    ) -> int:
+        """
+        Calculate deterministic relevance.
+
+        Relevance requires actual token overlap.
+
+        This prevents an unrelated preference such as
+        "Prefers hiking" from being injected into a request
+        about "European AI regulation" simply because it is
+        a preference.
+        """
+
+        content_tokens = cls._tokens(
+            memory.content
+        )
+
+        category_tokens = cls._tokens(
+            memory.category
+        )
+
+        overlap = request_tokens & (
+            content_tokens
+            | category_tokens
+        )
+
+        if not overlap:
+            return 0
+
+        category = (
+            memory.category.strip().casefold()
+        )
+
+        category_priority = (
+            _MEMORY_CATEGORY_PRIORITY.get(
+                category,
+                10,
+            )
+        )
+
+        return (
+            category_priority
+            + len(overlap)
+        )
+
+    @staticmethod
+    def _render_memory(
+        memory: MemoryRecord,
+    ) -> str:
+        """
+        Render memory explicitly as learner context.
+
+        Memory content is treated as data, not instructions.
+        """
+
+        category = (
+            memory.category.strip()
+        )
+
+        content = " ".join(
+            memory.content.split()
+        )
+
+        return (
+            f"[{category}] {content}"
+        )

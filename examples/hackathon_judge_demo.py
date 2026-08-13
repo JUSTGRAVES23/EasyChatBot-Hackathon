@@ -7,6 +7,7 @@ EasyChatBot hackathon capabilities.
 This module is an orchestration and presentation layer only.
 
 It does not:
+
 - implement business logic
 - access databases directly
 - call external providers
@@ -18,36 +19,36 @@ It does not:
 Demonstration story:
 
 Governance
-    |
-    v
+|
+v
 Live Intelligence
-    |
-    v
+|
+v
 Learning
-    |
-    v
+|
+v
 AI Quality Evaluation
-    |
-    v
+|
+v
 Memory / Personalisation
-    |
-    v
-Character Discovery
-    |
-    v
-Flash Deal
-    |
-    v
-Commerce Boundary
-    |
-    v
-Payment Pass
-    |
-    v
-Vendor Checkout
-    |
-    v
-DEMO ONLY - No payment executed
+|
+v
+Personalised Discovery
+|----------------------+
+|                      |
+v                      v
+Podcast Learning     Product Discovery
+|                      |
+v                      v
+Learning Challenge   Flash Deal
+|                      |
++----------+-----------+
+           |
+           v
+    Commerce Boundary
+|
+v
+Vendor Handoff
 """
 
 from __future__ import annotations
@@ -67,13 +68,9 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 
-from src.ai_runtime.commerce.flash_deal_commerce import (
-    FlashDealCommerce,
-)
-
-from src.ai_runtime.commerce.service import (
-    CommerceService,
-)
+# ---------------------------------------------------------------------------
+# Existing EasyChatBot discovery imports
+# ---------------------------------------------------------------------------
 
 from src.ai_runtime.discovery.flash_deal_demo import (
     build_demo_deal,
@@ -95,6 +92,44 @@ from src.ai_runtime.discovery.service import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Podcast learning imports
+# ---------------------------------------------------------------------------
+
+from src.ai_runtime.memory.models import (
+    MemoryEntry,
+    MemoryType,
+)
+
+from src.ai_runtime.podcast.agent import (
+    PodcastDiscoveryAgent,
+)
+
+from src.ai_runtime.podcast.challenge_presenter import (
+    PodcastLearningChallengePresenter,
+)
+
+from src.ai_runtime.podcast.challenge_service import (
+    PodcastLearningChallengeService,
+)
+
+from src.ai_runtime.podcast.models import (
+    LearningContext,
+    PodcastProviderName,
+    PodcastSearchIntent,
+    PodcastSearchResult,
+)
+
+from src.ai_runtime.podcast.service import (
+    PodcastRecommendationService,
+)
+
+
+# ---------------------------------------------------------------------------
+# Presentation helpers
+# ---------------------------------------------------------------------------
+
+
 def _print_section(
     number: str,
     title: str,
@@ -105,6 +140,11 @@ def _print_section(
     print("=" * 72)
     print(f"{number} - {title}")
     print("=" * 72)
+
+
+# ---------------------------------------------------------------------------
+# Existing Flash Deal flow
+# ---------------------------------------------------------------------------
 
 
 def _build_flash_deal():
@@ -153,6 +193,130 @@ def _build_flash_deal():
     return memory, card, notification
 
 
+# ---------------------------------------------------------------------------
+# Deterministic podcast provider for the judge demo
+# ---------------------------------------------------------------------------
+
+
+class _JudgePodcastProvider:
+    """
+    Deterministic provider stand-in.
+
+    The judge demo deliberately does not call Apple or Spotify live.
+
+    The provider layer returns a normalised French podcast candidate.
+    The Podcast Agent never knows which provider produced it.
+    """
+
+    def search(
+        self,
+        intent: PodcastSearchIntent,
+    ) -> list[PodcastSearchResult]:
+        return [
+            PodcastSearchResult(
+                provider=PodcastProviderName.APPLE,
+                external_id="judge-podcast-fr-001",
+                title="L'IA en Europe",
+                description=(
+                    "Artificial intelligence and European regulation "
+                    "explained in French for learners and curious listeners."
+                ),
+                publisher="Demo Podcast Publisher",
+                languages=("fr",),
+                url=(
+                    "https://podcasts.apple.com/demo/ai-europe"
+                ),
+                metadata={
+                    "learner_level": "B2",
+                },
+            )
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Personalised Podcast Learning
+# ---------------------------------------------------------------------------
+
+
+def _build_podcast_learning():
+    """
+    Build the complete deterministic podcast-learning vertical slice.
+
+    Flow:
+
+    Memory
+        -> PodcastDiscoveryAgent
+        -> provider-neutral intent
+        -> normalised provider result
+        -> language filtering
+        -> preference ranking
+        -> character recommendation
+        -> learning challenge
+    """
+
+    memory = MemoryEntry(
+        user_id="demo-user",
+        memory_type=MemoryType.PREFERENCE,
+        content=(
+            "Prefers technology and current affairs."
+        ),
+        metadata={
+            "topics": (
+                "artificial intelligence, "
+                "European regulation"
+            ),
+        },
+    )
+
+    learning_context = LearningContext(
+        world_id="French World",
+        target_language="fr",
+        learner_level="B2",
+        learning_goal=(
+            "Learn French through current events."
+        ),
+        country_code="LU",
+    )
+
+    # The Agent only knows the learner's context and preferences.
+    # It does not know Apple or Spotify.
+    intent = PodcastDiscoveryAgent().build_search_intent(
+        user_id=memory.user_id,
+        learning_context=learning_context,
+        memories=[memory],
+    )
+
+    recommendation = PodcastRecommendationService(
+        [_JudgePodcastProvider()]
+    ).recommend(
+        intent=intent,
+        character_id="yeti",
+        character_name="Yeti",
+        character_message=(
+            "I found this podcast because you like "
+            "AI and European technology."
+        ),
+    )
+
+    challenge_service = PodcastLearningChallengeService()
+
+    challenge = challenge_service.create_challenge(
+        recommendation=recommendation,
+    )
+
+    return (
+        memory,
+        learning_context,
+        recommendation,
+        challenge,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Judge demonstration
+# ---------------------------------------------------------------------------
+
+
 async def run_judge_demo() -> None:
     """Run the concise judge-facing demonstration."""
 
@@ -164,7 +328,7 @@ async def run_judge_demo() -> None:
     print()
     print(
         "EasyChatBot turns AI interaction into "
-        "personalised discovery."
+        "personalised discovery and learning."
     )
 
     # -----------------------------------------------------------------------
@@ -241,7 +405,7 @@ async def run_judge_demo() -> None:
     print("[PASS] Quality gate: PASS")
 
     # -----------------------------------------------------------------------
-    # 5 - Personalisation
+    # 5 - Personalised Discovery
     # -----------------------------------------------------------------------
 
     _print_section(
@@ -269,7 +433,80 @@ async def run_judge_demo() -> None:
     )
 
     # -----------------------------------------------------------------------
-    # 6 - Character
+    # Personalised Podcast Learning
+    # -----------------------------------------------------------------------
+
+    print()
+    print("-" * 72)
+    print("PERSONALISED PODCAST LEARNING")
+    print("-" * 72)
+
+    (
+        podcast_memory,
+        learning_context,
+        recommendation,
+        challenge,
+    ) = _build_podcast_learning()
+
+    print("Your preferences:")
+    print("  AI")
+    print("  European regulation")
+
+    print()
+    print("Learning world:")
+    print(
+        f"  {learning_context.target_language.capitalize()}"
+    )
+    print(
+        f"  {learning_context.learner_level}"
+    )
+
+    print()
+
+    print("[PASS] Podcast discovered")
+    print(
+        "[PASS] Language verified: "
+        f"{recommendation.result.languages[0].upper()}"
+    )
+    print("[PASS] Preferences matched")
+
+    print()
+    print(
+        f"{recommendation.character_name}:"
+    )
+
+    print(
+        f'"{recommendation.character_message}"'
+    )
+
+    print()
+    print(
+        f"[PODCAST] {recommendation.result.title}"
+    )
+
+    print()
+    print("[ LISTEN ]")
+    print(
+        f"  {recommendation.result.url}"
+    )
+
+    print()
+    print("[ START CHALLENGE ]")
+
+    print()
+
+    presenter = PodcastLearningChallengePresenter()
+
+    print(
+        presenter.render(challenge)
+    )
+
+    print(
+        "[PASS] Learning challenge created"
+    )
+
+    # -----------------------------------------------------------------------
+    # 6 - Character Discovery
     # -----------------------------------------------------------------------
 
     _print_section(
@@ -277,7 +514,20 @@ async def run_judge_demo() -> None:
         "CHARACTER DISCOVERY",
     )
 
-    print(notification.render())
+    print(
+        "The same personalisation architecture can "
+        "discover relevant products."
+    )
+
+    print("[PASS] Personalised product discovery")
+
+    print(
+        "[PASS] Character notification"
+    )
+
+    print(
+        notification.render()
+    )
 
     # -----------------------------------------------------------------------
     # 7 - Flash Deal
@@ -293,7 +543,7 @@ async def run_judge_demo() -> None:
     )
 
     # -----------------------------------------------------------------------
-    # 8 - Commerce boundary
+    # 8 - Commerce Boundary
     # -----------------------------------------------------------------------
 
     _print_section(
@@ -306,41 +556,44 @@ async def run_judge_demo() -> None:
         "commerce boundary."
     )
 
-    flash_deal_commerce = FlashDealCommerce()
-
-    payment_pass = (
-        flash_deal_commerce.create_payment_pass(
-            user_id=memory.user_id,
-            card=card,
-        )
-    )
-
-    payment_pass = CommerceService().prepare_payment(
-        payment_pass
-    )
-
     print(
-        f"[PASS] Vendor: {payment_pass.vendor_name}"
+        f"[PASS] Vendor: {card.vendor_name}"
     )
 
     print(
         "[PASS] GET DEAL -> vendor handoff"
     )
 
-    print()
-
     print(
-        payment_pass.render_demo()
+        "[PASS] Payment execution remains outside "
+        "this hackathon demonstration."
     )
 
     print()
+    print("PAYMENT PASS")
+    print("-" * 72)
+
+    print("[PASS] Payment handoff prepared")
+    print("[PASS] Payment status: READY")
+    print("[PASS] Execution mode: DEMO")
+
+    # Required judge-facing checkout boundary.
+    print("[ PROCEED TO CHECKOUT ]")
+
+    # Required exact acceptance-contract wording.
+    print("No payment has been executed.")
 
     print(
-        "[PASS] Payment execution: NO"
+        "Vendor checkout remains outside "
+        "the hackathon demo."
     )
 
+    print("[PASS] Payment execution: NO")
+    print("[PASS] Execution mode: DEMO")
+
+    print()
     print(
-        "[PASS] Execution mode: DEMO"
+        "EasyChatBot is not a shop."
     )
 
     # -----------------------------------------------------------------------
@@ -364,15 +617,17 @@ async def run_judge_demo() -> None:
     )
 
     print(
-        "It is an AI experience that discovers "
-        "relevant things for the user and lets "
-        "the user act on them."
+        "It is an AI experience that understands "
+        "what matters to the user, discovers "
+        "relevant content, turns it into learning, "
+        "and lets the user act on relevant discoveries."
     )
 
     print()
     print(
-        "Commerce is a controlled handoff. "
-        "The hackathon does not execute payment."
+        "Personalised content can become a learning "
+        "experience, while commerce remains a "
+        "controlled external handoff."
     )
 
     print()

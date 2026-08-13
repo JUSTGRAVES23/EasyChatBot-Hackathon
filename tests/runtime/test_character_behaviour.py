@@ -18,7 +18,9 @@ async def test_clara_uses_clara_profile():
 
     registry = CharacterRegistry()
 
-    clara = registry.get("clara")
+    clara = registry.get(
+        "clara"
+    )
 
     agent = ConversationAgent(
         clara
@@ -26,7 +28,9 @@ async def test_clara_uses_clara_profile():
 
     context = ExecutionContext(
         user_id="demo-user",
-        request="Explain artificial intelligence",
+        request=(
+            "Explain artificial intelligence"
+        ),
     )
 
     result = await agent.execute(
@@ -39,10 +43,27 @@ async def test_clara_uses_clara_profile():
         "Clara"
     )
 
-    assert result.output["personality"] == (
+    profile = result.output[
+        "character_profile"
+    ]
+
+    assert profile["character_id"] == (
+        "clara"
+    )
+
+    assert profile["name"] == (
+        "Clara"
+    )
+
+    assert profile["description"] == (
+        "A professional learning companion "
+        "focused on technology and career topics."
+    )
+
+    assert profile["personality"] == (
         "Analytical, structured and supportive."
     )
 
-    assert result.output["learning_style"] == (
+    assert profile["learning_style"] == (
         "Structured and practical learning."
     )

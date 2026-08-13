@@ -1,8 +1,9 @@
 """
 AI Runtime capability contracts.
 
-This module defines the provider-independent contract used by
-the AI Runtime to request execution of an approved capability.
+This module defines the provider-independent contracts used by
+the AI Runtime to request and represent execution of approved
+capabilities.
 
 Architecture:
 
@@ -19,14 +20,19 @@ Governance
     |
     v
 Capability Execution
+    |
+    v
+Capability Result
+
 
 This module contains contracts only.
 
 It does not:
-- execute agents
-- call providers
-- evaluate governance policies
-- perform external side effects
+
+- execute agents;
+- call providers;
+- evaluate governance policies;
+- perform external side effects.
 """
 
 from __future__ import annotations
@@ -38,15 +44,62 @@ from typing import Any, Mapping
 
 class CapabilityType(StrEnum):
     """
-    Supported runtime capability categories.
+    Supported AI Runtime capability categories.
 
-    The list is intentionally small for the initial framework
-    implementation. New capabilities should be added explicitly.
+    Capabilities are explicit Runtime contracts.
+
+    Adding a new capability requires:
+
+    - registration;
+    - governance review;
+    - executor implementation;
+    - testing.
+
+    The capability itself does not imply autonomous execution.
     """
 
-    LIVE_INTELLIGENCE = "live_intelligence"
-    LEARNING_GENERATION = "learning_generation"
-    EVALUATION = "evaluation"
+    LIVE_INTELLIGENCE = (
+        "live_intelligence"
+    )
+
+    PODCAST_DISCOVERY = (
+        "podcast_discovery"
+    )
+
+    PODCAST_LISTENING_PROPOSAL = (
+        "podcast_listening_proposal"
+    )
+
+    LEARNING_GENERATION = (
+        "learning_generation"
+    )
+
+    FLASHCARD_GENERATION = (
+        "flashcard_generation"
+    )
+
+    EVALUATION = (
+        "evaluation"
+    )
+
+
+# =========================================================
+# Backward Compatibility
+# =========================================================
+
+"""
+Historical Runtime/application code imports:
+
+    CapabilityName
+
+The contract was renamed to:
+
+    CapabilityType
+
+Keep this alias during migration.
+"""
+
+CapabilityName = CapabilityType
 
 
 class CapabilityExecutionStatus(StrEnum):
@@ -55,45 +108,63 @@ class CapabilityExecutionStatus(StrEnum):
     """
 
     ACCEPTED = "accepted"
+
     COMPLETED = "completed"
+
     REJECTED = "rejected"
+
     FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
 class CapabilityRequest:
     """
-    Provider-independent request submitted to the AI Runtime.
+    Provider-independent request submitted to AI Runtime.
 
-    Attributes:
-        capability:
-            Logical capability requested by the application.
+    The application/API boundary may provide either:
 
-        request_id:
-            Correlation identifier for the execution.
+    - CapabilityType enum values;
+    - string capability values.
 
-        payload:
-            Explicit capability input.
-
-        metadata:
-            Non-business execution metadata.
-
-        requested_by:
-            Component or application requesting execution.
+    Strings are normalised to CapabilityType internally.
     """
 
     capability: CapabilityType
+
     request_id: str
+
     payload: Mapping[str, Any]
+
     metadata: Mapping[str, Any] = field(
         default_factory=dict
     )
+
     requested_by: str = "application"
 
     def __post_init__(self) -> None:
+        """
+        Validate and normalise the Runtime request.
+        """
+
+        if not isinstance(
+            self.request_id,
+            str,
+        ):
+            raise ValueError(
+                "Capability request_id must be a string."
+            )
+
         if not self.request_id.strip():
             raise ValueError(
                 "Capability request_id cannot be empty."
+            )
+
+        if not isinstance(
+            self.requested_by,
+            str,
+        ):
+            raise ValueError(
+                "Capability requested_by must be a string."
             )
 
         if not self.requested_by.strip():
@@ -101,21 +172,69 @@ class CapabilityRequest:
                 "Capability requested_by cannot be empty."
             )
 
+        if not isinstance(
+            self.payload,
+            Mapping,
+        ):
+            raise ValueError(
+                "Capability payload must be a mapping."
+            )
+
+        if not isinstance(
+            self.metadata,
+            Mapping,
+        ):
+            raise ValueError(
+                "Capability metadata must be a mapping."
+            )
+
+        if isinstance(
+            self.capability,
+            str,
+        ):
+            try:
+                object.__setattr__(
+                    self,
+                    "capability",
+                    CapabilityType(
+                        self.capability,
+                    ),
+                )
+
+            except ValueError as exc:
+                raise ValueError(
+                    "Unsupported capability: "
+                    f"{self.capability}"
+                ) from exc
+
+        elif not isinstance(
+            self.capability,
+            CapabilityType,
+        ):
+            raise ValueError(
+                "Capability must be a valid CapabilityType."
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilityResult:
     """
-    Provider-independent result returned by the AI Runtime.
+    Provider-independent result returned by AI Runtime.
 
-    The result contains execution information but does not expose
-    provider-specific response objects.
+    Provider-specific responses remain hidden behind
+    capability executors.
     """
 
     request_id: str
+
     capability: CapabilityType
+
     status: CapabilityExecutionStatus
+
     output: Any = None
+
     error: str | None = None
+
     metadata: Mapping[str, Any] = field(
         default_factory=dict
     )
@@ -145,7 +264,7 @@ class CapabilityResult:
     @property
     def rejected(self) -> bool:
         """
-        Return True when execution was rejected before execution.
+        Return True when governance rejected execution.
         """
 
         return (

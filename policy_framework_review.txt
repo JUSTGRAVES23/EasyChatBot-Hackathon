@@ -1,0 +1,456 @@
+﻿===== EXISTING POLICY FRAMEWORK REVIEW =====
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\engine.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/engine.py
+
+Purpose:
+Coordinates the evaluation of Runtime Policies.
+
+The PolicyEngine delegates decision making to registered Policy
+implementations while remaining independent of execution, providers,
+models and business logic.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from runtime.policies.policy import (
+    PolicyContext,
+    PolicyDecision,
+)
+from runtime.policies.registry import PolicyRegistry
+
+
+class PolicyEngine:
+    """
+    Central runtime policy evaluator.
+
+    The PolicyEngine is responsible for resolving a registered
+    policy and returning its PolicyDecision.
+
+    It deliberately contains no business rules itself.
+    """
+
+    def __init__(
+        self,
+        registry: PolicyRegistry,
+    ) -> None:
+        """
+        Initialize the PolicyEngine.
+
+        Parameters
+        ----------
+        registry:
+            Registry containing all available runtime policies.
+        """
+        self._registry = registry
+
+    def evaluate(
+        self,
+        policy_name: str,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """
+        Evaluate a registered policy.
+
+        Parameters
+        ----------
+        policy_name:
+            Name of the registered policy.
+
+        context:
+            Immutable policy evaluation context.
+
+        Returns
+        -------
+        PolicyDecision
+            Decision produced by the selected policy.
+
+        Raises
+        ------
+        KeyError
+            If the requested policy is not registered.
+        """
+
+        policy = self._registry.get(policy_name)
+
+        return policy.evaluate(context)
+
+    def exists(
+        self,
+        policy_name: str,
+    ) -> bool:
+        """
+        Determine whether a policy is registered.
+        """
+
+        return self._registry.exists(policy_name)
+
+    def list(self) -> tuple[str, ...]:
+        """
+        Return all registered policies.
+        """
+
+        return self._registry.list()
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}"
+            f"(registered={len(self._registry)})"
+        )
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\policy.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/policy.py
+
+Purpose:
+Defines the common policy contracts used throughout the AI Runtime.
+
+Policies evaluate a PolicyContext and return a PolicyDecision.
+
+The policy subsystem centralizes runtime decisions such as:
+
+- Provider selection
+- Model selection
+- Retry behaviour
+- Approval decisions
+- Cost governance
+- Fallback behaviour
+
+Policies contain decision logic only.
+They never execute providers, modify runtime state or perform business logic.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyContext:
+    """
+    Immutable context supplied to policy evaluation.
+
+    The context contains the information required for making
+    runtime decisions. Additional fields may be introduced
+    over time without affecting the Policy interface.
+    """
+
+    agent_id: str
+    capability: str
+
+    provider_id: str | None = None
+    model_id: str | None = None
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyDecision:
+    """
+    Result returned by policy evaluation.
+
+    The decision represents recommendations only.
+    It never performs execution.
+    """
+
+    approved: bool = True
+
+    provider_id: str | None = None
+    model_id: str | None = None
+
+    retry: bool = False
+    max_retries: int = 0
+
+    fallback_provider: str | None = None
+
+    reason: str | None = None
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class Policy(ABC):
+    """
+    Base class for all runtime policies.
+
+    Each policy evaluates a PolicyContext and returns
+    a standardized PolicyDecision.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """
+        Human-readable policy name.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def evaluate(
+        self,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """
+        Evaluate the supplied policy context.
+
+        Parameters
+        ----------
+        context:
+            Immutable policy evaluation context.
+
+        Returns
+        -------
+        PolicyDecision
+            Decision produced by the policy.
+        """
+        raise NotImplementedError
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\registry.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/registry.py
+
+Purpose:
+Maintains the collection of available Runtime Policies.
+
+Policies register themselves once during application startup and can
+later be retrieved by name by the PolicyEngine.
+
+The registry is intentionally lightweight and contains no policy
+evaluation logic.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from runtime.policies.policy import Policy
+
+
+class PolicyRegistry:
+    """
+    Stores all available Runtime Policies.
+
+    The registry is responsible for registering, retrieving,
+    listing and validating policies.
+    """
+
+    def __init__(self) -> None:
+        self._policies: dict[str, Policy] = {}
+
+    def register(
+        self,
+        policy: Policy,
+    ) -> None:
+        """
+        Register a policy.
+
+        Raises
+        ------
+        ValueError
+            If a policy with the same name is already registered.
+        """
+
+        if policy.name in self._policies:
+            raise ValueError(
+                f"Policy '{policy.name}' is already registered."
+            )
+
+        self._policies[policy.name] = policy
+
+    def get(
+        self,
+        name: str,
+    ) -> Policy:
+        """
+        Retrieve a registered policy.
+
+        Raises
+        ------
+        KeyError
+            If the policy does not exist.
+        """
+
+        try:
+            return self._policies[name]
+
+        except KeyError as exc:
+            raise KeyError(
+                f"Policy '{name}' is not registered."
+            ) from exc
+
+    def exists(
+        self,
+        name: str,
+    ) -> bool:
+        """
+        Determine whether a policy exists.
+        """
+
+        return name in self._policies
+
+    def unregister(
+        self,
+        name: str,
+    ) -> None:
+        """
+        Remove a policy.
+
+        Raises
+        ------
+        KeyError
+            If the policy is not registered.
+        """
+
+        if name not in self._policies:
+            raise KeyError(
+                f"Policy '{name}' is not registered."
+            )
+
+        del self._policies[name]
+
+    def list(self) -> tuple[str, ...]:
+        """
+        Return all registered policy names.
+        """
+
+        return tuple(sorted(self._policies.keys()))
+
+    def clear(self) -> None:
+        """
+        Remove all registered policies.
+        """
+
+        self._policies.clear()
+
+    def __contains__(
+        self,
+        name: str,
+    ) -> bool:
+        return name in self._policies
+
+    def __len__(self) -> int:
+        return len(self._policies)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}"
+            f"(registered={len(self)})"
+        )
+
+============================================================
+FILE: C:\AI Folder\ai_agents\runtime\policies\runtime_policies.py
+============================================================
+"""
+================================================================================
+File: runtime/policies/runtime_policies.py
+
+Purpose:
+Contains the built-in Runtime Policy implementations shipped with the
+EasyChatBot AI Runtime.
+
+Runtime Policies encapsulate reusable decision logic used during AI
+execution. They evaluate a PolicyContext and produce a standardized
+PolicyDecision that guides the runtime without performing execution.
+
+These policies are intentionally stateless, deterministic whenever
+possible, and independent from providers, models and infrastructure.
+
+Typical responsibilities include:
+
+â€¢ Provider routing
+â€¢ Model selection
+â€¢ Retry recommendations
+â€¢ Approval decisions
+â€¢ Cost governance
+â€¢ Fallback recommendations
+
+New runtime policies should inherit from the Policy base class defined
+in runtime.policies.policy.
+
+Author:
+EasyChatBot AI Runtime
+================================================================================
+"""
+
+from __future__ import annotations
+
+from runtime.policies.policy import (
+    Policy,
+    PolicyContext,
+    PolicyDecision,
+)
+
+
+class RoutingPolicy(Policy):
+    """
+    Default Runtime Routing Policy.
+
+    This policy determines which provider and model should be used for
+    an execution request.
+
+    The initial implementation is intentionally conservative. It simply
+    returns the provider and model already supplied in the PolicyContext.
+
+    Future versions may incorporate:
+
+    - Capability-based routing
+    - Provider availability
+    - Local vs cloud execution
+    - Cost optimisation
+    - Governance constraints
+    - Preferred provider ordering
+    - Model capability matching
+    """
+
+    @property
+    def name(self) -> str:
+        """
+        Unique runtime policy name.
+        """
+        return "routing"
+
+    def evaluate(
+        self,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """
+        Evaluate the routing policy.
+
+        Parameters
+        ----------
+        context:
+            Immutable policy evaluation context.
+
+        Returns
+        -------
+        PolicyDecision
+            Routing decision for the current execution request.
+        """
+
+        return PolicyDecision(
+            approved=True,
+            provider_id=context.provider_id,
+            model_id=context.model_id,
+            reason="Default Runtime Routing Policy applied.",
+        )

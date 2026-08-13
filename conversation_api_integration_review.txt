@@ -1,0 +1,762 @@
+﻿==================== API ROUTES ====================
+
+"""
+EasyChatBot API Routes.
+
+The API layer exposes the application.
+
+Routes do not contain agent logic.
+They delegate execution to application services.
+"""
+
+from fastapi import APIRouter, HTTPException
+
+from backend.characters.character_registry import (
+    CharacterRegistry,
+)
+
+from backend.services.companion_service import (
+    CompanionService,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+router = APIRouter()
+
+character_registry = CharacterRegistry()
+
+
+def create_companion_service(
+    character,
+) -> CompanionService:
+    """
+    Create the application-level CompanionService.
+
+    Kept as a small dependency seam so API tests can
+    replace the service without invoking external providers.
+
+    Production behaviour remains the same.
+    """
+
+    return CompanionService(
+        character=character
+    )
+
+
+@router.get("/characters")
+def get_characters():
+    """
+    Return available AI companions.
+    """
+
+    characters = (
+        character_registry.list_characters()
+    )
+
+    return {
+        "characters": [
+            {
+                "id": character.character_id,
+                "name": character.name,
+                "description": character.description,
+                "personality": character.personality,
+                "learning_style": character.learning_style,
+            }
+            for character in characters
+        ]
+    }
+
+
+@router.post("/chat")
+async def chat(
+    payload: dict,
+):
+    """
+    Execute an EasyChatBot companion interaction.
+
+    Expected payload:
+
+    {
+        "user_id": "demo-user",
+        "character": "yeti",
+        "message": "Explain AI",
+        "research": false
+    }
+    """
+
+    message = payload.get("message")
+
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="message is required",
+        )
+
+    character_id = payload.get(
+        "character",
+        "yeti",
+    )
+
+    try:
+        character = character_registry.get(
+            character_id
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    companion_service = (
+        create_companion_service(
+            character
+        )
+    )
+
+    context = ExecutionContext(
+        user_id=payload.get(
+            "user_id",
+            "demo-user",
+        ),
+        request=message,
+    )
+
+    result = await companion_service.interact(
+        context,
+        use_research=payload.get(
+            "research",
+            False,
+        ),
+    )
+
+    return result
+
+
+==================== API CHAT TEST ====================
+
+import pytest
+
+from httpx import ASGITransport, AsyncClient
+
+from backend.api.main import app
+from backend.api import routes
+
+
+class FakeCompanionService:
+    """
+    Test double for the application service.
+
+    This test deliberately does not invoke Parallel.
+    """
+
+    def __init__(
+        self,
+        character,
+    ):
+        self.character = character
+        self.received_context = None
+        self.received_use_research = None
+
+    async def interact(
+        self,
+        context,
+        use_research=False,
+    ):
+        self.received_context = context
+        self.received_use_research = (
+            use_research
+        )
+
+        return {
+            "character": self.character.name,
+            "conversation": {
+                "character": self.character.name,
+                "message": (
+                    f"{self.character.name}: "
+                    f"Test response"
+                ),
+                "intelligence_context": (
+                    "TEST INTELLIGENCE"
+                    if use_research
+                    else None
+                ),
+            },
+            "research": (
+                {
+                    "query": context.request,
+                    "test": True,
+                }
+                if use_research
+                else None
+            ),
+            "quality": {
+                "quality_score": 1.0,
+                "passed": True,
+                "findings": [],
+                "recommendations": [],
+            },
+            "memory_count": 0,
+        }
+
+
+@pytest.mark.asyncio
+async def test_chat_passes_research_false(
+    monkeypatch,
+):
+    """
+    Verify /chat passes research=False
+    to CompanionService.
+    """
+
+    captured = {}
+
+    def fake_factory(
+        character,
+    ):
+        service = FakeCompanionService(
+            character
+        )
+
+        captured["service"] = service
+
+        return service
+
+    monkeypatch.setattr(
+        routes,
+        "create_companion_service",
+        fake_factory,
+    )
+
+    transport = ASGITransport(
+        app=app
+    )
+
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+
+        response = await client.post(
+            "/chat",
+            json={
+                "user_id": "api-test-user",
+                "character": "yeti",
+                "message": (
+                    "Explain artificial intelligence"
+                ),
+                "research": False,
+            },
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    service = captured["service"]
+
+    assert (
+        service.received_use_research
+        is False
+    )
+
+    assert (
+        service.received_context.user_id
+        == "api-test-user"
+    )
+
+    assert (
+        service.received_context.request
+        == "Explain artificial intelligence"
+    )
+
+    assert data["character"] == "Yeti"
+
+    assert data["research"] is None
+
+    assert (
+        data["conversation"][
+            "intelligence_context"
+        ]
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_passes_research_true(
+    monkeypatch,
+):
+    """
+    Verify /chat passes research=True
+    to CompanionService.
+
+    This is an API contract test and therefore
+    intentionally does not call Parallel.
+    """
+
+    captured = {}
+
+    def fake_factory(
+        character,
+    ):
+        service = FakeCompanionService(
+            character
+        )
+
+        captured["service"] = service
+
+        return service
+
+    monkeypatch.setattr(
+        routes,
+        "create_companion_service",
+        fake_factory,
+    )
+
+    transport = ASGITransport(
+        app=app
+    )
+
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+
+        response = await client.post(
+            "/chat",
+            json={
+                "user_id": "api-test-user",
+                "character": "yeti",
+                "message": (
+                    "What are the latest "
+                    "European AI regulation "
+                    "developments?"
+                ),
+                "research": True,
+            },
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    service = captured["service"]
+
+    assert (
+        service.received_use_research
+        is True
+    )
+
+    assert (
+        service.received_context.user_id
+        == "api-test-user"
+    )
+
+    assert (
+        service.received_context.request
+        == (
+            "What are the latest "
+            "European AI regulation "
+            "developments?"
+        )
+    )
+
+    assert data["character"] == "Yeti"
+
+    assert data["research"] is not None
+
+    assert (
+        data["conversation"][
+            "intelligence_context"
+        ]
+        == "TEST INTELLIGENCE"
+    )
+
+
+==================== COMPANION SERVICE ====================
+
+"""
+Companion Service.
+
+Coordinates:
+
+Character
+Conversation Agent
+Research Agent
+Quality Agent
+Memory Service
+
+Application orchestration layer.
+
+Live Intelligence flow:
+
+CompanionService
+        |
+        +--> ResearchAgent
+        |        |
+        |        v
+        |   IntelligenceContext
+        |
+        +--> ConversationAgent
+                 ^
+                 |
+          enriched ExecutionContext
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from backend.agents.conversation_agent import (
+    ConversationAgent,
+)
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.agents.quality_agent import (
+    QualityAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.memory.memory_service import (
+    MemoryService,
+)
+
+
+class CompanionService:
+    """
+    Coordinates AI companion experiences.
+
+    The service orchestrates agents but does not contain
+    provider-specific logic.
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        conversation_agent=None,
+        research_agent=None,
+        quality_agent=None,
+        memory_service=None,
+    ):
+
+        self.character = character
+
+        self.conversation_agent = (
+            conversation_agent
+            or ConversationAgent(character)
+        )
+
+        self.research_agent = (
+            research_agent
+            or ResearchAgent()
+        )
+
+        self.quality_agent = (
+            quality_agent
+            or QualityAgent()
+        )
+
+        self.memory_service = (
+            memory_service
+            or MemoryService()
+        )
+
+    async def interact(
+        self,
+        context: ExecutionContext,
+        use_research: bool = False,
+    ):
+        """
+        Execute a complete companion interaction.
+
+        When research is requested, the Research Agent
+        produces an IntelligenceContext which is attached
+        to a new immutable ExecutionContext before the
+        Conversation Agent executes.
+
+        The original ExecutionContext is never mutated.
+        """
+
+        memories = (
+            self.memory_service.recall(
+                context.user_id
+            )
+        )
+
+        research_result = None
+
+        conversation_context = context
+
+        if use_research:
+
+            research_result = (
+                await self.research_agent.execute(
+                    context
+                )
+            )
+
+            if (
+                research_result.success
+                and research_result.output is not None
+            ):
+                conversation_context = replace(
+                    context,
+                    intelligence_context=(
+                        research_result.output
+                    ),
+                )
+
+        conversation_result = (
+            await self.conversation_agent.execute(
+                conversation_context
+            )
+        )
+
+        quality_result = (
+            await self.quality_agent.execute(
+                conversation_context
+            )
+        )
+
+        self.memory_service.remember(
+            user_id=context.user_id,
+            category="conversation",
+            content=context.request,
+        )
+
+        return {
+            "character": self.character.name,
+
+            "conversation":
+                conversation_result.output,
+
+            "research":
+                (
+                    research_result.output
+                    if research_result
+                    else None
+                ),
+
+            "quality":
+                quality_result.output,
+
+            "memory_count":
+                len(memories),
+        }
+
+
+==================== CONVERSATION AGENT ====================
+
+"""
+Conversation Agent.
+
+Provides character-aware conversational responses
+for the EasyChatBot hackathon runtime.
+
+The agent remains provider-independent.
+
+Architecture:
+
+ExecutionContext
+|
+v
+ConversationAgent
+|
++--> CharacterProfile
+|
++--> Optional IntelligenceContext
+|
+v
+ConversationRequest
+|
+v
+AgentResult
+
+The actual LLM execution remains outside this
+hackathon agent and can later consume ConversationRequest
+through the appropriate EasyChatBot LLM service.
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import (
+    AgentManifest,
+)
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ConversationAgent(BaseAgent):
+    """
+    Character-aware conversation agent.
+
+    Responsibilities:
+
+    - apply character identity
+    - construct a provider-independent conversation request
+    - include optional live intelligence
+    - return a standard AgentResult
+
+    Does not:
+
+    - call an LLM provider
+    - call Parallel directly
+    - manage voice
+    - manage memory
+    - execute external workflows
+    """
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+    ) -> None:
+
+        super().__init__(
+            AgentManifest(
+                agent_id="conversation_agent",
+                name="Conversation Agent",
+                description=(
+                    "Provides character-aware "
+                    "conversation responses."
+                ),
+            )
+        )
+
+        self.character = character
+
+    def build_request(
+        self,
+        context: ExecutionContext,
+    ) -> ConversationRequest:
+        """
+        Build a provider-independent conversation request.
+
+        This method translates runtime state and character
+        identity into the application-level conversation
+        contract.
+
+        No provider-specific terminology is introduced.
+        """
+
+        system_instruction = (
+            f"You are {self.character.name}, "
+            f"a character in EasyChatBot. "
+            f"Your personality is: "
+            f"{self.character.personality} "
+            f"Your learning style is: "
+            f"{self.character.learning_style} "
+            f"Communicate in a way that is consistent "
+            f"with this character."
+        )
+
+        conversation_context = None
+
+        if context.has_intelligence_context:
+            conversation_context = (
+                context.intelligence_context.to_context_text()
+            )
+
+        return ConversationRequest(
+            system_instruction=system_instruction,
+            user_prompt=context.request,
+            conversation_context=conversation_context,
+            character_id=self.character.character_id,
+            character_name=self.character.name,
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the conversation agent.
+
+        The current hackathon implementation prepares a
+        provider-independent ConversationRequest.
+
+        Actual LLM generation remains outside this agent.
+        """
+
+        conversation_request = self.build_request(
+            context
+        )
+
+        output = {
+            "character": self.character.name,
+
+            "character_profile": {
+                "character_id": (
+                    self.character.character_id
+                ),
+                "name": self.character.name,
+                "description": (
+                    self.character.description
+                ),
+                "personality": (
+                    self.character.personality
+                ),
+                "learning_style": (
+                    self.character.learning_style
+                ),
+            },
+
+            "personality": (
+                self.character.personality
+            ),
+
+            "learning_style": (
+                self.character.learning_style
+            ),
+
+            "message": (
+                f"{self.character.name}: "
+                f"Let's explore this together. "
+                f"You asked: {context.request}"
+            ),
+
+            "intelligence_context": (
+                conversation_request.conversation_context
+            ),
+
+            "conversation_request": (
+                conversation_request
+            ),
+        }
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=output,
+        )
+

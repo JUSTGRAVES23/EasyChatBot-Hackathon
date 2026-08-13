@@ -1,0 +1,416 @@
+﻿===== backend/providers/base_provider.py =====
+"""
+Base Provider Contract.
+
+Defines the interface for external AI and knowledge providers.
+
+Examples:
+- Gemini
+- Parallel Search
+- Future LLM providers
+
+The Runtime communicates with providers through this contract.
+
+Providers are replaceable implementations.
+The Agent layer must remain independent from provider details.
+"""
+
+from abc import ABC, abstractmethod
+
+from backend.providers.provider_result import ProviderResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class BaseProvider(ABC):
+    """
+    Abstract base class for EasyChatBot providers.
+
+    Providers are responsible for communicating
+    with external services.
+
+    They are NOT responsible for:
+    - agent decisions
+    - workflow orchestration
+    - memory management
+    - user interaction
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ):
+        """
+        Initialise provider.
+
+        Args:
+            provider_id:
+                Unique provider identifier.
+        """
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute provider operation.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            ProviderResult containing provider output.
+        """
+
+        pass
+===== backend/providers/provider_result.py =====
+"""
+Provider Result Contract.
+
+Defines the standard response returned
+by external providers.
+
+All providers return this structure so
+the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    """
+    Immutable provider execution result.
+
+    Attributes:
+
+        success:
+            Indicates whether provider execution succeeded.
+
+        provider_id:
+            Identifier of the provider.
+
+        output:
+            Provider response payload.
+
+        error:
+            Error details if execution failed.
+    """
+
+    success: bool
+    provider_id: str
+    output: Any = None
+    error: str | None = None
+===== backend/providers/parallel/parallel_provider.py =====
+"""
+Parallel Search Provider.
+
+Provides live world information
+through the Parallel Search API.
+"""
+
+from backend.providers.base_provider import (
+    BaseProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ParallelSearchProvider(BaseProvider):
+    """
+    Provider implementation using Parallel Search.
+
+    The SDK client is created only when required.
+    This allows tests to run without API credentials.
+    """
+
+    def __init__(
+        self,
+        client=None,
+    ):
+        super().__init__(
+            provider_id="parallel_search"
+        )
+
+        self.client = client
+
+
+    def _get_client(self):
+        """
+        Lazy-load the real Parallel client.
+
+        Avoids requiring API keys during unit tests.
+        """
+
+        if self.client is None:
+
+            from backend.providers.parallel.parallel_client import (
+                ParallelClientWrapper,
+            )
+
+            self.client = ParallelClientWrapper()
+
+        return self.client
+
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute a live Parallel search.
+        """
+
+        try:
+
+            client = self._get_client()
+
+            result = await client.search(
+                query=context.request
+            )
+
+            return ProviderResult(
+                success=True,
+                provider_id=self.provider_id,
+                output=result,
+            )
+
+        except Exception as exc:
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error=str(exc),
+            )
+===== backend/agents/research_agent.py =====
+"""
+Research Agent.
+
+Retrieves external information through approved
+knowledge providers and converts the result into
+provider-independent IntelligenceContext data.
+
+Architecture:
+
+Research Agent
+        |
+        v
+ParallelSearchProvider
+        |
+        v
+ParallelClientWrapper
+        |
+        v
+IntelligenceContext
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+from backend.agents.base_agent import BaseAgent
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+    IntelligenceSource,
+)
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchAgent(BaseAgent):
+    """
+    Agent responsible for world information retrieval.
+    """
+
+    def __init__(
+        self,
+        provider=None,
+    ):
+        super().__init__(
+            AgentManifest(
+                agent_id="research_agent",
+                name="Research Agent",
+                description=(
+                    "Retrieves live world information "
+                    "for AI learning experiences."
+                ),
+            )
+        )
+
+        self.provider = (
+            provider
+            or ParallelSearchProvider()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute research and produce a normalized
+        IntelligenceContext.
+        """
+
+        result = await self.provider.execute(
+            context
+        )
+
+        if not result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.manifest.agent_id,
+                output=None,
+                error=result.error,
+            )
+
+        intelligence = (
+            self._build_intelligence_context(
+                query=context.request,
+                provider_output=result.output,
+            )
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=intelligence,
+        )
+
+    @staticmethod
+    def _build_intelligence_context(
+        query: str,
+        provider_output,
+    ) -> IntelligenceContext:
+        """
+        Convert provider output into the
+        provider-independent IntelligenceContext.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            raise TypeError(
+                "Research provider output must be a dictionary."
+            )
+
+        raw_results = provider_output.get(
+            "results",
+            {},
+        )
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            raw_results = []
+
+        sources: list[IntelligenceSource] = []
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+            if not title or not url:
+                continue
+
+            content = ResearchAgent._extract_content(
+                raw_result
+            )
+
+            sources.append(
+                IntelligenceSource(
+                    title=title,
+                    url=url,
+                    source="parallel",
+                    content=content,
+                )
+            )
+
+        return IntelligenceContext(
+            query=query,
+            sources=tuple(sources),
+        )
+
+    @staticmethod
+    def _extract_content(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract available content from a normalized
+        Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+        return str(
+            excerpts or ""
+        ).strip()
