@@ -7,6 +7,12 @@ to the application.
 Characters define identity and behaviour.
 
 Agents remain responsible for capabilities and execution.
+
+Character selection readiness is determined by artwork
+availability.
+
+A character without approved EasyChatBot artwork is not
+selectable from the character selection experience.
 """
 
 from backend.characters.character_profile import (
@@ -17,10 +23,18 @@ from backend.characters.character_profile import (
 class CharacterRegistry:
     """
     Registry of approved EasyChatBot AI companions.
+
+    Character identity and behaviour belong here.
+
+    Artwork readiness also belongs to the character profile
+    because artwork availability determines whether the
+    character may be offered for selection.
     """
 
     def __init__(self) -> None:
+
         self._characters = {
+
             "yeti": CharacterProfile(
                 character_id="yeti",
                 name="Yeti",
@@ -34,7 +48,11 @@ class CharacterRegistry:
                 learning_style=(
                     "Conversation based learning."
                 ),
+                artwork_available=True,
+                artwork_status="approved",
+                selectable=True,
             ),
+
             "clara": CharacterProfile(
                 character_id="clara",
                 name="Clara",
@@ -48,7 +66,11 @@ class CharacterRegistry:
                 learning_style=(
                     "Structured and practical learning."
                 ),
+                artwork_available=True,
+                artwork_status="approved",
+                selectable=True,
             ),
+
             "luminate": CharacterProfile(
                 character_id="luminate",
                 name="Luminate",
@@ -62,7 +84,11 @@ class CharacterRegistry:
                 learning_style=(
                     "Exploration and discussion."
                 ),
+                artwork_available=True,
+                artwork_status="approved",
+                selectable=True,
             ),
+
         }
 
     def get(
@@ -77,11 +103,18 @@ class CharacterRegistry:
                 If the character does not exist.
         """
 
-        normalized_id = character_id.strip().lower()
+        normalized_id = (
+            character_id.strip().lower()
+        )
 
         try:
-            return self._characters[normalized_id]
+
+            return self._characters[
+                normalized_id
+            ]
+
         except KeyError as exc:
+
             raise ValueError(
                 f"Unknown character: {character_id}"
             ) from exc
@@ -93,4 +126,30 @@ class CharacterRegistry:
         Return all approved characters.
         """
 
-        return list(self._characters.values())
+        return list(
+            self._characters.values()
+        )
+
+    def list_selectable_characters(
+        self,
+    ) -> list[CharacterProfile]:
+        """
+        Return characters that are currently available
+        for learner selection.
+
+        Selection requires:
+
+        - approved artwork;
+        - artwork_available=True;
+        - selectable=True.
+        """
+
+        return [
+            character
+            for character in self._characters.values()
+            if (
+                character.artwork_available
+                and character.artwork_status == "approved"
+                and character.selectable
+            )
+        ]
