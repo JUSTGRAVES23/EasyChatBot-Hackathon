@@ -1,44 +1,30 @@
-"""
+﻿"""
 Voice Call Management Composition.
 
-Composition root for voice call identity management.
+Composition root for persistent
+voice call management.
 
 Responsibilities:
-- Build repository dependencies.
-- Provide shared application service.
-- Preserve voice call identity lifecycle.
+- Build management service.
+- Provide shared repository dependency.
 
 Does NOT:
 - Handle HTTP.
-- Execute runtime.
+- Execute voice calls.
 - Manage providers.
 """
+
 
 from __future__ import annotations
 
 
-from app.application.uai.voice.voice_call_management_service import (
+from backend.app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from app.infrastructure.persistence.voice_call_repository import (
-    InMemoryVoiceCallRepository,
-)
-
-
-
-#
-# Application lifetime repository.
-#
-# Temporary Beta implementation.
-#
-# Future:
-# Replace with PostgreSQL repository.
-#
-
-_voice_call_repository = (
-    InMemoryVoiceCallRepository()
+from backend.app.application.composition.voice_call_dependencies import (
+    voice_call_repository,
 )
 
 
@@ -52,7 +38,7 @@ def create_voice_call_management_service(
 
     return VoiceCallManagementService(
         repository=(
-            _voice_call_repository
+            voice_call_repository
         ),
     )
 
@@ -61,10 +47,7 @@ def create_voice_call_management_service(
 def build_voice_call_management_service(
 ) -> VoiceCallManagementService:
     """
-    Dependency provider.
-
-    Returns service using the same
-    repository instance.
+    Dependency builder.
     """
 
 
@@ -78,3 +61,4 @@ __all__ = [
     "create_voice_call_management_service",
     "build_voice_call_management_service",
 ]
+

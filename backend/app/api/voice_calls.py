@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Calls API Router.
 
 HTTP boundary for preparing
@@ -32,22 +32,22 @@ from fastapi import (
 from pydantic import BaseModel
 
 
-from app.application.uai.voice.voice_call_request import (
+from backend.app.application.uai.voice.voice_call_request import (
     VoiceCallRequest,
 )
 
 
-from app.application.uai.voice.voice_call_lifecycle_service import (
+from backend.app.application.uai.voice.voice_call_lifecycle_service import (
     VoiceCallLifecycleService,
 )
 
 
-from app.application.uai.voice.voice_call_context_factory import (
+from backend.app.application.uai.voice.voice_call_context_factory import (
     VoiceCallContextFactory,
 )
 
 
-from app.application.composition.voice_lifecycle_composition import (
+from backend.app.application.composition.voice_lifecycle_composition import (
     build_voice_call_lifecycle_service,
 )
 
@@ -205,3 +205,4 @@ def prepare_voice_call(
 __all__ = [
     "router",
 ]
+

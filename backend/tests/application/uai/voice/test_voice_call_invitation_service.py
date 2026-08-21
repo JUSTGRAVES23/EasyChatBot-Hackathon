@@ -5,16 +5,20 @@ Validates:
 - Invitation creation.
 - Invitation lifecycle.
 - Expiration handling.
+- Repository dependency injection.
 """
+
 
 from datetime import (
     timedelta,
 )
 
 
+
 from app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
+
 
 
 from app.domain.uai.voice.voice_call_invitation import (
@@ -23,10 +27,23 @@ from app.domain.uai.voice.voice_call_invitation import (
 
 
 
+from app.infrastructure.persistence.in_memory_voice_call_invitation_repository import (
+    InMemoryVoiceCallInvitationRepository,
+)
+
+
+
 def create_service():
 
+    repository = (
+        InMemoryVoiceCallInvitationRepository()
+    )
+
+
     return (
-        VoiceCallInvitationService()
+        VoiceCallInvitationService(
+            repository=repository,
+        )
     )
 
 
@@ -44,11 +61,20 @@ def test_create_invitation():
     )
 
 
-    assert invitation.voice_call_id == "vc-001"
+    assert invitation.voice_call_id == (
+        "vc-001"
+    )
 
-    assert invitation.learner_id == "learner-001"
 
-    assert invitation.character_id == "yeti"
+    assert invitation.learner_id == (
+        "learner-001"
+    )
+
+
+    assert invitation.character_id == (
+        "yeti"
+    )
+
 
     assert invitation.status == (
         VoiceCallInvitationStatus.CREATED

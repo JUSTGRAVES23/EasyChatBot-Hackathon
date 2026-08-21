@@ -1,4 +1,4 @@
-"""
+﻿"""
 Operations Center Dashboard API application service.
 
 Read-only application boundary.
@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from app.application.operations_center.dashboard_facade import (
+from backend.app.application.operations_center.dashboard_facade import (
     OperationsCenterDashboardFacade,
 )
 

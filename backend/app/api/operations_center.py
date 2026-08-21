@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot AI Operations Center HTTP API.
 
 FastAPI adapter for the read-only Operations Center dashboard.
@@ -44,7 +44,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 
-from app.application.operations_center.dashboard_composition import (
+from backend.app.application.operations_center.dashboard_composition import (
     create_operations_center_dashboard_api,
 )
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Management Service.
 
 Application service responsible for
@@ -35,7 +35,7 @@ from datetime import (
 import uuid
 
 
-from app.application.uai.voice.voice_call_repository import (
+from backend.app.application.uai.voice.voice_call_repository import (
     VoiceCallRepository,
 )
 

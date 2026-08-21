@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Acceptance Service.
 
 Application workflow responsible for
@@ -11,6 +11,7 @@ Responsibilities:
 - Handle first connection.
 - Handle reconnect flow.
 - Create voice session.
+- Record acceptance event.
 
 Does NOT:
 - Handle HTTP.
@@ -22,35 +23,56 @@ Does NOT:
 from __future__ import annotations
 
 
+
 from dataclasses import dataclass
 
 
-from datetime import datetime, timezone
+
+from datetime import (
+    datetime,
+    timezone,
+)
 
 
 
-from app.application.uai.voice.voice_call_management_service import (
+from backend.app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from app.application.uai.voice.voice_call_invitation_service import (
+
+from backend.app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
 
 
-from app.application.uai.voice.voice_call_session_service import (
+
+from backend.app.application.uai.voice.voice_call_session_service import (
     VoiceCallSessionService,
 )
 
 
-from app.application.uai.notifications.voice_call_notification_service import (
+
+from backend.app.application.uai.notifications.voice_call_notification_service import (
     VoiceCallNotificationService,
 )
 
 
+
+from backend.app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+
 from app.domain.uai.voice.voice_call_state import (
     VoiceCallState,
+)
+
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
 )
 
 
@@ -81,6 +103,10 @@ class VoiceCallAcceptanceService:
         VoiceCallSessionService
     )
 
+    voice_call_event_service: (
+        VoiceCallEventService
+    )
+
 
 
     def accept_voice_call(
@@ -94,12 +120,14 @@ class VoiceCallAcceptanceService:
         """
 
 
+
         updated_notification = (
             self.voice_call_notification_service
             .action_notification(
                 notification=notification,
             )
         )
+
 
 
         invitation = (
@@ -110,6 +138,7 @@ class VoiceCallAcceptanceService:
                 ),
             )
         )
+
 
 
         if invitation is None:
@@ -130,6 +159,7 @@ class VoiceCallAcceptanceService:
         )
 
 
+
         if voice_call is None:
 
             raise ValueError(
@@ -137,12 +167,6 @@ class VoiceCallAcceptanceService:
             )
 
 
-
-        #
-        # First connection
-        #
-        # CREATED calls are valid.
-        #
 
         if voice_call.state == (
             VoiceCallState.CREATED
@@ -155,10 +179,6 @@ class VoiceCallAcceptanceService:
                 )
             )
 
-
-        #
-        # Reconnect existing call
-        #
 
         elif self.voice_call_management_service.can_reconnect(
             voice_call_id=voice_call.id,
@@ -180,6 +200,17 @@ class VoiceCallAcceptanceService:
             raise ValueError(
                 "Voice call cannot be started."
             )
+
+
+
+        self.voice_call_event_service.record_event(
+            voice_call_id=voice_call.id,
+            learner_id=voice_call.learner_id,
+            character_id=voice_call.character_id,
+            event_type=(
+                VoiceCallEventType.ACCEPTED
+            ),
+        )
 
 
 

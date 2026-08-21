@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Trigger Composition.
 
 Composition root for the complete
@@ -9,6 +9,7 @@ Responsibilities:
 - Wire voice call services.
 - Wire invitation services.
 - Wire notification services.
+- Wire voice event services.
 - Return ready application facade.
 
 Does NOT:
@@ -23,30 +24,46 @@ from __future__ import annotations
 
 
 
-from app.application.uai.voice.voice_call_trigger_service import (
+from backend.app.application.uai.voice.voice_call_trigger_service import (
     VoiceCallTriggerService,
 )
 
 
-from app.application.uai.voice.voice_call_management_service import (
+
+from backend.app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from app.application.uai.voice.voice_call_invitation_service import (
+
+from backend.app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
 
 
-from app.application.uai.notifications.voice_call_notification_service import (
+
+from backend.app.application.uai.notifications.voice_call_notification_service import (
     VoiceCallNotificationService,
 )
 
 
-from app.application.composition.voice_call_dependencies import (
+
+from backend.app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+
+from backend.app.application.composition.voice_call_dependencies import (
     voice_call_repository,
     voice_call_invitation_repository,
     voice_call_notification_repository,
+)
+
+
+
+from backend.app.application.composition.voice_event_composition import (
+    build_voice_call_event_service,
 )
 
 
@@ -58,6 +75,7 @@ def create_voice_call_trigger_service(
     """
 
 
+
     voice_call_management_service = (
         VoiceCallManagementService(
             repository=(
@@ -65,6 +83,7 @@ def create_voice_call_trigger_service(
             ),
         )
     )
+
 
 
     voice_call_invitation_service = (
@@ -76,6 +95,7 @@ def create_voice_call_trigger_service(
     )
 
 
+
     voice_call_notification_service = (
         VoiceCallNotificationService(
             repository=(
@@ -85,17 +105,32 @@ def create_voice_call_trigger_service(
     )
 
 
+
+    voice_call_event_service = (
+        build_voice_call_event_service()
+    )
+
+
+
     return VoiceCallTriggerService(
+
         voice_call_management_service=(
             voice_call_management_service
         ),
+
 
         voice_call_invitation_service=(
             voice_call_invitation_service
         ),
 
+
         voice_call_notification_service=(
             voice_call_notification_service
+        ),
+
+
+        voice_call_event_service=(
+            voice_call_event_service
         ),
     )
 
@@ -120,3 +155,4 @@ __all__ = [
     "create_voice_call_trigger_service",
     "build_voice_call_trigger_service",
 ]
+

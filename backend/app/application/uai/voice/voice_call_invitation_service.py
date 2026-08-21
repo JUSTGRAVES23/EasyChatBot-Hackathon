@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Invitation Service.
 
 Application service responsible for
@@ -36,7 +36,7 @@ import uuid
 
 
 
-from app.application.uai.voice.voice_call_invitation_repository import (
+from backend.app.application.uai.voice.voice_call_invitation_repository import (
     VoiceCallInvitationRepository,
 )
 

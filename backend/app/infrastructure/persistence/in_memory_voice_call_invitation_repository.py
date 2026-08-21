@@ -1,4 +1,4 @@
-"""
+﻿"""
 In Memory Voice Call Invitation Repository.
 
 Infrastructure implementation of the
@@ -20,7 +20,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.uai.voice.voice_call_invitation_repository import (
+from backend.app.application.uai.voice.voice_call_invitation_repository import (
     VoiceCallInvitationRepository,
 )
 

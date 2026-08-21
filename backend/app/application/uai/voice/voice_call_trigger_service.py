@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Trigger Service.
 
 Application workflow service responsible
@@ -6,6 +6,8 @@ for starting the voice call invitation flow.
 
 Responsibilities:
 - Create voice call identity.
+- Activate voice call lifecycle.
+- Record lifecycle events.
 - Create voice call invitation.
 - Create notification trigger.
 - Coordinate application services.
@@ -25,23 +27,34 @@ from dataclasses import dataclass
 
 
 
-from app.application.uai.voice.voice_call_management_service import (
+from backend.app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from app.application.uai.voice.voice_call_invitation_service import (
+from backend.app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
 
 
-from app.application.uai.notifications.voice_call_notification_service import (
+from backend.app.application.uai.notifications.voice_call_notification_service import (
     VoiceCallNotificationService,
 )
 
 
+from backend.app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+
 from app.domain.uai.notifications.voice_call_notification import (
     VoiceCallNotificationChannel,
+)
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
 )
 
 
@@ -56,16 +69,24 @@ class VoiceCallTriggerService:
     for voice call triggering.
     """
 
+
     voice_call_management_service: (
         VoiceCallManagementService
     )
+
 
     voice_call_invitation_service: (
         VoiceCallInvitationService
     )
 
+
     voice_call_notification_service: (
         VoiceCallNotificationService
+    )
+
+
+    voice_call_event_service: (
+        VoiceCallEventService
     )
 
 
@@ -84,6 +105,7 @@ class VoiceCallTriggerService:
         """
 
 
+
         voice_call = (
             self.voice_call_management_service
             .create_call(
@@ -95,10 +117,59 @@ class VoiceCallTriggerService:
         )
 
 
+
+        #
+        # Voice call becomes active after
+        # trigger workflow starts.
+        #
+        # This enables:
+        # - reconnect validation
+        # - lifecycle tracking
+        # - session recovery
+        #
+
+        active_voice_call = (
+            voice_call
+            .mark_active()
+        )
+
+
+
+        active_voice_call = (
+            self.voice_call_management_service
+            .repository
+            .save(
+                voice_call=active_voice_call,
+            )
+        )
+
+
+
+        #
+        # Record business lifecycle event.
+        #
+        # This is independent from:
+        # - LiveKit events
+        # - AI runtime telemetry
+        #
+
+        self.voice_call_event_service.record_event(
+            voice_call_id=(
+                active_voice_call.id
+            ),
+            learner_id=learner_id,
+            character_id=character_id,
+            event_type=(
+                VoiceCallEventType.CREATED
+            ),
+        )
+
+
+
         invitation = (
             self.voice_call_invitation_service
             .create_invitation(
-                voice_call_id=voice_call.id,
+                voice_call_id=active_voice_call.id,
                 learner_id=learner_id,
                 character_id=character_id,
                 channel=(
@@ -108,11 +179,12 @@ class VoiceCallTriggerService:
         )
 
 
+
         notification = (
             self.voice_call_notification_service
             .create_notification(
                 invitation_id=invitation.id,
-                voice_call_id=voice_call.id,
+                voice_call_id=active_voice_call.id,
                 learner_id=learner_id,
                 character_id=character_id,
                 channel=(
@@ -122,8 +194,9 @@ class VoiceCallTriggerService:
         )
 
 
+
         return {
-            "voice_call": voice_call,
+            "voice_call": active_voice_call,
             "invitation": invitation,
             "notification": notification,
         }

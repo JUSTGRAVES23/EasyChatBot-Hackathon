@@ -131,8 +131,16 @@ def test_start_call_creates_connection():
     )
 
 
+    # Real LiveKit access tokens
+    # are signed JWT credentials.
+    assert connection.token
+
+
+    assert connection.token.count(".") == 2
+
+
     assert connection.token.startswith(
-        "livekit-"
+        "eyJ"
     )
 
 

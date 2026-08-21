@@ -13,6 +13,9 @@ VoiceCall
       |
       ↓
 Session
+      |
+      ↓
+VoiceCallEvent
 
 Identity must remain unchanged.
 """
@@ -24,9 +27,11 @@ from app.application.uai.voice.voice_call_acceptance_service import (
 )
 
 
+
 from app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
+
 
 
 from app.application.uai.voice.voice_call_invitation_service import (
@@ -34,9 +39,11 @@ from app.application.uai.voice.voice_call_invitation_service import (
 )
 
 
+
 from app.application.uai.voice.voice_call_session_service import (
     VoiceCallSessionService,
 )
+
 
 
 from app.application.uai.notifications.voice_call_notification_service import (
@@ -44,9 +51,17 @@ from app.application.uai.notifications.voice_call_notification_service import (
 )
 
 
+
+from app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+
 from app.infrastructure.persistence.voice_call_repository import (
     InMemoryVoiceCallRepository,
 )
+
 
 
 from app.infrastructure.persistence.in_memory_voice_call_notification_repository import (
@@ -54,13 +69,27 @@ from app.infrastructure.persistence.in_memory_voice_call_notification_repository
 )
 
 
+
 from app.infrastructure.persistence.in_memory_voice_call_invitation_repository import (
     InMemoryVoiceCallInvitationRepository,
 )
 
 
+
+from app.infrastructure.persistence.in_memory_voice_call_event_repository import (
+    InMemoryVoiceCallEventRepository,
+)
+
+
+
 from app.domain.uai.notifications.voice_call_notification import (
     VoiceCallNotificationChannel,
+)
+
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
 )
 
 
@@ -94,13 +123,24 @@ def create_service():
     )
 
 
+    event_service = (
+        VoiceCallEventService(
+            repository=(
+                InMemoryVoiceCallEventRepository()
+            ),
+        )
+    )
+
+
     session_service = (
         VoiceCallSessionService()
     )
 
 
     return (
+
         VoiceCallAcceptanceService(
+
             voice_call_management_service=(
                 voice_call_management
             ),
@@ -116,10 +156,19 @@ def create_service():
             voice_call_session_service=(
                 session_service
             ),
+
+            voice_call_event_service=(
+                event_service
+            ),
         ),
+
         voice_call_management,
+
         invitation_service,
+
         notification_service,
+
+        event_service,
     )
 
 
@@ -131,6 +180,7 @@ def test_accept_voice_call_preserves_identity():
         voice_call_management,
         invitation_service,
         notification_service,
+        event_service,
     ) = create_service()
 
 
@@ -146,6 +196,7 @@ def test_accept_voice_call_preserves_identity():
     )
 
 
+
     invitation = (
         invitation_service
         .create_invitation(
@@ -155,6 +206,7 @@ def test_accept_voice_call_preserves_identity():
             channel="notification",
         )
     )
+
 
 
     notification = (
@@ -171,11 +223,13 @@ def test_accept_voice_call_preserves_identity():
     )
 
 
+
     result = (
         service.accept_voice_call(
             notification=notification,
         )
     )
+
 
 
     assert result["voice_call"].id == (
@@ -190,4 +244,20 @@ def test_accept_voice_call_preserves_identity():
 
     assert result["session"].learner_id == (
         "learner-001"
+    )
+
+
+
+    events = (
+        event_service.get_events(
+            voice_call_id=voice_call.id,
+        )
+    )
+
+
+    assert len(events) == 1
+
+
+    assert events[0].event_type == (
+        VoiceCallEventType.ACCEPTED
     )
