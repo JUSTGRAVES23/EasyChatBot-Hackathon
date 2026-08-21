@@ -1,27 +1,126 @@
-"""
+﻿"""
 EasyChatBot FastAPI Application.
 
 Application entry point.
 
 Responsibilities:
 - Create FastAPI application.
-- Register API routers.
+- Register active API routers.
 - Configure application metadata.
+- Manage application lifecycle.
 
 Does NOT:
 - Execute AI agents.
 - Handle business logic.
 - Manage voice sessions.
 - Call external providers.
+- Implement individual application services.
+- Execute cybersecurity workflows.
 """
 
 from __future__ import annotations
 
 
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
 
 
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import (
+    FastAPI,
+)
+
+
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)
+
+
+
+#
+# Scheduler lifecycle boundary
+#
+# FastAPI only controls lifecycle.
+# Business logic remains outside.
+#
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+
+#
+# Governance Audit API
+#
+# Read-only governance evidence boundary.
+#
+# Does NOT:
+# - modify controls;
+# - execute actions;
+# - change audit history.
+#
+
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+
+
+
+#
+# Operations Center Governance API
+#
+# Read-only governance visibility.
+#
+# Provides:
+# - control status;
+# - audit visibility;
+# - YETI governance messages.
+#
+
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+
+
+#
+# Governance Evidence Timeline API
+#
+# Read-only evidence explorer.
+#
+# Provides:
+# - governance events;
+# - operational history;
+# - audit evidence visibility.
+#
+
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+
+
+
+#
+# Governance Change Lifecycle API
+#
+# Provides:
+# - approval lifecycle;
+# - change management visibility;
+# - audit lifecycle integration.
+#
+# Flow:
+#
+# Approval
+#    |
+#    v
+# Change Record
+#    |
+#    v
+# Governance Audit
+#
+
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
 
 
 
@@ -51,6 +150,105 @@ from app.api.operations_center import (
 
 
 
+#
+# Cybersecurity Intelligence API
+#
+
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+
+
+#
+# Cybersecurity Decision Support API
+#
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+
+
+
+#
+# Cybersecurity Reports API
+#
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+
+#
+# Cybersecurity Live Reports API
+#
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+
+#
+# Scheduler runtime instance
+#
+
+scheduler_runtime = (
+    create_cybersecurity_scheduler_runtime()
+)
+
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    Starts:
+    - cybersecurity scheduler runtime.
+
+    Stops:
+    - cybersecurity scheduler runtime.
+
+    No business logic belongs here.
+    """
+
+
+    try:
+
+        await scheduler_runtime.start()
+
+
+    except Exception as exc:
+
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+
+
+    yield
+
+
+
+    try:
+
+        await scheduler_runtime.stop()
+
+
+    except Exception as exc:
+
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+
+
 def create_application() -> FastAPI:
     """
     Create and configure FastAPI application.
@@ -58,107 +256,172 @@ def create_application() -> FastAPI:
 
 
     application = FastAPI(
+
         title="EasyChatBot API",
+
         description=(
             "AI character learning platform API"
         ),
+
         version="0.1.0",
+
+        lifespan=lifespan,
+
     )
+
 
 
     #
     # CORS
     #
-    # Allows Next.js frontend
-    # to consume backend APIs.
-    #
 
     application.add_middleware(
+
         CORSMiddleware,
 
         allow_origins=[
+
             "http://localhost:3000",
+
         ],
 
         allow_credentials=True,
 
         allow_methods=[
+
             "*",
+
         ],
 
         allow_headers=[
+
             "*",
+
         ],
+
     )
 
 
 
     #
-    # Voice Calls API
+    # Voice APIs
     #
 
     application.include_router(
-        voice_calls_router
+        voice_calls_router,
+    )
+
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+
+    application.include_router(
+        voice_notification_acceptance_router,
     )
 
 
 
     #
-    # Voice Reconnect API
+    # AI Operations Center
     #
 
     application.include_router(
-        voice_reconnect_router
+        operations_center_router,
     )
 
 
 
     #
-    # Voice Trigger API
+    # Governance Audit API
     #
-    # Starts:
-    #
-    # VoiceCall
-    #      |
-    #      ↓
-    # Invitation
-    #      |
-    #      ↓
-    # Notification
+    # Provides immutable evidence visibility.
     #
 
     application.include_router(
-        voice_call_trigger_router
+        governance_audit_router,
     )
 
 
 
     #
-    # Voice Notification Acceptance API
+    # Operations Center Governance API
     #
-    # Flow:
-    #
-    # Notification Inbox
-    #        |
-    #        ↓
-    # Accept
-    #        |
-    #        ↓
-    # VoiceCallSession
+    # Provides governance dashboard state.
     #
 
     application.include_router(
-        voice_notification_acceptance_router
+        governance_operations_router,
     )
 
 
 
     #
-    # AI Operations Center API
+    # Governance Evidence Timeline API
+    #
+    # Provides evidence explorer data.
     #
 
     application.include_router(
-        operations_center_router
+        governance_evidence_router,
+    )
+
+
+
+    #
+    # Governance Change Lifecycle API
+    #
+    # Approval -> Change -> Audit lifecycle.
+    #
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+
+
+    #
+    # Cybersecurity Intelligence
+    #
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+
+
+    #
+    # Cybersecurity Decision Support
+    #
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+
+
+    #
+    # Cybersecurity Reports
+    #
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+
+
+    #
+    # Cybersecurity Live Reports
+    #
+
+    application.include_router(
+        cybersecurity_live_reports_router,
     )
 
 
@@ -167,3 +430,10 @@ def create_application() -> FastAPI:
 
 
 app = create_application()
+
+
+
+__all__ = [
+    "app",
+    "create_application",
+]

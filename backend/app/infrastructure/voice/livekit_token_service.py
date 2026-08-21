@@ -1,29 +1,41 @@
 """
 LiveKit Token Service.
 
-Infrastructure service responsible for
-creating voice connection credentials.
+Infrastructure service responsible for generating
+real LiveKit participant access tokens.
 
 Responsibilities:
-- Generate provider-specific tokens.
-- Hide LiveKit implementation details.
-- Return provider-independent domain model.
+- Generate signed LiveKit JWT access tokens.
+- Grant participant access to a specific room.
+- Keep LiveKit credentials inside infrastructure.
+- Return provider-independent VoiceConnectionToken.
 
 Does NOT:
 - Handle HTTP.
 - Manage application workflows.
-- Decide authorization rules.
+- Decide business authorization.
 - Persist tokens.
-- Execute voice calls.
+- Execute AI agents.
 """
 
 from __future__ import annotations
 
 
-from datetime import datetime, timedelta
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
 
 
+import os
 import uuid
+
+
+from dotenv import load_dotenv
+
+
+from livekit import api
 
 
 from app.domain.uai.voice.voice_connection_token import (
@@ -31,15 +43,13 @@ from app.domain.uai.voice.voice_connection_token import (
 )
 
 
+load_dotenv()
+
+
 
 class LiveKitTokenService:
     """
-    Infrastructure adapter for LiveKit tokens.
-
-    Beta 1 implementation:
-    - Generates deterministic provider abstraction.
-    - Real LiveKit SDK integration can replace
-      this implementation later.
+    Real LiveKit access-token infrastructure adapter.
     """
 
 
@@ -48,49 +58,130 @@ class LiveKitTokenService:
         self,
         *,
         room_name: str,
+        identity: str | None = None,
         expires_minutes: int = 30,
     ) -> VoiceConnectionToken:
         """
-        Create a voice connection token.
+        Create a signed LiveKit participant token.
 
         Parameters
         ----------
         room_name:
-            Voice room identifier.
+            LiveKit room the participant may join.
+
+        identity:
+            Unique LiveKit participant identity.
 
         expires_minutes:
             Token validity period.
-
-        Returns
-        -------
-        VoiceConnectionToken
-            Provider-independent token model.
         """
 
 
+
         if not room_name.strip():
+
             raise ValueError(
                 "room_name cannot be empty."
             )
 
 
+
         if expires_minutes <= 0:
+
             raise ValueError(
                 "expires_minutes must be positive."
             )
 
 
-        token = (
-            f"livekit-{uuid.uuid4()}"
+
+        participant_identity = (
+            identity.strip()
+            if identity is not None
+            else f"learner-{uuid.uuid4()}"
         )
 
 
+
+        if not participant_identity:
+
+            raise ValueError(
+                "identity cannot be empty."
+            )
+
+
+
+        api_key = os.getenv(
+            "LIVEKIT_API_KEY"
+        )
+
+
+
+        api_secret = os.getenv(
+            "LIVEKIT_API_SECRET"
+        )
+
+
+
+        if not api_key:
+
+            raise RuntimeError(
+                "LIVEKIT_API_KEY is not configured."
+            )
+
+
+
+        if not api_secret:
+
+            raise RuntimeError(
+                "LIVEKIT_API_SECRET is not configured."
+            )
+
+
+
         expires_at = (
-            datetime.utcnow()
+            datetime.now(
+                timezone.utc
+            )
             + timedelta(
                 minutes=expires_minutes,
             )
         )
+
+
+
+        access_token = (
+            api.AccessToken(
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            .with_identity(
+                participant_identity,
+            )
+            .with_name(
+                participant_identity,
+            )
+            .with_ttl(
+                timedelta(
+                    minutes=expires_minutes,
+                )
+            )
+            .with_grants(
+                api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
+            )
+        )
+
+
+
+        token = (
+            access_token.to_jwt()
+        )
+
 
 
         return VoiceConnectionToken(

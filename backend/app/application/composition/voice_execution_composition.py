@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Execution Composition.
 
 Application composition root
@@ -18,7 +18,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.uai.voice.voice_call_execution_service import (
+from backend.app.application.uai.voice.voice_call_execution_service import (
     VoiceCallExecutionService,
 )
 
@@ -47,6 +47,23 @@ def create_voice_call_execution_service(
 
 
 
+def build_voice_call_execution_service(
+) -> VoiceCallExecutionService:
+    """
+    Dependency builder.
+
+    Used by application composition
+    and adapters.
+    """
+
+
+    return (
+        create_voice_call_execution_service()
+    )
+
+
+
 __all__ = [
     "create_voice_call_execution_service",
+    "build_voice_call_execution_service",
 ]

@@ -75,8 +75,16 @@ def test_prepare_voice_call():
     assert "token" in body
 
 
+    # Real LiveKit access tokens are
+    # signed JWT credentials.
+    assert body["token"]
+
+
+    assert body["token"].count(".") == 2
+
+
     assert body["token"].startswith(
-        "livekit-"
+        "eyJ"
     )
 
 

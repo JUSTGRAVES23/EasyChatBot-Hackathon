@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Lifecycle Composition.
 
 Composition root for the complete
@@ -9,6 +9,7 @@ Responsibilities:
 - Wire execution coordinator.
 - Wire connection services.
 - Wire persistent voice call services.
+- Wire lifecycle event services.
 - Return ready application facade.
 
 Does NOT:
@@ -21,43 +22,48 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.uai.voice.voice_call_lifecycle_service import (
+from backend.app.application.uai.voice.voice_call_lifecycle_service import (
     VoiceCallLifecycleService,
 )
 
 
-from app.application.uai.voice.voice_call_execution_coordinator import (
+from backend.app.application.uai.voice.voice_call_execution_coordinator import (
     VoiceCallExecutionCoordinator,
 )
 
 
-from app.application.uai.voice.voice_room_service import (
+from backend.app.application.uai.voice.voice_room_service import (
     VoiceRoomService,
 )
 
 
-from app.application.uai.voice.voice_call_management_service import (
+from backend.app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from app.application.uai.voice.voice_call_session_service import (
+from backend.app.application.uai.voice.voice_call_session_service import (
     VoiceCallSessionService,
 )
 
 
-from app.application.composition.voice_connection_composition import (
+from backend.app.application.composition.voice_connection_composition import (
     create_voice_connection_service,
+)
+
+
+from backend.app.application.composition.voice_call_dependencies import (
+    voice_call_repository,
+)
+
+
+from backend.app.application.composition.voice_call_event_composition import (
+    build_voice_call_event_service,
 )
 
 
 from app.infrastructure.voice.voice_room_adapter import (
     VoiceRoomAdapter,
-)
-
-
-from app.infrastructure.persistence.voice_call_repository import (
-    InMemoryVoiceCallRepository,
 )
 
 
@@ -99,14 +105,11 @@ def create_voice_call_lifecycle_service(
     )
 
 
-    voice_call_repository = (
-        InMemoryVoiceCallRepository()
-    )
-
-
     voice_call_management_service = (
         VoiceCallManagementService(
-            repository=voice_call_repository,
+            repository=(
+                voice_call_repository
+            ),
         )
     )
 
@@ -116,18 +119,31 @@ def create_voice_call_lifecycle_service(
     )
 
 
+    voice_call_event_service = (
+        build_voice_call_event_service()
+    )
+
+
     return VoiceCallLifecycleService(
+
         execution_coordinator=(
             execution_coordinator
         ),
+
         connection_service=(
             connection_service
         ),
+
         voice_call_management_service=(
             voice_call_management_service
         ),
+
         voice_call_session_service=(
             voice_call_session_service
+        ),
+
+        voice_call_event_service=(
+            voice_call_event_service
         ),
     )
 
@@ -153,3 +169,4 @@ __all__ = [
     "create_voice_call_lifecycle_service",
     "build_voice_call_lifecycle_service",
 ]
+

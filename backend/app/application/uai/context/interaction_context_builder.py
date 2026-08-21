@@ -1,4 +1,4 @@
-"""
+﻿"""
 Interaction Context Builder.
 
 Application service responsible for composing
@@ -37,11 +37,11 @@ from app.domain.uai.context.world_context import (
 )
 
 
-from app.application.uai.character.character_resolver import (
+from backend.app.application.uai.character.character_resolver import (
     CharacterResolver,
 )
 
-from app.application.uai.world.world_resolver import (
+from backend.app.application.uai.world.world_resolver import (
     WorldResolver,
 )
 

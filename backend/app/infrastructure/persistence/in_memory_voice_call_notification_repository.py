@@ -1,4 +1,4 @@
-"""
+﻿"""
 In Memory Voice Call Notification Repository.
 
 Infrastructure implementation of the
@@ -19,7 +19,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.uai.notifications.voice_call_notification_repository import (
+from backend.app.application.uai.notifications.voice_call_notification_repository import (
     VoiceCallNotificationRepository,
 )
 

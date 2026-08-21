@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Context Factory.
 
 Application factory responsible for
@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-from app.application.uai.voice.voice_call_request import (
+from backend.app.application.uai.voice.voice_call_request import (
     VoiceCallRequest,
 )
 
@@ -80,7 +80,7 @@ class VoiceCallContextFactory:
 
             READY
               |
-              ↓
+              â†“
           Runtime ACTIVE
         """
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Composition Root.
 
 Central place where voice dependencies
@@ -18,12 +18,12 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.uai.voice.voice_character_session_service import (
+from backend.app.application.uai.voice.voice_character_session_service import (
     VoiceCharacterSessionService,
 )
 
 
-from app.application.uai.voice.voice_call_execution_service import (
+from backend.app.application.uai.voice.voice_call_execution_service import (
     VoiceCallExecutionService,
 )
 

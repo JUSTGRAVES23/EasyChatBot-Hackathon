@@ -1,13 +1,21 @@
 """
 Tests for Voice Execution Composition.
 
-Validates that the composition root
-creates correctly wired voice execution
-application services.
+Validates:
+
+Composition Root
+        |
+        ↓
+VoiceCallExecutionService
+        |
+        ↓
+VoiceCallExecutionRuntime
 """
+
 
 from app.application.composition.voice_execution_composition import (
     create_voice_call_execution_service,
+    build_voice_call_execution_service,
 )
 
 
@@ -22,12 +30,7 @@ from app.ai_runtime.voice.voice_call_execution_runtime import (
 
 
 
-def test_create_voice_call_execution_service():
-    """
-    Verify composition creates
-    the application service.
-    """
-
+def test_create_voice_execution_service():
 
     service = (
         create_voice_call_execution_service()
@@ -43,4 +46,18 @@ def test_create_voice_call_execution_service():
     assert isinstance(
         service.execution_runtime,
         VoiceCallExecutionRuntime,
+    )
+
+
+
+def test_build_voice_execution_service():
+
+    service = (
+        build_voice_call_execution_service()
+    )
+
+
+    assert isinstance(
+        service,
+        VoiceCallExecutionService,
     )

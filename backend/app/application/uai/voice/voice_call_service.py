@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Application Service.
 
 Application boundary for voice calls.
@@ -20,12 +20,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-from app.application.uai.voice.voice_call_request import (
+from backend.app.application.uai.voice.voice_call_request import (
     VoiceCallRequest,
 )
 
 
-from app.application.uai.voice.voice_call_orchestrator import (
+from backend.app.application.uai.voice.voice_call_orchestrator import (
     VoiceCallOrchestrator,
 )
 

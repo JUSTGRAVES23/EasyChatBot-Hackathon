@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Orchestrator.
 
 Coordinates the preparation of a voice call.
@@ -22,17 +22,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-from app.application.uai.voice.voice_call_request import (
+from backend.app.application.uai.voice.voice_call_request import (
     VoiceCallRequest,
 )
 
 
-from app.application.uai.context.interaction_context_builder import (
+from backend.app.application.uai.context.interaction_context_builder import (
     InteractionContextBuilder,
 )
 
 
-from app.application.uai.voice.voice_character_session_service import (
+from backend.app.application.uai.voice.voice_character_session_service import (
     VoiceCharacterSessionService,
 )
 
@@ -89,19 +89,19 @@ class VoiceCallOrchestrator:
 
         Request
           |
-          ↓
+          â†“
         Interaction Context
           |
-          ↓
+          â†“
         Character Voice Session
           |
-          ↓
+          â†“
         Voice Call Session
           |
-          ↓
+          â†“
         Runtime Preparation
           |
-          ↓
+          â†“
         READY state
         """
 

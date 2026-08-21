@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Session Orchestrator.
 
 Coordinates the creation of a complete
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 
-from app.application.uai.voice.voice_session_service import (
+from backend.app.application.uai.voice.voice_session_service import (
     VoiceSessionService,
 )
 

@@ -1,0 +1,50 @@
+"""
+EasyChatBot Cybersecurity Operations Center API.
+
+Read-only dashboard endpoint.
+
+Does NOT:
+- execute security actions;
+- modify infrastructure;
+- connect external tools.
+
+Demo foundation.
+"""
+
+
+from fastapi import APIRouter
+
+
+from app.cybersecurity_center.service import (
+    cybersecurity_dashboard_service,
+)
+
+
+from app.cybersecurity_center.schemas import (
+    CyberSecurityDashboardSchema,
+)
+
+
+
+router = APIRouter(
+    prefix="/api/cybersecurity-center",
+    tags=[
+        "cybersecurity-center"
+    ],
+)
+
+
+
+@router.get(
+    "/dashboard",
+    response_model=CyberSecurityDashboardSchema,
+)
+def get_cybersecurity_dashboard():
+    """
+    Return cybersecurity dashboard data.
+    """
+
+    return (
+        cybersecurity_dashboard_service
+        .get_dashboard()
+    )

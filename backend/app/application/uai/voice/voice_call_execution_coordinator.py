@@ -1,19 +1,18 @@
-"""
+﻿"""
 Voice Call Execution Coordinator.
 
 Application orchestration boundary
-between room preparation and runtime
-execution.
+for voice call execution.
 
 Responsibilities:
-- Prepare room.
-- Start voice execution.
-- Coordinate application services.
+- Prepare voice room.
+- Coordinate runtime execution.
 
 Does NOT:
 - Handle HTTP.
 - Manage providers.
-- Execute audio directly.
+- Persist data.
+- Connect LiveKit directly.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-from app.application.uai.voice.voice_room_service import (
+from backend.app.application.uai.voice.voice_room_service import (
     VoiceRoomService,
 )
 
@@ -37,11 +36,6 @@ from app.domain.uai.voice.voice_call_execution_context import (
 )
 
 
-from app.domain.uai.voice.voice_call_session import (
-    VoiceCallSession,
-)
-
-
 
 @dataclass(
     frozen=True,
@@ -49,8 +43,22 @@ from app.domain.uai.voice.voice_call_session import (
 )
 class VoiceCallExecutionCoordinator:
     """
-    Coordinates complete voice execution flow.
+    Coordinates voice call execution.
+
+    Keeps compatibility with the current
+    application contracts.
+
+    Future migration target:
+
+        Lifecycle
+            |
+            â†“
+        ExecutionService
+            |
+            â†“
+        Runtime
     """
+
 
     room_service: VoiceRoomService
 
@@ -64,11 +72,11 @@ class VoiceCallExecutionCoordinator:
         context: VoiceCallExecutionContext,
     ) -> dict:
         """
-        Prepare room and start execution.
+        Prepare room and execute runtime.
         """
 
 
-        room_configuration = (
+        room = (
             self.room_service
             .prepare_room(
                 context=context,
@@ -85,6 +93,31 @@ class VoiceCallExecutionCoordinator:
 
 
         return {
-            "room": room_configuration,
+            "room": room,
             "session": session,
         }
+
+
+
+    def prepare(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room only.
+        """
+
+
+        return (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceCallExecutionCoordinator",
+]

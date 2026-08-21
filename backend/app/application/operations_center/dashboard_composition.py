@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot AI Operations Center Dashboard Composition.
 
 Composition root for dashboard API creation.
@@ -31,12 +31,12 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.operations_center.dashboard_api import (
+from backend.app.application.operations_center.dashboard_api import (
     OperationsCenterDashboardAPI,
 )
 
 
-from app.application.operations_center.dashboard_facade import (
+from backend.app.application.operations_center.dashboard_facade import (
     OperationsCenterDashboardFacade,
 )
 

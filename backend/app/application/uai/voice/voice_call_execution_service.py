@@ -23,8 +23,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+
 from app.ai_runtime.voice.voice_call_execution_runtime import (
     VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
 )
 
 
@@ -60,7 +66,10 @@ class VoiceCallExecutionService:
     voice call execution.
     """
 
-    execution_runtime: VoiceCallExecutionRuntime
+
+    execution_runtime: (
+        VoiceCallExecutionRuntime
+    )
 
 
 
@@ -68,6 +77,7 @@ class VoiceCallExecutionService:
         self,
         *,
         session: VoiceCallSession,
+        voice_call: VoiceCall | None = None,
     ) -> VoiceCallExecutionContext:
         """
         Build runtime execution context.
@@ -81,21 +91,33 @@ class VoiceCallExecutionService:
 
 
         learner = VoiceCallParticipant(
-            participant_id=session.learner_id,
-            role=VoiceParticipantRole.LEARNER,
+            participant_id=(
+                session.learner_id
+            ),
+            role=(
+                VoiceParticipantRole.LEARNER
+            ),
             display_name="Learner",
         )
 
 
         character = VoiceCallParticipant(
-            participant_id=session.character_id,
-            role=VoiceParticipantRole.CHARACTER,
-            display_name=session.character_id,
+            participant_id=(
+                session.character_id
+            ),
+            role=(
+                VoiceParticipantRole.CHARACTER
+            ),
+            display_name=(
+                session.character_id
+            ),
         )
 
 
         room = VoiceCallRoom(
-            room_id=session.session_id,
+            room_id=(
+                session.session_id
+            ),
             participants=(
                 learner,
                 character,
@@ -106,6 +128,7 @@ class VoiceCallExecutionService:
         return VoiceCallExecutionContext(
             session=session,
             room=room,
+            voice_call=voice_call,
         )
 
 
@@ -114,6 +137,7 @@ class VoiceCallExecutionService:
         self,
         *,
         session: VoiceCallSession,
+        voice_call: VoiceCall | None = None,
     ) -> VoiceCallSession:
         """
         Start voice call execution.
@@ -122,6 +146,7 @@ class VoiceCallExecutionService:
 
         context = self._build_context(
             session=session,
+            voice_call=voice_call,
         )
 
 
@@ -138,6 +163,7 @@ class VoiceCallExecutionService:
         self,
         *,
         session: VoiceCallSession,
+        voice_call: VoiceCall | None = None,
     ) -> VoiceCallSession:
         """
         Stop voice call execution.
@@ -146,6 +172,7 @@ class VoiceCallExecutionService:
 
         context = self._build_context(
             session=session,
+            voice_call=voice_call,
         )
 
 
@@ -162,6 +189,7 @@ class VoiceCallExecutionService:
         self,
         *,
         session: VoiceCallSession,
+        voice_call: VoiceCall | None = None,
     ) -> VoiceCallSession:
         """
         Mark voice call execution failed.
@@ -170,6 +198,7 @@ class VoiceCallExecutionService:
 
         context = self._build_context(
             session=session,
+            voice_call=voice_call,
         )
 
 
@@ -179,3 +208,9 @@ class VoiceCallExecutionService:
                 context=context,
             )
         )
+
+
+
+__all__ = [
+    "VoiceCallExecutionService",
+]

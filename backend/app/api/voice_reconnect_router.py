@@ -1,20 +1,19 @@
-"""
-Voice Reconnect API Router.
+﻿"""
+Voice Call Reconnect API.
 
 HTTP boundary for reconnecting
 existing voice calls.
 
 Responsibilities:
-- Receive reconnect requests.
-- Validate voice call identity.
-- Delegate reconnect workflow.
-- Return new connection data.
+- Receive reconnect request.
+- Delegate reconnect lifecycle.
+- Return stable response.
 
 Does NOT:
-- Manage LiveKit directly.
-- Execute AI runtime.
+- Manage LiveKit.
+- Manage providers.
 - Persist directly.
-- Create providers.
+- Implement reconnect business logic.
 """
 
 from __future__ import annotations
@@ -22,26 +21,17 @@ from __future__ import annotations
 
 from fastapi import (
     APIRouter,
-    Depends,
     HTTPException,
 )
 
 
-from pydantic import BaseModel
-
-
-from app.application.uai.voice.voice_call_management_service import (
-    VoiceCallManagementService,
+from backend.app.application.composition.voice_lifecycle_composition import (
+    build_voice_call_lifecycle_service,
 )
 
 
-from app.application.uai.voice.voice_call_session_service import (
-    VoiceCallSessionService,
-)
-
-
-from app.application.composition.voice_call_management_composition import (
-    build_voice_call_management_service,
+from app.api.schemas.voice_call import (
+    VoiceReconnectResponseSchema,
 )
 
 
@@ -49,73 +39,51 @@ from app.application.composition.voice_call_management_composition import (
 router = APIRouter(
     prefix="/voice",
     tags=[
-        "voice",
+        "voice-reconnect",
     ],
 )
 
 
 
-class VoiceReconnectResponseModel(
-    BaseModel
-):
-    """
-    HTTP reconnect response.
-    """
-
-    voice_call_id: str
-
-    session_id: str
-
-    character_id: str
-
-    language_code: str
-
-    state: str
-
-
-
-def get_voice_call_management_service(
-) -> VoiceCallManagementService:
-    """
-    Dependency provider.
-    """
-
-    return (
-        build_voice_call_management_service()
-    )
-
-
-
-def get_voice_call_session_service(
-) -> VoiceCallSessionService:
-    """
-    Dependency provider.
-    """
-
-    return VoiceCallSessionService()
-
-
-
 @router.post(
     "/call/{voice_call_id}/reconnect",
-    response_model=VoiceReconnectResponseModel,
+    response_model=VoiceReconnectResponseSchema,
 )
 def reconnect_voice_call(
     voice_call_id: str,
-    management_service: VoiceCallManagementService = Depends(
-        get_voice_call_management_service
-    ),
-    session_service: VoiceCallSessionService = Depends(
-        get_voice_call_session_service
-    ),
-) -> VoiceReconnectResponseModel:
+) -> VoiceReconnectResponseSchema:
     """
-    Reconnect existing voice call.
+    Reconnect an existing voice call.
+
+    The application lifecycle service owns
+    reconnect validation, session creation,
+    and lifecycle event handling.
     """
+
+
+    service = (
+        build_voice_call_lifecycle_service()
+    )
+
+
+    if service.voice_call_management_service is None:
+
+        raise RuntimeError(
+            "Voice call management service "
+            "not configured."
+        )
+
+
+    if service.voice_call_session_service is None:
+
+        raise RuntimeError(
+            "Voice call session service "
+            "not configured."
+        )
 
 
     voice_call = (
-        management_service
+        service.voice_call_management_service
         .get_call(
             voice_call_id=voice_call_id,
         )
@@ -126,35 +94,50 @@ def reconnect_voice_call(
 
         raise HTTPException(
             status_code=404,
-            detail="Voice call not found.",
+            detail=(
+                "Voice call not found."
+            ),
         )
 
 
-    if not management_service.can_reconnect(
-        voice_call_id=voice_call_id,
-        now=voice_call.created_at,
-    ):
+    try:
+
+        session = (
+            service.reconnect_call(
+                voice_call=voice_call,
+            )
+        )
+
+
+    except ValueError as exc:
 
         raise HTTPException(
             status_code=400,
-            detail="Voice call cannot reconnect.",
-        )
+            detail=str(exc),
+        ) from exc
 
 
-    session = (
-        session_service
-        .reconnect_session(
-            voice_call=voice_call,
-        )
-    )
+    return VoiceReconnectResponseSchema(
 
+        voice_call_id=(
+            voice_call.id
+        ),
 
-    return VoiceReconnectResponseModel(
-        voice_call_id=voice_call.id,
-        session_id=session.session_id,
-        character_id=session.character_id,
-        language_code=session.language_code,
-        state=session.state.value,
+        character_id=(
+            voice_call.character_id
+        ),
+
+        language_code=(
+            voice_call.language_code
+        ),
+
+        session_id=(
+            session.session_id
+        ),
+
+        state=(
+            session.state.value
+        ),
     )
 
 

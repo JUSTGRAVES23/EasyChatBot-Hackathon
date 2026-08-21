@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Call Lifecycle Service.
 
 Application facade for the complete
@@ -9,7 +9,8 @@ Responsibilities:
 - Create persistent voice call identity.
 - Create execution sessions.
 - Generate voice connections.
-- Expose lifecycle operations.
+- Handle reconnect lifecycle.
+- Record lifecycle events.
 
 Does NOT:
 - Handle HTTP.
@@ -24,23 +25,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-from app.application.uai.voice.voice_call_execution_coordinator import (
+from backend.app.application.uai.voice.voice_call_execution_coordinator import (
     VoiceCallExecutionCoordinator,
 )
 
 
-from app.application.uai.voice.voice_connection_service import (
+from backend.app.application.uai.voice.voice_connection_service import (
     VoiceConnectionService,
 )
 
 
-from app.application.uai.voice.voice_call_management_service import (
+from backend.app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from app.application.uai.voice.voice_call_session_service import (
+from backend.app.application.uai.voice.voice_call_session_service import (
     VoiceCallSessionService,
+)
+
+
+from backend.app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
 )
 
 
@@ -59,6 +65,11 @@ from app.domain.uai.voice.voice_call_session import (
 )
 
 
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
+)
+
+
 
 @dataclass(
     frozen=True,
@@ -67,32 +78,31 @@ from app.domain.uai.voice.voice_call_session import (
 class VoiceCallLifecycleService:
     """
     Application lifecycle facade.
-
-    Coordinates:
-
-        VoiceCall
-            |
-            ↓
-        VoiceCallSession
-            |
-            ↓
-        Runtime Execution
-            |
-            ↓
-        Connection
     """
 
 
-    execution_coordinator: VoiceCallExecutionCoordinator
+    execution_coordinator: (
+        VoiceCallExecutionCoordinator
+    )
 
-    connection_service: VoiceConnectionService | None = None
+
+    connection_service: (
+        VoiceConnectionService | None
+    ) = None
+
 
     voice_call_management_service: (
         VoiceCallManagementService | None
     ) = None
 
+
     voice_call_session_service: (
         VoiceCallSessionService | None
+    ) = None
+
+
+    voice_call_event_service: (
+        VoiceCallEventService | None
     ) = None
 
 
@@ -104,7 +114,18 @@ class VoiceCallLifecycleService:
     ) -> dict:
         """
         Prepare room, execute call,
-        and create connection.
+        create connection and record event.
+
+        Identity rules
+        --------------
+        VoiceCall.id:
+            Persistent business/lifecycle identity.
+
+        VoiceCallSession.session_id:
+            Execution/session identity.
+
+        Lifecycle events must use the persistent
+        VoiceCall.id when a VoiceCall is available.
         """
 
 
@@ -114,6 +135,42 @@ class VoiceCallLifecycleService:
                 context=context,
             )
         )
+
+
+        session = result["session"]
+
+
+        if self.voice_call_event_service is not None:
+
+            #
+            # Preserve the persistent VoiceCall
+            # identity for lifecycle events.
+            #
+            # The execution session has its own
+            # session_id, but that must not replace
+            # the VoiceCall business identity.
+            #
+            voice_call_id = (
+                context.voice_call.id
+                if context.voice_call is not None
+                else session.session_id
+            )
+
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=(
+                    voice_call_id
+                ),
+                learner_id=(
+                    session.learner_id
+                ),
+                character_id=(
+                    session.character_id
+                ),
+                event_type=(
+                    VoiceCallEventType.STARTED
+                ),
+            )
 
 
         if self.connection_service is not None:
@@ -221,12 +278,33 @@ class VoiceCallLifecycleService:
             )
 
 
-        return (
+        session = (
             self.voice_call_session_service
             .reconnect_session(
                 voice_call=voice_call,
             )
         )
+
+
+        if self.voice_call_event_service is not None:
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=(
+                    voice_call.id
+                ),
+                learner_id=(
+                    voice_call.learner_id
+                ),
+                character_id=(
+                    voice_call.character_id
+                ),
+                event_type=(
+                    VoiceCallEventType.RECONNECTED
+                ),
+            )
+
+
+        return session
 
 
 

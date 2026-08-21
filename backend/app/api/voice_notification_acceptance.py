@@ -1,21 +1,18 @@
-"""
+﻿"""
 Voice Notification Acceptance API.
 
-HTTP boundary for accepting a
-voice call notification.
+HTTP boundary for accepting
+voice call notifications.
 
 Responsibilities:
 - Receive acceptance request.
-- Retrieve notification.
-- Delegate acceptance workflow.
-- Return voice session information.
+- Delegate workflow.
+- Return stable API contract.
 
 Does NOT:
-- Execute AI runtime.
-- Connect LiveKit.
-- Manage repositories.
-- Send notifications.
-- Select providers.
+- Execute runtime.
+- Manage providers.
+- Persist data.
 """
 
 from __future__ import annotations
@@ -28,22 +25,18 @@ from fastapi import (
 )
 
 
-from pydantic import BaseModel
-
-
-
-from app.application.composition.voice_call_acceptance_composition import (
+from backend.app.application.composition.voice_call_acceptance_composition import (
     build_voice_call_acceptance_service,
 )
 
 
-from app.application.uai.voice.voice_call_acceptance_service import (
+from backend.app.application.uai.voice.voice_call_acceptance_service import (
     VoiceCallAcceptanceService,
 )
 
 
-from app.application.uai.notifications.voice_call_notification_service import (
-    VoiceCallNotificationService,
+from app.api.schemas.voice_call import (
+    VoiceCallAcceptanceResponseSchema,
 )
 
 
@@ -54,25 +47,6 @@ router = APIRouter(
         "voice-notification",
     ],
 )
-
-
-
-class VoiceNotificationAcceptanceResponse(
-    BaseModel,
-):
-    """
-    Acceptance response.
-    """
-
-    voice_call_id: str
-
-    learner_id: str
-
-    character_id: str
-
-    session_id: str
-
-    state: str
 
 
 
@@ -90,24 +64,18 @@ def get_voice_call_acceptance_service(
 
 @router.post(
     "/notification/{notification_id}/accept",
-    response_model=VoiceNotificationAcceptanceResponse,
+    response_model=VoiceCallAcceptanceResponseSchema,
 )
 def accept_voice_notification(
     notification_id: str,
     service: VoiceCallAcceptanceService = Depends(
         get_voice_call_acceptance_service,
     ),
-) -> VoiceNotificationAcceptanceResponse:
+) -> VoiceCallAcceptanceResponseSchema:
     """
-    Accept voice call notification.
+    Accept voice notification.
     """
 
-    #
-    # Retrieve notification.
-    #
-    # The composition currently owns
-    # the notification service wiring.
-    #
 
     notification_service = (
         service.voice_call_notification_service
@@ -161,7 +129,7 @@ def accept_voice_notification(
 
 
 
-    return VoiceNotificationAcceptanceResponse(
+    return VoiceCallAcceptanceResponseSchema(
         voice_call_id=(
             voice_call.id
         ),
@@ -188,3 +156,4 @@ def accept_voice_notification(
 __all__ = [
     "router",
 ]
+

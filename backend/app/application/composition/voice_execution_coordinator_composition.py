@@ -1,4 +1,4 @@
-"""
+﻿"""
 Voice Execution Coordinator Composition.
 
 Composition root for complete
@@ -19,12 +19,12 @@ Does NOT:
 from __future__ import annotations
 
 
-from app.application.uai.voice.voice_call_execution_coordinator import (
+from backend.app.application.uai.voice.voice_call_execution_coordinator import (
     VoiceCallExecutionCoordinator,
 )
 
 
-from app.application.uai.voice.voice_room_service import (
+from backend.app.application.uai.voice.voice_room_service import (
     VoiceRoomService,
 )
 
