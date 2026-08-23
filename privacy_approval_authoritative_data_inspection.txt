@@ -1,0 +1,1729 @@
+﻿from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class PrivacyTriggerType(StrEnum):
+    NEW_PROCESSING = "NEW_PROCESSING"
+    PROCESSING_CHANGE = "PROCESSING_CHANGE"
+    DATA_MAPPING_CHANGE = "DATA_MAPPING_CHANGE"
+    RETENTION_CHANGE = "RETENTION_CHANGE"
+    PROCESSOR_CHANGE = "PROCESSOR_CHANGE"
+    DPIA_CHANGE = "DPIA_CHANGE"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyGovernanceCase:
+    """Case-centric governance record rendered by the Operations Center.
+
+    ``change_id`` is the stable link to the authoritative PrivacyChange.
+    It is optional at model level for backward compatibility with older Beta
+    fixtures; newly created runtime cases should always populate it.
+    """
+
+    case_id: str
+    title: str
+    summary: str
+    trigger_type: PrivacyTriggerType
+    triggered_at: datetime
+    trigger_source: str
+    change_id: str | None = None
+    processing_ids: tuple[str, ...] = ()
+    data_map_ids: tuple[str, ...] = ()
+    risk: str = "MEDIUM"
+    validation_status: str = "PENDING"
+    email_status: str = "NOT_SENT"
+    governance_status: str = "PENDING_DPO_GRC"
+    final_decision: str | None = None
+    final_decision_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("case_id", "title", "summary", "trigger_source"):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"{field_name} is required.")
+        if self.change_id is not None and not self.change_id.strip():
+            raise ValueError("change_id cannot be blank when provided.")
+        if self.triggered_at.tzinfo is None:
+            raise ValueError("triggered_at must be timezone-aware.")
+        if self.final_decision_at is not None and self.final_decision_at.tzinfo is None:
+            raise ValueError("final_decision_at must be timezone-aware.")
+from __future__ import annotations
+
+from .privacy_governance_case import PrivacyGovernanceCase
+
+
+class PrivacyGovernanceCaseRegistry:
+    """Beta registry for privacy governance cases."""
+
+    def __init__(
+        self,
+        cases: list[PrivacyGovernanceCase] | None = None,
+    ) -> None:
+        self._cases: dict[str, PrivacyGovernanceCase] = {}
+        for case in cases or []:
+            self.register(case)
+
+    def register(self, case: PrivacyGovernanceCase) -> None:
+        if case.case_id in self._cases:
+            raise ValueError(f"Case already registered: {case.case_id}")
+        self._cases[case.case_id] = case
+
+    def get(self, case_id: str) -> PrivacyGovernanceCase:
+        try:
+            return self._cases[case_id]
+        except KeyError as exc:
+            raise KeyError(f"Governance case not found: {case_id}") from exc
+
+    def update(self, case: PrivacyGovernanceCase) -> None:
+        if case.case_id not in self._cases:
+            raise KeyError(f"Governance case not found: {case.case_id}")
+        self._cases[case.case_id] = case
+
+    def all(self) -> tuple[PrivacyGovernanceCase, ...]:
+        return tuple(self._cases.values())
+
+    def pending(self) -> tuple[PrivacyGovernanceCase, ...]:
+        return tuple(
+            case
+            for case in self._cases.values()
+            if case.governance_status == "PENDING_DPO_GRC"
+        )
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .privacy_approval_record import (
+    ApprovalDecision,
+    PrivacyApprovalRecord,
+)
+from .privacy_approval_registry import PrivacyApprovalRegistry
+from .privacy_change import (
+    PrivacyChange,
+    PrivacyChangeStatus,
+)
+from .privacy_change_registry import PrivacyChangeRegistry
+from .privacy_governance_case import (
+    PrivacyGovernanceCase,
+    PrivacyTriggerType,
+)
+from .privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+from .privacy_governance_decision_service import (
+    PrivacyGovernanceDecisionService,
+)
+
+
+class PrivacyGovernanceCaseService:
+    """Application service for privacy governance cases.
+
+    This service is the application boundary between privacy processing and
+    the case-centric governance model rendered by the Operations Center.
+
+    It owns no persistence. Registries are injected so Beta can use in-memory
+    state while the same contracts can later be backed by repositories.
+
+    The registries remain authoritative. Downstream adapters such as the
+    Excel evidence synchronizer receive read-only access to these same
+    registry instances and must never create a second governance state store.
+    """
+
+    def __init__(
+        self,
+        *,
+        case_registry: PrivacyGovernanceCaseRegistry,
+        change_registry: PrivacyChangeRegistry,
+        approval_registry: PrivacyApprovalRegistry,
+        decision_service: PrivacyGovernanceDecisionService,
+    ) -> None:
+        if case_registry is None:
+            raise ValueError("case_registry cannot be None.")
+
+        if change_registry is None:
+            raise ValueError("change_registry cannot be None.")
+
+        if approval_registry is None:
+            raise ValueError("approval_registry cannot be None.")
+
+        if decision_service is None:
+            raise ValueError("decision_service cannot be None.")
+
+        self._cases = case_registry
+        self._changes = change_registry
+        self._approvals = approval_registry
+        self._decision_service = decision_service
+
+    @property
+    def case_registry(self) -> PrivacyGovernanceCaseRegistry:
+        """Return the authoritative governance case registry."""
+
+        return self._cases
+
+    @property
+    def change_registry(self) -> PrivacyChangeRegistry:
+        """Return the authoritative privacy change registry."""
+
+        return self._changes
+
+    @property
+    def approval_registry(self) -> PrivacyApprovalRegistry:
+        """Return the authoritative approval evidence registry."""
+
+        return self._approvals
+
+    def create_case(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        trigger_type: PrivacyTriggerType,
+        trigger_source: str,
+        validation_status: str = "PENDING",
+        email_status: str = "NOT_SENT",
+        processing_ids: tuple[str, ...] = (),
+        data_map_ids: tuple[str, ...] = (),
+    ) -> PrivacyGovernanceCase:
+        """Create a governance case from a registered privacy change.
+
+        The authoritative PrivacyChange status determines the initial
+        governance case status.
+
+        Status mapping:
+
+            PrivacyChangeStatus.APPROVED
+                -> APPROVED
+
+            PrivacyChangeStatus.BLOCKED
+                -> BLOCKED
+
+            PrivacyChangeStatus.PENDING_DPO_GRC
+                -> PENDING_DPO_GRC
+
+        The enum is compared directly rather than comparing ``.value`` to
+        hard-coded uppercase strings. This is important because the
+        PrivacyChangeStatus values are lowercase.
+        """
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        self._require_text(
+            "change_id",
+            change_id,
+        )
+
+        self._require_text(
+            "trigger_source",
+            trigger_source,
+        )
+
+        existing = (
+            self._cases.get(case_id)
+            if self._case_exists(case_id)
+            else None
+        )
+
+        if existing is not None:
+            return existing
+
+        change = self._changes.get(
+            change_id
+        )
+
+        if change is None:
+            raise KeyError(
+                f"Privacy change not found: {change_id}"
+            )
+
+        #
+        # IMPORTANT:
+        #
+        # Compare the authoritative enum directly.
+        #
+        # Do NOT use:
+        #
+        #     change.status.value == "BLOCKED"
+        #
+        # because PrivacyChangeStatus.BLOCKED.value is "blocked".
+        #
+
+        if change.status == PrivacyChangeStatus.BLOCKED:
+            governance_status = "BLOCKED"
+
+        elif change.status == PrivacyChangeStatus.APPROVED:
+            governance_status = "APPROVED"
+
+        else:
+            governance_status = "PENDING_DPO_GRC"
+
+        case = PrivacyGovernanceCase(
+            case_id=case_id,
+            title=change.title,
+            summary=change.description,
+            trigger_type=trigger_type,
+            triggered_at=datetime.now(timezone.utc),
+            trigger_source=trigger_source,
+            change_id=change_id,
+            processing_ids=processing_ids,
+            data_map_ids=data_map_ids,
+            risk=change.risk.value,
+            validation_status=validation_status,
+            email_status=email_status,
+            governance_status=governance_status,
+        )
+
+        self._cases.register(
+            case
+        )
+
+        return case
+
+    def get_case(
+        self,
+        case_id: str,
+    ) -> PrivacyGovernanceCase:
+        """Return one authoritative governance case."""
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        return self._cases.get(
+            case_id
+        )
+
+    def list_cases(
+        self,
+    ) -> tuple[PrivacyGovernanceCase, ...]:
+        """Return all authoritative governance cases."""
+
+        return self._cases.all()
+
+    def list_pending_cases(
+        self,
+    ) -> tuple[PrivacyGovernanceCase, ...]:
+        """Return all governance cases awaiting human review."""
+
+        return self._cases.pending()
+
+    def get_approval_history(
+        self,
+        case_id: str,
+    ) -> tuple[PrivacyApprovalRecord, ...]:
+        """Return authoritative approval evidence for a case."""
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        self._cases.get(
+            case_id
+        )
+
+        return self._approvals.for_case(
+            case_id
+        )
+
+    def approve(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        approval_id: str,
+        reviewer: str,
+        role: str,
+        comment: str,
+    ) -> PrivacyApprovalRecord:
+        """Record an explicit human approval."""
+
+        self._validate_decision_inputs(
+            case_id=case_id,
+            change_id=change_id,
+            reviewer=reviewer,
+            role=role,
+        )
+
+        return self._decision_service.record_decision(
+            case_id=case_id,
+            change_id=change_id,
+            approval_id=approval_id,
+            reviewer=reviewer,
+            role=role,
+            decision=ApprovalDecision.APPROVED,
+            comment=comment,
+        )
+
+    def reject(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        approval_id: str,
+        reviewer: str,
+        role: str,
+        comment: str,
+    ) -> PrivacyApprovalRecord:
+        """Record an explicit human rejection."""
+
+        self._validate_decision_inputs(
+            case_id=case_id,
+            change_id=change_id,
+            reviewer=reviewer,
+            role=role,
+        )
+
+        return self._decision_service.record_decision(
+            case_id=case_id,
+            change_id=change_id,
+            approval_id=approval_id,
+            reviewer=reviewer,
+            role=role,
+            decision=ApprovalDecision.REJECTED,
+            comment=comment,
+        )
+
+    def request_changes(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        approval_id: str,
+        reviewer: str,
+        role: str,
+        comment: str,
+    ) -> PrivacyApprovalRecord:
+        """Record an explicit request-for-changes decision."""
+
+        self._validate_decision_inputs(
+            case_id=case_id,
+            change_id=change_id,
+            reviewer=reviewer,
+            role=role,
+        )
+
+        return self._decision_service.record_decision(
+            case_id=case_id,
+            change_id=change_id,
+            approval_id=approval_id,
+            reviewer=reviewer,
+            role=role,
+            decision=ApprovalDecision.REQUEST_CHANGES,
+            comment=comment,
+        )
+
+    def _validate_decision_inputs(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        reviewer: str,
+        role: str,
+    ) -> None:
+        """Validate the context required for a human decision."""
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        self._require_text(
+            "change_id",
+            change_id,
+        )
+
+        self._require_text(
+            "reviewer",
+            reviewer,
+        )
+
+        self._cases.get(
+            case_id
+        )
+
+        change = self._changes.get(
+            change_id
+        )
+
+        if change is None:
+            raise KeyError(
+                f"Privacy change not found: {change_id}"
+            )
+
+        self._require_text(
+            "role",
+            role,
+        )
+
+    def _case_exists(
+        self,
+        case_id: str,
+    ) -> bool:
+        """Return whether a case exists."""
+
+        try:
+            self._cases.get(
+                case_id
+            )
+
+        except KeyError:
+            return False
+
+        return True
+
+    @staticmethod
+    def _require_text(
+        field_name: str,
+        value: str,
+    ) -> None:
+        """Validate a required text field."""
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"{field_name} is required."
+            )
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from .privacy_change import PrivacyChange
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalEmailRequest:
+    """Immutable request to escalate a privacy change for human approval."""
+
+    change_id: str
+    recipient: str
+    subject: str
+    body: str
+    requires_dpo_approval: bool
+    requires_grc_approval: bool
+
+
+class ApprovalEmailSender(Protocol):
+    """Application-level email delivery boundary.
+
+    The application layer does not know whether delivery uses
+    Resend, SMTP, or another provider.
+    """
+
+    def send(
+        self,
+        request: ApprovalEmailRequest,
+    ) -> None:
+        ...
+
+
+class PrivacyApprovalEmailService:
+    """Creates privacy governance approval requests.
+
+    Responsibilities:
+    - validate that automated privacy validation has passed;
+    - determine whether DPO/GRC review is required;
+    - construct the approval request;
+    - delegate email delivery to the injected sender.
+
+    Does NOT:
+    - approve privacy changes;
+    - make legal decisions;
+    - modify governance status;
+    - call an email provider directly;
+    - interpret email delivery as approval.
+    """
+
+    def __init__(
+        self,
+        *,
+        sender: ApprovalEmailSender,
+        approval_recipient: str,
+    ) -> None:
+        if sender is None:
+            raise ValueError("sender cannot be None.")
+
+        if not approval_recipient.strip():
+            raise ValueError("approval_recipient is required.")
+
+        self._sender = sender
+        self._recipient = approval_recipient.strip()
+
+    def escalate(
+        self,
+        change: PrivacyChange,
+        *,
+        validation_passed: bool,
+    ) -> ApprovalEmailRequest:
+        """Create and send a governance approval request.
+
+        A request can only be escalated after automated privacy
+        validation has passed.
+
+        Sending the email never constitutes DPO/GRC approval.
+        """
+
+        if change is None:
+            raise ValueError("change cannot be None.")
+
+        if not validation_passed:
+            raise ValueError(
+                "Cannot request approval while privacy "
+                "validation is failing."
+            )
+
+        if not (
+            change.dpo_required
+            or change.grc_required
+        ):
+            raise ValueError(
+                "Email escalation is only required for "
+                "governance-routed changes."
+            )
+
+        roles: list[str] = []
+
+        if change.dpo_required:
+            roles.append("DPO")
+
+        if change.grc_required:
+            roles.append("GRC")
+
+        subject = (
+            "[EasyChatBot Privacy Governance] "
+            f"Approval Required â€” {change.change_id}"
+        )
+
+        body = (
+            "EASYCHATBOT Â· PRIVACY GOVERNANCE\n"
+            "\n"
+            "HUMAN GOVERNANCE REVIEW REQUIRED\n"
+            "\n"
+            "A privacy-impacting change has passed automated "
+            "privacy validation and requires explicit human "
+            "governance review before it may proceed.\n"
+            "\n"
+            "CHANGE\n"
+            f"Change ID: {change.change_id}\n"
+            f"Title: {change.title}\n"
+            f"Description: {change.description}\n"
+            f"Risk: {change.risk.value}\n"
+            "\n"
+            "GOVERNANCE\n"
+            f"Required reviewers: {', '.join(roles)}\n"
+            "Automated privacy validation: PASS\n"
+            "Current governance status: PENDING_DPO_GRC\n"
+            "\n"
+            "DECISION REQUIRED\n"
+            "Please review the controlled Privacy Change Registry "
+            "and explicitly record the applicable governance decision.\n"
+            "\n"
+            "Possible decisions:\n"
+            "- APPROVE\n"
+            "- REJECT\n"
+            "- REQUEST CHANGES\n"
+            "\n"
+            "IMPORTANT GOVERNANCE CONTROL\n"
+            "This email is an escalation and approval request only.\n"
+            "It does not itself constitute approval.\n"
+            "Sending, receiving, or replying to this email does not "
+            "constitute DPO or GRC approval.\n"
+            "\n"
+            "The change must remain pending until the required "
+            "governance decision is explicitly recorded in the "
+            "controlled governance system.\n"
+            "\n"
+            "Applicable GDPR references should be reviewed in the "
+            "controlled privacy assessment for this change.\n"
+            "\n"
+            "EasyChatBot Privacy & Governance\n"
+            "Automated validation provides decision support and "
+            "control evidence. It does not replace DPO, GRC, or "
+            "Legal judgement."
+        )
+
+        request = ApprovalEmailRequest(
+            change_id=change.change_id,
+            recipient=self._recipient,
+            subject=subject,
+            body=body,
+            requires_dpo_approval=change.dpo_required,
+            requires_grc_approval=change.grc_required,
+        )
+
+        self._sender.send(request)
+
+        return request
+
+
+__all__ = [
+    "ApprovalEmailRequest",
+    "ApprovalEmailSender",
+    "PrivacyApprovalEmailService",
+]
+from __future__ import annotations
+
+from dataclasses import replace
+
+from .privacy_approval_email_service import (
+    PrivacyApprovalEmailService,
+)
+from .privacy_change import (
+    PrivacyChange,
+    PrivacyChangeStatus,
+)
+from .privacy_change_registry import (
+    PrivacyChangeRegistry,
+)
+from .privacy_validation_service import (
+    PrivacyValidationService,
+)
+
+
+class PrivacyGovernanceGate:
+    """Privacy governance decision gate.
+
+    Responsibilities:
+    - consume deterministic privacy validation results;
+    - block changes with validation failures;
+    - route privacy-impacting changes to DPO/GRC;
+    - trigger an approval escalation only when validation passes;
+    - never interpret email delivery as approval.
+
+    Does NOT:
+    - make legal decisions;
+    - grant DPO/GRC approval;
+    - execute production changes;
+    - schedule recurring approval emails.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: PrivacyChangeRegistry,
+        validation_service: PrivacyValidationService | None = None,
+        approval_email_service: PrivacyApprovalEmailService | None = None,
+    ) -> None:
+        if registry is None:
+            raise ValueError(
+                "registry cannot be None."
+            )
+
+        self._registry = registry
+        self._validation = validation_service
+        self._approval_email = approval_email_service
+
+    def route(
+        self,
+        change: PrivacyChange,
+        *,
+        automated_validation_passed: bool | None = None,
+        dpo_approved: bool = False,
+        grc_approved: bool = False,
+    ) -> PrivacyChange:
+        """Route a change through the governance decision.
+
+        This synchronous method preserves the existing Beta contract.
+
+        If a validation service is configured, it is the authoritative
+        source for automated privacy validation.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        validation_passed = self._resolve_validation(
+            automated_validation_passed
+        )
+
+        if not validation_passed:
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.BLOCKED,
+            )
+
+        elif change.dpo_required or change.grc_required:
+            if not (
+                dpo_approved
+                and grc_approved
+            ):
+                updated = replace(
+                    change,
+                    status=(
+                        PrivacyChangeStatus.PENDING_DPO_GRC
+                    ),
+                )
+            else:
+                updated = replace(
+                    change,
+                    status=(
+                        PrivacyChangeStatus.APPROVED
+                    ),
+                )
+
+        else:
+            updated = replace(
+                change,
+                status=(
+                    PrivacyChangeStatus.APPROVED
+                ),
+            )
+
+        self._save(updated)
+
+        return updated
+
+    async def route_and_escalate(
+        self,
+        change: PrivacyChange,
+    ) -> PrivacyChange:
+        """Run automated validation and escalate when governance requires it.
+
+        Email is sent ONLY when:
+
+        1. PrivacyValidationService returns PASS;
+        2. the change requires DPO/GRC review;
+        3. the change is not already approved.
+
+        Email delivery never changes the governance status to APPROVED.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        if self._validation is None:
+            raise RuntimeError(
+                "PrivacyValidationService is required "
+                "for automatic governance routing."
+            )
+
+        if self._approval_email is None:
+            raise RuntimeError(
+                "PrivacyApprovalEmailService is required "
+                "for automatic governance escalation."
+            )
+
+        validation = self._validation.validate()
+
+        if validation.status != "PASS":
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.BLOCKED,
+            )
+
+            self._save(updated)
+
+            return updated
+
+        if not (
+            change.dpo_required
+            or change.grc_required
+        ):
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.APPROVED,
+            )
+
+            self._save(updated)
+
+            return updated
+
+        updated = replace(
+            change,
+            status=(
+                PrivacyChangeStatus.PENDING_DPO_GRC
+            ),
+        )
+
+        self._save(updated)
+
+        self._approval_email.escalate(
+    change=updated,
+    validation_passed=True,
+)
+
+        return updated
+
+    def can_proceed(
+        self,
+        change_id: str,
+    ) -> bool:
+        change = self._registry.get(
+            change_id
+        )
+
+        return bool(
+            change
+            and change.status
+            == PrivacyChangeStatus.APPROVED
+        )
+
+    def _resolve_validation(
+        self,
+        explicit_result: bool | None,
+    ) -> bool:
+        if self._validation is not None:
+            result = self._validation.validate()
+
+            return (
+                result.status == "PASS"
+            )
+
+        if explicit_result is None:
+            raise ValueError(
+                "automated_validation_passed is required "
+                "when no PrivacyValidationService is configured."
+            )
+
+        return explicit_result
+
+    def _save(
+        self,
+        change: PrivacyChange,
+    ) -> None:
+        existing = self._registry.get(
+            change.change_id
+        )
+
+        if existing is None:
+            self._registry.register(
+                change
+            )
+        else:
+            self._registry.update(
+                change
+            )
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .privacy_change import (
+    PrivacyChange,
+    PrivacyChangeStatus,
+)
+from .privacy_change_registry import PrivacyChangeRegistry
+from .privacy_governance_case import (
+    PrivacyGovernanceCase,
+    PrivacyTriggerType,
+)
+from .privacy_governance_case_service import PrivacyGovernanceCaseService
+from .privacy_governance_gate import PrivacyGovernanceGate
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyGovernanceFlowResult:
+    """Result of the Beta privacy-to-governance case flow."""
+
+    change: PrivacyChange
+    case: PrivacyGovernanceCase
+
+
+class PrivacyGovernanceFlowService:
+    """Orchestrate a privacy change into a governance case.
+
+    Flow:
+
+        Privacy Change
+            â†“
+        Privacy Governance Gate
+            â†“
+        Shared Change Registry
+            â†“
+        Privacy Governance Case Service
+            â†“
+        Shared Case Registry
+            â†“
+        Operations Center API
+            â†“
+        Operations Center UI
+
+    The service does not make human governance decisions.
+    """
+
+    def __init__(
+        self,
+        *,
+        change_registry: PrivacyChangeRegistry,
+        governance_gate: PrivacyGovernanceGate,
+        case_service: PrivacyGovernanceCaseService,
+    ) -> None:
+        if change_registry is None:
+            raise ValueError(
+                "change_registry cannot be None."
+            )
+
+        if governance_gate is None:
+            raise ValueError(
+                "governance_gate cannot be None."
+            )
+
+        if case_service is None:
+            raise ValueError(
+                "case_service cannot be None."
+            )
+
+        self._changes = change_registry
+        self._gate = governance_gate
+        self._cases = case_service
+
+    def process_new_processing(
+        self,
+        change: PrivacyChange,
+        *,
+        automated_validation_passed: bool,
+        case_id: str | None = None,
+        trigger_source: str = "Processing Registry",
+        processing_ids: tuple[str, ...] = (),
+        data_map_ids: tuple[str, ...] = (),
+    ) -> PrivacyGovernanceFlowResult:
+        """Process a NEW_PROCESSING change through governance."""
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        #
+        # Register the original change.
+        #
+        self._save_change(change)
+
+        #
+        # The governance gate is authoritative for the resulting
+        # PrivacyChange status.
+        #
+        updated = self._gate.route(
+            change,
+            automated_validation_passed=automated_validation_passed,
+        )
+
+        #
+        # Persist the authoritative gate result into the shared registry.
+        #
+        # This is important because PrivacyGovernanceCaseService reads
+        # the authoritative PrivacyChange from this same registry.
+        #
+        self._save_change(updated)
+
+        resolved_case_id = (
+            case_id
+            if case_id is not None
+            else f"CASE-{updated.change_id}"
+        )
+
+        validation_status = (
+            "PASS"
+            if automated_validation_passed
+            else "FAIL"
+        )
+
+        expected_governance_status = (
+            self._expected_governance_status(
+                updated.status
+            )
+        )
+
+        case = self._cases.create_case(
+            case_id=resolved_case_id,
+            change_id=updated.change_id,
+            trigger_type=PrivacyTriggerType.NEW_PROCESSING,
+            trigger_source=trigger_source,
+            validation_status=validation_status,
+            processing_ids=processing_ids,
+            data_map_ids=data_map_ids,
+        )
+
+        #
+        # Defensive consistency boundary.
+        #
+        if case.governance_status != expected_governance_status:
+            raise RuntimeError(
+                "Privacy governance flow produced inconsistent state: "
+                f"change status={updated.status.value}, "
+                f"case governance status={case.governance_status}, "
+                f"expected={expected_governance_status}."
+            )
+
+        return PrivacyGovernanceFlowResult(
+            change=updated,
+            case=case,
+        )
+
+    def _save_change(
+        self,
+        change: PrivacyChange,
+    ) -> None:
+        existing = self._changes.get(
+            change.change_id
+        )
+
+        if existing is None:
+            self._changes.register(
+                change
+            )
+        else:
+            self._changes.update(
+                change
+            )
+
+    @staticmethod
+    def _expected_governance_status(
+        status: PrivacyChangeStatus,
+    ) -> str:
+        if status == PrivacyChangeStatus.BLOCKED:
+            return "BLOCKED"
+
+        if status == PrivacyChangeStatus.APPROVED:
+            return "APPROVED"
+
+        return "PENDING_DPO_GRC"
+
+
+__all__ = [
+    "PrivacyGovernanceFlowResult",
+    "PrivacyGovernanceFlowService",
+]
+from __future__ import annotations
+
+from urllib.parse import quote
+
+
+class PrivacyGovernanceCaseURLBuilder:
+    """Build stable application URLs for human governance review."""
+
+    def __init__(self, *, app_base_url: str) -> None:
+        base = app_base_url.strip().rstrip("/")
+        if not base:
+            raise ValueError("app_base_url is required.")
+        self._base_url = base
+
+    def build(self, case_id: str) -> str:
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise ValueError("case_id is required.")
+        return (
+            f"{self._base_url}/privacy-governance/"
+            f"{quote(case_id.strip(), safe='')}"
+        )
+
+
+__all__ = ["PrivacyGovernanceCaseURLBuilder"]
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.privacy.privacy_approval_email_service import (
+    ApprovalEmailRequest,
+)
+
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+class ResendApprovalEmailSender:
+    """Privacy approval-email adapter using the existing email infrastructure.
+
+    Delivery path:
+
+        PrivacyApprovalEmailService
+            â†“
+        ResendApprovalEmailSender
+            â†“
+        EmailProviderManager
+            â†“
+        ResendEmailProvider
+            â†“
+        Resend
+
+    This adapter is responsible only for translating the privacy
+    approval request into the existing email-provider abstraction.
+
+    It does NOT:
+    - approve or reject privacy changes;
+    - make DPO/GRC decisions;
+    - modify governance state;
+    - bypass the Privacy Governance Gate;
+    - access provider credentials directly.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_manager: EmailProviderManager | None = None,
+    ) -> None:
+        self._provider_manager = (
+            provider_manager
+            or EmailProviderManager()
+        )
+
+    async def send(
+        self,
+        request: ApprovalEmailRequest,
+    ) -> dict[str, Any]:
+        """Send a privacy governance approval notification."""
+
+        if request is None:
+            raise ValueError(
+                "request cannot be None."
+            )
+
+        if not request.recipient.strip():
+            raise ValueError(
+                "Email recipient is required."
+            )
+
+        if not request.subject.strip():
+            raise ValueError(
+                "Email subject cannot be empty."
+            )
+
+        if not request.body.strip():
+            raise ValueError(
+                "Email body cannot be empty."
+            )
+
+        content = {
+            "recipient": request.recipient,
+            "body": request.body,
+            "email_type": "privacy_governance_approval",
+            "change_id": request.change_id,
+            "requires_dpo_approval": (
+                request.requires_dpo_approval
+            ),
+            "requires_grc_approval": (
+                request.requires_grc_approval
+            ),
+        }
+
+        return await self._provider_manager.send(
+            request.subject,
+            content,
+        )
+"""
+Email Provider Manager.
+
+Controls provider selection, configuration, availability,
+and controlled email delivery.
+
+The manager is deliberately provider-independent.
+Concrete providers such as Resend are injected into this
+boundary rather than called directly by application services.
+
+Does NOT:
+- generate cybersecurity reports;
+- schedule emails;
+- analyse security;
+- execute remediation;
+- expose provider credentials.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backend.cybersecurity.email.resend_email_provider import (
+    ResendEmailProvider,
+)
+
+
+class EmailProviderManager:
+    """
+    Provider abstraction for controlled email delivery.
+    """
+
+    def __init__(
+        self,
+        provider: Any | None = None,
+    ) -> None:
+
+        self.provider = (
+            provider
+            if provider is not None
+            else self._build_default_provider()
+        )
+
+    @staticmethod
+    def _build_default_provider() -> Any | None:
+        """
+        Build the configured default email provider.
+
+        Resend is currently the approved hackathon provider.
+
+        If Resend is not configured, return None so the
+        application can report provider_not_configured
+        rather than failing during application import.
+        """
+
+        try:
+            return ResendEmailProvider()
+
+        except ValueError:
+            return None
+
+    def status(self) -> dict[str, Any]:
+        """
+        Return non-sensitive provider status.
+
+        This method never exposes:
+        - API keys;
+        - secrets;
+        - credentials.
+
+        Status is determined from the provider already
+        configured in the manager. No external provider
+        request is made.
+        """
+
+        if self.provider is None:
+
+            return {
+                "provider": None,
+                "configured": False,
+                "available": False,
+                "status": "not_configured",
+            }
+
+        provider_id = getattr(
+            self.provider,
+            "provider_id",
+            self.provider.__class__.__name__,
+        )
+
+        return {
+            "provider": provider_id,
+            "configured": True,
+            "available": True,
+            "status": "ready",
+        }
+
+    async def send(
+        self,
+        subject: str,
+        content: dict,
+    ) -> dict:
+
+        if self.provider is None:
+
+            return {
+                "status": "provider_not_configured",
+            }
+
+        return await self.provider.send(
+            subject,
+            content,
+        )
+"""
+Resend email provider.
+
+Infrastructure adapter responsible only for email delivery.
+
+The provider supports multiple controlled email contracts:
+
+- Cybersecurity notifications:
+  rendered by the existing cybersecurity HTML renderer.
+
+- Privacy Governance reminders:
+  the application service supplies the authoritative HTML and
+  plain-text content. The provider delivers that content without
+  replacing it with the cybersecurity template.
+
+The provider does not:
+- make governance decisions;
+- modify governance state;
+- execute remediation;
+- generate application decisions;
+- access provider credentials outside configuration.
+"""
+
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+from typing import Any
+
+import resend
+
+from backend.cybersecurity.email.email_configuration import (
+    EMAIL_FROM,
+    RESEND_API_KEY,
+)
+
+
+class ResendEmailProvider:
+    """
+    Provider adapter for Resend email delivery.
+
+    Routing rule:
+
+        privacy_governance_reminder
+            -> supplied html_body
+
+        all other email types
+            -> existing cybersecurity renderer
+    """
+
+    provider_id = "resend"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        sender: str | None = None,
+    ) -> None:
+        self.api_key = api_key or RESEND_API_KEY
+        self.sender = sender or EMAIL_FROM
+
+        if not self.api_key:
+            raise ValueError(
+                "RESEND_API_KEY is not configured."
+            )
+
+        if not self.sender:
+            raise ValueError(
+                "Email sender is not configured."
+            )
+
+        resend.api_key = self.api_key
+
+    async def send(
+        self,
+        subject: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send an email through Resend."""
+
+        if not isinstance(subject, str) or not subject.strip():
+            raise ValueError(
+                "Email subject cannot be empty."
+            )
+
+        if not isinstance(content, dict):
+            raise TypeError(
+                "Email content must be a dictionary."
+            )
+
+        recipient = content.get("recipient")
+
+        if not isinstance(recipient, str) or not recipient.strip():
+            raise ValueError(
+                "Email recipient is required."
+            )
+
+        recipient = recipient.strip()
+
+        email_type = content.get(
+            "email_type",
+            "",
+        )
+
+        # Privacy Governance owns its complete presentation.
+        #
+        # Do not replace the supplied HTML with the
+        # Cybersecurity renderer.
+        if email_type == "privacy_governance_reminder":
+            html = self._get_supplied_html_body(content)
+        else:
+            # Preserve existing Cybersecurity behaviour.
+            html = self._build_html(content)
+
+        text_body = content.get("body")
+
+        if text_body is not None:
+            if not isinstance(text_body, str):
+                raise TypeError(
+                    "body must be a string when provided."
+                )
+
+            if not text_body.strip():
+                raise ValueError(
+                    "body cannot be empty when provided."
+                )
+
+        params: dict[str, Any] = {
+            "from": self.sender,
+            "to": [recipient],
+            "subject": subject,
+            "html": html,
+        }
+
+        if isinstance(text_body, str) and text_body.strip():
+            params["text"] = text_body
+
+        attachments = content.get("attachments")
+
+        if attachments is not None:
+            params["attachments"] = self._build_attachments(
+                attachments
+            )
+
+        response = await resend.Emails.send_async(
+            params
+        )
+
+        if isinstance(response, dict):
+            message_id = response.get("id")
+        else:
+            message_id = getattr(
+                response,
+                "id",
+                None,
+            )
+
+        return {
+            "provider": self.provider_id,
+            "status": "accepted",
+            "message_id": message_id,
+        }
+
+    @staticmethod
+    def _get_supplied_html_body(
+        content: dict[str, Any],
+    ) -> str:
+        """
+        Return the application-owned Privacy Governance HTML.
+
+        The provider deliberately does not generate or alter this
+        HTML because the application service owns the presentation
+        and governance message.
+        """
+
+        html_body = content.get("html_body")
+
+        if not isinstance(html_body, str):
+            raise TypeError(
+                "Privacy Governance email requires "
+                "html_body to be a string."
+            )
+
+        if not html_body.strip():
+            raise ValueError(
+                "Privacy Governance email html_body cannot be empty."
+            )
+
+        return html_body
+
+    @staticmethod
+    def _build_attachments(
+        attachments: Any,
+    ) -> list[dict[str, Any]]:
+        """
+        Convert local application attachment metadata into the
+        Resend attachment representation.
+
+        Resend rejects Windows/local filesystem paths supplied
+        directly as ``path`` values. Therefore local files are
+        read and encoded as base64 ``content``.
+
+        Supports inline Privacy Governance assets:
+
+            cid:easychatbot-governance-logo
+        """
+
+        if not isinstance(attachments, list):
+            raise TypeError(
+                "attachments must be a list when provided."
+            )
+
+        normalized: list[dict[str, Any]] = []
+
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                raise TypeError(
+                    "Each email attachment must be a dictionary."
+                )
+
+            path_value = attachment.get("path")
+
+            if not path_value:
+                raise ValueError(
+                    "Email attachment path is required."
+                )
+
+            path = Path(str(path_value))
+
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Email attachment not found: {path}"
+                )
+
+            if not path.is_file():
+                raise ValueError(
+                    f"Email attachment is not a file: {path}"
+                )
+
+            filename = attachment.get("filename")
+
+            resolved_filename = (
+                str(filename).strip()
+                if filename
+                else path.name
+            )
+
+            if not resolved_filename:
+                raise ValueError(
+                    "Email attachment filename is required."
+                )
+
+            content_id = attachment.get(
+                "content_id"
+            )
+
+            inline = bool(
+                attachment.get(
+                    "inline",
+                    False,
+                )
+            )
+
+            if inline and not content_id:
+                raise ValueError(
+                    "Inline email attachments require "
+                    "content_id."
+                )
+
+            # Read the local file and encode it for Resend.
+            encoded_content = base64.b64encode(
+                path.read_bytes()
+            ).decode("ascii")
+
+            resend_attachment: dict[str, Any] = {
+                "filename": resolved_filename,
+                "content": encoded_content,
+            }
+
+            if content_id:
+                resend_attachment["content_id"] = str(
+                    content_id
+                )
+
+            normalized.append(
+                resend_attachment
+            )
+
+        return normalized
+
+    @staticmethod
+    def _build_html(
+        content: dict[str, Any],
+    ) -> str:
+        """
+        Existing Cybersecurity HTML renderer.
+
+        This remains the Cybersecurity fallback and is intentionally
+        not used for Privacy Governance reminders.
+        """
+
+        posture = str(
+            content.get(
+                "posture",
+                "Security notification",
+            )
+        )
+
+        critical_count = content.get(
+            "critical_count",
+            0,
+        )
+
+        high_count = content.get(
+            "high_count",
+            0,
+        )
+
+        priority_signals = content.get(
+            "priority_signals",
+            [],
+        )
+
+        signal_rows = ""
+
+        if isinstance(
+            priority_signals,
+            list,
+        ):
+            for signal in priority_signals:
+                if not isinstance(
+                    signal,
+                    dict,
+                ):
+                    continue
+
+                title = str(
+                    signal.get(
+                        "title",
+                        "Security signal",
+                    )
+                )
+
+                severity = str(
+                    signal.get(
+                        "severity",
+                        "",
+                    )
+                ).upper()
+
+                signal_rows += (
+                    "<li>"
+                    f"<strong>{title}</strong>"
+                    f" — {severity}"
+                    "</li>"
+                )
+
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>EasyChatBot Cybersecurity</title>
+</head>
+<body>
+    <h2>EasyChatBot Cybersecurity Notification</h2>
+
+    <p>
+        <strong>Security posture:</strong>
+        {posture}
+    </p>
+
+    <p>
+        <strong>Critical findings:</strong>
+        {critical_count}
+    </p>
+
+    <p>
+        <strong>High findings:</strong>
+        {high_count}
+    </p>
+
+    <h3>Priority Security Signals</h3>
+
+    <ul>
+        {signal_rows}
+    </ul>
+
+    <hr>
+
+    <p>
+        This notification is decision support only.
+        No remediation action was executed by EasyChatBot.
+    </p>
+
+    <p>
+        <strong>Environment:</strong> DEMO
+    </p>
+</body>
+</html>
+"""
+
+
+__all__ = [
+    "ResendEmailProvider",
+]

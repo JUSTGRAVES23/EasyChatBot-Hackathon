@@ -1,0 +1,256 @@
+"""
+EasyChatBot AI Operations Center dashboard composition.
+
+Composition root for the read-only Operations Center
+dashboard, provider-health application stack, and
+operational-event read API.
+
+This module owns dependency construction for the
+Operations Center application boundary.
+
+It does not execute providers, agents, Runtime routing,
+or autonomous remediation.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+from app.application.provider_management.escalation_workflow_repository import (
+    InMemoryEscalationWorkflowRepository,
+)
+from app.application.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+from app.application.provider_management.operations_center_dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+from app.application.provider_management.operations_center_dashboard_service import (
+    OperationsCenterDashboardService,
+)
+from app.application.provider_management.operations_center_operational_events_api import (
+    OperationsCenterOperationalEventsAPI,
+)
+from app.application.provider_management.operations_center_provider_service import (
+    OperationsCenterProviderService,
+)
+from app.application.provider_management.operational_event_repository import (
+    InMemoryOperationalEventRepository,
+)
+from app.application.provider_management.operational_event_service import (
+    OperationalEventService,
+)
+from app.application.provider_management.provider_health_application_service import (
+    ProviderHealthApplicationService,
+)
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+from app.application.provider_management.provider_incident_service import (
+    InMemoryProviderIncidentRepository,
+    ProviderIncidentService,
+)
+from app.application.provider_management.provider_operational_event_service import (
+    ProviderOperationalEventService,
+)
+
+
+@dataclass(frozen=True)
+class OperationsCenterComposition:
+    """
+    Composed Operations Center application graph.
+
+    Exposes the application-facing boundaries needed for
+    controlled integration testing and demonstration.
+    """
+
+    dashboard_api: OperationsCenterDashboardAPI
+
+    health_application_service: (
+        ProviderHealthApplicationService
+    )
+
+    operational_event_service: (
+        OperationalEventService
+    )
+
+    operational_events_api: (
+        OperationsCenterOperationalEventsAPI
+    )
+
+
+def create_operations_center_composition() -> (
+    OperationsCenterComposition
+):
+    """
+    Construct the complete Operations Center application graph.
+
+    A single ProviderHealthMonitorService is shared between
+    health ingestion and provider intelligence.
+
+    A single OperationalEventService is shared by provider
+    operational-event adapters and the read-only operational
+    events API.
+
+    Provider incidents therefore emit operational facts into
+    the same event store exposed by the Operations Center API.
+    """
+
+    # ---------------------------------------------------------
+    # Provider health state
+    # ---------------------------------------------------------
+
+    health_monitor = (
+        ProviderHealthMonitorService()
+    )
+
+    # ---------------------------------------------------------
+    # Operational event persistence
+    # ---------------------------------------------------------
+
+    operational_event_repository = (
+        InMemoryOperationalEventRepository()
+    )
+
+    operational_event_service = (
+        OperationalEventService(
+            repository=(
+                operational_event_repository
+            )
+        )
+    )
+
+    provider_operational_event_service = (
+        ProviderOperationalEventService(
+            operational_event_service=(
+                operational_event_service
+            )
+        )
+    )
+
+    operational_events_api = (
+        OperationsCenterOperationalEventsAPI(
+            operational_event_service=(
+                operational_event_service
+            )
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Provider incidents
+    # ---------------------------------------------------------
+
+    incident_repository = (
+        InMemoryProviderIncidentRepository()
+    )
+
+    incident_service = (
+        ProviderIncidentService(
+            repository=incident_repository,
+            operational_event_service=(
+                provider_operational_event_service
+            ),
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Health application boundary
+    # ---------------------------------------------------------
+
+    health_application_service = (
+        ProviderHealthApplicationService(
+            health_monitor=health_monitor,
+            incident_service=incident_service,
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Escalation history
+    # ---------------------------------------------------------
+
+    workflow_repository = (
+        InMemoryEscalationWorkflowRepository()
+    )
+
+    history_service = (
+        EscalationHistoryService(
+            repository=workflow_repository
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Provider intelligence
+    # ---------------------------------------------------------
+
+    provider_service = (
+        OperationsCenterProviderService(
+            health_monitor=health_monitor
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Dashboard application service
+    # ---------------------------------------------------------
+
+    dashboard_service = (
+        OperationsCenterDashboardService(
+            history_service=history_service,
+            provider_service=provider_service,
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Presentation facade
+    # ---------------------------------------------------------
+
+    facade = (
+        OperationsCenterDashboardFacade(
+            dashboard_service=dashboard_service
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Application API
+    # ---------------------------------------------------------
+
+    dashboard_api = (
+        OperationsCenterDashboardAPI(
+            facade=facade
+        )
+    )
+
+    return OperationsCenterComposition(
+        dashboard_api=dashboard_api,
+        health_application_service=(
+            health_application_service
+        ),
+        operational_event_service=(
+            operational_event_service
+        ),
+        operational_events_api=(
+            operational_events_api
+        ),
+    )
+
+
+def create_operations_center_dashboard_api() -> (
+    OperationsCenterDashboardAPI
+):
+    """
+    Backward-compatible dashboard API composition entry point.
+
+    Existing callers that only require the dashboard continue
+    to receive the dashboard API.
+
+    The complete application graph is composed through
+    create_operations_center_composition().
+    """
+
+    composition = (
+        create_operations_center_composition()
+    )
+
+    return composition.dashboard_api

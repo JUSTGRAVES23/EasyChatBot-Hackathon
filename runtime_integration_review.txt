@@ -1,0 +1,265 @@
+
+===== .\backend\runtime\runtime_engine.py =====
+
+"""
+EasyChatBot Runtime Engine.
+
+The Runtime is responsible for orchestrating
+agent execution.
+
+Responsibilities:
+- receive execution requests
+- provide execution context
+- call approved agents
+- return structured results
+
+The Runtime does not:
+- implement business logic
+- call providers directly
+- manage user interfaces
+"""
+
+from backend.agents.base_agent import BaseAgent
+from backend.agents.agent_result import AgentResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class RuntimeEngine:
+    """
+    Central execution orchestrator.
+
+    Agents execute through the Runtime.
+    """
+
+    async def execute(
+        self,
+        agent: BaseAgent,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute an agent using runtime control.
+
+        Args:
+            agent:
+                Agent implementation.
+
+            context:
+                Runtime execution context.
+
+        Returns:
+            AgentResult.
+        """
+
+        return await agent.execute(context)
+
+===== .\backend\services\external_runtime_service.py =====
+
+"""
+External Runtime Application Service.
+
+Provides the application-layer boundary to the external/user-assistance
+AI Runtime.
+
+Architecture:
+
+Application
+    |
+    v
+ExternalRuntimeService
+    |
+    v
+CapabilityGateway
+    |
+    v
+CapabilityRegistry
+    |
+    v
+Capability Executor
+
+
+Responsibilities:
+
+- receive approved capability requests from application services;
+- delegate execution to the external Runtime;
+- keep API routes independent from Runtime implementation details;
+- preserve dependency injection.
+
+This service does not:
+
+- implement capability business logic;
+- construct capability executors;
+- construct the CapabilityRegistry;
+- construct the CapabilityGateway;
+- make governance decisions;
+- call providers directly;
+- execute agents directly;
+- modify production systems.
+
+The external Runtime remains responsible for capability execution
+and governance enforcement.
+"""
+
+from __future__ import annotations
+
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityRequest,
+    CapabilityResult,
+)
+
+
+class ExternalRuntimeService:
+    """
+    Application-layer adapter for the external AI Runtime.
+
+    The CapabilityGateway is injected by the application
+    composition layer.
+
+    This keeps the application layer independent from:
+
+    - capability registry;
+    - executor implementations;
+    - provider integrations.
+    """
+
+    def __init__(
+        self,
+        gateway: CapabilityGateway,
+    ) -> None:
+        """
+        Initialise External Runtime service.
+
+        Args:
+            gateway:
+                Configured external Runtime gateway.
+
+        Raises:
+            ValueError:
+                If gateway is missing.
+        """
+
+        if gateway is None:
+            raise ValueError(
+                "CapabilityGateway cannot be None."
+            )
+
+        self._gateway = gateway
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        """
+        Execute an approved Runtime capability.
+
+        Governance and execution remain delegated to
+        CapabilityGateway.
+
+        Args:
+            request:
+                Explicit Runtime capability request.
+
+        Returns:
+            Provider-independent CapabilityResult.
+
+        Raises:
+            ValueError:
+                If request is missing.
+        """
+
+        if request is None:
+            raise ValueError(
+                "CapabilityRequest cannot be None."
+            )
+
+        return await self._gateway.execute(
+            request,
+        )
+
+===== .\backend\runtime\context\execution_context.py =====
+
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+- optionally carry bounded learner memory context
+
+Does not:
+- execute providers
+- manage memory persistence
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from src.ai_runtime.memory.context_builder import (
+    MemoryContext,
+)
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    The context is immutable. Enrichment must therefore use
+    dataclasses.replace() rather than mutating an existing
+    instance.
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    memory_context: MemoryContext | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached.
+        """
+
+        return (
+            self.intelligence_context is not None
+        )
+
+    @property
+    def has_memory_context(self) -> bool:
+        """
+        Return whether bounded learner memory context
+        is attached.
+        """
+
+        return (
+            self.memory_context is not None
+            and not self.memory_context.is_empty
+        )

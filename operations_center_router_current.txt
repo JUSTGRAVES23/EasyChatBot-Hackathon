@@ -1,0 +1,448 @@
+
+
+===== FILE: .\app\interfaces\provider_management\operations_center_dashboard_router.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard HTTP router.
+
+Exposes the read-only Operations Center dashboard through
+the HTTP/API boundary.
+
+HTTP contract:
+
+    GET /api/operations-center/dashboard
+
+Architecture:
+
+Application Composition
+     |
+     v
+OperationsCenterDashboardAPI
+     |
+     v
+Operations Center Router
+     |
+     v
+HTTP Client
+
+
+Responsibilities:
+
+- expose the Operations Center dashboard endpoint;
+- use the configured application dependency;
+- delegate dashboard generation to the application API;
+- keep HTTP concerns isolated from application logic.
+
+Does NOT:
+
+- access repositories directly;
+- calculate system confidence;
+- approve escalations;
+- reject escalations;
+- modify provider routing;
+- execute providers;
+- send emails;
+- perform autonomous operational actions.
+
+The router is read-only.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends
+
+from app.application.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+
+from app.application.provider_management.operations_center_dashboard_composition import (
+    create_operations_center_dashboard_api,
+)
+
+
+router = APIRouter(
+    prefix="/api/operations-center",
+    tags=["AI Operations Center"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Application composition
+# ---------------------------------------------------------------------------
+#
+# The application stack is composed once when this module is loaded.
+#
+# The route itself never constructs application services.
+# The dependency resolver only returns the already-composed instance.
+#
+_dashboard_api = (
+    create_operations_center_dashboard_api()
+)
+
+
+def configure_dashboard_api(
+    dashboard_api: OperationsCenterDashboardAPI,
+) -> None:
+    """
+    Replace the configured dashboard API.
+
+    Primarily useful for application bootstrap and deterministic
+    integration testing.
+
+    The HTTP route never constructs the dependency itself.
+    """
+
+    if dashboard_api is None:
+        raise ValueError(
+            "Operations Center dashboard API "
+            "cannot be None."
+        )
+
+    global _dashboard_api
+
+    _dashboard_api = dashboard_api
+
+
+def get_dashboard_api() -> OperationsCenterDashboardAPI:
+    """
+    Resolve the configured Operations Center dashboard API.
+
+    The dependency has already been composed outside the
+    request handler.
+
+    No repositories or application services are constructed
+    per HTTP request.
+    """
+
+    return _dashboard_api
+
+
+@router.get(
+    "/dashboard",
+)
+def get_operations_center_dashboard(
+    dashboard_api: OperationsCenterDashboardAPI = Depends(
+        get_dashboard_api
+    ),
+) -> dict[str, Any]:
+    """
+    Return the current Operations Center dashboard.
+
+    The HTTP layer delegates directly to the application API.
+
+    Provider discovery remains below the API boundary.
+    """
+
+    return dashboard_api.get_dashboard()
+
+
+===== FILE: .\tests\interfaces\provider_management\test_operations_center_dashboard_router.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard router tests.
+
+Validates the HTTP boundary for the Operations Center
+dashboard.
+
+The router must:
+
+- expose GET /api/operations-center/dashboard;
+- delegate to OperationsCenterDashboardAPI;
+- return the dashboard contract as JSON;
+- expose no provider-management business logic;
+- remain read-only;
+- use the configured application dependency.
+"""
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.application.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+
+from app.interfaces.provider_management.operations_center_dashboard_router import (
+    get_dashboard_api,
+    router,
+)
+
+
+def create_test_api() -> (
+    OperationsCenterDashboardAPI
+):
+    """
+    Create a deterministic dashboard API test double.
+
+    The HTTP layer should call get_dashboard() without provider
+    arguments. Provider discovery belongs below the HTTP boundary.
+    """
+
+    class TestDashboardAPI:
+        """
+        Minimal test double for the dashboard API.
+        """
+
+        def get_dashboard(
+            self,
+        ) -> dict:
+            return {
+                "system_confidence": 92.0,
+                "monitoring_status": "healthy",
+                "active_providers": [
+                    {
+                        "provider": "openai",
+                        "model": "gpt-5-mini",
+                        "capabilities": [
+                            "conversation",
+                            "reasoning",
+                        ],
+                        "active": True,
+                    },
+                    {
+                        "provider": "gemini",
+                        "model": (
+                            "gemini-2.5-flash"
+                        ),
+                        "capabilities": [
+                            "summarisation",
+                        ],
+                        "active": True,
+                    },
+                ],
+                "active_escalations": 0,
+                "pending_approvals": 0,
+                "approved_escalations": 0,
+                "rejected_escalations": 0,
+                "pending_notifications": 0,
+                "total_escalations": 0,
+            }
+
+    return TestDashboardAPI()  # type: ignore[return-value]
+
+
+def create_test_app() -> FastAPI:
+    """
+    Create a minimal FastAPI application containing only
+    the Operations Center dashboard router.
+    """
+
+    app = FastAPI(
+        title="EasyChatBot AI Operations Center"
+    )
+
+    app.include_router(router)
+
+    app.dependency_overrides[
+        get_dashboard_api
+    ] = create_test_api
+
+    return app
+
+
+def test_dashboard_endpoint_returns_success() -> None:
+    """
+    Validate the dashboard HTTP endpoint.
+    """
+
+    app = create_test_app()
+
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/operations-center/dashboard"
+    )
+
+    assert response.status_code == 200
+
+
+def test_dashboard_endpoint_returns_json() -> None:
+    """
+    Validate the dashboard response is JSON-compatible.
+    """
+
+    app = create_test_app()
+
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/operations-center/dashboard"
+    )
+
+    assert response.headers[
+        "content-type"
+    ].startswith(
+        "application/json"
+    )
+
+    body = response.json()
+
+    assert isinstance(
+        body,
+        dict,
+    )
+
+
+def test_dashboard_endpoint_exposes_expected_contract() -> None:
+    """
+    Validate the dashboard contract exposed to the frontend.
+    """
+
+    app = create_test_app()
+
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/operations-center/dashboard"
+    )
+
+    body = response.json()
+
+    assert (
+        body["system_confidence"]
+        == 92.0
+    )
+
+    assert (
+        body["monitoring_status"]
+        == "healthy"
+    )
+
+    assert (
+        body["active_escalations"]
+        == 0
+    )
+
+    assert (
+        body["pending_approvals"]
+        == 0
+    )
+
+    assert (
+        body["approved_escalations"]
+        == 0
+    )
+
+    assert (
+        body["rejected_escalations"]
+        == 0
+    )
+
+    assert (
+        body["pending_notifications"]
+        == 0
+    )
+
+    assert (
+        body["total_escalations"]
+        == 0
+    )
+
+
+def test_dashboard_endpoint_exposes_provider_data() -> None:
+    """
+    Validate provider information reaches the HTTP response.
+    """
+
+    app = create_test_app()
+
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/operations-center/dashboard"
+    )
+
+    body = response.json()
+
+    providers = body[
+        "active_providers"
+    ]
+
+    assert len(providers) == 2
+
+    assert providers[0][
+        "provider"
+    ] == "openai"
+
+    assert providers[0][
+        "model"
+    ] == "gpt-5-mini"
+
+    assert providers[0][
+        "active"
+    ] is True
+
+    assert providers[1][
+        "provider"
+    ] == "gemini"
+
+
+def test_dashboard_endpoint_is_read_only() -> None:
+    """
+    Validate the dashboard endpoint is GET-only.
+
+    Operational state must not be changed through this
+    endpoint.
+    """
+
+    app = create_test_app()
+
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/operations-center/dashboard"
+    )
+
+    assert response.status_code == 405
+
+
+def test_production_dashboard_dependency_is_configured() -> None:
+    """
+    Validate that the production dashboard dependency is
+    available through the composition boundary.
+    """
+
+    app = FastAPI(
+        title="EasyChatBot AI Operations Center"
+    )
+
+    app.include_router(router)
+
+    client = TestClient(
+        app,
+        raise_server_exceptions=False,
+    )
+
+    response = client.get(
+        "/api/operations-center/dashboard"
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert isinstance(
+        body,
+        dict,
+    )
+
+    assert (
+        body["system_confidence"]
+        == 100.0
+    )
+
+    assert (
+        body["monitoring_status"]
+        == "healthy"
+    )
+
+    assert (
+        body["active_escalations"]
+        == 0
+    )
+
+    assert (
+        body["total_escalations"]
+        == 0
+    )

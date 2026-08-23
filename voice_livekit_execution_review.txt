@@ -1,0 +1,4561 @@
+
+======================================================================
+FILE: backend/app/infrastructure/voice/livekit_agent_dispatcher.py
+======================================================================
+"""
+LiveKit Agent Dispatcher.
+
+Infrastructure adapter responsible for dispatching
+an approved EasyChatBot voice call to the LiveKit
+realtime agent worker.
+
+Responsibilities:
+- Create a LiveKit agent dispatch.
+- Target the EasyChatBot voice worker.
+- Pass approved voice-call metadata to the worker.
+- Keep LiveKit API details inside infrastructure.
+
+Does NOT:
+- Decide whether a call is authorized.
+- Create voice-call business state.
+- Manage application lifecycle.
+- Resolve worlds or characters.
+- Execute AI agents.
+- Persist conversations.
+- Generate participant tokens.
+"""
+
+from __future__ import annotations
+
+
+import json
+import logging
+import os
+
+
+from dataclasses import dataclass
+
+
+from livekit import api
+
+
+logger = logging.getLogger(
+    __name__
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class LiveKitAgentDispatcher:
+    """
+    Infrastructure adapter for LiveKit Agent dispatch.
+
+    The application layer supplies an already-approved
+    voice-call context. This adapter translates that
+    context into a LiveKit AgentDispatch request.
+
+    LiveKit credentials are read from the environment
+    and remain inside the infrastructure boundary.
+    """
+
+    agent_name: str = "easychatbot-voice"
+
+
+    def dispatch(
+        self,
+        *,
+        room_name: str,
+        learner_id: str,
+        world_id: str,
+        character_id: str,
+        language_code: str,
+    ) -> str:
+        """
+        Dispatch the EasyChatBot voice agent to a room.
+
+        Parameters
+        ----------
+        room_name:
+            LiveKit room that the agent must join.
+
+        learner_id:
+            Approved learner identifier.
+
+        world_id:
+            Active learning world.
+
+        character_id:
+            Approved AI character.
+
+        language_code:
+            Active interaction language.
+
+        Returns
+        -------
+        str
+            LiveKit dispatch identifier.
+
+        Raises
+        ------
+        ValueError
+            If required values are empty or credentials
+            are not configured.
+        """
+
+        self._validate_required_value(
+            room_name,
+            "room_name",
+        )
+
+        self._validate_required_value(
+            learner_id,
+            "learner_id",
+        )
+
+        self._validate_required_value(
+            world_id,
+            "world_id",
+        )
+
+        self._validate_required_value(
+            character_id,
+            "character_id",
+        )
+
+        self._validate_required_value(
+            language_code,
+            "language_code",
+        )
+
+
+        api_key = os.getenv(
+            "LIVEKIT_API_KEY",
+        )
+
+        api_secret = os.getenv(
+            "LIVEKIT_API_SECRET",
+        )
+
+        livekit_url = os.getenv(
+            "LIVEKIT_URL",
+        )
+
+
+        if not api_key:
+            raise ValueError(
+                "LIVEKIT_API_KEY is not configured."
+            )
+
+
+        if not api_secret:
+            raise ValueError(
+                "LIVEKIT_API_SECRET is not configured."
+            )
+
+
+        if not livekit_url:
+            raise ValueError(
+                "LIVEKIT_URL is not configured."
+            )
+
+
+        metadata = {
+            "learner_id": learner_id.strip(),
+            "world_id": world_id.strip(),
+            "character_id": character_id.strip(),
+            "language_code": language_code.strip(),
+        }
+
+
+        metadata_json = json.dumps(
+            metadata,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+
+        logger.info(
+            "Dispatching EasyChatBot LiveKit agent",
+            extra={
+                "room_name": room_name,
+                "agent_name": self.agent_name,
+                "learner_id": learner_id,
+                "world_id": world_id,
+                "character_id": character_id,
+                "language_code": language_code,
+            },
+        )
+
+
+        livekit_api = api.LiveKitAPI(
+            url=livekit_url,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+
+
+        try:
+            dispatch = (
+                livekit_api
+                .agent_dispatch
+                .create_dispatch(
+                    api.CreateAgentDispatchRequest(
+                        agent_name=(
+                            self.agent_name
+                        ),
+                        room=room_name.strip(),
+                        metadata=metadata_json,
+                    )
+                )
+            )
+
+
+            logger.info(
+                "LiveKit agent dispatch created",
+                extra={
+                    "dispatch_id": (
+                        dispatch.id
+                    ),
+                    "room_name": room_name,
+                    "agent_name": (
+                        self.agent_name
+                    ),
+                },
+            )
+
+
+            return dispatch.id
+
+        finally:
+            livekit_api.aclose()
+
+
+    @staticmethod
+    def _validate_required_value(
+        value: str,
+        field_name: str,
+    ) -> None:
+        """
+        Validate a required string field.
+        """
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            raise ValueError(
+                f"{field_name} must be a string."
+            )
+
+
+        if not value.strip():
+            raise ValueError(
+                f"{field_name} cannot be empty."
+            )
+
+
+__all__ = [
+    "LiveKitAgentDispatcher",
+]
+
+======================================================================
+FILE: backend/app/infrastructure/voice/livekit_voice_worker.py
+======================================================================
+"""
+LiveKit Voice Worker.
+
+Infrastructure entry point for realtime voice sessions.
+
+Responsibilities:
+- Receive a LiveKit job context.
+- Read application-approved job metadata.
+- Convert metadata into a voice call request.
+- Build the existing EasyChatBot voice execution context.
+- Build the existing UAI InteractionContext.
+- Create the LiveKit realtime character agent.
+- Start the LiveKit AgentSession.
+
+Does NOT:
+- Own EasyChatBot business logic.
+- Resolve worlds or characters directly.
+- Decide learner authorization.
+- Persist conversations.
+- Manage call lifecycle state.
+- Bypass the EasyChatBot Runtime.
+"""
+
+from __future__ import annotations
+
+
+import json
+import logging
+
+
+from dataclasses import dataclass
+
+
+from livekit.agents import (
+    AgentServer,
+    JobContext,
+    WorkerOptions,
+    cli,
+)
+
+
+from app.application.uai.voice.voice_call_context_factory import (
+    VoiceCallContextFactory,
+)
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.application.uai.voice.voice_interaction_context_service import (
+    VoiceInteractionContextService,
+)
+
+
+from app.application.uai.voice.voice_dependencies import (
+    build_voice_interaction_context_service,
+)
+
+
+from app.infrastructure.voice.livekit_realtime_agent import (
+    LiveKitRealtimeAgent,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class LiveKitVoiceWorker:
+    """
+    Infrastructure worker for EasyChatBot realtime voice.
+
+    Application services are injected so the worker does not
+    construct domain/application dependencies itself.
+    """
+
+    context_factory: VoiceCallContextFactory
+
+    interaction_context_service: (
+        VoiceInteractionContextService
+    )
+
+    async def run(
+        self,
+        *,
+        ctx: JobContext,
+    ) -> None:
+        """
+        Connect to LiveKit and start the EasyChatBot
+        realtime character session.
+        """
+
+        metadata = self._read_job_metadata(
+            ctx,
+        )
+
+
+        request = self._create_voice_call_request(
+            metadata,
+        )
+
+
+        execution_context = (
+            self.context_factory.create(
+                request=request,
+            )
+        )
+
+
+        interaction_context = (
+            self.interaction_context_service.build(
+                context=execution_context,
+            )
+        )
+
+
+        character = (
+            interaction_context.character
+        )
+
+
+        instructions = (
+            "You are "
+            f"{character.name}, "
+            f"a French learning character. "
+            f"Your personality reference is "
+            f"{character.personality_reference}. "
+            f"Your teaching style is "
+            f"{character.teaching_style}. "
+            "Speak naturally, conversationally, "
+            "and help the learner practice the "
+            "target language."
+        )
+
+
+        realtime_agent = (
+            LiveKitRealtimeAgent(
+                context=interaction_context,
+                instructions=instructions,
+            )
+        )
+
+
+        ctx.log_context_fields = {
+            "room_name": ctx.room.name,
+            "learner_id": (
+                request.learner_id
+            ),
+            "world_id": (
+                request.world_id
+            ),
+            "character_id": (
+                request.character_id
+            ),
+        }
+
+
+        logger.info(
+            "Starting EasyChatBot LiveKit voice agent",
+            extra={
+                "room_name": ctx.room.name,
+                "learner_id": request.learner_id,
+                "world_id": request.world_id,
+                "character_id": request.character_id,
+            },
+        )
+
+
+        await ctx.connect()
+
+
+        agent = (
+            realtime_agent.create_agent()
+        )
+
+
+        session = (
+            realtime_agent.create_session()
+        )
+
+
+        await session.start(
+            agent=agent,
+            room=ctx.room,
+        )
+
+
+    @staticmethod
+    def _read_job_metadata(
+        ctx: JobContext,
+    ) -> dict[str, object]:
+        """
+        Read and validate LiveKit job metadata.
+
+        The metadata is supplied by the application when
+        the LiveKit job is dispatched.
+        """
+
+        raw_metadata = (
+            ctx.job.metadata
+        )
+
+
+        if not raw_metadata:
+            raise ValueError(
+                "LiveKit job metadata is required."
+            )
+
+
+        try:
+            metadata = json.loads(
+                raw_metadata,
+            )
+
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "LiveKit job metadata must be valid JSON."
+            ) from exc
+
+
+        if not isinstance(
+            metadata,
+            dict,
+        ):
+            raise ValueError(
+                "LiveKit job metadata must be a JSON object."
+            )
+
+
+        return metadata
+
+
+    @staticmethod
+    def _create_voice_call_request(
+        metadata: dict[str, object],
+    ) -> VoiceCallRequest:
+        """
+        Convert validated LiveKit job metadata
+        into the existing application request contract.
+        """
+
+        required_fields = (
+            "learner_id",
+            "world_id",
+            "character_id",
+            "language_code",
+        )
+
+
+        values: dict[str, str] = {}
+
+
+        for field in required_fields:
+
+            value = metadata.get(
+                field,
+            )
+
+
+            if not isinstance(
+                value,
+                str,
+            ):
+                raise ValueError(
+                    f"LiveKit metadata field "
+                    f"'{field}' must be a string."
+                )
+
+
+            if not value.strip():
+                raise ValueError(
+                    f"LiveKit metadata field "
+                    f"'{field}' cannot be empty."
+                )
+
+
+            values[field] = value.strip()
+
+
+        return VoiceCallRequest(
+            learner_id=values["learner_id"],
+            world_id=values["world_id"],
+            character_id=values["character_id"],
+            language_code=values["language_code"],
+        )
+
+
+server = AgentServer()
+
+
+_worker = LiveKitVoiceWorker(
+    context_factory=VoiceCallContextFactory(),
+    interaction_context_service=(
+        build_voice_interaction_context_service()
+    ),
+)
+
+
+@server.rtc_session(
+    agent_name="easychatbot-voice",
+)
+async def entrypoint(
+    ctx: JobContext,
+) -> None:
+    """
+    LiveKit Agents entrypoint.
+    """
+
+    await _worker.run(
+        ctx=ctx,
+    )
+
+
+def run() -> None:
+    """
+    Start the LiveKit Agents worker.
+    """
+
+    cli.run_app(
+        WorkerOptions(
+            agent_name="easychatbot-voice",
+        )
+    )
+
+
+__all__ = [
+    "LiveKitVoiceWorker",
+    "entrypoint",
+    "run",
+]
+
+======================================================================
+FILE: backend/app/infrastructure/voice/livekit_realtime_agent.py
+======================================================================
+"""
+LiveKit Realtime Agent Infrastructure.
+
+Infrastructure boundary between LiveKit Agents and EasyChatBot.
+
+Responsibilities:
+- Define the LiveKit Agents character wrapper.
+- Create an AgentSession.
+- Keep LiveKit Agents implementation details inside infrastructure.
+- Expose a small provider-independent application-facing boundary.
+
+Does NOT:
+- Own EasyChatBot business logic.
+- Manage call lifecycle state.
+- Persist conversations.
+- Modify production data.
+- Bypass the EasyChatBot Runtime.
+- Directly manage application authorization.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from livekit.agents import (
+    Agent,
+    AgentSession,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class LiveKitRealtimeAgent:
+    """
+    Infrastructure adapter for a LiveKit realtime character.
+
+    The adapter creates the LiveKit Agents objects required for
+    realtime voice execution while keeping EasyChatBot character
+    context outside the LiveKit-specific implementation.
+
+    LiveKit Agents remains an infrastructure/realtime boundary.
+    EasyChatBot remains responsible for application and AI runtime
+    orchestration.
+    """
+
+    context: InteractionContext
+
+    instructions: str
+
+
+    def create_agent(
+        self,
+    ) -> Agent:
+        """
+        Create the LiveKit Agent representation of the character.
+
+        Character-specific instructions are supplied explicitly by
+        the EasyChatBot application/runtime layer.
+        """
+
+        return Agent(
+            instructions=self.instructions,
+        )
+
+
+    def create_session(
+        self,
+    ) -> AgentSession:
+        """
+        Create a LiveKit AgentSession.
+
+        Provider-specific STT, LLM and TTS configuration is deliberately
+        not hard-coded here.
+
+        Composition/root configuration should inject those capabilities
+        when the realtime voice worker is assembled.
+        """
+
+        return AgentSession()
+
+
+    def character_id(
+        self,
+    ) -> str:
+        """
+        Return the active EasyChatBot character identifier.
+        """
+
+        return (
+            self.context
+            .character
+            .character_id
+        )
+
+
+    def language_code(
+        self,
+    ) -> str:
+        """
+        Return the active interaction language.
+        """
+
+        return (
+            self.context
+            .world
+            .language_code
+        )
+
+
+__all__ = [
+    "LiveKitRealtimeAgent",
+]
+
+======================================================================
+FILE: backend/app/infrastructure/voice/livekit_token_service.py
+======================================================================
+"""
+LiveKit Token Service.
+
+Infrastructure service responsible for generating
+real LiveKit participant access tokens.
+
+Responsibilities:
+- Generate signed LiveKit JWT access tokens.
+- Grant participant access to a specific room.
+- Keep LiveKit credentials inside infrastructure.
+- Return provider-independent VoiceConnectionToken.
+
+Does NOT:
+- Handle HTTP.
+- Manage application workflows.
+- Decide business authorization.
+- Persist tokens.
+- Execute AI agents.
+"""
+
+from __future__ import annotations
+
+
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
+
+
+import os
+import uuid
+
+
+from dotenv import load_dotenv
+
+
+from livekit import api
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+load_dotenv()
+
+
+
+class LiveKitTokenService:
+    """
+    Real LiveKit access-token infrastructure adapter.
+    """
+
+
+
+    def create_token(
+        self,
+        *,
+        room_name: str,
+        identity: str | None = None,
+        expires_minutes: int = 30,
+    ) -> VoiceConnectionToken:
+        """
+        Create a signed LiveKit participant token.
+
+        Parameters
+        ----------
+        room_name:
+            LiveKit room the participant may join.
+
+        identity:
+            Unique LiveKit participant identity.
+
+        expires_minutes:
+            Token validity period.
+        """
+
+
+
+        if not room_name.strip():
+
+            raise ValueError(
+                "room_name cannot be empty."
+            )
+
+
+
+        if expires_minutes <= 0:
+
+            raise ValueError(
+                "expires_minutes must be positive."
+            )
+
+
+
+        participant_identity = (
+            identity.strip()
+            if identity is not None
+            else f"learner-{uuid.uuid4()}"
+        )
+
+
+
+        if not participant_identity:
+
+            raise ValueError(
+                "identity cannot be empty."
+            )
+
+
+
+        api_key = os.getenv(
+            "LIVEKIT_API_KEY"
+        )
+
+
+
+        api_secret = os.getenv(
+            "LIVEKIT_API_SECRET"
+        )
+
+
+
+        if not api_key:
+
+            raise RuntimeError(
+                "LIVEKIT_API_KEY is not configured."
+            )
+
+
+
+        if not api_secret:
+
+            raise RuntimeError(
+                "LIVEKIT_API_SECRET is not configured."
+            )
+
+
+
+        expires_at = (
+            datetime.now(
+                timezone.utc
+            )
+            + timedelta(
+                minutes=expires_minutes,
+            )
+        )
+
+
+
+        access_token = (
+            api.AccessToken(
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            .with_identity(
+                participant_identity,
+            )
+            .with_name(
+                participant_identity,
+            )
+            .with_ttl(
+                timedelta(
+                    minutes=expires_minutes,
+                )
+            )
+            .with_grants(
+                api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
+            )
+        )
+
+
+
+        token = (
+            access_token.to_jwt()
+        )
+
+
+
+        return VoiceConnectionToken(
+            token=token,
+            room_name=room_name,
+            provider="livekit",
+            expires_at=expires_at,
+        )
+
+
+
+__all__ = [
+    "LiveKitTokenService",
+]
+
+======================================================================
+FILE: backend/app/infrastructure/voice/livekit_adapter.py
+======================================================================
+"""
+LiveKit Infrastructure Adapter.
+
+Infrastructure boundary for LiveKit room configuration.
+
+Responsibilities:
+- Translate voice session information into
+  LiveKit provider configuration.
+- Keep LiveKit-specific details inside infrastructure.
+- Prepare provider connection metadata.
+
+Does NOT:
+- Decide when a call starts.
+- Manage learner business logic.
+- Execute AI agents.
+- Manage application lifecycle.
+- Persist data.
+- Generate participant tokens.
+"""
+
+from __future__ import annotations
+
+
+import logging
+
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+logger = logging.getLogger(
+    __name__
+)
+
+
+
+class LiveKitAdapter:
+    """
+    Infrastructure adapter for LiveKit.
+
+    Converts the provider-independent voice session
+    into LiveKit room configuration.
+
+    Token generation is deliberately handled by
+    LiveKitTokenService.
+    """
+
+
+
+    provider = "livekit"
+
+
+
+    def create_room_configuration(
+        self,
+        *,
+        session: VoiceSession,
+    ) -> dict[str, str]:
+        """
+        Prepare LiveKit room configuration.
+
+        Parameters
+        ----------
+        session:
+            Provider-independent voice session.
+
+        Returns
+        -------
+        dict[str, str]
+            LiveKit room metadata.
+        """
+
+
+
+        if not session.room_name.strip():
+
+            raise ValueError(
+                "Voice room name cannot be empty."
+            )
+
+
+
+        if not session.character_id.strip():
+
+            raise ValueError(
+                "Voice session character id "
+                "cannot be empty."
+            )
+
+
+
+        logger.info(
+            "Preparing LiveKit room configuration",
+            extra={
+                "session_id": (
+                    session.session_id
+                ),
+                "room_name": (
+                    session.room_name
+                ),
+                "character_id": (
+                    session.character_id
+                ),
+                "language_code": (
+                    session.language_code
+                ),
+            },
+        )
+
+
+
+        return {
+            "room_name": (
+                session.room_name
+            ),
+            "character_id": (
+                session.character_id
+            ),
+            "language_code": (
+                session.language_code
+            ),
+            "provider": self.provider,
+        }
+
+
+
+__all__ = [
+    "LiveKitAdapter",
+]
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_call_service.py
+======================================================================
+"""
+Voice Call Application Service.
+
+Application boundary for voice calls.
+
+Responsibilities:
+- Receive voice call requests.
+- Delegate preparation workflow.
+- Return prepared call information.
+
+Does NOT:
+- Execute speech.
+- Manage providers.
+- Manage HTTP.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.application.uai.voice.voice_call_orchestrator import (
+    VoiceCallOrchestrator,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallService:
+    """
+    Voice call application service.
+    """
+
+    orchestrator: VoiceCallOrchestrator
+
+
+
+    def prepare_call(
+        self,
+        *,
+        request: VoiceCallRequest,
+    ) -> dict:
+        """
+        Prepare voice call.
+        """
+
+
+        session = (
+            self.orchestrator
+            .prepare_call(
+                request=request
+            )
+        )
+
+
+        return {
+            "room_name": (
+                session.session_id
+            ),
+            "character_id": (
+                session.character_id
+            ),
+            "language_code": (
+                session.language_code
+            ),
+            "provider": (
+                "livekit"
+            ),
+        }
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_call_orchestrator.py
+======================================================================
+"""
+Voice Call Orchestrator.
+
+Coordinates the preparation of a voice call.
+
+Responsibilities:
+- Build interaction context.
+- Create character voice session.
+- Create domain voice call session.
+- Apply voice call runtime lifecycle.
+
+Does NOT:
+- Execute AI providers.
+- Manage LiveKit.
+- Handle HTTP.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.application.uai.voice.voice_character_session_service import (
+    VoiceCharacterSessionService,
+)
+
+
+from app.ai_runtime.voice.voice_call_runtime import (
+    VoiceCallRuntime,
+)
+
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallOrchestrator:
+    """
+    Voice call workflow coordinator.
+    """
+
+    context_builder: InteractionContextBuilder
+
+    session_service: VoiceCharacterSessionService
+
+    voice_runtime: VoiceCallRuntime = (
+        VoiceCallRuntime()
+    )
+
+
+
+    def prepare_call(
+        self,
+        *,
+        request: VoiceCallRequest,
+    ) -> VoiceCallSession:
+        """
+        Prepare voice call session.
+
+        Flow:
+
+        Request
+          |
+          ↓
+        Interaction Context
+          |
+          ↓
+        Character Voice Session
+          |
+          ↓
+        Voice Call Session
+          |
+          ↓
+        Runtime Preparation
+          |
+          ↓
+        READY state
+        """
+
+
+        learner = LearnerContext(
+            learner_id=request.learner_id,
+            learning_goals=[
+                "conversation",
+            ],
+        )
+
+
+        voice = VoiceContext(
+            language_code=request.language_code,
+            voice_provider="openai",
+            voice_profile="verse",
+        )
+
+
+        context = (
+            self.context_builder
+            .build(
+                learner=learner,
+                world_id=request.world_id,
+                character_id=request.character_id,
+                voice=voice,
+            )
+        )
+
+
+        voice_session = (
+            self.session_service
+            .create_session(
+                context=context,
+            )
+        )
+
+
+        call_session = VoiceCallSession(
+            session_id=(
+                voice_session.session_id
+            ),
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+        )
+
+
+        return (
+            self.voice_runtime
+            .prepare(
+                session=call_session,
+            )
+        )
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_character_session_service.py
+======================================================================
+"""
+Voice Character Session Service.
+
+Application service responsible for
+creating character voice sessions.
+
+Responsibilities:
+- Coordinate character runtime.
+- Coordinate speech runtime.
+- Create domain voice session.
+- Request LiveKit room configuration.
+
+Does NOT:
+- Call speech providers directly.
+- Manage LiveKit directly.
+- Store configuration.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+from uuid import uuid4
+
+
+from app.ai_runtime.voice.voice_character_runtime import (
+    VoiceCharacterRuntime,
+)
+
+
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCharacterSessionService:
+    """
+    Creates voice sessions for AI characters.
+    """
+
+    livekit_adapter: object
+
+    speech_runtime: VoiceSpeechRuntime
+
+
+
+    def create_session(
+        self,
+        *,
+        context: InteractionContext,
+    ) -> VoiceSession:
+        """
+        Create a character voice session.
+        """
+
+
+        character_runtime = (
+            VoiceCharacterRuntime(
+                context=context,
+                speech_runtime=(
+                    self.speech_runtime
+                ),
+            )
+        )
+
+
+        character_id = (
+            character_runtime
+            .character_id()
+        )
+
+
+        session = VoiceSession(
+            session_id=str(
+                uuid4()
+            ),
+            room_name=(
+                f"{character_id}-voice-room"
+            ),
+            character_id=character_id,
+            language_code=(
+                context.voice.language_code
+            ),
+        )
+
+
+        self.livekit_adapter.create_room_configuration(
+            session=session,
+        )
+
+
+        return session
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_connection_service.py
+======================================================================
+"""
+Voice Connection Service.
+
+Application service responsible for
+creating voice connection credentials.
+
+Responsibilities:
+- Coordinate token creation.
+- Request infrastructure token generation.
+- Return domain connection token.
+
+Does NOT:
+- Handle HTTP.
+- Generate provider tokens.
+- Manage LiveKit directly.
+- Persist credentials.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceConnectionService:
+    """
+    Application boundary for voice connections.
+    """
+
+    token_service: LiveKitTokenService
+
+
+
+    def create_connection(
+        self,
+        *,
+        room_name: str,
+    ) -> VoiceConnectionToken:
+        """
+        Create voice connection credentials.
+        """
+
+
+        return (
+            self.token_service
+            .create_token(
+                room_name=room_name,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceConnectionService",
+]
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_interaction_context_service.py
+======================================================================
+"""
+Voice Interaction Context Service.
+
+Application service responsible for translating
+a voice call execution context into the existing
+UAI InteractionContext.
+
+Responsibilities:
+- Build LearnerContext from the voice call session.
+- Build VoiceContext from the voice call session.
+- Delegate world and character resolution to
+  InteractionContextBuilder.
+- Return the established InteractionContext contract.
+
+Does NOT:
+- Handle HTTP.
+- Connect to LiveKit.
+- Execute AI agents.
+- Manage LiveKit sessions.
+- Persist data.
+- Resolve worlds or characters directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceInteractionContextService:
+    """
+    Application boundary for creating the established
+    UAI InteractionContext from a voice call context.
+    """
+
+    context_builder: InteractionContextBuilder
+
+
+
+    def build(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> InteractionContext:
+        """
+        Build InteractionContext for a voice call.
+        """
+
+        session = context.session
+
+
+        learner = LearnerContext(
+            learner_id=session.learner_id,
+        )
+
+
+        voice = VoiceContext(
+            language_code=session.language_code,
+            voice_provider="openai",
+            voice_profile=session.character_id,
+        )
+
+
+        return (
+            self.context_builder
+            .build(
+                learner=learner,
+                world_id=session.world_id,
+                character_id=session.character_id,
+                voice=voice,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceInteractionContextService",
+]
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_call_context_factory.py
+======================================================================
+"""
+Voice Call Context Factory.
+
+Application factory responsible for
+creating voice execution contexts.
+
+Responsibilities:
+- Convert voice call requests into
+  domain execution context.
+- Create voice sessions.
+- Create room participants.
+- Build validated execution boundary.
+
+Does NOT:
+- Handle HTTP.
+- Execute runtime.
+- Connect LiveKit.
+- Select providers.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallContextFactory:
+    """
+    Creates voice execution contexts.
+    """
+
+
+
+    def create(
+        self,
+        *,
+        request: VoiceCallRequest,
+    ) -> VoiceCallExecutionContext:
+        """
+        Create execution context.
+
+        Lifecycle starts:
+
+            READY
+              |
+              ↓
+          Runtime ACTIVE
+        """
+
+
+        session = VoiceCallSession(
+            session_id=(
+                f"{request.character_id}-"
+                f"{request.learner_id}"
+            ),
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+        room = VoiceCallRoom(
+            room_id=session.session_id,
+            participants=(
+                VoiceCallParticipant(
+                    participant_id=request.learner_id,
+                    role=(
+                        VoiceParticipantRole.LEARNER
+                    ),
+                    display_name="Learner",
+                ),
+                VoiceCallParticipant(
+                    participant_id=request.character_id,
+                    role=(
+                        VoiceParticipantRole.CHARACTER
+                    ),
+                    display_name=(
+                        request.character_id
+                    ),
+                ),
+            ),
+        )
+
+
+        return VoiceCallExecutionContext(
+            session=session,
+            room=room,
+        )
+
+
+
+__all__ = [
+    "VoiceCallContextFactory",
+]
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_call_request.py
+======================================================================
+"""
+Voice Call Request DTO.
+
+Represents a request to start
+a character voice interaction.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallRequest:
+    """
+    Request data required to prepare
+    a voice call.
+    """
+
+    learner_id: str
+
+    world_id: str
+
+    character_id: str
+
+    language_code: str
+
+
+    def __post_init__(self) -> None:
+
+        if not self.learner_id.strip():
+            raise ValueError(
+                "learner_id cannot be empty."
+            )
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "character_id cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+======================================================================
+FILE: backend/app/application/uai/context/interaction_context_builder.py
+======================================================================
+"""
+Interaction Context Builder.
+
+Application service responsible for composing
+the complete UAI interaction context.
+
+Responsibilities:
+- Combine domain contexts.
+- Coordinate runtime preparation.
+- Create InteractionContext.
+
+Does NOT:
+- Call AI providers.
+- Create LiveKit sessions.
+- Persist memory.
+- Execute agents.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+from app.application.uai.character.character_resolver import (
+    CharacterResolver,
+)
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class InteractionContextBuilder:
+    """
+    Builds the complete UAI interaction context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_resolver: WorldResolver,
+        character_resolver: CharacterResolver,
+    ) -> None:
+
+        self._world_resolver = (
+            world_resolver
+        )
+
+        self._character_resolver = (
+            character_resolver
+        )
+
+
+    def build(
+        self,
+        *,
+        learner: LearnerContext,
+        world_id: str,
+        character_id: str,
+        voice: VoiceContext,
+    ) -> InteractionContext:
+        """
+        Build interaction context.
+        """
+
+        logger.info(
+            "Building interaction context",
+            extra={
+                "world_id": world_id,
+                "character_id": character_id,
+            },
+        )
+
+
+        world = (
+            self._world_resolver
+            .resolve(world_id)
+        )
+
+
+        character = (
+            self._character_resolver
+            .resolve(character_id)
+        )
+
+
+        context = InteractionContext(
+            learner=learner,
+            world=world,
+            character=character,
+            voice=voice,
+        )
+
+
+        logger.info(
+            "Interaction context created",
+        )
+
+
+        return context
+
+======================================================================
+FILE: backend/app/domain/uai/context/interaction_context.py
+======================================================================
+"""
+UAI Interaction Context.
+
+Represents the complete context of one AI interaction.
+
+This object is a domain contract between:
+
+- User interaction layer
+- AI Runtime
+- Character Runtime
+- Voice Runtime
+
+Responsibilities
+----------------
+- Hold validated interaction state.
+- Provide immutable runtime context.
+- Ensure all required context exists.
+
+Does NOT
+--------
+- Call AI providers.
+- Create conversations.
+- Manage LiveKit.
+- Persist data.
+- Execute agents.
+
+Architecture
+------------
+
+Learner Context
+        +
+World Context
+        +
+Character Context
+        +
+Voice Context
+
+        |
+
+        v
+
+InteractionContext
+
+        |
+
+        v
+
+AI Runtime
+
+
+Design principles
+-----------------
+- Immutable
+- Explicit dependencies
+- Provider independent
+- Easy to test
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.domain.uai.context.character_context import (
+    CharacterContext,
+)
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class InteractionContext:
+    """
+    Complete context required for an AI interaction.
+    """
+
+    learner: LearnerContext
+
+    world: WorldContext
+
+    character: CharacterContext
+
+    voice: VoiceContext
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate mandatory contexts.
+        """
+
+        if self.learner is None:
+            raise ValueError(
+                "Learner context is required."
+            )
+
+        if self.world is None:
+            raise ValueError(
+                "World context is required."
+            )
+
+        if self.character is None:
+            raise ValueError(
+                "Character context is required."
+            )
+
+        if self.voice is None:
+            raise ValueError(
+                "Voice context is required."
+            )
+
+======================================================================
+FILE: backend/app/domain/uai/context/learner_context.py
+======================================================================
+"""
+Learner Context.
+
+Represents learner information required
+for AI interaction.
+
+This object does not handle:
+- authentication
+- user accounts
+- payments
+- persistence
+
+It only provides learning context.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class LearnerContext:
+    """
+    Immutable learner context.
+    """
+
+    learner_id: str
+
+    level: str | None = None
+
+    native_language: str | None = None
+
+    learning_goals: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """
+        Validate learner context.
+        """
+
+        if not self.learner_id.strip():
+            raise ValueError(
+                "learner_id cannot be empty."
+            )
+
+        if self.level is not None:
+            if not self.level.strip():
+                raise ValueError(
+                    "level cannot be blank."
+                )
+
+        if self.native_language is not None:
+            if not self.native_language.strip():
+                raise ValueError(
+                    "native_language cannot be blank."
+                )
+
+======================================================================
+FILE: backend/app/domain/uai/context/world_context.py
+======================================================================
+"""
+World Context.
+
+Represents the active learning world
+for an AI interaction.
+
+Examples:
+
+- French World
+- Spanish World
+- Business French World
+
+The world determines:
+- language
+- learning environment
+- available experience rules
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class WorldContext:
+    """
+    Immutable learning world context.
+    """
+
+    world_id: str
+
+    name: str
+
+    language_code: str
+
+    available_characters: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """
+        Validate world context.
+        """
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        if not self.name.strip():
+            raise ValueError(
+                "world name cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+======================================================================
+FILE: backend/app/domain/uai/context/character_context.py
+======================================================================
+"""
+Character Context.
+
+Represents the selected AI character
+for one interaction.
+
+The character remains separate from:
+- AI execution
+- providers
+- infrastructure
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class CharacterContext:
+    """
+    Immutable character interaction context.
+    """
+
+    character_id: str
+
+    name: str
+
+    personality_reference: str
+
+    teaching_style: str
+
+    premium_required: bool = False
+
+    def __post_init__(self) -> None:
+        """
+        Validate character context.
+        """
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "character_id cannot be empty."
+            )
+
+        if not self.name.strip():
+            raise ValueError(
+                "character name cannot be empty."
+            )
+
+        if not self.personality_reference.strip():
+            raise ValueError(
+                "personality_reference cannot be empty."
+            )
+
+======================================================================
+FILE: backend/app/domain/uai/context/voice_context.py
+======================================================================
+"""
+Voice Context.
+
+Represents voice configuration required
+for an AI interaction.
+
+Does not execute:
+- STT
+- TTS
+- LiveKit
+
+It only carries configuration.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceContext:
+    """
+    Immutable voice context.
+    """
+
+    language_code: str
+
+    voice_provider: str
+
+    voice_profile: str
+
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        """
+        Validate voice context.
+        """
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+        if not self.voice_provider.strip():
+            raise ValueError(
+                "voice_provider cannot be empty."
+            )
+
+        if not self.voice_profile.strip():
+            raise ValueError(
+                "voice_profile cannot be empty."
+            )
+
+======================================================================
+FILE: backend/app/domain/uai/voice/voice_session.py
+======================================================================
+"""
+Voice Session Domain Model.
+
+Represents one character voice interaction.
+
+Does NOT:
+- Connect to LiveKit.
+- Generate tokens.
+- Execute AI.
+- Handle audio.
+
+It is only the domain state.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceSession:
+    """
+    Immutable voice session state.
+    """
+
+    session_id: str
+
+    room_name: str
+
+    character_id: str
+
+    language_code: str
+
+    status: str = "created"
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate session state.
+        """
+
+        if not self.session_id.strip():
+            raise ValueError(
+                "session_id cannot be empty."
+            )
+
+        if not self.room_name.strip():
+            raise ValueError(
+                "room_name cannot be empty."
+            )
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "character_id cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+======================================================================
+FILE: backend/app/domain/uai/voice/voice_call_session.py
+======================================================================
+"""
+Voice Call Session Domain Model.
+
+Represents a prepared voice interaction.
+
+Does NOT:
+- connect providers;
+- manage LiveKit;
+- execute AI.
+
+It only represents validated
+voice call state.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallSession:
+    """
+    Immutable voice call session.
+    """
+
+    session_id: str
+
+    learner_id: str
+
+    character_id: str
+
+    world_id: str
+
+    language_code: str
+
+    state: VoiceCallState = (
+        VoiceCallState.CREATED
+    )
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate session.
+        """
+
+        if not self.session_id.strip():
+            raise ValueError(
+                "session_id cannot be empty."
+            )
+
+
+        if not self.learner_id.strip():
+            raise ValueError(
+                "learner_id cannot be empty."
+            )
+
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "character_id cannot be empty."
+            )
+
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+
+    def is_active(self) -> bool:
+        """
+        Return whether call is active.
+        """
+
+        return (
+            self.state
+            ==
+            VoiceCallState.ACTIVE
+        )
+
+
+    def is_finished(self) -> bool:
+        """
+        Return whether call finished.
+        """
+
+        return self.state in {
+            VoiceCallState.ENDED,
+            VoiceCallState.FAILED,
+        }
+
+======================================================================
+FILE: backend/app/domain/uai/voice/voice_call_execution_context.py
+======================================================================
+"""
+Voice Call Execution Context.
+
+Domain model representing the
+runtime execution context of a
+voice call.
+
+Responsibilities:
+- Hold voice call identity when available.
+- Hold voice call room information.
+- Hold execution participants.
+- Provide runtime input boundary.
+
+Does NOT:
+- Execute AI.
+- Connect providers.
+- Manage LiveKit.
+- Handle persistence.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionContext:
+    """
+    Immutable execution context
+    for a voice call.
+
+    voice_call is optional for backward
+    compatibility with existing runtime
+    execution flows.
+
+    New lifecycle flows should provide it.
+    """
+
+
+    session: VoiceCallSession
+
+
+    room: VoiceCallRoom
+
+
+    voice_call: VoiceCall | None = None
+
+
+
+    def participant_count(
+        self,
+    ) -> int:
+        """
+        Return number of participants
+        in the call.
+        """
+
+        return len(
+            self.room.participants
+        )
+
+
+
+    def has_voice_identity(
+        self,
+    ) -> bool:
+        """
+        Check whether persistent
+        VoiceCall identity exists.
+        """
+
+        return (
+            self.voice_call
+            is not None
+        )
+
+
+
+__all__ = [
+    "VoiceCallExecutionContext",
+]
+
+======================================================================
+FILE: backend/app/domain/uai/voice/voice_call_room.py
+======================================================================
+"""
+Voice Call Room Domain Model.
+
+Represents the logical room composition
+for a voice call.
+
+Responsibilities:
+- Define room identity.
+- Hold call participants.
+- Validate participant composition.
+
+Does NOT:
+- Connect to LiveKit.
+- Manage audio streams.
+- Execute AI.
+- Manage providers.
+- Handle networking.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallRoom:
+    """
+    Immutable voice call room.
+
+    Supports:
+
+    Beta:
+        Learner + Character
+
+    Future:
+        Learner + Learner + Character
+    """
+
+    room_id: str
+
+    participants: tuple[
+        VoiceCallParticipant,
+        ...
+
+    ]
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate room composition.
+        """
+
+        if not self.room_id.strip():
+            raise ValueError(
+                "room_id cannot be empty."
+            )
+
+
+        if not self.participants:
+            raise ValueError(
+                "Voice call room requires "
+                "at least one participant."
+            )
+
+
+        character_count = sum(
+            1
+            for participant in self.participants
+            if participant.role
+            ==
+            VoiceParticipantRole.CHARACTER
+        )
+
+
+        if character_count > 1:
+            raise ValueError(
+                "Voice call room supports "
+                "only one character participant."
+            )
+
+
+    def has_character(self) -> bool:
+        """
+        Check whether a character exists
+        in the room.
+        """
+
+        return any(
+            participant.role
+            ==
+            VoiceParticipantRole.CHARACTER
+            for participant in self.participants
+        )
+
+
+    def learner_count(self) -> int:
+        """
+        Return number of learners.
+        """
+
+        return sum(
+            1
+            for participant in self.participants
+            if participant.role
+            ==
+            VoiceParticipantRole.LEARNER
+        )
+
+======================================================================
+FILE: backend/app/ai_runtime/voice/voice_call_runtime.py
+======================================================================
+"""
+Voice Call Runtime.
+
+Runtime orchestration layer for
+AI character voice calls.
+
+Responsibilities:
+- Manage voice call lifecycle execution.
+- Coordinate voice session activation.
+- Apply runtime boundaries.
+- Return runtime state changes.
+
+Does NOT:
+- Handle HTTP requests.
+- Create API responses.
+- Manage persistence.
+- Select providers.
+- Directly manage LiveKit.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallRuntime:
+    """
+    Runtime coordinator for voice calls.
+    """
+
+
+
+    def prepare(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        Prepare a voice call for activation.
+
+        Transition:
+
+        CREATED
+            |
+            ↓
+        PREPARING
+            |
+            ↓
+        READY
+        """
+
+
+        if session.state not in {
+            VoiceCallState.CREATED,
+            VoiceCallState.PREPARING,
+        }:
+            raise ValueError(
+                "Voice call cannot be prepared "
+                f"from state {session.state.value}."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+
+    def activate(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        Activate a prepared voice call.
+
+        Transition:
+
+        READY
+          |
+          ↓
+        ACTIVE
+        """
+
+
+        if session.state != (
+            VoiceCallState.READY
+        ):
+            raise ValueError(
+                "Voice call must be ready "
+                "before activation."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def end(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        End an active voice call.
+
+        Transition:
+
+        ACTIVE
+          |
+          ↓
+        ENDED
+        """
+
+
+        if session.state != (
+            VoiceCallState.ACTIVE
+        ):
+            raise ValueError(
+                "Only active calls can be ended."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ENDED,
+        )
+
+
+
+    def fail(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        Mark voice call as failed.
+        """
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.FAILED,
+        )
+
+======================================================================
+FILE: backend/app/ai_runtime/voice/voice_call_execution_runtime.py
+======================================================================
+"""
+Voice Call Execution Runtime.
+
+Runtime execution coordinator for
+AI character voice calls.
+
+Responsibilities:
+- Execute prepared voice call sessions.
+- Coordinate execution lifecycle.
+- Validate execution context.
+- Provide runtime boundaries.
+
+Does NOT:
+- Handle HTTP.
+- Persist sessions.
+- Manage authentication.
+- Own LiveKit connections.
+- Select providers.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionRuntime:
+    """
+    Executes prepared voice calls.
+    """
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Start voice call execution.
+
+        Expected lifecycle:
+
+        READY
+          |
+          ↓
+        ACTIVE
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.READY
+        ):
+            raise ValueError(
+                "Voice call must be READY "
+                "before execution."
+            )
+
+
+        if not context.room.has_character():
+
+            raise ValueError(
+                "Voice call room requires "
+                "a character participant."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def stop(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Stop voice call execution.
+
+        Expected lifecycle:
+
+        ACTIVE
+          |
+          ↓
+        ENDED
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.ACTIVE
+        ):
+            raise ValueError(
+                "Only ACTIVE voice calls "
+                "can be stopped."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ENDED,
+        )
+
+
+
+    def fail(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Mark execution as failed.
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.FAILED,
+        )
+
+======================================================================
+FILE: backend/app/ai_runtime/voice/voice_character_runtime.py
+======================================================================
+"""
+Voice Character Runtime.
+
+Coordinates character identity
+with speech capabilities.
+
+Responsibilities:
+- Hold character runtime context.
+- Generate character speech requests.
+- Preserve personality boundaries.
+
+Does NOT:
+- Call providers directly.
+- Manage LiveKit.
+- Store conversations.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCharacterRuntime:
+    """
+    Runtime for speaking AI characters.
+    """
+
+    context: InteractionContext
+
+    speech_runtime: VoiceSpeechRuntime
+
+
+
+    def speak(
+        self,
+        text: str,
+    ) -> bytes:
+        """
+        Generate character audio.
+
+        Uses the selected character voice profile.
+        """
+
+        return self.speech_runtime.synthesize(
+            text=text,
+            voice_profile=(
+                self.context
+                .voice
+                .voice_profile
+            ),
+            language_code=(
+                self.context
+                .voice
+                .language_code
+            ),
+        )
+
+
+
+    def character_id(
+        self,
+    ) -> str:
+        """
+        Return active character identity.
+        """
+
+        return (
+            self.context
+            .character
+            .character_id
+        )
+
+======================================================================
+FILE: backend/app/ai_runtime/voice/voice_speech_runtime.py
+======================================================================
+"""
+Voice Speech Runtime.
+
+Runtime bridge between AI characters
+and speech providers.
+
+Responsibilities:
+- Coordinate speech generation.
+- Use provider abstraction.
+- Keep AI runtime provider independent.
+
+Does NOT:
+- Call vendors directly.
+- Manage LiveKit rooms.
+- Store secrets.
+- Manage conversations.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.providers.speech.speech_provider import (
+    SpeechProvider,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceSpeechRuntime:
+    """
+    Runtime service for speech operations.
+
+    Depends on the SpeechProvider abstraction.
+    """
+
+    speech_provider: SpeechProvider
+
+
+
+    def transcribe(
+        self,
+        *,
+        audio: bytes,
+        language_code: str,
+    ) -> str:
+        """
+        Convert audio input into text.
+        """
+
+        return self.speech_provider.transcribe(
+            audio=audio,
+            language_code=language_code,
+        )
+
+
+
+    def synthesize(
+        self,
+        *,
+        text: str,
+        voice_profile: str,
+        language_code: str,
+    ) -> bytes:
+        """
+        Convert text into generated audio.
+        """
+
+        return self.speech_provider.synthesize(
+            text=text,
+            voice_profile=voice_profile,
+            language_code=language_code,
+        )
+
+======================================================================
+FILE: backend/app/providers/speech/speech_provider.py
+======================================================================
+"""
+Speech Provider Contract.
+
+Defines the abstraction for speech services.
+
+Supported capabilities:
+- Speech to Text (STT)
+- Text to Speech (TTS)
+
+The AI Runtime depends on this contract,
+not on a specific vendor.
+
+Possible implementations:
+- OpenAI Speech
+- ElevenLabs
+- Azure Speech
+- Local models
+
+Does NOT:
+- Manage conversations.
+- Manage characters.
+- Manage LiveKit rooms.
+- Store user data.
+"""
+
+from __future__ import annotations
+
+from abc import (
+    ABC,
+    abstractmethod,
+)
+
+
+
+class SpeechProvider(
+    ABC
+):
+    """
+    Abstract speech provider.
+
+    Provider implementations must
+    implement this interface.
+    """
+
+
+    @abstractmethod
+    def transcribe(
+        self,
+        audio: bytes,
+        language_code: str,
+    ) -> str:
+        """
+        Convert audio into text.
+
+        Parameters
+        ----------
+        audio:
+            Raw audio bytes.
+
+        language_code:
+            Expected language.
+
+        Returns
+        -------
+        str
+            Transcribed text.
+        """
+
+        raise NotImplementedError
+
+
+
+    @abstractmethod
+    def synthesize(
+        self,
+        text: str,
+        voice_profile: str,
+        language_code: str,
+    ) -> bytes:
+        """
+        Convert text into audio.
+
+        Parameters
+        ----------
+        text:
+            Text to speak.
+
+        voice_profile:
+            Character voice profile.
+
+        language_code:
+            Output language.
+
+        Returns
+        -------
+        bytes
+            Generated audio.
+        """
+
+        raise NotImplementedError
+
+======================================================================
+FILE: backend/app/providers/speech/openai_speech_provider.py
+======================================================================
+"""
+OpenAI Speech Provider.
+
+Concrete speech provider implementation for OpenAI.
+
+Responsibilities:
+- Transcribe audio using OpenAI speech-to-text.
+- Synthesize speech using OpenAI text-to-speech.
+- Hide OpenAI SDK details behind SpeechProvider.
+
+Does NOT:
+- Handle HTTP.
+- Manage application workflows.
+- Manage LiveKit.
+- Persist conversations.
+- Execute AI agents.
+"""
+
+from __future__ import annotations
+
+
+import io
+
+
+import os
+
+
+from typing import Any
+
+
+from openai import OpenAI
+
+
+from app.providers.speech.speech_provider import (
+    SpeechProvider,
+)
+
+
+
+class OpenAISpeechProvider(
+    SpeechProvider,
+):
+    """
+    OpenAI implementation of the speech provider contract.
+
+    The OpenAI client is created lazily so that importing
+    the provider and running unit tests does not require
+    OPENAI_API_KEY to be present.
+
+    A client can also be injected for testing.
+    """
+
+
+    DEFAULT_TRANSCRIPTION_MODEL = (
+        "gpt-4o-mini-transcribe"
+    )
+
+
+    DEFAULT_TTS_MODEL = (
+        "gpt-4o-mini-tts"
+    )
+
+
+    DEFAULT_VOICE = (
+        "alloy"
+    )
+
+
+    def __init__(
+        self,
+        *,
+        client: Any | None = None,
+        transcription_model: str | None = None,
+        tts_model: str | None = None,
+    ) -> None:
+        """
+        Initialize the OpenAI speech provider.
+
+        Parameters
+        ----------
+        client:
+            Optional OpenAI client.
+
+            Primarily intended for tests and dependency
+            injection.
+
+        transcription_model:
+            Optional OpenAI transcription model.
+
+        tts_model:
+            Optional OpenAI text-to-speech model.
+        """
+
+        self._client = client
+
+        self._transcription_model = (
+            transcription_model
+            or os.getenv(
+                "OPENAI_TRANSCRIPTION_MODEL",
+                self.DEFAULT_TRANSCRIPTION_MODEL,
+            )
+        )
+
+        self._tts_model = (
+            tts_model
+            or os.getenv(
+                "OPENAI_TTS_MODEL",
+                self.DEFAULT_TTS_MODEL,
+            )
+        )
+
+
+    @property
+    def client(self) -> OpenAI:
+        """
+        Return the configured OpenAI client.
+
+        The client is initialized lazily.
+        """
+
+        if self._client is None:
+
+            api_key = os.getenv(
+                "OPENAI_API_KEY"
+            )
+
+            if not api_key:
+
+                raise RuntimeError(
+                    "OPENAI_API_KEY is not configured."
+                )
+
+            self._client = OpenAI(
+                api_key=api_key,
+            )
+
+        return self._client
+
+
+    def transcribe(
+        self,
+        *,
+        audio: bytes,
+        language_code: str,
+    ) -> str:
+        """
+        Transcribe audio into text.
+
+        Parameters
+        ----------
+        audio:
+            Raw audio bytes.
+
+        language_code:
+            ISO language code, for example ``fr``.
+
+        Returns
+        -------
+        str
+            Transcribed text.
+        """
+
+        if not audio:
+
+            raise ValueError(
+                "audio cannot be empty."
+            )
+
+
+        if not language_code.strip():
+
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+
+        audio_file = io.BytesIO(
+            audio
+        )
+
+
+        audio_file.name = (
+            "voice_input.wav"
+        )
+
+
+        response = (
+            self.client
+            .audio
+            .transcriptions
+            .create(
+                model=(
+                    self._transcription_model
+                ),
+                file=audio_file,
+                language=(
+                    language_code
+                ),
+            )
+        )
+
+
+        text = getattr(
+            response,
+            "text",
+            None,
+        )
+
+
+        if text is None:
+
+            raise RuntimeError(
+                "OpenAI transcription response "
+                "did not contain text."
+            )
+
+
+        return str(text)
+
+
+
+    def synthesize(
+        self,
+        *,
+        text: str,
+        voice_profile: str,
+        language_code: str,
+    ) -> bytes:
+        """
+        Generate speech audio.
+
+        Parameters
+        ----------
+        text:
+            Text to synthesize.
+
+        voice_profile:
+            Character voice profile.
+
+        language_code:
+            Language requested by the caller.
+
+        Returns
+        -------
+        bytes
+            Generated audio bytes.
+        """
+
+        if not text.strip():
+
+            raise ValueError(
+                "text cannot be empty."
+            )
+
+
+        if not voice_profile.strip():
+
+            raise ValueError(
+                "voice_profile cannot be empty."
+            )
+
+
+        if not language_code.strip():
+
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+
+        # Character voice profiles are currently mapped
+        # to provider-supported voices at the infrastructure
+        # boundary. This prevents provider-specific voice
+        # identifiers from leaking into the domain/runtime.
+        voice = self._resolve_voice(
+            voice_profile
+        )
+
+
+        response = (
+            self.client
+            .audio
+            .speech
+            .create(
+                model=(
+                    self._tts_model
+                ),
+                voice=voice,
+                input=text,
+            )
+        )
+
+
+        audio_content = getattr(
+            response,
+            "content",
+            None,
+        )
+
+
+        if audio_content is not None:
+
+            return bytes(
+                audio_content
+            )
+
+
+        if hasattr(
+            response,
+            "read",
+        ):
+
+            return bytes(
+                response.read()
+            )
+
+
+        raise RuntimeError(
+            "OpenAI speech response "
+            "did not contain audio content."
+        )
+
+
+
+    @classmethod
+    def _resolve_voice(
+        cls,
+        voice_profile: str,
+    ) -> str:
+        """
+        Map an application character voice profile
+        to an OpenAI-supported voice.
+
+        Character identifiers such as ``yeti`` must not
+        be sent directly to the provider because they are
+        application concepts rather than provider voice IDs.
+        """
+
+        normalized = (
+            voice_profile
+            .strip()
+            .lower()
+        )
+
+
+        voice_mapping = {
+            "yeti": "onyx",
+        }
+
+
+        return voice_mapping.get(
+            normalized,
+            normalized
+            if normalized in {
+                "alloy",
+                "ash",
+                "ballad",
+                "coral",
+                "echo",
+                "fable",
+                "nova",
+                "onyx",
+                "sage",
+                "shimmer",
+                "verse",
+                "marin",
+                "cedar",
+            }
+            else cls.DEFAULT_VOICE,
+        )
+
+
+
+__all__ = [
+    "OpenAISpeechProvider",
+]
+
+======================================================================
+FILE: backend/app/providers/speech/speech_provider_factory.py
+======================================================================
+"""
+Speech Provider Factory.
+
+Creates speech provider implementations
+from configuration.
+
+Responsibilities:
+- Convert configuration into providers.
+- Centralize provider selection.
+
+Does NOT:
+- Execute speech operations.
+- Store credentials.
+- Manage runtime sessions.
+"""
+
+from __future__ import annotations
+
+
+from app.configuration.providers.speech_provider_config import (
+    SpeechProviderConfig,
+)
+
+
+from app.providers.speech.speech_provider import (
+    SpeechProvider,
+)
+
+
+from app.providers.speech.openai_speech_provider import (
+    OpenAISpeechProvider,
+)
+
+
+
+class SpeechProviderFactory:
+    """
+    Factory for speech providers.
+    """
+
+    @staticmethod
+    def create(
+        config: SpeechProviderConfig,
+    ) -> SpeechProvider:
+        """
+        Create speech provider from configuration.
+
+        Parameters
+        ----------
+        config:
+            Provider configuration.
+
+        Returns
+        -------
+        SpeechProvider
+            Configured speech provider.
+
+        Raises
+        ------
+        ValueError
+            If provider is unsupported.
+        """
+
+        provider_name = (
+            config.provider_name
+            .lower()
+            .strip()
+        )
+
+
+        if provider_name == "openai":
+
+            return OpenAISpeechProvider()
+
+
+        raise ValueError(
+            f"Unsupported speech provider: {provider_name}"
+        )
+
+======================================================================
+FILE: backend/app/configuration/providers/speech_provider_config.py
+======================================================================
+"""
+Speech Provider Configuration.
+
+Defines provider settings required
+for speech integrations.
+
+Configuration only.
+
+Does NOT:
+- call providers
+- store secrets directly
+- execute speech operations
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class SpeechProviderConfig:
+    """
+    Immutable speech provider configuration.
+    """
+
+    provider_name: str
+
+    model_name: str
+
+    default_language: str
+
+    enabled: bool = True
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate configuration.
+        """
+
+        if not self.provider_name.strip():
+            raise ValueError(
+                "provider_name cannot be empty."
+            )
+
+        if not self.model_name.strip():
+            raise ValueError(
+                "model_name cannot be empty."
+            )
+
+        if not self.default_language.strip():
+            raise ValueError(
+                "default_language cannot be empty."
+            )
+
+======================================================================
+FILE: backend/app/application/uai/voice/voice_dependencies.py
+======================================================================
+"""
+Voice Dependency Composition.
+
+Application composition root
+for voice call services.
+
+Responsibilities:
+- Build voice dependencies.
+- Wire application services.
+- Build the UAI interaction-context bridge.
+
+Does NOT:
+- Handle HTTP.
+- Execute calls.
+- Persist data.
+- Manage LiveKit directly.
+"""
+
+from __future__ import annotations
+
+
+from pathlib import Path
+
+
+from app.application.uai.voice.voice_call_service import (
+    VoiceCallService,
+)
+
+
+from app.application.uai.voice.voice_call_orchestrator import (
+    VoiceCallOrchestrator,
+)
+
+
+from app.application.uai.voice.voice_character_session_service import (
+    VoiceCharacterSessionService,
+)
+
+
+from app.application.uai.voice.voice_interaction_context_service import (
+    VoiceInteractionContextService,
+)
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+
+from app.application.uai.character.character_resolver import (
+    CharacterResolver,
+)
+
+
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+
+from app.infrastructure.characters.yaml_character_repository import (
+    YamlCharacterRepository,
+)
+
+
+from app.infrastructure.voice.livekit_adapter import (
+    LiveKitAdapter,
+)
+
+
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from app.providers.speech.speech_provider_factory import (
+    SpeechProviderFactory,
+)
+
+
+from app.configuration.providers.speech_provider_config import (
+    SpeechProviderConfig,
+)
+
+
+
+def build_voice_call_service() -> VoiceCallService:
+    """
+    Create configured voice call service.
+    """
+
+    #
+    # Application configuration root:
+    #
+    # backend/app
+    #
+
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[3]
+    )
+
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+
+    character_repository = YamlCharacterRepository(
+        profiles_path=(
+            Path(
+                r"C:\AI Folder\FrenchTeacherAI"
+            )
+            / "docs"
+            / "specifications"
+            / "characters"
+            / "profiles"
+        )
+    )
+
+
+    context_builder = InteractionContextBuilder(
+        world_resolver=WorldResolver(
+            world_repository=world_repository,
+        ),
+        character_resolver=CharacterResolver(
+            character_repository=character_repository,
+        ),
+    )
+
+
+    #
+    # Voice interaction-context bridge.
+    #
+    # Converts the existing voice call execution
+    # context into the established UAI InteractionContext.
+    #
+
+    interaction_context_service = (
+        VoiceInteractionContextService(
+            context_builder=context_builder,
+        )
+    )
+
+
+    #
+    # LiveKit infrastructure boundary.
+    #
+
+    livekit_adapter = LiveKitAdapter()
+
+
+    #
+    # Speech provider configuration.
+    #
+
+    speech_config = SpeechProviderConfig(
+        provider_name="openai",
+        model_name="tts-1",
+        default_language="fr",
+    )
+
+
+    speech_provider = (
+        SpeechProviderFactory.create(
+            config=speech_config,
+        )
+    )
+
+
+    speech_runtime = VoiceSpeechRuntime(
+        speech_provider=speech_provider,
+    )
+
+
+    session_service = VoiceCharacterSessionService(
+        livekit_adapter=livekit_adapter,
+        speech_runtime=speech_runtime,
+    )
+
+
+    orchestrator = VoiceCallOrchestrator(
+        context_builder=context_builder,
+        session_service=session_service,
+    )
+
+
+    #
+    # Keep the interaction-context bridge available
+    # through the composition root for realtime voice
+    # infrastructure.
+    #
+    # The existing VoiceCallService contract remains
+    # unchanged.
+    #
+
+    _ = interaction_context_service
+
+
+    return VoiceCallService(
+        orchestrator=orchestrator,
+    )
+
+
+
+def build_voice_interaction_context_service(
+) -> VoiceInteractionContextService:
+    """
+    Build the application service that converts
+    a voice execution context into InteractionContext.
+
+    This is the composition entry point for
+    realtime voice infrastructure.
+    """
+
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[3]
+    )
+
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+
+    character_repository = YamlCharacterRepository(
+        profiles_path=(
+            Path(
+                r"C:\AI Folder\FrenchTeacherAI"
+            )
+            / "docs"
+            / "specifications"
+            / "characters"
+            / "profiles"
+        )
+    )
+
+
+    context_builder = InteractionContextBuilder(
+        world_resolver=WorldResolver(
+            world_repository=world_repository,
+        ),
+        character_resolver=CharacterResolver(
+            character_repository=character_repository,
+        ),
+    )
+
+
+    return VoiceInteractionContextService(
+        context_builder=context_builder,
+    )
+
+
+
+__all__ = [
+    "build_voice_call_service",
+    "build_voice_interaction_context_service",
+]
+
+======================================================================
+FILE: backend/app/application/composition/livekit_voice_composition.py
+======================================================================
+"""
+LiveKit Voice Composition.
+
+Application composition boundary for
+creating realtime voice agents.
+
+Responsibilities:
+- Build EasyChatBot realtime voice dependencies.
+- Convert validated voice context into
+  the LiveKit realtime infrastructure adapter.
+- Keep LiveKit-specific construction
+  outside application services.
+
+Does NOT:
+- Handle HTTP.
+- Connect to LiveKit rooms.
+- Execute the LiveKit worker.
+- Persist data.
+- Select learners or characters.
+- Bypass the EasyChatBot Runtime.
+"""
+
+from __future__ import annotations
+
+
+from app.ai_runtime.voice.voice_character_agent import (
+    VoiceCharacterAgent,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.infrastructure.voice.livekit_realtime_agent import (
+    LiveKitRealtimeAgent,
+)
+
+
+
+def create_livekit_realtime_agent(
+    *,
+    context: InteractionContext,
+    instructions: str,
+) -> LiveKitRealtimeAgent:
+    """
+    Create the LiveKit realtime infrastructure adapter.
+
+    The InteractionContext is supplied by the
+    existing EasyChatBot application/runtime layer.
+
+    LiveKit remains an infrastructure boundary.
+    """
+
+    return LiveKitRealtimeAgent(
+        context=context,
+        instructions=instructions,
+    )
+
+
+
+__all__ = [
+    "create_livekit_realtime_agent",
+]
+
+======================================================================
+FILE: backend/app/api/voice_calls.py
+======================================================================
+"""
+Voice Calls API Router.
+
+HTTP boundary for preparing
+character voice calls.
+
+Responsibilities:
+- Receive API requests.
+- Validate request payload.
+- Delegate to application services.
+- Return HTTP responses.
+
+Does NOT:
+- Execute AI agents.
+- Connect to LiveKit directly.
+- Manage conversations.
+- Select providers.
+- Create runtime dependencies.
+- Build domain execution contexts.
+"""
+
+from __future__ import annotations
+
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
+
+
+from pydantic import BaseModel
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+from app.application.uai.voice.voice_call_context_factory import (
+    VoiceCallContextFactory,
+)
+
+
+from app.application.composition.voice_lifecycle_composition import (
+    build_voice_call_lifecycle_service,
+)
+
+
+
+router = APIRouter(
+    prefix="/voice",
+    tags=[
+        "voice",
+    ],
+)
+
+
+
+class VoiceCallRequestModel(
+    BaseModel
+):
+    """
+    HTTP request model.
+    """
+
+    learner_id: str
+
+    world_id: str
+
+    character_id: str
+
+    language_code: str
+
+
+
+class VoiceCallResponseModel(
+    BaseModel
+):
+    """
+    HTTP response model.
+    """
+
+    room_name: str
+
+    character_id: str
+
+    language_code: str
+
+    provider: str
+
+    state: str
+
+    token: str
+
+    expires_at: str
+
+
+
+def get_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Dependency provider.
+
+    Composition decisions remain
+    outside the HTTP adapter.
+    """
+
+    return (
+        build_voice_call_lifecycle_service()
+    )
+
+
+
+def get_voice_call_context_factory(
+) -> VoiceCallContextFactory:
+    """
+    Dependency provider for context creation.
+
+    Domain creation remains inside
+    application layer.
+    """
+
+    return VoiceCallContextFactory()
+
+
+
+@router.post(
+    "/call",
+    response_model=VoiceCallResponseModel,
+)
+def prepare_voice_call(
+    request: VoiceCallRequestModel,
+    service: VoiceCallLifecycleService = Depends(
+        get_voice_call_lifecycle_service
+    ),
+    context_factory: VoiceCallContextFactory = Depends(
+        get_voice_call_context_factory
+    ),
+) -> VoiceCallResponseModel:
+    """
+    Prepare and start a character voice call.
+    """
+
+
+    try:
+
+        call_request = VoiceCallRequest(
+            learner_id=request.learner_id,
+            world_id=request.world_id,
+            character_id=request.character_id,
+            language_code=request.language_code,
+        )
+
+
+        context = (
+            context_factory.create(
+                request=call_request,
+            )
+        )
+
+
+        result = (
+            service.start_call(
+                context=context,
+            )
+        )
+
+
+        room = result["room"]
+
+        session = result["session"]
+
+        connection = result["connection"]
+
+
+        return VoiceCallResponseModel(
+            room_name=room["room_name"],
+            character_id=session.character_id,
+            language_code=session.language_code,
+            provider=room["provider"],
+            state=session.state.value,
+            token=connection.token,
+            expires_at=(
+                connection.expires_at
+                .isoformat()
+            ),
+        )
+
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+
+__all__ = [
+    "router",
+]
+
+======================================================================
+FILE: backend/app/api/voice_call_trigger.py
+======================================================================
+"""
+Voice Call Trigger API.
+
+HTTP boundary for starting
+voice call invitation workflows.
+
+Responsibilities:
+- Receive trigger requests.
+- Validate input.
+- Delegate to application layer.
+- Return response.
+
+Does NOT:
+- Execute voice runtime.
+- Manage providers.
+- Send notifications.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from fastapi import (
+    APIRouter,
+    Depends,
+)
+
+
+from pydantic import BaseModel
+
+
+from app.application.uai.voice.voice_call_trigger_service import (
+    VoiceCallTriggerService,
+)
+
+
+from app.application.composition.voice_call_trigger_composition import (
+    build_voice_call_trigger_service,
+)
+
+
+from app.domain.uai.notifications.voice_call_notification import (
+    VoiceCallNotificationChannel,
+)
+
+
+
+router = APIRouter(
+    prefix="/voice",
+    tags=[
+        "voice-trigger",
+    ],
+)
+
+
+
+class VoiceCallTriggerRequest(
+    BaseModel,
+):
+    """
+    Trigger request payload.
+    """
+
+    learner_id: str
+
+    character_id: str
+
+    world_id: str
+
+    language_code: str
+
+    channel: VoiceCallNotificationChannel = (
+        VoiceCallNotificationChannel.INBOX
+    )
+
+
+
+class VoiceCallTriggerResponse(
+    BaseModel,
+):
+    """
+    Trigger response payload.
+    """
+
+    voice_call_id: str
+
+    invitation_id: str
+
+    notification_id: str
+
+
+
+def get_voice_call_trigger_service(
+) -> VoiceCallTriggerService:
+    """
+    Dependency provider.
+    """
+
+    return (
+        build_voice_call_trigger_service()
+    )
+
+
+
+@router.post(
+    "/trigger",
+    response_model=VoiceCallTriggerResponse,
+)
+def trigger_voice_call(
+    request: VoiceCallTriggerRequest,
+    service: VoiceCallTriggerService = Depends(
+        get_voice_call_trigger_service
+    ),
+) -> VoiceCallTriggerResponse:
+    """
+    Trigger a voice call workflow.
+    """
+
+
+    result = (
+        service.trigger_voice_call(
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+            notification_channel=request.channel,
+        )
+    )
+
+
+    return VoiceCallTriggerResponse(
+        voice_call_id=(
+            result["voice_call"].id
+        ),
+        invitation_id=(
+            result["invitation"].id
+        ),
+        notification_id=(
+            result["notification"].id
+        ),
+    )
+
+
+
+__all__ = [
+    "router",
+]

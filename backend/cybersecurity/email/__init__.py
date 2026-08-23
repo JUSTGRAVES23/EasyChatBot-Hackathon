@@ -1,0 +1,3 @@
+"""
+Cybersecurity email package.
+"""

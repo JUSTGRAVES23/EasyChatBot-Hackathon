@@ -1,0 +1,389 @@
+﻿"""
+Cybersecurity data-source contract.
+
+The agent consumes normalized CybersecuritySignal objects and does not know
+where they came from.
+
+Future implementations may use SIEM, vulnerability scanners, IAM, GRC,
+cloud-security tooling, or other approved sources.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from backend.cybersecurity.intelligence_models import CybersecuritySignal
+
+
+class CybersecurityDataSource(ABC):
+    """Provider-independent source of normalized cybersecurity signals."""
+
+    source_id: str
+
+    def __init__(self, source_id: str) -> None:
+        if not source_id.strip():
+            raise ValueError("Cybersecurity data source_id cannot be empty.")
+        self.source_id = source_id
+
+    @abstractmethod
+    async def get_signals(self) -> list[CybersecuritySignal]:
+        """Return normalized cybersecurity observations."""
+        raise NotImplementedError
+
+"""
+Controlled demo cybersecurity data source.
+
+This is explicitly simulated data for hackathon demonstration purposes.
+It does not call external security systems.
+"""
+
+from __future__ import annotations
+
+from cybersecurity.data_source import CybersecurityDataSource
+from backend.cybersecurity.intelligence_models import CybersecuritySignal
+
+
+class DemoCybersecurityDataSource(CybersecurityDataSource):
+    """Returns controlled simulated security observations."""
+
+    def __init__(self) -> None:
+        super().__init__(source_id="cybersecurity_demo")
+
+    async def get_signals(self) -> list[CybersecuritySignal]:
+        return [
+            CybersecuritySignal(
+                signal_id="demo-threat-001",
+                category="threat",
+                title="AI prompt injection attempt detected",
+                severity="high",
+                confidence=0.96,
+                source="demo-security-events",
+                affected_area="AI interaction layer",
+                technique="Prompt Injection",
+                status="open",
+            ),
+            CybersecuritySignal(
+                signal_id="demo-vuln-001",
+                category="vulnerability",
+                title="Critical dependency vulnerability identified",
+                severity="critical",
+                confidence=0.98,
+                source="demo-vulnerability-scanner",
+                affected_area="Application dependencies",
+                technique="Known Vulnerability",
+                status="open",
+            ),
+            CybersecuritySignal(
+                signal_id="demo-identity-001",
+                category="identity",
+                title="Suspicious privileged API access detected",
+                severity="high",
+                confidence=0.91,
+                source="demo-identity-monitor",
+                affected_area="Privileged API access",
+                technique="Anomalous Access",
+                status="open",
+            ),
+            CybersecuritySignal(
+                signal_id="demo-governance-001",
+                category="governance",
+                title="AI governance review requires attention",
+                severity="medium",
+                confidence=0.87,
+                source="demo-governance-monitor",
+                affected_area="AI governance",
+                technique="Control Review",
+                status="open",
+            ),
+            CybersecuritySignal(
+                signal_id="demo-event-001",
+                category="security_event",
+                title="Dependency security event under investigation",
+                severity="low",
+                confidence=0.89,
+                source="demo-security-events",
+                affected_area="Application",
+                technique="Security Event",
+                status="open",
+            ),
+        ]
+
+"""
+Cybersecurity Intelligence Application Service.
+
+Application-layer composition for Cybersecurity Intelligence Agent.
+
+Flow:
+
+CybersecurityDataSource
+        ↓
+ExecutionContext
+        ↓
+RuntimeEngine
+        ↓
+CybersecurityIntelligenceAgent
+        ↓
+AgentResult
+
+Does not:
+- call provider SDKs;
+- execute remediation;
+- send email;
+- modify production systems;
+- bypass the Runtime.
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_result import AgentResult
+from backend.agents.cybersecurity_intelligence_agent import (
+    CybersecurityIntelligenceAgent,
+)
+from backend.cybersecurity.data_source import CybersecurityDataSource
+from backend.runtime.context.execution_context import ExecutionContext
+from backend.runtime.runtime_engine import RuntimeEngine
+
+
+class CybersecurityIntelligenceService:
+    """
+    Application boundary for Cybersecurity Intelligence.
+
+    The service acquires normalized signals and delegates agent execution
+    to the existing RuntimeEngine.
+    """
+
+    def __init__(
+        self,
+        data_source: CybersecurityDataSource,
+        runtime: RuntimeEngine | None = None,
+        agent: CybersecurityIntelligenceAgent | None = None,
+    ) -> None:
+        if data_source is None:
+            raise ValueError(
+                "Cybersecurity data source cannot be None."
+            )
+
+        self.data_source = data_source
+        self.runtime = runtime or RuntimeEngine()
+        self.agent = agent or CybersecurityIntelligenceAgent()
+
+    async def analyse(
+        self,
+        *,
+        user_id: str,
+        request: str,
+    ) -> AgentResult:
+        """
+        Acquire cybersecurity signals and execute Agent 1 through Runtime.
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "user_id cannot be empty."
+            )
+
+        if not request.strip():
+            raise ValueError(
+                "request cannot be empty."
+            )
+
+        signals = await self.data_source.get_signals()
+
+        context = ExecutionContext(
+            user_id=user_id,
+            request=request,
+            metadata={
+                "cybersecurity_signals": signals,
+                "data_source": self.data_source.source_id,
+                "data_mode": "DEMO",
+            },
+        )
+
+        return await self.runtime.execute(
+            agent=self.agent,
+            context=context,
+        )
+
+"""
+Cybersecurity Intelligence Agent.
+
+Agent 1 for the EasyChatBot Cybersecurity Operations Center.
+
+Responsibilities:
+- analyse supplied cybersecurity signals;
+- orchestrate cybersecurity intelligence skills;
+- produce a provider-independent decision-support result.
+
+Does NOT:
+- call provider SDKs directly;
+- modify production systems;
+- execute remediation;
+- send emails;
+- persist security state.
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_result import AgentResult
+from backend.agents.base_agent import BaseAgent
+from backend.cybersecurity.intelligence_models import CybersecuritySignal
+from backend.runtime.context.execution_context import ExecutionContext
+from backend.skills.skill import SkillInput
+
+from backend.skills.cybersecurity.executive_security_summary import (
+    ExecutiveSecuritySummarySkill,
+)
+from backend.skills.cybersecurity.security_signal_analysis import (
+    SecuritySignalAnalysisSkill,
+)
+from backend.skills.cybersecurity.threat_prioritisation import (
+    ThreatPrioritisationSkill,
+)
+
+
+class CybersecurityIntelligenceAgent(BaseAgent):
+    """
+    Produces a structured cybersecurity intelligence assessment.
+
+    The agent is stateless. Security data is supplied explicitly through
+    ExecutionContext.metadata.
+    """
+
+    agent_id = "cybersecurity.intelligence"
+    name = "Cybersecurity Intelligence Agent"
+    version = "1.0.0"
+
+    def __init__(
+        self,
+        signal_analysis_skill: SecuritySignalAnalysisSkill | None = None,
+        prioritisation_skill: ThreatPrioritisationSkill | None = None,
+        summary_skill: ExecutiveSecuritySummarySkill | None = None,
+    ) -> None:
+        self._signal_analysis = (
+            signal_analysis_skill or SecuritySignalAnalysisSkill()
+        )
+        self._prioritisation = (
+            prioritisation_skill or ThreatPrioritisationSkill()
+        )
+        self._summary = (
+            summary_skill or ExecutiveSecuritySummarySkill()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Analyse supplied cybersecurity signals and return a decision-support
+        intelligence result.
+        """
+
+        if context is None:
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error="Execution context cannot be None.",
+            )
+
+        raw_signals = context.metadata.get(
+            "cybersecurity_signals"
+        )
+
+        if raw_signals is None:
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    "cybersecurity_signals are required "
+                    "in execution metadata."
+                ),
+            )
+
+        if not isinstance(raw_signals, (list, tuple)):
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    "cybersecurity_signals must be a "
+                    "list or tuple."
+                ),
+            )
+
+        signals = [
+            item
+            for item in raw_signals
+            if isinstance(item, CybersecuritySignal)
+        ]
+
+        analysis_result = await self._signal_analysis.execute(
+            SkillInput(
+                request=context.request,
+                metadata={
+                    "signals": signals,
+                },
+            )
+        )
+
+        if not analysis_result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    analysis_result.error
+                    or "Security signal analysis failed."
+                ),
+            )
+
+        prioritisation_result = await self._prioritisation.execute(
+            SkillInput(
+                request=context.request,
+                metadata={
+                    "analysed_signals": analysis_result.output,
+                },
+            )
+        )
+
+        if not prioritisation_result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    prioritisation_result.error
+                    or "Threat prioritisation failed."
+                ),
+            )
+
+        summary_result = await self._summary.execute(
+            SkillInput(
+                request=context.request,
+                metadata={
+                    "prioritised_signals": (
+                        prioritisation_result.output
+                    ),
+                    "execution_id": context.execution_id,
+                },
+            )
+        )
+
+        if not summary_result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    summary_result.error
+                    or "Executive security summary failed."
+                ),
+            )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.agent_id,
+            output=summary_result.output,
+        )
+

@@ -1,0 +1,1492 @@
+﻿============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\config.py
+============================================================
+"""
+LLM Provider Configuration.
+
+Defines approved provider configuration
+for the EasyChatBot hackathon runtime.
+
+Configuration is environment-driven so the
+application does not hard-code deployment-specific
+provider settings.
+
+Local development supports a .env file located
+at the EasyChatBot project root.
+
+For the Hackathon runtime, the project .env file
+is authoritative. This prevents stale local shell
+environment variables from silently overriding the
+configured development credentials.
+
+Future production versions should use an external
+secret/configuration management system.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+# Resolve the EasyChatBot project root.
+#
+# config.py:
+# backend/
+#   providers/
+#     llm/
+#       config.py
+#
+# parents[3] -> EasyChatBot-Hackathon/
+PROJECT_ROOT = Path(
+    __file__
+).resolve().parents[3]
+
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+# Load the Hackathon project's local configuration.
+#
+# override=True is intentional for the local Hackathon
+# runtime because .env is the authoritative project
+# configuration source.
+#
+# Production deployments must not rely on this mechanism.
+load_dotenv(
+    dotenv_path=ENV_FILE,
+    override=True,
+)
+
+
+DEFAULT_PROVIDER = "openai"
+
+DEFAULT_MODEL = "gpt-5-mini"
+
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+
+
+def get_llm_provider_name() -> str:
+    """
+    Return the configured LLM provider name.
+
+    Environment variable:
+
+        EASYCHATBOT_LLM_PROVIDER
+
+    Default:
+
+        openai
+
+    Returns
+    -------
+    str
+        Normalised provider identifier.
+
+    Raises
+    ------
+    ValueError
+        If the configured provider name is empty.
+    """
+
+    provider = os.getenv(
+        "EASYCHATBOT_LLM_PROVIDER",
+        DEFAULT_PROVIDER,
+    )
+
+    provider = provider.strip().lower()
+
+    if not provider:
+        raise ValueError(
+            "LLM provider name cannot be empty."
+        )
+
+    return provider
+
+
+def get_llm_model() -> str:
+    """
+    Return the configured model for the
+    default/current LLM path.
+
+    Environment variable:
+
+        EASYCHATBOT_LLM_MODEL
+
+    Default:
+
+        gpt-5-mini
+
+    Returns
+    -------
+    str
+        Configured model identifier.
+
+    Raises
+    ------
+    ValueError
+        If the configured model is empty.
+    """
+
+    model = os.getenv(
+        "EASYCHATBOT_LLM_MODEL",
+        DEFAULT_MODEL,
+    )
+
+    model = model.strip()
+
+    if not model:
+        raise ValueError(
+            "LLM model cannot be empty."
+        )
+
+    return model
+
+
+def get_gemini_model() -> str:
+    """
+    Return the configured Gemini model.
+
+    Environment variable:
+
+        EASYCHATBOT_GEMINI_MODEL
+
+    Default:
+
+        gemini-3.6-flash
+
+    Returns
+    -------
+    str
+        Configured Gemini model identifier.
+
+    Raises
+    ------
+    ValueError
+        If the configured Gemini model is empty.
+    """
+
+    model = os.getenv(
+        "EASYCHATBOT_GEMINI_MODEL",
+        DEFAULT_GEMINI_MODEL,
+    )
+
+    model = model.strip()
+
+    if not model:
+        raise ValueError(
+            "Gemini model cannot be empty."
+        )
+
+    return model
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py
+============================================================
+"""
+Gemini LLM Provider.
+
+Concrete Gemini implementation of the provider-independent
+LLMProvider contract used by the EasyChatBot hackathon runtime.
+
+Architecture:
+
+    ConversationAgent
+            |
+            v
+    ConversationRequest
+            |
+            v
+       LLMProvider
+            |
+            v
+      GeminiProvider
+            |
+            v
+       Gemini API
+            |
+            v
+      ProviderResult
+
+Responsibilities:
+- execute ConversationRequest through Gemini
+- use the configured Gemini model
+- translate Gemini responses into ProviderResult
+- isolate the Gemini SDK from the application/runtime layers
+
+Does not:
+- build application workflows
+- perform research
+- manage memory
+- select providers
+- manage conversations
+- modify application state
+
+The provider uses Google's current `google-genai` SDK.
+The SDK client is injectable so unit tests do not need a real
+Gemini API call.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiProvider(LLMProvider):
+    """
+    Gemini implementation of the LLMProvider contract.
+
+    The Google Gemini SDK is deliberately isolated inside this
+    infrastructure adapter.
+
+    Args:
+        model:
+            Gemini model identifier.
+
+        client:
+            Optional injected `google.genai.Client`.
+
+            Dependency injection allows unit tests to provide a
+            fake client without making a real API call.
+    """
+
+    def __init__(
+        self,
+        model: str = "gemini-3.6-flash",
+        client: Any | None = None,
+    ) -> None:
+        super().__init__(
+            provider_id="gemini",
+        )
+
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(
+                "Gemini model cannot be empty."
+            )
+
+        self.model = model.strip()
+        self._client = client
+
+    def _get_client(self) -> Any:
+        """
+        Lazily create the Google GenAI client.
+
+        The API key is read from GEMINI_API_KEY and is never
+        hard-coded into the provider.
+        """
+
+        if self._client is not None:
+            return self._client
+
+        api_key = os.getenv("GEMINI_API_KEY")
+
+        if not api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY environment variable is required."
+            )
+
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError(
+                "The google-genai package is required for "
+                "GeminiProvider. Install it with: "
+                "pip install google-genai"
+            ) from exc
+
+        self._client = genai.Client(
+            api_key=api_key,
+        )
+
+        return self._client
+
+    @staticmethod
+    def _build_contents(
+        request: ConversationRequest,
+    ) -> str:
+        """
+        Convert the provider-independent request into the
+        user-facing content sent to Gemini.
+
+        System behaviour remains separate and is supplied through
+        Gemini's system_instruction configuration.
+
+        Live intelligence, when present, is deliberately carried
+        through the existing ConversationRequest context rather
+        than retrieved by Gemini itself.
+        """
+
+        sections: list[str] = []
+
+        if request.conversation_context:
+            sections.extend(
+                (
+                    "CONTEXT:",
+                    request.conversation_context.strip(),
+                    "",
+                )
+            )
+
+        sections.extend(
+            (
+                "USER REQUEST:",
+                request.user_prompt.strip(),
+            )
+        )
+
+        return "\n".join(sections)
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate a response using Gemini.
+
+        Returns a provider-independent ProviderResult and never
+        exposes Gemini SDK response objects to the application.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        try:
+            client = self._get_client()
+
+            from google.genai import types
+
+            contents = self._build_contents(
+                request,
+            )
+
+            config = types.GenerateContentConfig(
+                system_instruction=(
+                    request.system_instruction
+                ),
+            )
+
+            response = await client.aio.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Gemini provider execution failed."
+            )
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error=str(exc),
+            )
+
+        output_text = getattr(
+            response,
+            "text",
+            None,
+        )
+
+        if not output_text or not output_text.strip():
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error="Gemini returned an empty response.",
+            )
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output=output_text.strip(),
+        )
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py
+============================================================
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py
+============================================================
+"""
+LLM Provider Factory.
+
+Creates approved LLM provider implementations.
+
+The factory is the composition boundary between
+application/runtime code and infrastructure providers.
+
+Architecture:
+
+Application/API
+|
+v
+LLMProviderFactory
+|
+v
+LLMProvider
+|
++--> OpenAIProvider
++--> Future OllamaProvider
++--> GeminiProvider
+
+Responsibilities:
+
+- create configured LLM providers
+- isolate provider construction
+- provide provider independence
+- obtain approved provider configuration
+
+Does not:
+
+- execute LLM requests
+- build prompts
+- manage conversations
+- manage memory
+- apply routing decisions
+- call provider SDKs directly
+"""
+
+from __future__ import annotations
+
+from backend.providers.llm.config import (
+    get_gemini_model,
+    get_llm_model,
+    get_llm_provider_name,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.llm.openai_provider import (
+    OpenAIProvider,
+)
+
+from backend.providers.llm.gemini_provider import (
+    GeminiProvider,
+)
+
+
+class LLMProviderFactory:
+    """
+    Factory responsible for creating LLM providers.
+
+    Provider selection and configuration are centralised
+    here so application/runtime code does not depend
+    directly on concrete infrastructure implementations.
+    """
+
+    @staticmethod
+    def create(
+        provider: str | None = None,
+    ) -> LLMProvider:
+        """
+        Create a configured LLM provider.
+
+        Parameters
+        ----------
+        provider:
+            Optional provider identifier.
+
+            When omitted, the configured provider from
+            LLM provider configuration is used.
+
+        Returns
+        -------
+        LLMProvider
+            Configured provider implementation.
+
+        Raises
+        ------
+        ValueError
+            If provider is invalid or unsupported.
+        """
+
+        if provider is None:
+            provider_name = (
+                get_llm_provider_name()
+            )
+        else:
+            if not isinstance(
+                provider,
+                str,
+            ):
+                raise ValueError(
+                    "Provider name must be a string."
+                )
+
+            provider_name = (
+                provider.strip().lower()
+            )
+
+            if not provider_name:
+                raise ValueError(
+                    "Provider name cannot be empty."
+                )
+
+        if provider_name == "openai":
+            return OpenAIProvider(
+                model=get_llm_model(),
+            )
+
+        if provider_name == "gemini":
+            return GeminiProvider(
+                model=get_gemini_model(),
+            )
+
+        raise ValueError(
+            (
+                "Unsupported LLM provider: "
+                f"{provider_name}"
+            )
+        )
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py
+============================================================
+"""
+OpenAI LLM Provider.
+
+Concrete LLM provider implementation for the EasyChatBot
+hackathon runtime.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+OpenAIProvider
+|
+v
+OpenAI Responses API
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- execute ConversationRequest through OpenAI
+- use the configured OpenAI model
+- translate the OpenAI response into ProviderResult
+- isolate the OpenAI SDK from the application layer
+
+Does not:
+
+- build prompts
+- manage characters
+- manage memory
+- perform research
+- perform routing
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from openai import AsyncOpenAI
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIProvider(LLMProvider):
+    """
+    OpenAI implementation of the LLMProvider contract.
+
+    The OpenAI SDK is deliberately isolated inside this
+    infrastructure adapter.
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5-mini",
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        """
+        Initialise the OpenAI provider.
+
+        Parameters
+        ----------
+        model:
+            OpenAI model identifier.
+
+        client:
+            Optional injected AsyncOpenAI client.
+
+            Dependency injection allows unit tests to
+            provide a fake client without making a real
+            API call.
+        """
+
+        super().__init__(
+            provider_id="openai",
+        )
+
+        if not isinstance(
+            model,
+            str,
+        ):
+            raise ValueError(
+                "OpenAI model must be a string."
+            )
+
+        model = model.strip()
+
+        if not model:
+            raise ValueError(
+                "OpenAI model cannot be empty."
+            )
+
+        self.model = model
+
+        if client is not None:
+            self._client = client
+            return
+
+        api_key = os.getenv(
+            "OPENAI_API_KEY"
+        )
+
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is not configured."
+            )
+
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+        )
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate a response using OpenAI.
+
+        The provider translates the provider-independent
+        ConversationRequest into the OpenAI Responses API
+        request.
+
+        Parameters
+        ----------
+        request:
+            Provider-independent conversation request.
+
+        Returns
+        -------
+        ProviderResult
+            Provider-independent execution result.
+
+        Raises
+        ------
+        ValueError
+            If request is None.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": request.system_instruction,
+            },
+        ]
+
+        if request.conversation_context:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Additional context:\n"
+                        f"{request.conversation_context}"
+                    ),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": request.user_prompt,
+            }
+        )
+
+        try:
+            response = (
+                await self._client.responses.create(
+                    model=self.model,
+                    input=messages,
+                )
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "OpenAI provider execution failed."
+            )
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=str(exc),
+            )
+
+        output_text = getattr(
+            response,
+            "output_text",
+            None,
+        )
+
+        if not output_text:
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=(
+                    "OpenAI returned an empty response."
+                ),
+            )
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output=output_text,
+        )
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__init__.py
+============================================================
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__pycache__\config.cpython-313.pyc
+============================================================
+ó
+
+    Š}}jI  ã                  ó¼   • S r SSKJr  SSKrSSKJr  SSKJr  \" \5      R                  5       R                  S   r\S-  r\" \SS	9  S
+r
+SrSrSS
+ jrSS jrSS jrg)aF  
+LLM Provider Configuration.
+
+Defines approved provider configuration
+for the EasyChatBot hackathon runtime.
+
+Configuration is environment-driven so the
+application does not hard-code deployment-specific
+provider settings.
+
+Local development supports a .env file located
+at the EasyChatBot project root.
+
+For the Hackathon runtime, the project .env file
+is authoritative. This prevents stale local shell
+environment variables from silently overriding the
+configured development credentials.
+
+Future production versions should use an external
+secret/configuration management system.
+é    )ÚannotationsN)ÚPath)Úload_dotenvé   z.envT)Údotenv_pathÚoverrideÚopenaiz
+gpt-5-minizgemini-3.6-flashc                 óœ   • [         R                  " S[        5      n U R                  5       R	                  5       n U (       d  [        S5      eU $ )zö
+Return the configured LLM provider name.
+
+Environment variable:
+
+    EASYCHATBOT_LLM_PROVIDER
+
+Default:
+
+    openai
+
+Returns
+-------
+str
+    Normalised provider identifier.
+
+Raises
+------
+ValueError
+    If the configured provider name is empty.
+ÚEASYCHATBOT_LLM_PROVIDERz"LLM provider name cannot be empty.)ÚosÚgetenvÚDEFAULT_PROVIDERÚstripÚlowerÚ
+ValueError)Úproviders    ÚBC:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\config.pyÚget_llm_provider_namer   C   sI   € ô. yŠyØ"Üó€Hð
+ ~‰~Ó×%Ñ%Ó'€HæÜØ0ó
+ð 	
+ð €Oó    c                 ó€   • [         R                  " S[        5      n U R                  5       n U (       d  [	        S5      eU $ )a  
+Return the configured model for the
+default/current LLM path.
+
+Environment variable:
+
+    EASYCHATBOT_LLM_MODEL
+
+Default:
+
+    gpt-5-mini
+
+Returns
+-------
+str
+    Configured model identifier.
+
+Raises
+------
+ValueError
+    If the configured model is empty.
+ÚEASYCHATBOT_LLM_MODELzLLM model cannot be empty.)r   r
+   Ú
+DEFAULT_MODELr   r   ©Úmodels    r   Ú
+get_llm_modelr   i   s?   € ô0 
+IŠIØÜó
+€Eð
+ 
+K‰K‹M€EæÜØ(ó
+ð 	
+ð €Lr   c                 ó€   • [         R                  " S[        5      n U R                  5       n U (       d  [	        S5      eU $ )zþ
+Return the configured Gemini model.
+
+Environment variable:
+
+    EASYCHATBOT_GEMINI_MODEL
+
+Default:
+
+    gemini-3.6-flash
+
+Returns
+-------
+str
+    Configured Gemini model identifier.
+
+Raises
+------
+ValueError
+    If the configured Gemini model is empty.
+ÚEASYCHATBOT_GEMINI_MODELzGemini model cannot be empty.)r   r
+   ÚDEFAULT_GEMINI_MODELr   r   r   s    r   Úget_gemini_modelr      s?   € ô. 
+IŠIØ"Üó
+€Eð
+ 
+K‰K‹M€EæÜØ+ó
+ð 	
+ð €Lr   )ÚreturnÚstr)Ú__doc__Ú
+__future__r   r   Úpathlibr   Údotenvr   Ú__file__ÚresolveÚparentsÚPROJECT_ROOTÚENV_FILEr   r   r   r   r   r   © r   r   Ú<module>r,      sy   ðñõ, #ã 	Ý å ñ Øóç	'ƒ)G‰GAñ€ð ˜&Ñ €ñ ØØ
+òð Ð à€
+à)Ð ô#ôL$õN#r   
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__pycache__\gemini_provider.cpython-313.pyc
+============================================================
+ó
+
+    p}jc  ã                  óŽ   • S r SSKJr  SSKrSSKrSSKJr  SSKJr  SSK	J
+r
+  SSKJr  \R                  " \5      r " S S	\
+5      rg)
+a“  
+Gemini LLM Provider.
+
+Concrete Gemini implementation of the provider-independent
+LLMProvider contract used by the EasyChatBot hackathon runtime.
+
+Architecture:
+
+    ConversationAgent
+            |
+            v
+    ConversationRequest
+            |
+            v
+       LLMProvider
+            |
+            v
+      GeminiProvider
+            |
+            v
+       Gemini API
+            |
+            v
+      ProviderResult
+
+Responsibilities:
+- execute ConversationRequest through Gemini
+- use the configured Gemini model
+- translate Gemini responses into ProviderResult
+- isolate the Gemini SDK from the application/runtime layers
+
+Does not:
+- build application workflows
+- perform research
+- manage memory
+- select providers
+- manage conversations
+- modify application state
+
+The provider uses Google's current `google-genai` SDK.
+The SDK client is injectable so unit tests do not need a real
+Gemini API call.
+é    )ÚannotationsN)ÚAny)ÚConversationRequest)ÚLLMProvider)ÚProviderResultc                  óz   ^ • \ rS rSrSr  S     S	U 4S jjjrS
+S jr\    SS j5       r    SS jr	Sr
+U =r$ )
+ÚGeminiProvideréA   aj  
+Gemini implementation of the LLMProvider contract.
+
+The Google Gemini SDK is deliberately isolated inside this
+infrastructure adapter.
+
+Args:
+    model:
+        Gemini model identifier.
+
+    client:
+        Optional injected `google.genai.Client`.
+
+        Dependency injection allows unit tests to provide a
+        fake client without making a real API call.
+c                óÀ   >• [         TU ]  SS9  [        U[        5      (       a  UR	                  5       (       d  [        S5      eUR	                  5       U l        X l        g )NÚgemini)Úprovider_idzGemini model cannot be empty.)ÚsuperÚ__init__Ú
+isinstanceÚstrÚstripÚ
+ValueErrorÚmodelÚ_client)Úselfr   ÚclientÚ	__class__s      €ÚKC:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.pyr   ÚGeminiProvider.__init__S   sW   ø€ ô
+ 	‰ÑØ ð 	ñ 	
+ô ˜%¤×%Ñ%¨U¯[©[¯]©]ÜØ/óð 
+ð —[‘[“]ˆŒ
+Øó    c                ó  • U R                   b  U R                   $ [        R                  " S5      nU(       d  [        S5      e SSKJn  UR                  US9U l         U R                   $ ! [         a  n[        S5      UeSnAff = f)z|
+Lazily create the Google GenAI client.
+
+The API key is read from GEMINI_API_KEY and is never
+hard-coded into the provider.
+NÚGEMINI_API_KEYz0GEMINI_API_KEY environment variable is required.r   )ÚgenaizbThe google-genai package is required for GeminiProvider. Install it with: pip install google-genai)Úapi_key)r   ÚosÚgetenvÚRuntimeErrorÚgoogler   ÚImportErrorÚClient)r   r   r   Úexcs       r   Ú_get_clientÚGeminiProvider._get_clientd   s‘   € ð <‰<Ñ#Ø—<‘<Ðä—)’)Ð,Ó-ˆæÜØBóð 
+ð	Ý$ð —|‘|Øð $ð 
+ˆŒð |‰|Ðøô ó 	Üð+óð ð	
+ûð	ús   ÁA) Á)
+BÁ3A?Á?Bc                óø   • / nU R                   (       a,  UR                  SU R                   R                  5       S45        UR                  SU R                  R                  5       45        SR	                  U5      $ )aP  
+Convert the provider-independent request into the
+user-facing content sent to Gemini.
+
+System behaviour remains separate and is supplied through
+Gemini's system_instruction configuration.
+
+Live intelligence, when present, is deliberately carried
+through the existing ConversationRequest context rather
+than retrieved by Gemini itself.
+zCONTEXT:Ú z
+USER REQUEST:Ú
+)Úconversation_contextÚextendr   Úuser_promptÚjoin)ÚrequestÚsectionss     r   Ú_build_contentsÚGeminiProvider._build_contents…   st   € ð  !ˆà×'×'ØO‰OàØ×0Ñ0×6Ñ6Ó8Øðô
+ð 	‰àØ×#Ñ#×)Ñ)Ó+ð
+ô	
+ð y‰y˜Ó"Ð"r   c           	   ƒ  ót  #   • Uc  [        S5      e U R                  5       nSSKJn  U R	                  U5      nUR                  UR                  S9nUR                  R                  R                  U R                  UUS9I Sh  v•N n[#        US
+S5      nU(       a  UR%                  5       (       d  [        SU R                  SSS	9$ [        SU R                  UR%                  5       S
+9$  Nf! [         a>  n[        R                  S5        [        SU R                  S[!        U5      S	9s SnA$ SnAff = f7f)z”
+Generate a response using Gemini.
+
+Returns a provider-independent ProviderResult and never
+exposes Gemini SDK response objects to the application.
+Nz$Conversation request cannot be None.r   )Útypes)Úsystem_instruction)r   ÚcontentsÚconfigz!Gemini provider execution failed.F)Úsuccessr
+   ÚoutputÚerrorÚtextz"Gemini returned an empty response.T)r9   r
+   r:   )r   r'   Úgoogle.genair5   r2   ÚGenerateContentConfigr6   ÚaioÚmodelsÚgenerate_contentr   Ú	ExceptionÚloggerÚ	exceptionr   r
+   r   Úgetattrr   )	r   r0   r   r5   r7   r8   Úresponser&   Úoutput_texts	            r   ÚgenerateÚGeminiProvider.generate©   sT  é € ð ‰?ÜØ6óð 
+ð	Ø×%Ñ%Ó'ˆFå*à×+Ñ+ØóˆHð ×0Ñ0à×.Ñ.ð 1ð ˆFð $ŸZ™Z×.Ñ.×?Ñ?Ø—j‘jØ!Øð @ð ÷ ˆHô$ ØØØó
+ˆö  +×"3Ñ"3×"5Ñ"5Ü!ØØ ×,Ñ,ØØ:ñ	ð 
+ô ØØ×(Ñ(Ø×$Ñ$Ó&ñ
+ð 	
+ñAøô ó 
+	Ü×ÑØ3ô
+ô "ØØ ×,Ñ,ØÜ˜#“hñ	õ 
+ûð
+	üsH   ‚D8’A2C- ÂC+ÂC- Â	A"D8Ã+C- Ã-
+D5Ã73D0Ä*D5Ä+D8Ä0D5Ä5D8)r   r   )zgemini-3.6-flashN)r   r   r   z
+Any | NoneÚreturnÚNone)rJ   r   )r0   r   rJ   r   )r0   r   rJ   r   )Ú__name__Ú
+__module__Ú__qualname__Ú__firstlineno__Ú__doc__r   r'   Ústaticmethodr2   rH   Ú__static_attributes__Ú
+__classcell__)r   s   @r   r	   r	   A   s   ø† ñð& (Ø!ðàðð ðð 
+÷	ð ô"ðB ð!#Ø$ð!#à	ó!#ó ð!#ðFC
+à$ðC
+ð 
+÷C
+ò C
+r   r	   )rP   Ú
+__future__r   Úloggingr    Útypingr   Ú)backend.conversation.conversation_requestr   Ú"backend.providers.llm.llm_providerr   Ú!backend.providers.provider_resultr   Ú	getLoggerrL   rC   r	   © r   r   Ú<module>r\      sH   ðñ*õX #ã Û 	Ý õõõð
+ 
+×	Ò	˜8Ó	$€ôk
+[õ k
+r   
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__pycache__\llm_provider.cpython-313.pyc
+============================================================
+ó
+
+    Þ­yjð  ã                  óZ   • S r SSKJr  SSKJr  SSKJr  SSKJr  SSKJ	r	   " S S\5      r
+g	)
+aÒ  
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+é    )Úannotations)ÚABC)Úabstractmethod)ÚConversationRequest)ÚProviderResultc                  óR   • \ rS rSr% SrS\S'       S	S jr\    S
+S j5       rSr	g)ÚLLMProvideré8   z×
+Abstract provider contract for language model generation.
+
+Concrete implementations may use OpenAI, Ollama,
+Gemini, or another approved LLM provider.
+
+The application and agent layers depend only on
+this contract.
+ÚstrÚprovider_idc                óP   • UR                  5       (       d  [        S5      eXl        g)zk
+Initialise the LLM provider.
+
+Args:
+    provider_id:
+        Stable identifier for the concrete provider.
+z LLM provider_id cannot be empty.N)ÚstripÚ
+ValueErrorr   )Úselfr   s     ÚHC:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.pyÚ__init__ÚLLMProvider.__init__E   s+   € ð × Ñ ×"Ñ"ÜØ2óð 
+ð 'Õó    c              ƒ  ó   #   • [         e7f)zü
+Generate an LLM response.
+
+Args:
+    request:
+        Provider-independent conversation request.
+
+Returns:
+    ProviderResult containing the generated
+    response or an error.
+
+Implementations must not expose provider SDK
+objects through the result.
+)ÚNotImplementedError)r   Úrequests     r   ÚgenerateÚLLMProvider.generateX   s
+   é € ô( "Ð!ùs   ‚	)r   N)r   r   ÚreturnÚNone)r   r   r   r   )
+Ú__name__Ú
+__module__Ú__qualname__Ú__firstlineno__Ú__doc__Ú__annotations__r   r   r   Ú__static_attributes__© r   r   r	   r	   8   sL   ‡ ñð Óð'àð'ð 
+ô'ð& ð"à$ð"ð 
+ó"ó ó"r   r	   N)r    Ú
+__future__r   Úabcr   r   Ú)backend.conversation.conversation_requestr   Ú!backend.providers.provider_resultr   r	   r#   r   r   Ú<module>r(      s,   ðñ'õR #å Ý õõô
+4"#õ 4"r   
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__pycache__\llm_provider_factory.cpython-313.pyc
+============================================================
+ó
+
+    t~}jà
+  ã                  ó`   • S r SSKJr  SSKJrJrJr  SSKJr  SSK	J
+r
+  SSKJr   " S S5      r
+g	)
+al  
+LLM Provider Factory.
+
+Creates approved LLM provider implementations.
+
+The factory is the composition boundary between
+application/runtime code and infrastructure providers.
+
+Architecture:
+
+Application/API
+|
+v
+LLMProviderFactory
+|
+v
+LLMProvider
+|
++--> OpenAIProvider
++--> Future OllamaProvider
++--> GeminiProvider
+
+Responsibilities:
+
+- create configured LLM providers
+- isolate provider construction
+- provide provider independence
+- obtain approved provider configuration
+
+Does not:
+
+- execute LLM requests
+- build prompts
+- manage conversations
+- manage memory
+- apply routing decisions
+- call provider SDKs directly
+é    )Úannotations)Úget_gemini_modelÚ
+get_llm_modelÚget_llm_provider_name)ÚLLMProvider)ÚOpenAIProvider)ÚGeminiProviderc                  ó8   • \ rS rSrSr\ S   SS jj5       rSrg)ÚLLMProviderFactoryé=   zÍ
+Factory responsible for creating LLM providers.
+
+Provider selection and configuration are centralised
+here so application/runtime code does not depend
+directly on concrete infrastructure implementations.
+Nc                ó6  • U c  [        5       nOP[        U [        5      (       d  [        S5      eU R	                  5       R                  5       nU(       d  [        S5      eUS:X  a  [
+        [        5       S9$ US:X  a  [        [        5       S9$ [        SU 35      e)aH  
+Create a configured LLM provider.
+
+Parameters
+----------
+provider:
+    Optional provider identifier.
+
+    When omitted, the configured provider from
+    LLM provider configuration is used.
+
+Returns
+-------
+LLMProvider
+    Configured provider implementation.
+
+Raises
+------
+ValueError
+    If provider is invalid or unsupported.
+zProvider name must be a string.zProvider name cannot be empty.Úopenai)ÚmodelÚgeminizUnsupported LLM provider: )
+r   Ú
+isinstanceÚstrÚ
+ValueErrorÚstripÚlowerr   r   r	   r   )ÚproviderÚ
+provider_names     ÚPC:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.pyÚcreateÚLLMProviderFactory.createF   sÀ   € ð4 Ñä%Ó'ñ 
+ô ØÜ÷ñ ô !Ø5óð ð
+ —‘Ó ×&Ñ&Ó(ð 
+ö !Ü Ø4óð ð ˜HÓ$Ü!Ü#“oñð 
+ð ˜HÓ$Ü!Ü&Ó(ñð 
+ô à,Ø /ð#ó
+ð 	
+ó    © )N)r   z
+str | NoneÚreturnr   )Ú__name__Ú
+__module__Ú__qualname__Ú__firstlineno__Ú__doc__Ústaticmethodr   Ú__static_attributes__r   r   r   r   r   =   s.   † ñð à#ð>
+Øð>
+à	ô>
+ó ó>
+r   r   N)r"   Ú
+__future__r   Úbackend.providers.llm.configr   r   r   Ú"backend.providers.llm.llm_providerr   Ú%backend.providers.llm.openai_providerr   Ú%backend.providers.llm.gemini_providerr	   r   r   r   r   Ú<module>r*      s5   ðñ%õN #÷ñ õõõ÷
+H
+ò H
+r   
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__pycache__\openai_provider.cpython-313.pyc
+============================================================
+ó
+
+    €Ðzj9  ã                  óŽ   • S r SSKJr  SSKrSSKrSSKJr  SSKJr  SSK	J
+r
+  SSKJr  \R                  " \5      r " S S	\
+5      rg)
+a.  
+OpenAI LLM Provider.
+
+Concrete LLM provider implementation for the EasyChatBot
+hackathon runtime.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+OpenAIProvider
+|
+v
+OpenAI Responses API
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- execute ConversationRequest through OpenAI
+- use the configured OpenAI model
+- translate the OpenAI response into ProviderResult
+- isolate the OpenAI SDK from the application layer
+
+Does not:
+
+- build prompts
+- manage characters
+- manage memory
+- perform research
+- perform routing
+- modify application state
+é    )ÚannotationsN)ÚAsyncOpenAI)ÚConversationRequest)ÚLLMProvider)ÚProviderResultc                  óT   ^ • \ rS rSrSr  S     SU 4S jjjr    SS jrSrU =r$ )	ÚOpenAIProvideréB   z
+OpenAI implementation of the LLMProvider contract.
+
+The OpenAI SDK is deliberately isolated inside this
+infrastructure adapter.
+c                ó0  >• [         TU ]  SS9  [        U[        5      (       d  [	        S5      eUR                  5       nU(       d  [	        S5      eXl        Ub  X l        g[        R                  " S5      nU(       d  [	        S5      e[        US9U l        g)	zü
+Initialise the OpenAI provider.
+
+Parameters
+----------
+model:
+    OpenAI model identifier.
+
+client:
+    Optional injected AsyncOpenAI client.
+
+    Dependency injection allows unit tests to
+    provide a fake client without making a real
+    API call.
+Úopenai)Úprovider_idzOpenAI model must be a string.zOpenAI model cannot be empty.NÚOPENAI_API_KEYz!OPENAI_API_KEY is not configured.)Úapi_key)ÚsuperÚ__init__Ú
+isinstanceÚstrÚ
+ValueErrorÚstripÚmodelÚ_clientÚosÚgetenvr   )Úselfr   Úclientr   Ú	__class__s       €ÚKC:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.pyr   ÚOpenAIProvider.__init__J   s­   ø€ ô* 	‰ÑØ ð 	ñ 	
+ô ØÜ÷
+ñ 
+ô Ø0óð 
+ð —‘“
+ˆæÜØ/óð 
+ð Œ
+àÑØ!ŒLØä—)’)Øó
+ˆö ÜØ3óð 
+ô #Øñ
+ˆó    c              ƒ  óh  #   • Uc  [        S5      eSUR                  S./nUR                  (       a!  UR                  SSUR                   3S.5        UR                  SUR                  S.5         U R
+                  R                  R                  U R                  US9I Sh  v•N n[        USS5      nU(       d  [        S	U R                  SS
+9$ [        S
+U R                  US9$  NB! [         a=  n[        R                  S5        [        S	U R                  [        U5      S
+9s SnA$ SnAff = f7f)a\  
+Generate a response using OpenAI.
+
+The provider translates the provider-independent
+ConversationRequest into the OpenAI Responses API
+request.
+
+Parameters
+----------
+request:
+    Provider-independent conversation request.
+
+Returns
+-------
+ProviderResult
+    Provider-independent execution result.
+
+Raises
+------
+ValueError
+    If request is None.
+Nz$Conversation request cannot be None.Úsystem)ÚroleÚcontentÚuserzAdditional context:
+)r   Úinputz!OpenAI provider execution failed.F)Úsuccessr
+   ÚerrorÚoutput_textz"OpenAI returned an empty response.T)r&   r
+   Úoutput)r   Úsystem_instructionÚconversation_contextÚappendÚuser_promptr   Ú	responsesÚcreater   Ú	ExceptionÚloggerÚ	exceptionr   r
+   r   Úgetattr)r   ÚrequestÚmessagesÚresponseÚexcr(   s         r   ÚgenerateÚOpenAIProvider.generate…   s\  é € ð6 ‰?ÜØ6óð 
+ð !Ø"×5Ñ5ñ
+ð
+ˆð ×'×'ØO‰Oà"à/Ø"×7Ñ7Ð8ð:ñô
+ð 	‰àØ"×.Ñ.ñ
+ô	
+ð	à—l‘l×,Ñ,×3Ñ3ØŸ*™*Ø"ð 4ð ÷ ð 
+ô$ ØØØó
+ˆö Ü!ØØ ×,Ñ,à8ñ	ð 
+ô ØØ×(Ñ(Øñ
+ð 	
+ñAøô ó 		Ü×ÑØ3ô
+ô "ØØ ×,Ñ,Ü˜#“hñõ 
+ûð		üsH   ‚A/D2Á21C( Â#C&Â$C( Â(>D2Ã&C( Ã(
+D/Ã22D*Ä$D/Ä%D2Ä*D/Ä/D2)r   r   )z
+gpt-5-miniN)r   r   r   zAsyncOpenAI | NoneÚreturnÚNone)r4   r   r:   r   )	Ú__name__Ú
+__module__Ú__qualname__Ú__firstlineno__Ú__doc__r   r8   Ú__static_attributes__Ú
+__classcell__)r   s   @r   r	   r	   B   sW   ø† ñð "Ø%)ð9
+àð9
+ð #ð9
+ð 
+÷	9
+ð 9
+ðv_
+à$ð_
+ð 
+÷_
+ò _
+r   r	   )r@   Ú
+__future__r   Úloggingr   r   r   Ú)backend.conversation.conversation_requestr   Ú"backend.providers.llm.llm_providerr   Ú!backend.providers.provider_resultr   Ú	getLoggerr<   r1   r	   © r   r   Ú<module>rJ      sH   ðñ(õT #ã Û 	å õõõð
+ 
+×	Ò	˜8Ó	$€ôb
+[õ b
+r   
+
+============================================================
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__pycache__\__init__.cpython-313.pyc
+============================================================
+ó
+
+    e­yj    ã                   ó   • g )N© r   ó    ÚDC:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\__init__.pyÚ<module>r      s   ñr   
+

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Awaitable
+from typing import Awaitable, Callable
 
-from app.application.beta_access.beta_access_service import BetaAccessService
+from backend.app.application.beta_access.beta_access_service import BetaAccessService
 
 logger = logging.getLogger(__name__)
 
 
 class BetaTelegramStartHandler:
-    """Adapter for /start <token>. Only private chats may bind Beta users."""
+    """Application-facing handler for /start <token>."""
 
     def __init__(
         self,

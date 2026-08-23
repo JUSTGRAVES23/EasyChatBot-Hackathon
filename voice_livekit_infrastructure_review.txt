@@ -1,0 +1,491 @@
+﻿"""
+LiveKit Infrastructure Adapter.
+
+Responsible for communication with LiveKit.
+
+This layer is infrastructure only.
+
+Responsibilities:
+- Prepare LiveKit connection data.
+- Abstract LiveKit provider details.
+- Create room connection metadata.
+
+Does NOT:
+- Decide when a call starts.
+- Manage learner logic.
+- Execute AI agents.
+- Store memory.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class LiveKitAdapter:
+    """
+    Infrastructure adapter for LiveKit.
+
+    Beta 1 implementation:
+    - Provider abstraction only.
+    - Real API connection added later.
+    """
+
+    def create_room_configuration(
+        self,
+        *,
+        session: VoiceSession,
+    ) -> dict[str, str]:
+        """
+        Prepare LiveKit room configuration.
+
+        Parameters
+        ----------
+        session:
+            Voice session information.
+
+        Returns
+        -------
+        dict
+            Provider-independent room data.
+        """
+
+        logger.info(
+            "Preparing LiveKit room configuration",
+            extra={
+                "session_id": session.session_id,
+                "room_name": session.room_name,
+            },
+        )
+
+
+        return {
+            "room_name": (
+                session.room_name
+            ),
+            "character_id": (
+                session.character_id
+            ),
+            "language_code": (
+                session.language_code
+            ),
+            "provider": "livekit",
+        }
+"""
+LiveKit Token Service.
+
+Infrastructure service responsible for
+creating voice connection credentials.
+
+Responsibilities:
+- Generate provider-specific tokens.
+- Hide LiveKit implementation details.
+- Return provider-independent domain model.
+
+Does NOT:
+- Handle HTTP.
+- Manage application workflows.
+- Decide authorization rules.
+- Persist tokens.
+- Execute voice calls.
+"""
+
+from __future__ import annotations
+
+
+from datetime import datetime, timedelta
+
+
+import uuid
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+
+class LiveKitTokenService:
+    """
+    Infrastructure adapter for LiveKit tokens.
+
+    Beta 1 implementation:
+    - Generates deterministic provider abstraction.
+    - Real LiveKit SDK integration can replace
+      this implementation later.
+    """
+
+
+
+    def create_token(
+        self,
+        *,
+        room_name: str,
+        expires_minutes: int = 30,
+    ) -> VoiceConnectionToken:
+        """
+        Create a voice connection token.
+
+        Parameters
+        ----------
+        room_name:
+            Voice room identifier.
+
+        expires_minutes:
+            Token validity period.
+
+        Returns
+        -------
+        VoiceConnectionToken
+            Provider-independent token model.
+        """
+
+
+        if not room_name.strip():
+            raise ValueError(
+                "room_name cannot be empty."
+            )
+
+
+        if expires_minutes <= 0:
+            raise ValueError(
+                "expires_minutes must be positive."
+            )
+
+
+        token = (
+            f"livekit-{uuid.uuid4()}"
+        )
+
+
+        expires_at = (
+            datetime.utcnow()
+            + timedelta(
+                minutes=expires_minutes,
+            )
+        )
+
+
+        return VoiceConnectionToken(
+            token=token,
+            room_name=room_name,
+            provider="livekit",
+            expires_at=expires_at,
+        )
+
+
+
+__all__ = [
+    "LiveKitTokenService",
+]
+"""
+Voice Connection Service.
+
+Application service responsible for
+creating voice connection credentials.
+
+Responsibilities:
+- Coordinate token creation.
+- Request infrastructure token generation.
+- Return domain connection token.
+
+Does NOT:
+- Handle HTTP.
+- Generate provider tokens.
+- Manage LiveKit directly.
+- Persist credentials.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceConnectionService:
+    """
+    Application boundary for voice connections.
+    """
+
+    token_service: LiveKitTokenService
+
+
+
+    def create_connection(
+        self,
+        *,
+        room_name: str,
+    ) -> VoiceConnectionToken:
+        """
+        Create voice connection credentials.
+        """
+
+
+        return (
+            self.token_service
+            .create_token(
+                room_name=room_name,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceConnectionService",
+]
+"""
+Voice Room Service.
+
+Application service responsible for
+preparing voice room configuration.
+
+Responsibilities:
+- Coordinate execution context.
+- Request room preparation.
+- Return provider-independent
+  room configuration.
+
+Does NOT:
+- Handle HTTP.
+- Execute AI.
+- Manage providers directly.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceRoomService:
+    """
+    Application boundary for
+    voice room preparation.
+    """
+
+    room_adapter: VoiceRoomAdapter
+
+
+
+    def prepare_room(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room configuration.
+        """
+
+
+        return (
+            self.room_adapter
+            .create_room_configuration(
+                context=context,
+            )
+        )
+"""
+Voice Call Execution Runtime.
+
+Runtime execution coordinator for
+AI character voice calls.
+
+Responsibilities:
+- Execute prepared voice call sessions.
+- Coordinate execution lifecycle.
+- Validate execution context.
+- Provide runtime boundaries.
+
+Does NOT:
+- Handle HTTP.
+- Persist sessions.
+- Manage authentication.
+- Own LiveKit connections.
+- Select providers.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionRuntime:
+    """
+    Executes prepared voice calls.
+    """
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Start voice call execution.
+
+        Expected lifecycle:
+
+        READY
+          |
+          â†“
+        ACTIVE
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.READY
+        ):
+            raise ValueError(
+                "Voice call must be READY "
+                "before execution."
+            )
+
+
+        if not context.room.has_character():
+
+            raise ValueError(
+                "Voice call room requires "
+                "a character participant."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def stop(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Stop voice call execution.
+
+        Expected lifecycle:
+
+        ACTIVE
+          |
+          â†“
+        ENDED
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.ACTIVE
+        ):
+            raise ValueError(
+                "Only ACTIVE voice calls "
+                "can be stopped."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ENDED,
+        )
+
+
+
+    def fail(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Mark execution as failed.
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.FAILED,
+        )

@@ -1,0 +1,1847 @@
+﻿===== PROVIDER HEALTH SERVICE =====
+"""
+EasyChatBot AI Operations Center provider health tests.
+
+Validates:
+
+Provider Health Observation
+        |
+        v
+ProviderHealthService
+        |
+        +----------------------+
+        |                      |
+        v                      v
+Provider Health State   Health Transition
+        |                      |
+        +----------+-----------+
+                   |
+                   v
+          Provider Incident
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthStatus,
+    ProviderHealthTransition,
+)
+
+from app.application.provider_management.provider_health_service import (
+    ProviderHealthService,
+)
+
+
+def create_observation(
+    *,
+    provider: str = "openai",
+    status: ProviderHealthStatus = (
+        ProviderHealthStatus.HEALTHY
+    ),
+    observed_at: datetime | None = None,
+    capability: str | None = "conversation",
+    consecutive_failures: int = 0,
+    consecutive_successes: int = 1,
+) -> ProviderHealthObservation:
+    """
+    Create deterministic provider health evidence.
+    """
+
+    if observed_at is None:
+        observed_at = datetime(
+            2026,
+            8,
+            14,
+            14,
+            32,
+            tzinfo=timezone.utc,
+        )
+
+    return ProviderHealthObservation(
+        provider=provider,
+        model="gpt-5-mini",
+        capability=capability,
+        status=status,
+        observed_at=observed_at,
+        latency_ms=800,
+        consecutive_failures=(
+            consecutive_failures
+        ),
+        consecutive_successes=(
+            consecutive_successes
+        ),
+    )
+
+
+def create_service() -> ProviderHealthService:
+    """
+    Create a fresh health service.
+    """
+
+    return ProviderHealthService()
+
+
+def test_first_failure_creates_degraded_state() -> None:
+    """
+    Validate that the first failure produces a degraded
+    provider state rather than an immediate outage.
+    """
+
+    service = create_service()
+
+    event = service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=1,
+            consecutive_successes=0,
+        )
+    )
+
+    state = service.get_state("openai")
+
+    assert state is not None
+
+    assert (
+        state.status
+        == ProviderHealthStatus.DEGRADED
+    )
+
+    assert (
+        event.transition
+        == ProviderHealthTransition.DEGRADED
+    )
+
+    assert (
+        event.current_status
+        == ProviderHealthStatus.DEGRADED
+    )
+
+    assert (
+        event.consecutive_failures
+        == 1
+    )
+
+
+def test_three_consecutive_failures_create_unavailable_state() -> None:
+    """
+    Validate the outage threshold.
+
+    Three consecutive failures must move the provider
+    from degraded to unavailable.
+    """
+
+    service = create_service()
+
+    first = service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=1,
+            consecutive_successes=0,
+        )
+    )
+
+    second = service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=2,
+            consecutive_successes=0,
+            observed_at=datetime(
+                2026,
+                8,
+                14,
+                14,
+                33,
+                tzinfo=timezone.utc,
+            ),
+        )
+    )
+
+    third = service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=3,
+            consecutive_successes=0,
+            observed_at=datetime(
+                2026,
+                8,
+                14,
+                14,
+                34,
+                tzinfo=timezone.utc,
+            ),
+        )
+    )
+
+    state = service.get_state("openai")
+
+    assert state is not None
+
+    assert (
+        first.transition
+        == ProviderHealthTransition.DEGRADED
+    )
+
+    assert (
+        second.transition
+        == ProviderHealthTransition.DEGRADED
+    )
+
+    assert (
+        third.transition
+        == ProviderHealthTransition.UNAVAILABLE
+    )
+
+    assert (
+        state.status
+        == ProviderHealthStatus.UNAVAILABLE
+    )
+
+    assert (
+        state.consecutive_failures
+        == 3
+    )
+
+    assert (
+        state.unavailable_since
+        == datetime(
+            2026,
+            8,
+            14,
+            14,
+            34,
+            tzinfo=timezone.utc,
+        )
+    )
+
+
+def test_successful_observation_recovers_provider() -> None:
+    """
+    Validate provider recovery.
+
+    A successful observation after an outage returns
+    the provider to healthy state and generates a
+    recovered transition.
+    """
+
+    service = create_service()
+
+    service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=1,
+            consecutive_successes=0,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=2,
+            consecutive_successes=0,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=3,
+            consecutive_successes=0,
+        )
+    )
+
+    recovery = service.observe(
+        create_observation(
+            status=ProviderHealthStatus.HEALTHY,
+            consecutive_failures=0,
+            consecutive_successes=1,
+            observed_at=datetime(
+                2026,
+                8,
+                14,
+                14,
+                35,
+                tzinfo=timezone.utc,
+            ),
+        )
+    )
+
+    state = service.get_state("openai")
+
+    assert state is not None
+
+    assert (
+        state.status
+        == ProviderHealthStatus.HEALTHY
+    )
+
+    assert (
+        recovery.transition
+        == ProviderHealthTransition.RECOVERED
+    )
+
+    assert (
+        recovery.previous_status
+        == ProviderHealthStatus.UNAVAILABLE
+    )
+
+    assert (
+        recovery.current_status
+        == ProviderHealthStatus.HEALTHY
+    )
+
+    assert (
+        state.last_success_at
+        == datetime(
+            2026,
+            8,
+            14,
+            14,
+            35,
+            tzinfo=timezone.utc,
+        )
+    )
+
+    assert (
+        state.unavailable_since
+        is None
+    )
+
+
+def test_health_state_is_tracked_independently_per_provider() -> None:
+    """
+    Validate independent provider health tracking.
+    """
+
+    service = create_service()
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=1,
+            consecutive_successes=0,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="gemini",
+            status=ProviderHealthStatus.HEALTHY,
+            consecutive_failures=0,
+            consecutive_successes=1,
+        )
+    )
+
+    openai_state = service.get_state(
+        "openai"
+    )
+
+    gemini_state = service.get_state(
+        "gemini"
+    )
+
+    assert openai_state is not None
+    assert gemini_state is not None
+
+    assert (
+        openai_state.status
+        == ProviderHealthStatus.DEGRADED
+    )
+
+    assert (
+        gemini_state.status
+        == ProviderHealthStatus.HEALTHY
+    )
+
+
+def test_capability_is_preserved_in_transition() -> None:
+    """
+    Validate affected capability propagation.
+    """
+
+    service = create_service()
+
+    event = service.observe(
+        create_observation(
+            provider="openai",
+            capability="summarisation",
+            status=ProviderHealthStatus.DEGRADED,
+            consecutive_failures=1,
+            consecutive_successes=0,
+        )
+    )
+
+    assert (
+        event.affected_capabilities
+        == ("summarisation",)
+    )
+
+
+def test_multiple_provider_states_are_available() -> None:
+    """
+    Validate retrieval of all provider health states.
+    """
+
+    service = create_service()
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            status=ProviderHealthStatus.HEALTHY,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="gemini",
+            status=ProviderHealthStatus.HEALTHY,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="ollama",
+            status=ProviderHealthStatus.HEALTHY,
+        )
+    )
+
+    states = service.get_all_states()
+
+    assert len(states) == 3
+
+    assert [
+        state.provider
+        for state in states
+    ] == [
+        "gemini",
+        "ollama",
+        "openai",
+    ]
+
+
+def test_unknown_observation_produces_unknown_state() -> None:
+    """
+    Validate explicit unknown health status.
+    """
+
+    service = create_service()
+
+    event = service.observe(
+        create_observation(
+            status=ProviderHealthStatus.UNKNOWN,
+            consecutive_failures=0,
+            consecutive_successes=0,
+        )
+    )
+
+    state = service.get_state("openai")
+
+    assert state is not None
+
+    assert (
+        state.status
+        == ProviderHealthStatus.UNKNOWN
+    )
+
+    assert (
+        event.transition
+        == ProviderHealthTransition.UNKNOWN
+    )
+
+
+def test_negative_latency_is_rejected() -> None:
+    """
+    Validate observation input.
+    """
+
+    service = create_service()
+
+    observation = ProviderHealthObservation(
+        provider="openai",
+        model="gpt-5-mini",
+        capability="conversation",
+        status=ProviderHealthStatus.HEALTHY,
+        observed_at=datetime.now(
+            timezone.utc
+        ),
+        latency_ms=-1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Latency cannot be negative.",
+    ):
+        service.observe(
+            observation
+        )
+
+
+def test_empty_provider_is_rejected() -> None:
+    """
+    Validate provider identity.
+    """
+
+    service = create_service()
+
+    observation = create_observation(
+        provider="   "
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Provider cannot be empty.",
+    ):
+        service.observe(
+            observation
+        )
+
+
+def test_none_observation_is_rejected() -> None:
+    """
+    Validate required observation input.
+    """
+
+    service = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Provider health observation "
+            "cannot be None."
+        ),
+    ):
+        service.observe(
+            None,  # type: ignore[arg-type]
+        )
+
+
+def test_clear_removes_all_health_state() -> None:
+    """
+    Validate isolated state reset.
+    """
+
+    service = create_service()
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            status=ProviderHealthStatus.HEALTHY,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="gemini",
+            status=ProviderHealthStatus.HEALTHY,
+        )
+    )
+
+    assert len(
+        service.get_all_states()
+    ) == 2
+
+    service.clear()
+
+    assert (
+        service.get_all_states()
+        == ()
+    )
+
+    assert (
+        service.get_state("openai")
+        is None
+    )
+
+===== MONITOR =====
+"""
+EasyChatBot AI Operations Center provider health monitor tests.
+
+Validates the vertical flow:
+
+ProviderHealthObservation
+        |
+        v
+ProviderHealthService
+        |
+        v
+ProviderHealthMonitorService
+        |
+        v
+ProviderHealthReadModel
+
+The monitor must:
+
+- delegate health calculation;
+- retain latest observation metadata;
+- expose provider health read models;
+- support multiple providers;
+- preserve provider/model/capability attribution;
+- track provider failure and recovery;
+- remain read-only from an operational perspective.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthStatus,
+    ProviderHealthTransition,
+)
+
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+
+
+def create_observation(
+    *,
+    provider: str,
+    model: str,
+    capability: str,
+    status: ProviderHealthStatus,
+    observed_at: datetime,
+    consecutive_failures: int = 0,
+    consecutive_successes: int = 0,
+) -> ProviderHealthObservation:
+    """
+    Create deterministic provider health evidence.
+    """
+
+    return ProviderHealthObservation(
+        provider=provider,
+        model=model,
+        capability=capability,
+        status=status,
+        observed_at=observed_at,
+        latency_ms=700,
+        consecutive_failures=consecutive_failures,
+        consecutive_successes=consecutive_successes,
+    )
+
+
+def test_observe_returns_health_transition() -> None:
+    """
+    Validate that observations are delegated to the health
+    service and produce a transition.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    transition = service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.DEGRADED,
+            observed_at=datetime(
+                2026,
+                8,
+                15,
+                10,
+                30,
+                tzinfo=timezone.utc,
+            ),
+            consecutive_failures=1,
+        )
+    )
+
+    assert (
+        transition.provider
+        == "openai"
+    )
+
+    assert (
+        transition.transition
+        == ProviderHealthTransition.DEGRADED
+    )
+
+
+def test_get_provider_health_preserves_provider_metadata() -> None:
+    """
+    Validate provider/model/capability attribution.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    observed_at = datetime(
+        2026,
+        8,
+        15,
+        10,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.DEGRADED,
+            observed_at=observed_at,
+            consecutive_failures=1,
+        )
+    )
+
+    result = service.get_provider_health(
+        "openai"
+    )
+
+    assert result is not None
+
+    assert (
+        result.provider
+        == "openai"
+    )
+
+    assert (
+        result.model
+        == "gpt-5-mini"
+    )
+
+    assert (
+        result.capability
+        == "conversation"
+    )
+
+    assert (
+        result.status
+        == "degraded"
+    )
+
+
+def test_get_provider_health_exposes_failure_tracking() -> None:
+    """
+    Validate failure tracking reaches the operational
+    read model.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    failure_time = datetime(
+        2026,
+        8,
+        15,
+        10,
+        32,
+        tzinfo=timezone.utc,
+    )
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.DEGRADED,
+            observed_at=failure_time,
+            consecutive_failures=2,
+        )
+    )
+
+    result = service.get_provider_health(
+        "openai"
+    )
+
+    assert result is not None
+
+    assert (
+        result.consecutive_failures
+        == 2
+    )
+
+    assert (
+        result.last_failure_at
+        == failure_time
+    )
+
+    assert (
+        result.degraded_since
+        == failure_time
+    )
+
+
+def test_unavailable_provider_is_exposed() -> None:
+    """
+    Validate three consecutive failures produce an
+    unavailable provider projection.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    timestamps = (
+        datetime(
+            2026,
+            8,
+            15,
+            10,
+            30,
+            tzinfo=timezone.utc,
+        ),
+        datetime(
+            2026,
+            8,
+            15,
+            10,
+            31,
+            tzinfo=timezone.utc,
+        ),
+        datetime(
+            2026,
+            8,
+            15,
+            10,
+            32,
+            tzinfo=timezone.utc,
+        ),
+    )
+
+    for index, timestamp in enumerate(
+        timestamps,
+        start=1,
+    ):
+        service.observe(
+            create_observation(
+                provider="openai",
+                model="gpt-5-mini",
+                capability="conversation",
+                status=ProviderHealthStatus.DEGRADED,
+                observed_at=timestamp,
+                consecutive_failures=index,
+            )
+        )
+
+    result = service.get_provider_health(
+        "openai"
+    )
+
+    assert result is not None
+
+    assert (
+        result.status
+        == "unavailable"
+    )
+
+    assert (
+        result.consecutive_failures
+        == 3
+    )
+
+    assert (
+        result.unavailable_since
+        == timestamps[-1]
+    )
+
+
+def test_recovery_updates_provider_health() -> None:
+    """
+    Validate successful recovery updates the read model.
+
+    Provider outage:
+
+        10:32
+
+    Provider recovery:
+
+        10:39
+
+    The current health contract treats the first healthy
+    observation as recovery.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    recovery_time = datetime(
+        2026,
+        8,
+        15,
+        10,
+        39,
+        tzinfo=timezone.utc,
+    )
+
+    failure_timestamps = (
+        datetime(
+            2026,
+            8,
+            15,
+            10,
+            30,
+            tzinfo=timezone.utc,
+        ),
+        datetime(
+            2026,
+            8,
+            15,
+            10,
+            31,
+            tzinfo=timezone.utc,
+        ),
+        datetime(
+            2026,
+            8,
+            15,
+            10,
+            32,
+            tzinfo=timezone.utc,
+        ),
+    )
+
+    failure_transitions = []
+
+    for index, timestamp in enumerate(
+        failure_timestamps,
+        start=1,
+    ):
+        failure_transitions.append(
+            service.observe(
+                create_observation(
+                    provider="openai",
+                    model="gpt-5-mini",
+                    capability="conversation",
+                    status=ProviderHealthStatus.DEGRADED,
+                    observed_at=timestamp,
+                    consecutive_failures=index,
+                )
+            )
+        )
+
+    assert (
+        failure_transitions[-1].transition
+        == ProviderHealthTransition.UNAVAILABLE
+    )
+
+    recovery_transition = service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=recovery_time,
+            consecutive_successes=1,
+        )
+    )
+
+    assert (
+        recovery_transition.transition
+        == ProviderHealthTransition.RECOVERED
+    )
+
+    result = service.get_provider_health(
+        "openai"
+    )
+
+    assert result is not None
+
+    assert (
+        result.status
+        == "healthy"
+    )
+
+    assert (
+        result.consecutive_failures
+        == 0
+    )
+
+    assert (
+        result.consecutive_successes
+        == 1
+    )
+
+    assert (
+        result.last_success_at
+        == recovery_time
+    )
+
+    assert (
+        result.unavailable_since
+        is None
+    )
+
+    assert (
+        result.degraded_since
+        is None
+    )
+
+
+def test_multiple_providers_are_tracked_independently() -> None:
+    """
+    Validate provider health isolation.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    timestamp = datetime(
+        2026,
+        8,
+        15,
+        10,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=timestamp,
+            consecutive_successes=1,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            capability="summarisation",
+            status=ProviderHealthStatus.DEGRADED,
+            observed_at=timestamp,
+            consecutive_failures=1,
+        )
+    )
+
+    openai = service.get_provider_health(
+        "openai"
+    )
+
+    gemini = service.get_provider_health(
+        "gemini"
+    )
+
+    assert openai is not None
+    assert gemini is not None
+
+    assert (
+        openai.status
+        == "healthy"
+    )
+
+    assert (
+        gemini.status
+        == "degraded"
+    )
+
+    assert (
+        openai.model
+        == "gpt-5-mini"
+    )
+
+    assert (
+        gemini.model
+        == "gemini-2.5-flash"
+    )
+
+
+def test_get_all_provider_health_is_sorted() -> None:
+    """
+    Validate deterministic provider ordering.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    timestamp = datetime(
+        2026,
+        8,
+        15,
+        10,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    service.observe(
+        create_observation(
+            provider="ollama",
+            model="gemma4",
+            capability="internal_experiments",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=timestamp,
+            consecutive_successes=1,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=timestamp,
+            consecutive_successes=1,
+        )
+    )
+
+    service.observe(
+        create_observation(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            capability="summarisation",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=timestamp,
+            consecutive_successes=1,
+        )
+    )
+
+    results = (
+        service.get_all_provider_health()
+    )
+
+    assert [
+        result.provider
+        for result in results
+    ] == [
+        "gemini",
+        "ollama",
+        "openai",
+    ]
+
+
+def test_unknown_provider_returns_none() -> None:
+    """
+    Validate lookup of an unobserved provider.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    assert (
+        service.get_provider_health(
+            "openai"
+        )
+        is None
+    )
+
+
+def test_empty_provider_is_rejected() -> None:
+    """
+    Validate provider input.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    with pytest.raises(
+        ValueError,
+        match="Provider cannot be empty.",
+    ):
+        service.get_provider_health(
+            ""
+        )
+
+
+def test_none_observation_is_rejected() -> None:
+    """
+    Validate observation input.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Provider health observation "
+            "cannot be None."
+        ),
+    ):
+        service.observe(
+            None,  # type: ignore[arg-type]
+        )
+
+
+def test_clear_removes_provider_health() -> None:
+    """
+    Validate isolated reset behavior.
+    """
+
+    service = ProviderHealthMonitorService()
+
+    service.observe(
+        create_observation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=datetime(
+                2026,
+                8,
+                15,
+                10,
+                30,
+                tzinfo=timezone.utc,
+            ),
+            consecutive_successes=1,
+        )
+    )
+
+    assert (
+        service.get_provider_health(
+            "openai"
+        )
+        is not None
+    )
+
+    service.clear()
+
+    assert (
+        service.get_provider_health(
+            "openai"
+        )
+        is None
+    )
+
+    assert (
+        service.get_all_provider_health()
+        == ()
+    )
+
+===== READ MODEL =====
+"""
+EasyChatBot AI Operations Center provider health read model tests.
+
+Validates the read-only projection between provider health
+state and Operations Center presentation data.
+
+The read model must:
+
+- preserve provider identity;
+- preserve model identity;
+- preserve capability attribution;
+- expose calculated health state;
+- expose failure/recovery timing;
+- reject mismatched provider state;
+- remain free of health calculation logic.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthState,
+    ProviderHealthStatus,
+)
+
+from app.application.provider_management.provider_health_read_model import (
+    ProviderHealthReadModel,
+    ProviderHealthReadModelService,
+)
+
+
+def create_observation() -> ProviderHealthObservation:
+    """
+    Create deterministic provider health evidence.
+    """
+
+    return ProviderHealthObservation(
+        provider="openai",
+        model="gpt-5-mini",
+        capability="conversation",
+        status=ProviderHealthStatus.DEGRADED,
+        observed_at=datetime(
+            2026,
+            8,
+            15,
+            10,
+            30,
+            tzinfo=timezone.utc,
+        ),
+        latency_ms=1800,
+        error_type="provider_timeout",
+        error_message=(
+            "Provider health probe timed out."
+        ),
+        consecutive_failures=2,
+        consecutive_successes=0,
+    )
+
+
+def create_state() -> ProviderHealthState:
+    """
+    Create deterministic calculated provider state.
+    """
+
+    checked_at = datetime(
+        2026,
+        8,
+        15,
+        10,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    degraded_since = datetime(
+        2026,
+        8,
+        15,
+        10,
+        29,
+        tzinfo=timezone.utc,
+    )
+
+    last_failure_at = datetime(
+        2026,
+        8,
+        15,
+        10,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    return ProviderHealthState(
+        provider="openai",
+        status=ProviderHealthStatus.DEGRADED,
+        checked_at=checked_at,
+        consecutive_failures=2,
+        consecutive_successes=0,
+        last_success_at=None,
+        last_failure_at=last_failure_at,
+        degraded_since=degraded_since,
+        unavailable_since=None,
+    )
+
+
+def test_build_returns_provider_health_read_model() -> None:
+    """
+    Validate the projection type.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert isinstance(
+        result,
+        ProviderHealthReadModel,
+    )
+
+
+def test_build_preserves_provider_identity() -> None:
+    """
+    Validate provider identity.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert (
+        result.provider
+        == "openai"
+    )
+
+
+def test_build_preserves_model_identity() -> None:
+    """
+    Validate model attribution from the observation.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert (
+        result.model
+        == "gpt-5-mini"
+    )
+
+
+def test_build_preserves_capability() -> None:
+    """
+    Validate capability attribution from the observation.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert (
+        result.capability
+        == "conversation"
+    )
+
+
+def test_build_exposes_calculated_health_state() -> None:
+    """
+    Validate that the calculated state comes from the health
+    state rather than being recalculated by the read model.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert (
+        result.status
+        == "degraded"
+    )
+
+    assert (
+        result.consecutive_failures
+        == 2
+    )
+
+    assert (
+        result.consecutive_successes
+        == 0
+    )
+
+
+def test_build_exposes_failure_and_recovery_timing() -> None:
+    """
+    Validate operational timing information.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert (
+        result.checked_at
+        == datetime(
+            2026,
+            8,
+            15,
+            10,
+            30,
+            tzinfo=timezone.utc,
+        )
+    )
+
+    assert (
+        result.degraded_since
+        == datetime(
+            2026,
+            8,
+            15,
+            10,
+            29,
+            tzinfo=timezone.utc,
+        )
+    )
+
+    assert (
+        result.last_failure_at
+        == datetime(
+            2026,
+            8,
+            15,
+            10,
+            30,
+            tzinfo=timezone.utc,
+        )
+    )
+
+    assert (
+        result.unavailable_since
+        is None
+    )
+
+    assert (
+        result.last_success_at
+        is None
+    )
+
+
+def test_build_marks_provider_active() -> None:
+    """
+    Validate the presentation-level active flag.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    result = service.build(
+        observation=create_observation(),
+        state=create_state(),
+    )
+
+    assert result.active is True
+
+
+def test_build_rejects_none_observation() -> None:
+    """
+    Validate required observation input.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Provider health observation "
+            "cannot be None."
+        ),
+    ):
+        service.build(
+            observation=None,  # type: ignore[arg-type]
+            state=create_state(),
+        )
+
+
+def test_build_rejects_none_state() -> None:
+    """
+    Validate required health state input.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Provider health state "
+            "cannot be None."
+        ),
+    ):
+        service.build(
+            observation=create_observation(),
+            state=None,  # type: ignore[arg-type]
+        )
+
+
+def test_build_rejects_provider_mismatch() -> None:
+    """
+    Validate that observation and calculated state cannot be
+    accidentally combined for different providers.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    mismatched_state = ProviderHealthState(
+        provider="gemini",
+        status=ProviderHealthStatus.HEALTHY,
+        checked_at=datetime(
+            2026,
+            8,
+            15,
+            10,
+            30,
+            tzinfo=timezone.utc,
+        ),
+        consecutive_failures=0,
+        consecutive_successes=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Observation provider and health state "
+            "provider must match."
+        ),
+    ):
+        service.build(
+            observation=create_observation(),
+            state=mismatched_state,
+        )
+
+
+def test_read_model_does_not_change_health_state() -> None:
+    """
+    Validate that building a projection does not mutate the
+    calculated health state.
+    """
+
+    service = (
+        ProviderHealthReadModelService()
+    )
+
+    state = create_state()
+
+    result = service.build(
+        observation=create_observation(),
+        state=state,
+    )
+
+    assert (
+        state.status
+        == ProviderHealthStatus.DEGRADED
+    )
+
+    assert (
+        state.consecutive_failures
+        == 2
+    )
+
+    assert (
+        result.status
+        == "degraded"
+    )
+
+===== MODELS / RELATED =====
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_ollama_cloud_health_probe.py:10:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_ollama_cloud_health_probe.py:54:         == ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_ollama_cloud_health_probe.py:88:         == ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_ollama_cloud_health_probe.py:115:         == ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_composition.py:24:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_composition.py:25:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_composition.py:33: ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_composition.py:38:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_composition.py:42:         status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_contract.py:209:         ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_contract.py:210:         ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_contract.py:214:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_contract.py:218:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:46:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:47:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:55: ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:60:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:64:         status=ProviderHealthStatus.UNAVAILABLE,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:238:         ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:242:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:254:             ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py:258:                 status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_dashboard_api.py:27:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_dashboard_api.py:28:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_dashboard_api.py:35:     status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_dashboard_api.py:38:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_flow.py:36:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_flow.py:37:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_flow.py:44: ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_flow.py:46:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_flow.py:50:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:5:     ProviderHealthHistoryRepository,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:13:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:14:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:22:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:37:         ProviderHealthHistoryRepository()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:43:             ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:51:             ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:101:         ProviderHealthHistoryRepository()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py:107:             ProviderHealthStatus.UNAVAILABLE,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:2: Tests for ProviderHealthApplicationService.
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:14:     ProviderHealthApplicationService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:18:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:19:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:20:     ProviderHealthTransition,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:24:     ProviderHealthMonitorService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:37: ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:42:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:46:         status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:57:     ProviderHealthApplicationService
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:65:         ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:79:         ProviderHealthApplicationService(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:89:     existing ProviderHealthMonitorService.
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:125:         == ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py:192:         == ProviderHealthTransition.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_composition.py:80:         ProviderHealthMonitorService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_composition.py:87:     monitor = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:47:     ProviderHealthEscalationService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:51:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:59:     status: ProviderHealthStatus = (
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:60:         ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:103:     ProviderHealthEscalationService
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:120:     return ProviderHealthEscalationService(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:258:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py:396:         ProviderHealthEscalationService(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:4:     ProviderHealthHistoryRepository,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:8:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:9:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:16:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:20:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:31:         ProviderHealthHistoryRepository()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:53:         ProviderHealthHistoryRepository()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:83:         ProviderHealthHistoryRepository()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py:97:         ProviderHealthHistoryRepository()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:6: ProviderHealthObservation
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:9: ProviderHealthService
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:12: ProviderHealthMonitorService
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:15: ProviderHealthReadModel
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:33:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:34:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:35:     ProviderHealthTransition,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:39:     ProviderHealthMonitorService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:48:     status: ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:52: ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:57:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:75:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:82:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:102:         == ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:111:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:127:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:166:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:182:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:216:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:254:                 status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:298:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:348:                     status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:357:         == ProviderHealthTransition.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:365:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:373:         == ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:418:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:434:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:445:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:488:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:504:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:515:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:526:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:551:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:566:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:582:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:601:     service = ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py:608:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:12:     ProviderHealthApplicationService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:16:     ProviderHealthProbeRunner,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:20:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:21:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:25:     ProviderHealthMonitorService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:34:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:49:         status: ProviderHealthStatus = (
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:50:             ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:74:     ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:78:         return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:99: ) -> ProviderHealthProbeRunner:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:105:         ProviderHealthMonitorService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:119:         ProviderHealthApplicationService(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:125:     return ProviderHealthProbeRunner(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:137:     ProviderHealthApplicationService.
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:161:         == ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py:250:         == ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:23:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:24:     ProviderHealthState,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:25:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:29:     ProviderHealthReadModel,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:30:     ProviderHealthReadModelService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:34: def create_observation() -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:39:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:43:         status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:62: def create_state() -> ProviderHealthState:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:94:     return ProviderHealthState(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:96:         status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:113:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:123:         ProviderHealthReadModel,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:133:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:153:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:173:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:194:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:224:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:285:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:302:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:324:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:347:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:350:     mismatched_state = ProviderHealthState(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:352:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:385:         ProviderHealthReadModelService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py:397:         == ProviderHealthStatus.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py:2: Tests for ProviderHealthRefreshService.
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py:5: that it delegates to the existing ProviderHealthProbeRunner and
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py:16:     ProviderHealthRefreshService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py:21:     """Minimal test double for ProviderHealthProbeRunner."""
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py:37:     service = ProviderHealthRefreshService(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py:51:         ProviderHealthRefreshService(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:9: ProviderHealthService
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:27:     ProviderHealthObservation,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:28:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:29:     ProviderHealthTransition,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:33:     ProviderHealthService,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:40:     status: ProviderHealthStatus = (
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:41:         ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:47: ) -> ProviderHealthObservation:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:62:     return ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:78: def create_service() -> ProviderHealthService:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:83:     return ProviderHealthService()
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:96:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:108:         == ProviderHealthStatus.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:113:         == ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:118:         == ProviderHealthStatus.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:139:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:147:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:163:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:183:         == ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:188:         == ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:193:         == ProviderHealthTransition.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:198:         == ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:232:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:240:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:248:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:256:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:276:         == ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:281:         == ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:286:         == ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:291:         == ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:322:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:331:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:350:         == ProviderHealthStatus.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:355:         == ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:370:             status=ProviderHealthStatus.DEGRADED,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:392:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:399:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:406:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:433:             status=ProviderHealthStatus.UNKNOWN,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:445:         == ProviderHealthStatus.UNKNOWN
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:450:         == ProviderHealthTransition.UNKNOWN
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:461:     observation = ProviderHealthObservation(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:465:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:530:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py:537:             status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:55:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:56:     ProviderHealthTransition,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:57:     ProviderHealthTransitionEvent,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:69:     transition: ProviderHealthTransition = (
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:70:         ProviderHealthTransition.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:78: ) -> ProviderHealthTransitionEvent:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:94:         ProviderHealthTransition.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:97:             ProviderHealthStatus.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:100:             ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:104:         ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:107:             ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:110:             ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:114:         ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:117:             ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:120:             ProviderHealthStatus.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:125:             ProviderHealthStatus.UNKNOWN
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:128:             ProviderHealthStatus.UNKNOWN
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:131:     return ProviderHealthTransitionEvent(
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:213:         == ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:360:                 ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:377:         == ProviderHealthStatus.HEALTHY
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:426:                 ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:452:             ProviderHealthTransition.DEGRADED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:711:                 ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py:752:                 ProviderHealthTransition.RECOVERED
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:44:     ProviderHealthStatus,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:57:     status: ProviderHealthStatus = (
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:58:         ProviderHealthStatus.UNAVAILABLE
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:213:         == ProviderHealthStatus.UNAVAILABLE.value
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:265:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:328:         status=ProviderHealthStatus.HEALTHY,
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py:348:         == ProviderHealthStatus.HEALTHY.value

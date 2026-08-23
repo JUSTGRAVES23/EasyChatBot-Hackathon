@@ -1,0 +1,1302 @@
+﻿======================================================================
+APPROVAL EMAIL SENDER MIGRATION INSPECTION
+======================================================================
+
+OLD:
+backend\app\infrastructure\email\resend_approval_email_sender.py
+
+TARGET:
+backend\app\infrastructure\privacy\email_approval_sender.py
+
+======================================================================
+PRIVACY APPROVAL EMAIL SERVICE
+======================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from .privacy_change import PrivacyChange
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalEmailRequest:
+    """Immutable request to escalate a privacy change for human approval."""
+
+    change_id: str
+    recipient: str
+    subject: str
+    body: str
+    requires_dpo_approval: bool
+    requires_grc_approval: bool
+
+
+class ApprovalEmailSender(Protocol):
+    """Application-level email delivery boundary.
+
+    The application layer does not know whether delivery uses
+    Resend, SMTP, or another provider.
+    """
+
+    def send(
+        self,
+        request: ApprovalEmailRequest,
+    ) -> None:
+        ...
+
+
+class PrivacyApprovalEmailService:
+    """Creates privacy governance approval requests.
+
+    Responsibilities:
+    - validate that automated privacy validation has passed;
+    - determine whether DPO/GRC review is required;
+    - construct the approval request;
+    - delegate email delivery to the injected sender.
+
+    Does NOT:
+    - approve privacy changes;
+    - make legal decisions;
+    - modify governance status;
+    - call an email provider directly;
+    - interpret email delivery as approval.
+    """
+
+    def __init__(
+        self,
+        *,
+        sender: ApprovalEmailSender,
+        approval_recipient: str,
+    ) -> None:
+        if sender is None:
+            raise ValueError("sender cannot be None.")
+
+        if not approval_recipient.strip():
+            raise ValueError("approval_recipient is required.")
+
+        self._sender = sender
+        self._recipient = approval_recipient.strip()
+
+    def escalate(
+        self,
+        change: PrivacyChange,
+        *,
+        validation_passed: bool,
+    ) -> ApprovalEmailRequest:
+        """Create and send a governance approval request.
+
+        A request can only be escalated after automated privacy
+        validation has passed.
+
+        Sending the email never constitutes DPO/GRC approval.
+        """
+
+        if change is None:
+            raise ValueError("change cannot be None.")
+
+        if not validation_passed:
+            raise ValueError(
+                "Cannot request approval while privacy "
+                "validation is failing."
+            )
+
+        if not (
+            change.dpo_required
+            or change.grc_required
+        ):
+            raise ValueError(
+                "Email escalation is only required for "
+                "governance-routed changes."
+            )
+
+        roles: list[str] = []
+
+        if change.dpo_required:
+            roles.append("DPO")
+
+        if change.grc_required:
+            roles.append("GRC")
+
+        subject = (
+            "[EasyChatBot Privacy Governance] "
+            f"Approval Required â€” {change.change_id}"
+        )
+
+        body = (
+            "EASYCHATBOT Â· PRIVACY GOVERNANCE\n"
+            "\n"
+            "HUMAN GOVERNANCE REVIEW REQUIRED\n"
+            "\n"
+            "A privacy-impacting change has passed automated "
+            "privacy validation and requires explicit human "
+            "governance review before it may proceed.\n"
+            "\n"
+            "CHANGE\n"
+            f"Change ID: {change.change_id}\n"
+            f"Title: {change.title}\n"
+            f"Description: {change.description}\n"
+            f"Risk: {change.risk.value}\n"
+            "\n"
+            "GOVERNANCE\n"
+            f"Required reviewers: {', '.join(roles)}\n"
+            "Automated privacy validation: PASS\n"
+            "Current governance status: PENDING_DPO_GRC\n"
+            "\n"
+            "DECISION REQUIRED\n"
+            "Please review the controlled Privacy Change Registry "
+            "and explicitly record the applicable governance decision.\n"
+            "\n"
+            "Possible decisions:\n"
+            "- APPROVE\n"
+            "- REJECT\n"
+            "- REQUEST CHANGES\n"
+            "\n"
+            "IMPORTANT GOVERNANCE CONTROL\n"
+            "This email is an escalation and approval request only.\n"
+            "It does not itself constitute approval.\n"
+            "Sending, receiving, or replying to this email does not "
+            "constitute DPO or GRC approval.\n"
+            "\n"
+            "The change must remain pending until the required "
+            "governance decision is explicitly recorded in the "
+            "controlled governance system.\n"
+            "\n"
+            "Applicable GDPR references should be reviewed in the "
+            "controlled privacy assessment for this change.\n"
+            "\n"
+            "EasyChatBot Privacy & Governance\n"
+            "Automated validation provides decision support and "
+            "control evidence. It does not replace DPO, GRC, or "
+            "Legal judgement."
+        )
+
+        request = ApprovalEmailRequest(
+            change_id=change.change_id,
+            recipient=self._recipient,
+            subject=subject,
+            body=body,
+            requires_dpo_approval=change.dpo_required,
+            requires_grc_approval=change.grc_required,
+        )
+
+        self._sender.send(request)
+
+        return request
+
+
+__all__ = [
+    "ApprovalEmailRequest",
+    "ApprovalEmailSender",
+    "PrivacyApprovalEmailService",
+]
+
+======================================================================
+PRIVACY GOVERNANCE COMPOSITION
+======================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .privacy_approval_email_service import PrivacyApprovalEmailService
+from .privacy_approval_registry import PrivacyApprovalRegistry
+from .privacy_change_registry import PrivacyChangeRegistry
+from .privacy_governance_case_registry import PrivacyGovernanceCaseRegistry
+from .privacy_governance_case_service import PrivacyGovernanceCaseService
+from .privacy_governance_dashboard_service import PrivacyGovernanceDashboardService
+from .privacy_governance_decision_service import PrivacyGovernanceDecisionService
+from .privacy_governance_flow_service import PrivacyGovernanceFlowService
+from .privacy_governance_gate import PrivacyGovernanceGate
+from .privacy_validation_service import PrivacyValidationService
+
+
+@dataclass(slots=True)
+class PrivacyGovernanceComposition:
+    """Single composition root for the privacy governance capability.
+
+    Beta 1 uses in-memory registries. Application services receive those same
+    instances so case creation, decisions, dashboard reads, and API reads all
+    observe one coherent runtime state.
+
+    Repository-backed implementations can replace the registries later without
+    changing the API contract or frontend.
+    """
+
+    change_registry: PrivacyChangeRegistry
+    case_registry: PrivacyGovernanceCaseRegistry
+    approval_registry: PrivacyApprovalRegistry
+    decision_service: PrivacyGovernanceDecisionService
+    governance_gate: PrivacyGovernanceGate
+    case_service: PrivacyGovernanceCaseService
+    flow_service: PrivacyGovernanceFlowService
+    dashboard_service: PrivacyGovernanceDashboardService
+
+
+def create_privacy_governance_composition(
+    *,
+    validation_service: PrivacyValidationService | None = None,
+    approval_email_service: PrivacyApprovalEmailService | None = None,
+) -> PrivacyGovernanceComposition:
+    """Create an isolated composition, primarily for tests and explicit DI."""
+
+    change_registry = PrivacyChangeRegistry()
+    case_registry = PrivacyGovernanceCaseRegistry()
+    approval_registry = PrivacyApprovalRegistry()
+
+    decision_service = PrivacyGovernanceDecisionService(
+        approval_registry=approval_registry,
+        change_registry=change_registry,
+        case_registry=case_registry,
+    )
+
+    governance_gate = PrivacyGovernanceGate(
+        registry=change_registry,
+        validation_service=validation_service,
+        approval_email_service=approval_email_service,
+    )
+
+    case_service = PrivacyGovernanceCaseService(
+        case_registry=case_registry,
+        change_registry=change_registry,
+        approval_registry=approval_registry,
+        decision_service=decision_service,
+    )
+
+    flow_service = PrivacyGovernanceFlowService(
+        change_registry=change_registry,
+        governance_gate=governance_gate,
+        case_service=case_service,
+    )
+
+    dashboard_service = PrivacyGovernanceDashboardService(
+        case_registry=case_registry,
+        approval_registry=approval_registry,
+    )
+
+    return PrivacyGovernanceComposition(
+        change_registry=change_registry,
+        case_registry=case_registry,
+        approval_registry=approval_registry,
+        decision_service=decision_service,
+        governance_gate=governance_gate,
+        case_service=case_service,
+        flow_service=flow_service,
+        dashboard_service=dashboard_service,
+    )
+
+
+# Runtime composition boundary.
+# The FastAPI adapter and application integrations must use this instance.
+_runtime_composition: PrivacyGovernanceComposition | None = None
+
+
+def get_privacy_governance_composition() -> PrivacyGovernanceComposition:
+    """Return the process-wide Beta governance composition.
+
+    This is the shared runtime instance used by the Operations Center API and
+    by application integrations that submit privacy governance events.
+
+    A future repository-backed implementation can keep this boundary while
+    replacing the underlying registry adapters.
+    """
+
+    global _runtime_composition
+
+    if _runtime_composition is None:
+        _runtime_composition = create_privacy_governance_composition()
+
+    return _runtime_composition
+
+
+def reset_privacy_governance_composition_for_tests() -> None:
+    """Reset the runtime composition.
+
+    Intended for test isolation only. Production code must not reset runtime
+    governance state.
+    """
+
+    global _runtime_composition
+    _runtime_composition = None
+
+======================================================================
+PRIVACY GOVERNANCE GATE
+======================================================================
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+from .privacy_approval_email_service import (
+    PrivacyApprovalEmailService,
+)
+from .privacy_change import (
+    PrivacyChange,
+    PrivacyChangeStatus,
+)
+from .privacy_change_registry import (
+    PrivacyChangeRegistry,
+)
+from .privacy_validation_service import (
+    PrivacyValidationResult,
+    PrivacyValidationService,
+)
+
+
+class PrivacyGovernanceGate:
+    """Privacy governance decision gate.
+
+    Responsibilities:
+    - consume deterministic privacy validation results;
+    - block changes with validation failures;
+    - route privacy-impacting changes to DPO/GRC;
+    - trigger an approval escalation only when validation passes;
+    - never interpret email delivery as approval.
+
+    Does NOT:
+    - make legal decisions;
+    - grant DPO/GRC approval;
+    - execute production changes;
+    - schedule recurring approval emails.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: PrivacyChangeRegistry,
+        validation_service: PrivacyValidationService | None = None,
+        approval_email_service: PrivacyApprovalEmailService | None = None,
+    ) -> None:
+        if registry is None:
+            raise ValueError(
+                "registry cannot be None."
+            )
+
+        self._registry = registry
+        self._validation = validation_service
+        self._approval_email = approval_email_service
+
+    def route(
+        self,
+        change: PrivacyChange,
+        *,
+        automated_validation_passed: bool | None = None,
+        dpo_approved: bool = False,
+        grc_approved: bool = False,
+    ) -> PrivacyChange:
+        """Route a change through the governance decision.
+
+        This synchronous method preserves the existing Beta contract.
+
+        If a validation service is configured, it is the authoritative
+        source for automated privacy validation.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        validation_passed = self._resolve_validation(
+            automated_validation_passed
+        )
+
+        if not validation_passed:
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.BLOCKED,
+            )
+
+        elif change.dpo_required or change.grc_required:
+            if not (
+                dpo_approved
+                and grc_approved
+            ):
+                updated = replace(
+                    change,
+                    status=(
+                        PrivacyChangeStatus.PENDING_DPO_GRC
+                    ),
+                )
+            else:
+                updated = replace(
+                    change,
+                    status=(
+                        PrivacyChangeStatus.APPROVED
+                    ),
+                )
+
+        else:
+            updated = replace(
+                change,
+                status=(
+                    PrivacyChangeStatus.APPROVED
+                ),
+            )
+
+        self._save(updated)
+
+        return updated
+
+    async def route_and_escalate(
+        self,
+        change: PrivacyChange,
+    ) -> PrivacyChange:
+        """Run automated validation and escalate when governance requires it.
+
+        Email is sent ONLY when:
+
+        1. PrivacyValidationService returns PASS;
+        2. the change requires DPO/GRC review;
+        3. the change is not already approved.
+
+        Email delivery never changes the governance status to APPROVED.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        if self._validation is None:
+            raise RuntimeError(
+                "PrivacyValidationService is required "
+                "for automatic governance routing."
+            )
+
+        if self._approval_email is None:
+            raise RuntimeError(
+                "PrivacyApprovalEmailService is required "
+                "for automatic governance escalation."
+            )
+
+        validation = self._validation.validate()
+
+        if validation.status != "PASS":
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.BLOCKED,
+            )
+
+            self._save(updated)
+            return updated
+
+        if not (
+            change.dpo_required
+            or change.grc_required
+        ):
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.APPROVED,
+            )
+
+            self._save(updated)
+            return updated
+
+        updated = replace(
+            change,
+            status=(
+                PrivacyChangeStatus.PENDING_DPO_GRC
+            ),
+        )
+
+        self._save(updated)
+
+        self._approval_email.escalate(
+    change=updated,
+    validation_passed=True,
+)
+        return updated
+
+    def can_proceed(
+        self,
+        change_id: str,
+    ) -> bool:
+        change = self._registry.get(
+            change_id
+        )
+
+        return bool(
+            change
+            and change.status
+            == PrivacyChangeStatus.APPROVED
+        )
+
+    def _resolve_validation(
+        self,
+        explicit_result: bool | None,
+    ) -> bool:
+        if self._validation is not None:
+            result = self._validation.validate()
+
+            return (
+                result.status == "PASS"
+            )
+
+        if explicit_result is None:
+            raise ValueError(
+                "automated_validation_passed is required "
+                "when no PrivacyValidationService is configured."
+            )
+
+        return explicit_result
+
+    def _save(
+        self,
+        change: PrivacyChange,
+    ) -> None:
+        existing = self._registry.get(
+            change.change_id
+        )
+
+        if existing is None:
+            self._registry.register(
+                change
+            )
+        else:
+            self._registry.update(
+                change
+            )
+
+======================================================================
+CURRENT E2E TEST
+======================================================================
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from backend.app.application.privacy.data_processing_map import (
+    DataProcessingMap,
+    DataProcessingMapEntry,
+)
+from backend.app.application.privacy.dpia_screening import (
+    DPIAScreening,
+    DPIAScreeningRegistry,
+)
+from backend.app.application.privacy.processing_activity import (
+    ProcessingActivity,
+)
+from backend.app.application.privacy.processing_registry import (
+    ProcessingRegistry,
+)
+from backend.app.application.privacy.processor_registry import (
+    ProcessorRecord,
+    ProcessorRegistry,
+)
+from backend.app.application.privacy.privacy_approval_email_service import (
+    PrivacyApprovalEmailService,
+)
+from backend.app.application.privacy.privacy_change import (
+    PrivacyChange,
+    PrivacyChangeRisk,
+    PrivacyChangeStatus,
+)
+from backend.app.application.privacy.privacy_change_registry import (
+    PrivacyChangeRegistry,
+)
+from backend.app.application.privacy.privacy_governance_gate import (
+    PrivacyGovernanceGate,
+)
+from backend.app.application.privacy.privacy_validation_service import (
+    PrivacyValidationService,
+)
+from backend.app.application.privacy.retention_registry import (
+    RetentionRegistry,
+    RetentionRule,
+)
+from backend.app.infrastructure.email.resend_approval_email_sender import (
+    ResendApprovalEmailSender,
+)
+
+
+# ---------------------------------------------------------------------------
+# REAL E2E TEST SAFETY SWITCH
+# ---------------------------------------------------------------------------
+
+E2E_ENABLED = (
+    os.getenv(
+        "PRIVACY_E2E_SEND_EMAIL",
+        "",
+    )
+    .strip()
+    .lower()
+    == "true"
+)
+
+
+# ---------------------------------------------------------------------------
+# Controlled E2E identifiers
+# ---------------------------------------------------------------------------
+
+PROCESSING_ID = "PROC-E2E-001"
+DATA_MAP_ID = "MAP-E2E-001"
+RETENTION_ID = "RET-E2E-001"
+PROCESSOR_ID = "PROC-PROVIDER-E2E-001"
+DPIA_SCREENING_ID = "DPIA-E2E-001"
+CHANGE_ID = "PCR-E2E-001"
+
+
+# ---------------------------------------------------------------------------
+# Configuration validation
+# ---------------------------------------------------------------------------
+
+
+def _require_e2e_configuration() -> None:
+    """
+    Fail safely when the real Resend E2E test is explicitly enabled.
+
+    The API key is never printed.
+    """
+
+    required = {
+        "RESEND_API_KEY": os.getenv(
+            "RESEND_API_KEY",
+            "",
+        ).strip(),
+        "PRIVACY_APPROVAL_EMAIL_FROM": os.getenv(
+            "PRIVACY_APPROVAL_EMAIL_FROM",
+            "",
+        ).strip(),
+        "PRIVACY_APPROVAL_EMAIL_TO": os.getenv(
+            "PRIVACY_APPROVAL_EMAIL_TO",
+            "",
+        ).strip(),
+    }
+
+    missing = [
+        name
+        for name, value in required.items()
+        if not value
+    ]
+
+    if missing:
+        pytest.fail(
+            "Privacy Resend E2E test is enabled, but required "
+            "configuration is missing: "
+            f"{', '.join(missing)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Real PrivacyValidationService
+# ---------------------------------------------------------------------------
+
+
+def _build_validation_service() -> PrivacyValidationService:
+    """
+    Build the real deterministic PrivacyValidationService.
+
+    This is intentionally not a fake validation service.
+
+    The E2E test must prove that the actual privacy validation layer
+    passes before an email can be sent.
+    """
+
+    processing_activity = ProcessingActivity(
+        processing_id=PROCESSING_ID,
+        name="Beta 1 Privacy Governance E2E Test",
+        purpose=(
+            "Controlled end-to-end validation of the "
+            "EasyChatBot privacy governance workflow."
+        ),
+        data_categories=(
+            "account identifier",
+            "learning interaction data",
+        ),
+        data_subjects=(
+            "registered learner",
+        ),
+        source=(
+            "EasyChatBot application",
+        ),
+        destinations=(
+            "EasyChatBot backend",
+            "approved email recipient",
+        ),
+        legal_basis=(
+            "Documented Beta 1 lawful basis recorded in the "
+            "controlled privacy assessment."
+        ),
+        retention_id=RETENTION_ID,
+        processor_ids=(
+            PROCESSOR_ID,
+        ),
+        data_map_id=DATA_MAP_ID,
+        dpia_screening_id=DPIA_SCREENING_ID,
+        gdpr_references=(
+            "GDPR Art. 5(1)(a)",
+            "GDPR Art. 5(1)(b)",
+            "GDPR Art. 6",
+            "GDPR Art. 13/14",
+            "GDPR Art. 28",
+            "GDPR Art. 30",
+            "GDPR Art. 35 where applicable",
+        ),
+        security_controls=(
+            "access control",
+            "least privilege",
+            "audit logging",
+            "encryption in transit",
+        ),
+        approval_status="APPROVED",
+    )
+
+    processing_registry = ProcessingRegistry(
+        [
+            processing_activity,
+        ]
+    )
+
+    data_processing_map = DataProcessingMap(
+        [
+            DataProcessingMapEntry(
+                map_id=DATA_MAP_ID,
+                processing_id=PROCESSING_ID,
+                source="EasyChatBot application",
+                input_data=(
+                    "account identifier",
+                    "learning interaction data",
+                ),
+                runtime_processing=(
+                    "privacy validation",
+                    "governance routing",
+                ),
+                pseudonymisation=(
+                    "Learner identifiers are minimised "
+                    "and pseudonymised where applicable."
+                ),
+                persistence=(
+                    "controlled governance registry",
+                ),
+                destinations=(
+                    "EasyChatBot backend",
+                    "approved email recipient",
+                ),
+                third_country_transfer=False,
+                transfer_safeguard=None,
+            ),
+        ]
+    )
+
+    retention_registry = RetentionRegistry(
+        [
+            RetentionRule(
+                retention_id=RETENTION_ID,
+                data_domain="privacy governance",
+                record_type="privacy change evidence",
+                retention_period=(
+                    "Beta 1 controlled retention period"
+                ),
+                trigger="governance record closure",
+                deletion_action=(
+                    "delete or securely dispose of the record "
+                    "according to the approved retention policy"
+                ),
+                legal_policy_basis=(
+                    "Controlled privacy/GRC retention policy."
+                ),
+            ),
+        ]
+    )
+
+    processor_registry = ProcessorRegistry(
+        [
+            ProcessorRecord(
+                processor_id=PROCESSOR_ID,
+                provider_name="Resend",
+                role="email delivery provider",
+                processor_agreement_art28=(
+                    "Contractual processor assessment required "
+                    "and maintained in the processor registry."
+                ),
+                hosting_location=(
+                    "Configured provider environment"
+                ),
+                third_country=False,
+                safeguard_art46_47=None,
+                dpo_status="REVIEWED",
+                grc_status="REVIEWED",
+                legal_status="REVIEWED",
+            ),
+        ]
+    )
+
+    dpia_registry = DPIAScreeningRegistry(
+        [
+            DPIAScreening(
+                screening_id=DPIA_SCREENING_ID,
+                processing_id=PROCESSING_ID,
+                overall_risk="LOW",
+                dpia_required="NO",
+                dpo_assessment=(
+                    "Screened for Beta 1 scope."
+                ),
+                grc_assessment=(
+                    "Screened for Beta 1 governance scope."
+                ),
+                status="COMPLETED",
+            ),
+        ]
+    )
+
+    return PrivacyValidationService(
+        processing_registry=processing_registry,
+        data_processing_map=data_processing_map,
+        retention_registry=retention_registry,
+        processor_registry=processor_registry,
+        dpia_registry=dpia_registry,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Controlled Privacy Change
+# ---------------------------------------------------------------------------
+
+
+def _build_change() -> PrivacyChange:
+    """
+    Create the controlled PCR-E2E-001 governance change.
+    """
+
+    return PrivacyChange(
+        change_id=CHANGE_ID,
+        title="Beta 1 Privacy Governance Email Test",
+        description=(
+            "Controlled end-to-end test proving that a privacy "
+            "change which passes automated privacy validation "
+            "and requires DPO/GRC review generates an approval "
+            "escalation through Resend."
+        ),
+        affected_processing_ids=[
+            PROCESSING_ID,
+        ],
+        affected_data_map_ids=[
+            DATA_MAP_ID,
+        ],
+        risk=PrivacyChangeRisk.MEDIUM,
+        status=PrivacyChangeStatus.DRAFT,
+        dpo_required=True,
+        grc_required=True,
+        metadata={
+            "test_type": "controlled_e2e",
+            "test_id": CHANGE_ID,
+            "purpose": (
+                "Verify Resend delivery and governance routing."
+            ),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Real Resend E2E test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not E2E_ENABLED,
+    reason=(
+        "Real Resend delivery disabled. Set "
+        "PRIVACY_E2E_SEND_EMAIL=true to explicitly run "
+        "this test."
+    ),
+)
+async def test_privacy_governance_resend_e2e():
+    """
+    Controlled real Resend E2E test.
+
+    The expected flow is:
+
+        PrivacyValidationService
+                    |
+                  PASS
+                    |
+                    v
+        PrivacyGovernanceGate
+                    |
+                    v
+           PENDING_DPO_GRC
+                    |
+                    v
+        PrivacyApprovalEmailService
+                    |
+                    v
+        ResendApprovalEmailSender
+                    |
+                    v
+                 Resend
+                    |
+                    v
+          DPO/GRC mailbox
+
+    Critical governance invariant:
+
+        Email sent != governance approval.
+    """
+
+    # ------------------------------------------------------------------
+    # 0. Verify that the explicit E2E configuration exists.
+    # ------------------------------------------------------------------
+
+    _require_e2e_configuration()
+
+    # ------------------------------------------------------------------
+    # 1. Build the REAL PrivacyValidationService.
+    # ------------------------------------------------------------------
+
+    validation_service = _build_validation_service()
+
+    # ------------------------------------------------------------------
+    # 2. Execute REAL automated privacy validation.
+    # ------------------------------------------------------------------
+
+    validation = validation_service.validate()
+
+    assert validation.status == "PASS", (
+        "The controlled E2E processing activity must pass "
+        "PrivacyValidationService before any email can be sent. "
+        f"Failures: {validation.failures}"
+    )
+
+    assert validation.failures == ()
+
+    assert validation.checks > 0
+
+    assert (
+        validation.passed
+        == validation.checks
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Build the REAL Resend infrastructure adapter.
+    # ------------------------------------------------------------------
+
+    resend_sender = ResendApprovalEmailSender(
+        api_key=os.environ[
+            "RESEND_API_KEY"
+        ],
+        sender_email=os.environ[
+            "PRIVACY_APPROVAL_EMAIL_FROM"
+        ],
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Build the REAL PrivacyApprovalEmailService.
+    # ------------------------------------------------------------------
+
+    approval_email_service = (
+        PrivacyApprovalEmailService(
+            sender=resend_sender,
+            approval_recipient=os.environ[
+                "PRIVACY_APPROVAL_EMAIL_TO"
+            ],
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Build the REAL governance registry and gate.
+    # ------------------------------------------------------------------
+
+    registry = PrivacyChangeRegistry()
+
+    gate = PrivacyGovernanceGate(
+        registry=registry,
+        validation_service=validation_service,
+        approval_email_service=approval_email_service,
+    )
+
+    change = _build_change()
+
+    # ------------------------------------------------------------------
+    # 6. Execute the REAL governance flow.
+    # ------------------------------------------------------------------
+
+    result = await gate.route_and_escalate(
+        change
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Verify the change identity.
+    # ------------------------------------------------------------------
+
+    assert (
+        result.change_id
+        == CHANGE_ID
+    )
+
+    # ------------------------------------------------------------------
+    # 8. Verify the governance state.
+    # ------------------------------------------------------------------
+
+    assert (
+        result.status
+        == PrivacyChangeStatus.PENDING_DPO_GRC
+    )
+
+    # ------------------------------------------------------------------
+    # 9. CRITICAL GOVERNANCE CONTROL:
+    #
+    #    Email delivery must NOT approve the change.
+    # ------------------------------------------------------------------
+
+    assert (
+        result.status
+        != PrivacyChangeStatus.APPROVED
+    )
+
+    assert (
+        gate.can_proceed(
+            CHANGE_ID
+        )
+        is False
+    )
+
+    # ------------------------------------------------------------------
+    # 10. Verify that the change exists in the registry.
+    # ------------------------------------------------------------------
+
+    registered = registry.get(
+        CHANGE_ID
+    )
+
+    assert registered is not None
+
+    assert (
+        registered.status
+        == PrivacyChangeStatus.PENDING_DPO_GRC
+    )
+
+    # ------------------------------------------------------------------
+    # 11. Controlled success output.
+    #
+    #     ResendApprovalEmailSender raises an exception if the
+    #     Resend delivery call fails. Therefore reaching this point
+    #     means the provider call completed without an exception.
+    # ------------------------------------------------------------------
+
+    print(
+        "\n"
+        "============================================================\n"
+        "PRIVACY GOVERNANCE RESEND E2E TEST PASSED\n"
+        "============================================================\n"
+        f"Change ID: {CHANGE_ID}\n"
+        f"Validation: {validation.status}\n"
+        f"Checks: {validation.checks}\n"
+        f"Passed: {validation.passed}\n"
+        "DPO required: YES\n"
+        "GRC required: YES\n"
+        "Governance status: PENDING_DPO_GRC\n"
+        "Email delivery: Resend accepted without exception\n"
+        "Governance approval: NOT GRANTED\n"
+        "============================================================\n"
+    )
+
+======================================================================
+CURRENT OLD SENDER TEST
+======================================================================
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from backend.app.application.privacy.privacy_approval_email_service import (
+    ApprovalEmailRequest,
+)
+from backend.app.infrastructure.email.resend_approval_email_sender import (
+    ResendApprovalEmailSender,
+)
+
+
+def make_request() -> ApprovalEmailRequest:
+    return ApprovalEmailRequest(
+        change_id="PCR-TEST-001",
+        recipient="davdbarbero1999@gmail.com",
+        subject="[EasyChatBot Privacy Governance] Approval Required",
+        body=(
+            "EasyChatBot Beta 1 Privacy Governance Review\n"
+            "\n"
+            "Explicit human approval is required."
+        ),
+        requires_dpo_approval=True,
+        requires_grc_approval=True,
+    )
+
+
+def test_resend_sender_sends_expected_payload() -> None:
+    sender = ResendApprovalEmailSender(
+        api_key="re_test_key",
+        sender_email="privacy@example.com",
+    )
+
+    request = make_request()
+
+    with patch(
+        "backend.app.infrastructure.email."
+        "resend_approval_email_sender.resend.Emails.send"
+    ) as mock_send:
+        sender.send(request)
+
+    mock_send.assert_called_once_with(
+        {
+            "from": "privacy@example.com",
+            "to": ["davdbarbero1999@gmail.com"],
+            "subject": (
+                "[EasyChatBot Privacy Governance] "
+                "Approval Required"
+            ),
+            "text": (
+                "EasyChatBot Beta 1 Privacy Governance Review\n"
+                "\n"
+                "Explicit human approval is required."
+            ),
+        }
+    )
+
+
+def test_resend_sender_requires_api_key() -> None:
+    sender = ResendApprovalEmailSender(
+        api_key="",
+        sender_email="privacy@example.com",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="RESEND_API_KEY",
+    ):
+        sender.send(make_request())
+
+
+def test_resend_sender_requires_sender_email() -> None:
+    sender = ResendApprovalEmailSender(
+        api_key="re_test_key",
+        sender_email="",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PRIVACY_APPROVAL_EMAIL_FROM",
+    ):
+        sender.send(make_request())
+
+
+def test_resend_sender_rejects_none_request() -> None:
+    sender = ResendApprovalEmailSender(
+        api_key="re_test_key",
+        sender_email="privacy@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="request cannot be None",
+    ):
+        sender.send(None)  # type: ignore[arg-type]
+
+
+def test_resend_sender_surfaces_provider_failure() -> None:
+    sender = ResendApprovalEmailSender(
+        api_key="re_test_key",
+        sender_email="privacy@example.com",
+    )
+
+    with patch(
+        "backend.app.infrastructure.email."
+        "resend_approval_email_sender.resend.Emails.send",
+        side_effect=Exception("provider unavailable"),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="Resend privacy approval email delivery failed",
+        ):
+            sender.send(make_request())
+
+
+def test_resend_sender_does_not_change_governance_state() -> None:
+    """Infrastructure adapter only delivers email.
+
+    Governance decisions remain owned by PrivacyGovernanceGate.
+    """
+
+    sender = ResendApprovalEmailSender(
+        api_key="re_test_key",
+        sender_email="privacy@example.com",
+    )
+
+    request = make_request()
+
+    with patch(
+        "backend.app.infrastructure.email."
+        "resend_approval_email_sender.resend.Emails.send"
+    ) as mock_send:
+        sender.send(request)
+
+    assert request.requires_dpo_approval is True
+    assert request.requires_grc_approval is True
+
+    mock_send.assert_called_once()
+
+======================================================================
+CURRENT NEW SENDER TESTS
+======================================================================
+
+
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\e2e\test_privacy_governance_resend_e2e.py
+LineNumber : 47
+Line       :     ResendApprovalEmailSender,
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\e2e\test_privacy_governance_resend_e2e.py
+LineNumber : 363
+Line       :         ResendApprovalEmailSender
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\e2e\test_privacy_governance_resend_e2e.py
+LineNumber : 413
+Line       :     resend_sender = ResendApprovalEmailSender(
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\e2e\test_privacy_governance_resend_e2e.py
+LineNumber : 511
+Line       :     #     ResendApprovalEmailSender raises an exception if the
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 11
+Line       :     ResendApprovalEmailSender,
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 31
+Line       :     sender = ResendApprovalEmailSender(
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 62
+Line       :     sender = ResendApprovalEmailSender(
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 75
+Line       :     sender = ResendApprovalEmailSender(
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 88
+Line       :     sender = ResendApprovalEmailSender(
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 101
+Line       :     sender = ResendApprovalEmailSender(
+
+Path       : C:\AI Folder\EasyChatBot-Hackathon\tests\infrastructure\test_resend_approval_email_sender.py
+LineNumber : 124
+Line       :     sender = ResendApprovalEmailSender(
+
+
+
+
+
+======================================================================
+END
+======================================================================
+
+No files modified by this inspection.
+

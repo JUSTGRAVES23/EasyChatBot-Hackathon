@@ -20,19 +20,10 @@ Does NOT:
 
 from __future__ import annotations
 
-
 from contextlib import asynccontextmanager
 
-
-from fastapi import (
-    FastAPI,
-)
-
-
-from fastapi.middleware.cors import (
-    CORSMiddleware,
-)
-
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 
 #
@@ -45,7 +36,6 @@ from fastapi.middleware.cors import (
 from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
     create_cybersecurity_scheduler_runtime,
 )
-
 
 
 #
@@ -64,7 +54,6 @@ from backend.governance.api.governance_audit_api import (
 )
 
 
-
 #
 # Operations Center Governance API
 #
@@ -81,7 +70,6 @@ from backend.governance.api.governance_operations_api import (
 )
 
 
-
 #
 # Governance Evidence Timeline API
 #
@@ -96,7 +84,6 @@ from backend.governance.api.governance_operations_api import (
 from backend.governance.api.governance_evidence_api import (
     router as governance_evidence_router,
 )
-
 
 
 #
@@ -123,6 +110,44 @@ from backend.governance.api.governance_change_lifecycle_api import (
 )
 
 
+#
+# Provider Management Controls
+#
+# Human-controlled provider delivery governance.
+#
+# Provider Management owns the control.
+# Governance Center observes and explains the state.
+#
+
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+
+
+#
+# Privacy Governance Operations Center API
+#
+# Privacy governance API boundary.
+#
+# Provides:
+# - governance summary;
+# - governance status chart;
+# - governance case list;
+# - governance case detail;
+# - explicit human governance decisions;
+# - controlled Beta/demo case creation.
+#
+# Decision logic remains inside the application service layer.
+#
+
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+
+
+#
+# Voice APIs
+#
 
 from app.api.voice_calls import (
     router as voice_calls_router,
@@ -144,10 +169,13 @@ from app.api.voice_notification_acceptance import (
 )
 
 
+#
+# AI Operations Center
+#
+
 from app.api.operations_center import (
     router as operations_center_router,
 )
-
 
 
 #
@@ -159,7 +187,6 @@ from app.api.cybersecurity_intelligence import (
 )
 
 
-
 #
 # Cybersecurity Decision Support API
 #
@@ -167,7 +194,6 @@ from app.api.cybersecurity_intelligence import (
 from app.api.cybersecurity_decision_support import (
     router as cybersecurity_decision_support_router,
 )
-
 
 
 #
@@ -179,7 +205,6 @@ from app.api.cybersecurity_reports import (
 )
 
 
-
 #
 # Cybersecurity Live Reports API
 #
@@ -189,15 +214,11 @@ from app.api.cybersecurity_live_reports import (
 )
 
 
-
 #
 # Scheduler runtime instance
 #
 
-scheduler_runtime = (
-    create_cybersecurity_scheduler_runtime()
-)
-
+scheduler_runtime = create_cybersecurity_scheduler_runtime()
 
 
 @asynccontextmanager
@@ -216,37 +237,25 @@ async def lifespan(
     No business logic belongs here.
     """
 
-
     try:
-
         await scheduler_runtime.start()
 
-
     except Exception as exc:
-
         print(
             "Cybersecurity scheduler startup failed:",
             exc,
         )
 
-
-
     yield
 
-
-
     try:
-
         await scheduler_runtime.stop()
 
-
     except Exception as exc:
-
         print(
             "Cybersecurity scheduler shutdown failed:",
             exc,
         )
-
 
 
 def create_application() -> FastAPI:
@@ -254,54 +263,33 @@ def create_application() -> FastAPI:
     Create and configure FastAPI application.
     """
 
-
     application = FastAPI(
-
         title="EasyChatBot API",
-
-        description=(
-            "AI character learning platform API"
-        ),
-
+        description="AI character learning platform API",
         version="0.1.0",
-
         lifespan=lifespan,
-
     )
-
-
 
     #
     # CORS
     #
 
     application.add_middleware(
-
         CORSMiddleware,
-
         allow_origins=[
-
             "http://localhost:3000",
-
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
         ],
-
         allow_credentials=True,
-
         allow_methods=[
-
             "*",
-
         ],
-
         allow_headers=[
-
             "*",
-
         ],
-
     )
-
-
 
     #
     # Voice APIs
@@ -311,22 +299,17 @@ def create_application() -> FastAPI:
         voice_calls_router,
     )
 
-
     application.include_router(
         voice_reconnect_router,
     )
-
 
     application.include_router(
         voice_call_trigger_router,
     )
 
-
     application.include_router(
         voice_notification_acceptance_router,
     )
-
-
 
     #
     # AI Operations Center
@@ -336,7 +319,51 @@ def create_application() -> FastAPI:
         operations_center_router,
     )
 
+    #
+    # Privacy Governance Operations Center
+    #
+    # Existing privacy governance API contract.
+    #
+    # Read endpoints:
+    #
+    # GET /api/privacy/governance/summary
+    # GET /api/privacy/governance/status-chart
+    # GET /api/privacy/governance/cases
+    # GET /api/privacy/governance/cases/{case_id}
+    #
+    # Decision endpoints:
+    #
+    # POST /api/privacy/governance/cases/{case_id}/approve
+    # POST /api/privacy/governance/cases/{case_id}/reject
+    # POST /api/privacy/governance/cases/{case_id}/request-changes
+    #
+    # Development/demo:
+    #
+    # POST /api/privacy/governance/demo/create-case
+    #
+    # All remain behind the established privacy governance router.
+    #
 
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    #
+    # Provider Management Controls
+    #
+    # Human-controlled provider delivery controls.
+    #
+    # POST /controls/providers/pause
+    # POST /controls/providers/resume
+    # GET  /controls/providers/status
+    #
+    # Provider Management remains the authority
+    # for changing provider execution state.
+    #
+
+    application.include_router(
+        provider_management_controls_router,
+    )
 
     #
     # Governance Audit API
@@ -348,8 +375,6 @@ def create_application() -> FastAPI:
         governance_audit_router,
     )
 
-
-
     #
     # Operations Center Governance API
     #
@@ -359,8 +384,6 @@ def create_application() -> FastAPI:
     application.include_router(
         governance_operations_router,
     )
-
-
 
     #
     # Governance Evidence Timeline API
@@ -372,8 +395,6 @@ def create_application() -> FastAPI:
         governance_evidence_router,
     )
 
-
-
     #
     # Governance Change Lifecycle API
     #
@@ -384,8 +405,6 @@ def create_application() -> FastAPI:
         governance_change_lifecycle_router,
     )
 
-
-
     #
     # Cybersecurity Intelligence
     #
@@ -393,8 +412,6 @@ def create_application() -> FastAPI:
     application.include_router(
         cybersecurity_intelligence_router,
     )
-
-
 
     #
     # Cybersecurity Decision Support
@@ -404,8 +421,6 @@ def create_application() -> FastAPI:
         cybersecurity_decision_support_router,
     )
 
-
-
     #
     # Cybersecurity Reports
     #
@@ -413,8 +428,6 @@ def create_application() -> FastAPI:
     application.include_router(
         cybersecurity_reports_router,
     )
-
-
 
     #
     # Cybersecurity Live Reports
@@ -424,13 +437,10 @@ def create_application() -> FastAPI:
         cybersecurity_live_reports_router,
     )
 
-
     return application
 
 
-
 app = create_application()
-
 
 
 __all__ = [

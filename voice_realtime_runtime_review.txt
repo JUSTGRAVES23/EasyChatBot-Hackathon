@@ -1,0 +1,414 @@
+﻿"""
+Voice Character Agent.
+
+Runtime coordinator for AI character voice sessions.
+
+Responsibilities:
+- Hold interaction context.
+- Coordinate conversation turns.
+- Apply character identity.
+
+Does NOT:
+- Connect to LiveKit.
+- Perform speech recognition.
+- Generate audio.
+- Call providers directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCharacterAgent:
+    """
+    AI character voice runtime.
+
+    Provider independent.
+    """
+
+    context: InteractionContext
+
+
+    def get_character_id(
+        self,
+    ) -> str:
+        """
+        Return active character.
+        """
+
+        return (
+            self.context
+            .character
+            .character_id
+        )
+
+
+    def get_language_code(
+        self,
+    ) -> str:
+        """
+        Return interaction language.
+        """
+
+        return (
+            self.context
+            .world
+            .language_code
+        )
+"""
+Voice Character Runtime.
+
+Coordinates character identity
+with speech capabilities.
+
+Responsibilities:
+- Hold character runtime context.
+- Generate character speech requests.
+- Preserve personality boundaries.
+
+Does NOT:
+- Call providers directly.
+- Manage LiveKit.
+- Store conversations.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCharacterRuntime:
+    """
+    Runtime for speaking AI characters.
+    """
+
+    context: InteractionContext
+
+    speech_runtime: VoiceSpeechRuntime
+
+
+
+    def speak(
+        self,
+        text: str,
+    ) -> bytes:
+        """
+        Generate character audio.
+
+        Uses the selected character voice profile.
+        """
+
+        return self.speech_runtime.synthesize(
+            text=text,
+            voice_profile=(
+                self.context
+                .voice
+                .voice_profile
+            ),
+            language_code=(
+                self.context
+                .voice
+                .language_code
+            ),
+        )
+
+
+
+    def character_id(
+        self,
+    ) -> str:
+        """
+        Return active character identity.
+        """
+
+        return (
+            self.context
+            .character
+            .character_id
+        )
+"""
+Voice Speech Runtime.
+
+Runtime bridge between AI characters
+and speech providers.
+
+Responsibilities:
+- Coordinate speech generation.
+- Use provider abstraction.
+- Keep AI runtime provider independent.
+
+Does NOT:
+- Call vendors directly.
+- Manage LiveKit rooms.
+- Store secrets.
+- Manage conversations.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.providers.speech.speech_provider import (
+    SpeechProvider,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceSpeechRuntime:
+    """
+    Runtime service for speech operations.
+
+    Depends on the SpeechProvider abstraction.
+    """
+
+    speech_provider: SpeechProvider
+
+
+
+    def transcribe(
+        self,
+        *,
+        audio: bytes,
+        language_code: str,
+    ) -> str:
+        """
+        Convert audio input into text.
+        """
+
+        return self.speech_provider.transcribe(
+            audio=audio,
+            language_code=language_code,
+        )
+
+
+
+    def synthesize(
+        self,
+        *,
+        text: str,
+        voice_profile: str,
+        language_code: str,
+    ) -> bytes:
+        """
+        Convert text into generated audio.
+        """
+
+        return self.speech_provider.synthesize(
+            text=text,
+            voice_profile=voice_profile,
+            language_code=language_code,
+        )
+"""
+Voice Call Runtime.
+
+Runtime orchestration layer for
+AI character voice calls.
+
+Responsibilities:
+- Manage voice call lifecycle execution.
+- Coordinate voice session activation.
+- Apply runtime boundaries.
+- Return runtime state changes.
+
+Does NOT:
+- Handle HTTP requests.
+- Create API responses.
+- Manage persistence.
+- Select providers.
+- Directly manage LiveKit.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallRuntime:
+    """
+    Runtime coordinator for voice calls.
+    """
+
+
+
+    def prepare(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        Prepare a voice call for activation.
+
+        Transition:
+
+        CREATED
+            |
+            â†“
+        PREPARING
+            |
+            â†“
+        READY
+        """
+
+
+        if session.state not in {
+            VoiceCallState.CREATED,
+            VoiceCallState.PREPARING,
+        }:
+            raise ValueError(
+                "Voice call cannot be prepared "
+                f"from state {session.state.value}."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+
+    def activate(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        Activate a prepared voice call.
+
+        Transition:
+
+        READY
+          |
+          â†“
+        ACTIVE
+        """
+
+
+        if session.state != (
+            VoiceCallState.READY
+        ):
+            raise ValueError(
+                "Voice call must be ready "
+                "before activation."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def end(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        End an active voice call.
+
+        Transition:
+
+        ACTIVE
+          |
+          â†“
+        ENDED
+        """
+
+
+        if session.state != (
+            VoiceCallState.ACTIVE
+        ):
+            raise ValueError(
+                "Only active calls can be ended."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ENDED,
+        )
+
+
+
+    def fail(
+        self,
+        *,
+        session: VoiceCallSession,
+    ) -> VoiceCallSession:
+        """
+        Mark voice call as failed.
+        """
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.FAILED,
+        )

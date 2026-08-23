@@ -1,0 +1,1780 @@
+﻿"""
+Voice Call Execution Coordinator.
+
+Application orchestration boundary
+between room preparation and runtime
+execution.
+
+Responsibilities:
+- Prepare room.
+- Start voice execution.
+- Coordinate application services.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers.
+- Execute audio directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionCoordinator:
+    """
+    Coordinates complete voice execution flow.
+    """
+
+    room_service: VoiceRoomService
+
+    execution_runtime: VoiceCallExecutionRuntime
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room and start execution.
+        """
+
+
+        room_configuration = (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+        session = (
+            self.execution_runtime
+            .start(
+                context=context,
+            )
+        )
+
+
+        return {
+            "room": room_configuration,
+            "session": session,
+        }
+"""
+Voice Call Execution Runtime.
+
+Runtime execution coordinator for
+AI character voice calls.
+
+Responsibilities:
+- Execute prepared voice call sessions.
+- Coordinate execution lifecycle.
+- Validate execution context.
+- Provide runtime boundaries.
+
+Does NOT:
+- Handle HTTP.
+- Persist sessions.
+- Manage authentication.
+- Own LiveKit connections.
+- Select providers.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionRuntime:
+    """
+    Executes prepared voice calls.
+    """
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Start voice call execution.
+
+        Expected lifecycle:
+
+        READY
+          |
+          â†“
+        ACTIVE
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.READY
+        ):
+            raise ValueError(
+                "Voice call must be READY "
+                "before execution."
+            )
+
+
+        if not context.room.has_character():
+
+            raise ValueError(
+                "Voice call room requires "
+                "a character participant."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def stop(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Stop voice call execution.
+
+        Expected lifecycle:
+
+        ACTIVE
+          |
+          â†“
+        ENDED
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.ACTIVE
+        ):
+            raise ValueError(
+                "Only ACTIVE voice calls "
+                "can be stopped."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ENDED,
+        )
+
+
+
+    def fail(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Mark execution as failed.
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.FAILED,
+        )
+"""
+Voice Call Context Factory.
+
+Application factory responsible for
+creating voice execution contexts.
+
+Responsibilities:
+- Convert voice call requests into
+  domain execution context.
+- Create voice sessions.
+- Create room participants.
+- Build validated execution boundary.
+
+Does NOT:
+- Handle HTTP.
+- Execute runtime.
+- Connect LiveKit.
+- Select providers.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallContextFactory:
+    """
+    Creates voice execution contexts.
+    """
+
+
+
+    def create(
+        self,
+        *,
+        request: VoiceCallRequest,
+    ) -> VoiceCallExecutionContext:
+        """
+        Create execution context.
+
+        Lifecycle starts:
+
+            READY
+              |
+              â†“
+          Runtime ACTIVE
+        """
+
+
+        session = VoiceCallSession(
+            session_id=(
+                f"{request.character_id}-"
+                f"{request.learner_id}"
+            ),
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+        room = VoiceCallRoom(
+            room_id=session.session_id,
+            participants=(
+                VoiceCallParticipant(
+                    participant_id=request.learner_id,
+                    role=(
+                        VoiceParticipantRole.LEARNER
+                    ),
+                    display_name="Learner",
+                ),
+                VoiceCallParticipant(
+                    participant_id=request.character_id,
+                    role=(
+                        VoiceParticipantRole.CHARACTER
+                    ),
+                    display_name=(
+                        request.character_id
+                    ),
+                ),
+            ),
+        )
+
+
+        return VoiceCallExecutionContext(
+            session=session,
+            room=room,
+        )
+
+
+
+__all__ = [
+    "VoiceCallContextFactory",
+]
+"""
+Voice Calls API Router.
+
+HTTP boundary for preparing
+character voice calls.
+
+Responsibilities:
+- Receive API requests.
+- Validate request payload.
+- Delegate to application services.
+- Return HTTP responses.
+
+Does NOT:
+- Execute AI agents.
+- Connect to LiveKit directly.
+- Manage conversations.
+- Select providers.
+- Create runtime dependencies.
+- Build domain execution contexts.
+"""
+
+from __future__ import annotations
+
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
+
+
+from pydantic import BaseModel
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+from app.application.uai.voice.voice_call_context_factory import (
+    VoiceCallContextFactory,
+)
+
+
+from app.application.composition.voice_lifecycle_composition import (
+    build_voice_call_lifecycle_service,
+)
+
+
+
+router = APIRouter(
+    prefix="/voice",
+    tags=[
+        "voice",
+    ],
+)
+
+
+
+class VoiceCallRequestModel(
+    BaseModel
+):
+    """
+    HTTP request model.
+    """
+
+    learner_id: str
+
+    world_id: str
+
+    character_id: str
+
+    language_code: str
+
+
+
+class VoiceCallResponseModel(
+    BaseModel
+):
+    """
+    HTTP response model.
+    """
+
+    room_name: str
+
+    character_id: str
+
+    language_code: str
+
+    provider: str
+
+    state: str
+
+    token: str
+
+    expires_at: str
+
+
+
+def get_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Dependency provider.
+
+    Composition decisions remain
+    outside the HTTP adapter.
+    """
+
+    return (
+        build_voice_call_lifecycle_service()
+    )
+
+
+
+def get_voice_call_context_factory(
+) -> VoiceCallContextFactory:
+    """
+    Dependency provider for context creation.
+
+    Domain creation remains inside
+    application layer.
+    """
+
+    return VoiceCallContextFactory()
+
+
+
+@router.post(
+    "/call",
+    response_model=VoiceCallResponseModel,
+)
+def prepare_voice_call(
+    request: VoiceCallRequestModel,
+    service: VoiceCallLifecycleService = Depends(
+        get_voice_call_lifecycle_service
+    ),
+    context_factory: VoiceCallContextFactory = Depends(
+        get_voice_call_context_factory
+    ),
+) -> VoiceCallResponseModel:
+    """
+    Prepare and start a character voice call.
+    """
+
+
+    try:
+
+        call_request = VoiceCallRequest(
+            learner_id=request.learner_id,
+            world_id=request.world_id,
+            character_id=request.character_id,
+            language_code=request.language_code,
+        )
+
+
+        context = (
+            context_factory.create(
+                request=call_request,
+            )
+        )
+
+
+        result = (
+            service.start_call(
+                context=context,
+            )
+        )
+
+
+        room = result["room"]
+
+        session = result["session"]
+
+        connection = result["connection"]
+
+
+        return VoiceCallResponseModel(
+            room_name=room["room_name"],
+            character_id=session.character_id,
+            language_code=session.language_code,
+            provider=room["provider"],
+            state=session.state.value,
+            token=connection.token,
+            expires_at=(
+                connection.expires_at
+                .isoformat()
+            ),
+        )
+
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+
+__all__ = [
+    "router",
+]
+"""
+Voice Runtime Contract Tests.
+
+Validates the boundary between:
+
+VoiceCallSession
+        |
+        â†“
+VoiceCallExecutionContext
+        |
+        â†“
+VoiceCallExecutionCoordinator
+        |
+        â†“
+VoiceCallExecutionRuntime
+
+
+Validates:
+- Session identity preservation.
+- Character propagation.
+- Language propagation.
+- Explicit runtime context.
+- Runtime does not mutate identity.
+
+Does NOT:
+- Test HTTP.
+- Test persistence.
+- Test external providers.
+"""
+
+from __future__ import annotations
+
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_runtime_coordinator(
+) -> VoiceCallExecutionCoordinator:
+    """
+    Create runtime coordinator.
+    """
+
+
+    room_service = (
+        VoiceRoomService(
+            room_adapter=(
+                VoiceRoomAdapter()
+            ),
+        )
+    )
+
+
+    runtime = (
+        VoiceCallExecutionRuntime()
+    )
+
+
+    return VoiceCallExecutionCoordinator(
+        room_service=room_service,
+        execution_runtime=runtime,
+    )
+
+
+
+def create_context(
+) -> VoiceCallExecutionContext:
+    """
+    Create valid runtime context.
+
+    Mirrors production domain contracts.
+    """
+
+
+    session = (
+        VoiceCallSession(
+            session_id="session-001",
+            learner_id="learner-001",
+            character_id="yeti",
+            world_id="french_world",
+            language_code="fr",
+            state=(
+                VoiceCallState.READY
+            ),
+        )
+    )
+
+
+
+    learner = (
+        VoiceCallParticipant(
+            participant_id="learner-001",
+            display_name="Learner",
+            role=(
+                VoiceParticipantRole.LEARNER
+            ),
+        )
+    )
+
+
+
+    character = (
+        VoiceCallParticipant(
+            participant_id="yeti",
+            display_name="Yeti",
+            role=(
+                VoiceParticipantRole.CHARACTER
+            ),
+        )
+    )
+
+
+
+    room = (
+        VoiceCallRoom(
+            room_id="room-001",
+            participants=(
+                learner,
+                character,
+            ),
+        )
+    )
+
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def test_runtime_contract_preserves_identity():
+
+    context = (
+        create_context()
+    )
+
+
+    coordinator = (
+        create_runtime_coordinator()
+    )
+
+
+    result = (
+        coordinator.start(
+            context=context,
+        )
+    )
+
+
+    assert result is not None
+
+
+    assert result["session"].learner_id == (
+        "learner-001"
+    )
+
+
+    assert result["session"].character_id == (
+        "yeti"
+    )
+
+
+    assert result["session"].language_code == (
+        "fr"
+    )
+
+
+
+def test_runtime_receives_explicit_context():
+
+    context = (
+        create_context()
+    )
+
+
+    assert context.session.learner_id == (
+        "learner-001"
+    )
+
+
+    assert context.session.character_id == (
+        "yeti"
+    )
+
+
+    assert context.session.world_id == (
+        "french_world"
+    )
+
+
+    assert context.session.language_code == (
+        "fr"
+    )
+
+
+    assert context.room.has_character()
+
+
+
+def test_runtime_does_not_modify_session_identity():
+
+    context = (
+        create_context()
+    )
+
+
+    original_session_id = (
+        context.session.session_id
+    )
+
+
+    original_character = (
+        context.session.character_id
+    )
+
+
+    coordinator = (
+        create_runtime_coordinator()
+    )
+
+
+    result = (
+        coordinator.start(
+            context=context,
+        )
+    )
+
+
+    assert result["session"].session_id == (
+        original_session_id
+    )
+
+
+    assert result["session"].character_id == (
+        original_character
+    )
+
+
+==================== backend/app/application/uai/voice/voice_call_execution_coordinator.py ====================
+
+"""
+Voice Call Execution Coordinator.
+
+Application orchestration boundary
+between room preparation and runtime
+execution.
+
+Responsibilities:
+- Prepare room.
+- Start voice execution.
+- Coordinate application services.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers.
+- Execute audio directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionCoordinator:
+    """
+    Coordinates complete voice execution flow.
+    """
+
+    room_service: VoiceRoomService
+
+    execution_runtime: VoiceCallExecutionRuntime
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room and start execution.
+        """
+
+
+        room_configuration = (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+        session = (
+            self.execution_runtime
+            .start(
+                context=context,
+            )
+        )
+
+
+        return {
+            "room": room_configuration,
+            "session": session,
+        }
+
+
+==================== backend/app/ai_runtime/voice/voice_call_execution_runtime.py ====================
+
+"""
+Voice Call Execution Runtime.
+
+Runtime execution coordinator for
+AI character voice calls.
+
+Responsibilities:
+- Execute prepared voice call sessions.
+- Coordinate execution lifecycle.
+- Validate execution context.
+- Provide runtime boundaries.
+
+Does NOT:
+- Handle HTTP.
+- Persist sessions.
+- Manage authentication.
+- Own LiveKit connections.
+- Select providers.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionRuntime:
+    """
+    Executes prepared voice calls.
+    """
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Start voice call execution.
+
+        Expected lifecycle:
+
+        READY
+          |
+          â†“
+        ACTIVE
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.READY
+        ):
+            raise ValueError(
+                "Voice call must be READY "
+                "before execution."
+            )
+
+
+        if not context.room.has_character():
+
+            raise ValueError(
+                "Voice call room requires "
+                "a character participant."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def stop(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Stop voice call execution.
+
+        Expected lifecycle:
+
+        ACTIVE
+          |
+          â†“
+        ENDED
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        if session.state != (
+            VoiceCallState.ACTIVE
+        ):
+            raise ValueError(
+                "Only ACTIVE voice calls "
+                "can be stopped."
+            )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.ENDED,
+        )
+
+
+
+    def fail(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> VoiceCallSession:
+        """
+        Mark execution as failed.
+        """
+
+
+        session = (
+            context.session
+        )
+
+
+        return VoiceCallSession(
+            session_id=session.session_id,
+            learner_id=session.learner_id,
+            character_id=session.character_id,
+            world_id=session.world_id,
+            language_code=session.language_code,
+            state=VoiceCallState.FAILED,
+        )
+
+
+==================== backend/app/application/uai/voice/voice_call_context_factory.py ====================
+
+"""
+Voice Call Context Factory.
+
+Application factory responsible for
+creating voice execution contexts.
+
+Responsibilities:
+- Convert voice call requests into
+  domain execution context.
+- Create voice sessions.
+- Create room participants.
+- Build validated execution boundary.
+
+Does NOT:
+- Handle HTTP.
+- Execute runtime.
+- Connect LiveKit.
+- Select providers.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallContextFactory:
+    """
+    Creates voice execution contexts.
+    """
+
+
+
+    def create(
+        self,
+        *,
+        request: VoiceCallRequest,
+    ) -> VoiceCallExecutionContext:
+        """
+        Create execution context.
+
+        Lifecycle starts:
+
+            READY
+              |
+              â†“
+          Runtime ACTIVE
+        """
+
+
+        session = VoiceCallSession(
+            session_id=(
+                f"{request.character_id}-"
+                f"{request.learner_id}"
+            ),
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+        room = VoiceCallRoom(
+            room_id=session.session_id,
+            participants=(
+                VoiceCallParticipant(
+                    participant_id=request.learner_id,
+                    role=(
+                        VoiceParticipantRole.LEARNER
+                    ),
+                    display_name="Learner",
+                ),
+                VoiceCallParticipant(
+                    participant_id=request.character_id,
+                    role=(
+                        VoiceParticipantRole.CHARACTER
+                    ),
+                    display_name=(
+                        request.character_id
+                    ),
+                ),
+            ),
+        )
+
+
+        return VoiceCallExecutionContext(
+            session=session,
+            room=room,
+        )
+
+
+
+__all__ = [
+    "VoiceCallContextFactory",
+]
+
+
+==================== backend/app/api/voice_calls.py ====================
+
+"""
+Voice Calls API Router.
+
+HTTP boundary for preparing
+character voice calls.
+
+Responsibilities:
+- Receive API requests.
+- Validate request payload.
+- Delegate to application services.
+- Return HTTP responses.
+
+Does NOT:
+- Execute AI agents.
+- Connect to LiveKit directly.
+- Manage conversations.
+- Select providers.
+- Create runtime dependencies.
+- Build domain execution contexts.
+"""
+
+from __future__ import annotations
+
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
+
+
+from pydantic import BaseModel
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+from app.application.uai.voice.voice_call_context_factory import (
+    VoiceCallContextFactory,
+)
+
+
+from app.application.composition.voice_lifecycle_composition import (
+    build_voice_call_lifecycle_service,
+)
+
+
+
+router = APIRouter(
+    prefix="/voice",
+    tags=[
+        "voice",
+    ],
+)
+
+
+
+class VoiceCallRequestModel(
+    BaseModel
+):
+    """
+    HTTP request model.
+    """
+
+    learner_id: str
+
+    world_id: str
+
+    character_id: str
+
+    language_code: str
+
+
+
+class VoiceCallResponseModel(
+    BaseModel
+):
+    """
+    HTTP response model.
+    """
+
+    room_name: str
+
+    character_id: str
+
+    language_code: str
+
+    provider: str
+
+    state: str
+
+    token: str
+
+    expires_at: str
+
+
+
+def get_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Dependency provider.
+
+    Composition decisions remain
+    outside the HTTP adapter.
+    """
+
+    return (
+        build_voice_call_lifecycle_service()
+    )
+
+
+
+def get_voice_call_context_factory(
+) -> VoiceCallContextFactory:
+    """
+    Dependency provider for context creation.
+
+    Domain creation remains inside
+    application layer.
+    """
+
+    return VoiceCallContextFactory()
+
+
+
+@router.post(
+    "/call",
+    response_model=VoiceCallResponseModel,
+)
+def prepare_voice_call(
+    request: VoiceCallRequestModel,
+    service: VoiceCallLifecycleService = Depends(
+        get_voice_call_lifecycle_service
+    ),
+    context_factory: VoiceCallContextFactory = Depends(
+        get_voice_call_context_factory
+    ),
+) -> VoiceCallResponseModel:
+    """
+    Prepare and start a character voice call.
+    """
+
+
+    try:
+
+        call_request = VoiceCallRequest(
+            learner_id=request.learner_id,
+            world_id=request.world_id,
+            character_id=request.character_id,
+            language_code=request.language_code,
+        )
+
+
+        context = (
+            context_factory.create(
+                request=call_request,
+            )
+        )
+
+
+        result = (
+            service.start_call(
+                context=context,
+            )
+        )
+
+
+        room = result["room"]
+
+        session = result["session"]
+
+        connection = result["connection"]
+
+
+        return VoiceCallResponseModel(
+            room_name=room["room_name"],
+            character_id=session.character_id,
+            language_code=session.language_code,
+            provider=room["provider"],
+            state=session.state.value,
+            token=connection.token,
+            expires_at=(
+                connection.expires_at
+                .isoformat()
+            ),
+        )
+
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+
+__all__ = [
+    "router",
+]
+
+
+==================== backend/tests/application/uai/voice/test_voice_runtime_contract.py ====================
+
+"""
+Voice Runtime Contract Tests.
+
+Validates the boundary between:
+
+VoiceCallSession
+        |
+        â†“
+VoiceCallExecutionContext
+        |
+        â†“
+VoiceCallExecutionCoordinator
+        |
+        â†“
+VoiceCallExecutionRuntime
+
+
+Validates:
+- Session identity preservation.
+- Character propagation.
+- Language propagation.
+- Explicit runtime context.
+- Runtime does not mutate identity.
+
+Does NOT:
+- Test HTTP.
+- Test persistence.
+- Test external providers.
+"""
+
+from __future__ import annotations
+
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_runtime_coordinator(
+) -> VoiceCallExecutionCoordinator:
+    """
+    Create runtime coordinator.
+    """
+
+
+    room_service = (
+        VoiceRoomService(
+            room_adapter=(
+                VoiceRoomAdapter()
+            ),
+        )
+    )
+
+
+    runtime = (
+        VoiceCallExecutionRuntime()
+    )
+
+
+    return VoiceCallExecutionCoordinator(
+        room_service=room_service,
+        execution_runtime=runtime,
+    )
+
+
+
+def create_context(
+) -> VoiceCallExecutionContext:
+    """
+    Create valid runtime context.
+
+    Mirrors production domain contracts.
+    """
+
+
+    session = (
+        VoiceCallSession(
+            session_id="session-001",
+            learner_id="learner-001",
+            character_id="yeti",
+            world_id="french_world",
+            language_code="fr",
+            state=(
+                VoiceCallState.READY
+            ),
+        )
+    )
+
+
+
+    learner = (
+        VoiceCallParticipant(
+            participant_id="learner-001",
+            display_name="Learner",
+            role=(
+                VoiceParticipantRole.LEARNER
+            ),
+        )
+    )
+
+
+
+    character = (
+        VoiceCallParticipant(
+            participant_id="yeti",
+            display_name="Yeti",
+            role=(
+                VoiceParticipantRole.CHARACTER
+            ),
+        )
+    )
+
+
+
+    room = (
+        VoiceCallRoom(
+            room_id="room-001",
+            participants=(
+                learner,
+                character,
+            ),
+        )
+    )
+
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def test_runtime_contract_preserves_identity():
+
+    context = (
+        create_context()
+    )
+
+
+    coordinator = (
+        create_runtime_coordinator()
+    )
+
+
+    result = (
+        coordinator.start(
+            context=context,
+        )
+    )
+
+
+    assert result is not None
+
+
+    assert result["session"].learner_id == (
+        "learner-001"
+    )
+
+
+    assert result["session"].character_id == (
+        "yeti"
+    )
+
+
+    assert result["session"].language_code == (
+        "fr"
+    )
+
+
+
+def test_runtime_receives_explicit_context():
+
+    context = (
+        create_context()
+    )
+
+
+    assert context.session.learner_id == (
+        "learner-001"
+    )
+
+
+    assert context.session.character_id == (
+        "yeti"
+    )
+
+
+    assert context.session.world_id == (
+        "french_world"
+    )
+
+
+    assert context.session.language_code == (
+        "fr"
+    )
+
+
+    assert context.room.has_character()
+
+
+
+def test_runtime_does_not_modify_session_identity():
+
+    context = (
+        create_context()
+    )
+
+
+    original_session_id = (
+        context.session.session_id
+    )
+
+
+    original_character = (
+        context.session.character_id
+    )
+
+
+    coordinator = (
+        create_runtime_coordinator()
+    )
+
+
+    result = (
+        coordinator.start(
+            context=context,
+        )
+    )
+
+
+    assert result["session"].session_id == (
+        original_session_id
+    )
+
+
+    assert result["session"].character_id == (
+        original_character
+    )

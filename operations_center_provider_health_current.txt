@@ -1,0 +1,1156 @@
+﻿============================================================
+===== FILE: .\app\application\provider_management\provider_health_application_service.py
+============================================================
+"""
+EasyChatBot provider health application service.
+
+Provides the controlled application boundary for ingesting
+provider health observations.
+
+Architecture:
+
+Provider Health Probe / Adapter
+        |
+        v
+ProviderHealthApplicationService
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+ProviderHealthMonitorService   ProviderIncidentService
+        |                             |
+        v                             v
+Health State / Read Model       Incident Lifecycle
+        |                             |
+        +-------------+---------------+
+                      |
+                      v
+               Operations Center
+
+
+Responsibilities:
+
+- accept explicit provider health observations;
+- delegate health processing to the existing monitor;
+- preserve ProviderHealthService as the authority for
+  health-state calculation;
+- process operational incident transitions;
+- return a stable application result;
+- keep provider probes and HTTP concerns outside this service.
+
+Does NOT:
+
+- execute providers;
+- perform health probes;
+- change Runtime routing;
+- select alternative providers;
+- send notifications directly;
+- approve operational actions;
+- modify infrastructure;
+- perform autonomous remediation.
+
+This is an application orchestration service.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthStatus,
+    ProviderHealthTransition,
+)
+
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+
+from app.application.provider_management.provider_incident_service import (
+    ProviderIncident,
+    ProviderIncidentService,
+)
+
+
+@dataclass(frozen=True)
+class ProviderHealthApplicationResult:
+    """
+    Stable result returned after processing a provider health
+    observation.
+    """
+
+    provider: str
+
+    model: str
+
+    capability: str
+
+    status: ProviderHealthStatus
+
+    transition: ProviderHealthTransition
+
+    incident: ProviderIncident | None
+
+
+class ProviderHealthApplicationService:
+    """
+    Application boundary for provider health ingestion.
+
+    The service coordinates the existing provider health
+    monitor and provider incident service.
+
+    It deliberately does not create a second
+    ProviderHealthService. The monitor remains the single
+    owner of provider health state.
+    """
+
+    def __init__(
+        self,
+        *,
+        health_monitor: ProviderHealthMonitorService,
+        incident_service: ProviderIncidentService,
+    ) -> None:
+        """
+        Initialise the provider health application service.
+        """
+
+        if health_monitor is None:
+            raise ValueError(
+                "Provider health monitor "
+                "cannot be None."
+            )
+
+        if incident_service is None:
+            raise ValueError(
+                "Provider incident service "
+                "cannot be None."
+            )
+
+        self._health_monitor = (
+            health_monitor
+        )
+
+        self._incident_service = (
+            incident_service
+        )
+
+    def observe(
+        self,
+        observation: ProviderHealthObservation,
+    ) -> ProviderHealthApplicationResult:
+        """
+        Process one provider health observation.
+
+        Health calculation and provider read-model state remain
+        owned by ProviderHealthMonitorService.
+
+        Incident lifecycle remains owned by
+        ProviderIncidentService.
+        """
+
+        if observation is None:
+            raise ValueError(
+                "Provider health observation "
+                "cannot be None."
+            )
+
+        transition = (
+            self._health_monitor
+            .observe(observation)
+        )
+
+        incident = (
+            self._incident_service
+            .process_transition(transition)
+        )
+
+        return ProviderHealthApplicationResult(
+            provider=observation.provider,
+            model=observation.model,
+            capability=observation.capability,
+            status=observation.status,
+            transition=transition.transition,
+            incident=incident,
+        )
+
+============================================================
+===== FILE: .\app\application\provider_management\provider_health_monitor_service.py
+============================================================
+"""
+EasyChatBot AI Operations Center provider health monitor.
+
+Coordinates provider health observations and their
+read-only operational projections.
+
+Architecture:
+
+Provider Health Observation
+        |
+        v
+ProviderHealthService
+        |
+        v
+ProviderHealthMonitorService
+        |
+        v
+ProviderHealthReadModel
+        |
+        v
+Operations Center
+
+
+Responsibilities:
+
+- accept provider health observations;
+- delegate health calculation to ProviderHealthService;
+- retain the latest observation metadata;
+- expose dashboard-safe provider health read models;
+- expose all currently observed providers.
+
+Does NOT:
+
+- execute providers;
+- perform health probes;
+- persist incidents;
+- send emails;
+- change Runtime routing;
+- approve recommendations;
+- perform autonomous failover.
+
+ProviderHealthService remains the authority for health
+state calculation.
+"""
+
+from __future__ import annotations
+
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthState,
+    ProviderHealthTransitionEvent,
+)
+
+from app.application.provider_management.provider_health_read_model import (
+    ProviderHealthReadModel,
+    ProviderHealthReadModelService,
+)
+
+from app.application.provider_management.provider_health_service import (
+    ProviderHealthService,
+)
+
+
+class ProviderHealthMonitorService:
+    """
+    Coordinates provider health state and operational
+    read-model generation.
+
+    The service deliberately keeps the latest observation
+    separately from calculated health state because the
+    current ProviderHealthState contract does not contain
+    model or capability metadata.
+    """
+
+    def __init__(
+        self,
+        *,
+        health_service: ProviderHealthService | None = None,
+        read_model_service: (
+            ProviderHealthReadModelService | None
+        ) = None,
+    ) -> None:
+        """
+        Initialise the provider health monitor.
+        """
+
+        self._health_service = (
+            health_service
+            if health_service is not None
+            else ProviderHealthService()
+        )
+
+        self._read_model_service = (
+            read_model_service
+            if read_model_service is not None
+            else ProviderHealthReadModelService()
+        )
+
+        self._latest_observations: dict[
+            str,
+            ProviderHealthObservation,
+        ] = {}
+
+    def observe(
+        self,
+        observation: ProviderHealthObservation,
+    ) -> ProviderHealthTransitionEvent:
+        """
+        Process a provider health observation.
+
+        Health calculation remains delegated to
+        ProviderHealthService.
+        """
+
+        if observation is None:
+            raise ValueError(
+                "Provider health observation cannot be None."
+            )
+
+        transition = self._health_service.observe(
+            observation
+        )
+
+        self._latest_observations[
+            observation.provider
+        ] = observation
+
+        return transition
+
+    def get_provider_health(
+        self,
+        provider: str,
+    ) -> ProviderHealthReadModel | None:
+        """
+        Return the current operational health projection
+        for one provider.
+        """
+
+        if not provider.strip():
+            raise ValueError(
+                "Provider cannot be empty."
+            )
+
+        state = self._health_service.get_state(
+            provider
+        )
+
+        observation = self._latest_observations.get(
+            provider
+        )
+
+        if (
+            state is None
+            or observation is None
+        ):
+            return None
+
+        return self._read_model_service.build(
+            observation=observation,
+            state=state,
+        )
+
+    def get_all_provider_health(
+        self,
+    ) -> tuple[
+        ProviderHealthReadModel,
+        ...
+    ]:
+        """
+        Return operational health projections for all
+        observed providers.
+
+        Results are deterministic and sorted by provider.
+        """
+
+        results: list[
+            ProviderHealthReadModel
+        ] = []
+
+        for state in (
+            self._health_service.get_all_states()
+        ):
+            observation = (
+                self._latest_observations.get(
+                    state.provider
+                )
+            )
+
+            if observation is None:
+                continue
+
+            results.append(
+                self._read_model_service.build(
+                    observation=observation,
+                    state=state,
+                )
+            )
+
+        return tuple(
+            sorted(
+                results,
+                key=lambda item: item.provider,
+            )
+        )
+
+    def clear(self) -> None:
+        """
+        Clear tracked health state and observations.
+
+        Intended for isolated tests and demonstrations.
+        """
+
+        self._health_service.clear()
+
+        self._latest_observations.clear()
+
+============================================================
+===== FILE: .\app\application\provider_management\provider_health_models.py
+============================================================
+"""
+EasyChatBot AI Operations Center provider health models.
+
+Defines the domain contracts used to monitor AI service
+provider availability and operational health.
+
+Architecture:
+
+Provider Health Probe
+        |
+        v
+ProviderHealthObservation
+        |
+        v
+ProviderHealthService
+        |
+        v
+ProviderIncidentService
+        |
+        v
+Escalation Service
+        |
+        v
+AI Operations Center
+
+
+Responsibilities:
+
+- represent provider health states;
+- represent individual health observations;
+- represent provider outage information;
+- represent health transitions;
+- provide immutable domain contracts.
+
+Does NOT:
+
+- execute providers;
+- perform health probes;
+- persist data;
+- send emails;
+- modify Runtime routing;
+- create autonomous failover.
+
+Human approval remains mandatory for operational changes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+
+
+class ProviderHealthStatus(
+    str,
+    Enum,
+):
+    """
+    Current operational health state of an AI provider.
+    """
+
+    HEALTHY = "healthy"
+
+    DEGRADED = "degraded"
+
+    UNAVAILABLE = "unavailable"
+
+    UNKNOWN = "unknown"
+
+
+class ProviderHealthTransition(
+    str,
+    Enum,
+):
+    """
+    Significant transition in provider health.
+
+    These transitions are useful for incident detection
+    and escalation decisions.
+    """
+
+    RECOVERED = "recovered"
+
+    DEGRADED = "degraded"
+
+    UNAVAILABLE = "unavailable"
+
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ProviderHealthObservation:
+    """
+    Immutable observation produced by a provider health
+    probe or an equivalent Runtime health signal.
+
+    An observation represents what was observed at one
+    point in time.
+
+    It is not itself an incident.
+    """
+
+    provider: str
+
+    model: str | None
+
+    capability: str | None
+
+    status: ProviderHealthStatus
+
+    observed_at: datetime
+
+    latency_ms: int | None = None
+
+    error_type: str | None = None
+
+    error_message: str | None = None
+
+    consecutive_failures: int = 0
+
+    consecutive_successes: int = 0
+
+
+@dataclass(frozen=True)
+class ProviderHealthState:
+    """
+    Current calculated health state of a provider.
+
+    This represents the operational state derived from
+    one or more health observations.
+
+    It does not represent historical incident storage.
+    """
+
+    provider: str
+
+    status: ProviderHealthStatus
+
+    checked_at: datetime
+
+    consecutive_failures: int
+
+    consecutive_successes: int
+
+    last_success_at: datetime | None = None
+
+    last_failure_at: datetime | None = None
+
+    degraded_since: datetime | None = None
+
+    unavailable_since: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ProviderIncident:
+    """
+    Provider availability incident.
+
+    An incident represents a sustained operational problem,
+    rather than an individual failed request.
+
+    Example:
+
+        OpenAI
+        unavailable
+        started 14:32
+        recovered 14:51
+        downtime 19 minutes
+    """
+
+    incident_id: str
+
+    provider: str
+
+    status: ProviderHealthStatus
+
+    started_at: datetime
+
+    last_observed_at: datetime
+
+    recovered_at: datetime | None = None
+
+    affected_capabilities: tuple[
+        str,
+        ...,
+    ] = ()
+
+    consecutive_failures: int = 0
+
+    resolution_message: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        """
+        Return whether the provider incident remains open.
+        """
+
+        return self.recovered_at is None
+
+    @property
+    def downtime_seconds(self) -> float | None:
+        """
+        Return completed downtime in seconds.
+
+        Returns None while the incident remains open because
+        final downtime has not yet been established.
+        """
+
+        if self.recovered_at is None:
+            return None
+
+        return (
+            self.recovered_at
+            - self.started_at
+        ).total_seconds()
+
+
+@dataclass(frozen=True)
+class ProviderHealthTransitionEvent:
+    """
+    Significant provider health transition.
+
+    Used by application services to determine whether an
+    incident should be created, updated, recovered, or
+    escalated.
+    """
+
+    provider: str
+
+    transition: ProviderHealthTransition
+
+    previous_status: ProviderHealthStatus
+
+    current_status: ProviderHealthStatus
+
+    occurred_at: datetime
+
+    consecutive_failures: int
+
+    consecutive_successes: int
+
+    affected_capabilities: tuple[
+        str,
+        ...,
+    ] = ()
+
+============================================================
+===== FILE: .\app\application\provider_management\operations_center_provider_service.py
+============================================================
+"""
+EasyChatBot AI Operations Center provider service.
+
+Bridges provider health intelligence into the Operations
+Center dashboard provider read model.
+
+Architecture:
+
+Provider Health Monitor
+        |
+        v
+ProviderHealthReadModel
+        |
+        v
+OperationsCenterProviderService
+        |
+        v
+ActiveProvider
+        |
+        v
+OperationsCenterDashboardService
+
+
+Responsibilities:
+
+- obtain provider health read models;
+- group capabilities by provider/model;
+- expose dashboard-safe active provider information;
+- preserve provider health status separately from provider
+  identity;
+- keep provider health calculation outside the dashboard.
+
+Does NOT:
+
+- execute providers;
+- perform health probes;
+- change Runtime routing;
+- approve recommendations;
+- perform failover;
+- send notifications;
+- modify provider configuration.
+"""
+
+from __future__ import annotations
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+)
+
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+
+
+class OperationsCenterProviderService:
+    """
+    Provides provider information for the Operations Center.
+
+    Provider health remains owned by ProviderHealthMonitorService.
+    This service is only an application-level adapter for the
+    dashboard.
+    """
+
+    def __init__(
+        self,
+        *,
+        health_monitor: ProviderHealthMonitorService,
+    ) -> None:
+        """
+        Initialise the provider service.
+        """
+
+        if health_monitor is None:
+            raise ValueError(
+                "Provider health monitor cannot be None."
+            )
+
+        self._health_monitor = health_monitor
+
+    def get_active_providers(
+        self,
+    ) -> tuple[
+        ActiveProvider,
+        ...
+    ]:
+        """
+        Return providers currently known to the health monitor.
+
+        A provider remains visible to the Operations Center even
+        when degraded or unavailable.
+
+        This is intentional: an unavailable provider must not
+        disappear from the dashboard because that would hide
+        the incident.
+        """
+
+        health_records = (
+            self._health_monitor
+            .get_all_provider_health()
+        )
+
+        providers: list[
+            ActiveProvider
+        ] = []
+
+        for record in health_records:
+            if record.model is None:
+                continue
+
+            capability = record.capability
+
+            capabilities: tuple[str, ...]
+
+            if capability is None:
+                capabilities = ()
+            else:
+                capabilities = (
+                    capability,
+                )
+
+            providers.append(
+                ActiveProvider(
+                    provider=record.provider,
+                    model=record.model,
+                    capabilities=capabilities,
+                    active=record.active,
+                )
+            )
+
+        return tuple(providers)
+
+============================================================
+===== FILE: .\app\application\provider_management\operations_center_dashboard_service.py
+============================================================
+"""
+EasyChatBot AI Operations Center dashboard service.
+
+Provides a read-only, user-friendly operational view
+for the AI Operations Center.
+
+Architecture:
+
+Provider Intelligence
+        |
+        v
+Provider Health / Escalations / Workflow
+        |
+        v
+OperationsCenterDashboardService
+        |
+        v
+Dashboard Read Model
+        |
+        v
+Frontend / API
+
+
+Responsibilities:
+
+- aggregate provider operational status;
+- expose active providers;
+- expose monitoring status;
+- expose escalation counts;
+- expose pending human approvals;
+- calculate an operational confidence score;
+- provide a stable presentation-independent read model.
+
+Does NOT:
+
+- execute providers;
+- change Runtime routing;
+- approve recommendations;
+- send emails;
+- modify escalation state;
+- modify provider configuration.
+
+This is a read-only application service.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_service import (
+    EscalationWorkflowStatus,
+)
+
+if TYPE_CHECKING:
+    from app.application.provider_management.operations_center_provider_service import (
+        OperationsCenterProviderService,
+    )
+
+
+class MonitoringStatus(str, Enum):
+    """
+    Overall monitoring state shown by the Operations Center.
+    """
+
+    HEALTHY = "healthy"
+
+    ATTENTION_REQUIRED = (
+        "attention_required"
+    )
+
+    INCIDENT = "incident"
+
+
+@dataclass(frozen=True)
+class ActiveProvider:
+    """
+    Provider information displayed by the Operations Center.
+    """
+
+    provider: str
+
+    model: str
+
+    capabilities: tuple[str, ...]
+
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class OperationsCenterDashboard:
+    """
+    User-friendly Operations Center dashboard read model.
+    """
+
+    system_confidence: float
+
+    monitoring_status: MonitoringStatus
+
+    active_providers: tuple[
+        ActiveProvider,
+        ...
+    ]
+
+    active_escalations: int
+
+    pending_approvals: int
+
+    approved_escalations: int
+
+    rejected_escalations: int
+
+    pending_notifications: int
+
+    total_escalations: int
+
+
+# Sentinel used to distinguish:
+#
+#     build_dashboard()
+#
+# from:
+#
+#     build_dashboard(active_providers=None)
+#
+# The former means "obtain providers from the configured
+# provider service".
+#
+# The latter is invalid input and must remain rejected.
+_UNSET = object()
+
+
+class OperationsCenterDashboardService:
+    """
+    Builds the read-only Operations Center dashboard.
+
+    Provider information can be explicitly supplied for
+    deterministic tests and controlled application use.
+
+    When active providers are omitted entirely, the configured
+    OperationsCenterProviderService is used.
+
+    Explicit None remains invalid.
+    """
+
+    def __init__(
+        self,
+        history_service: EscalationHistoryService,
+        provider_service: (
+            OperationsCenterProviderService
+            | None
+        ) = None,
+    ) -> None:
+        """
+        Initialise the dashboard service.
+        """
+
+        if history_service is None:
+            raise ValueError(
+                "Escalation history service "
+                "cannot be None."
+            )
+
+        self._history_service = (
+            history_service
+        )
+
+        self._provider_service = (
+            provider_service
+        )
+
+    def build_dashboard(
+        self,
+        *,
+        active_providers: (
+            tuple[
+                ActiveProvider,
+                ...
+            ]
+            | None
+            | object
+        ) = _UNSET,
+    ) -> OperationsCenterDashboard:
+        """
+        Build the current Operations Center dashboard.
+
+        Provider resolution rules:
+
+        1. Explicit tuple:
+               use the supplied providers.
+
+        2. Explicit None:
+               reject the invalid input.
+
+        3. Argument omitted:
+               use the configured provider service.
+
+        This distinction preserves the original dashboard
+        contract while allowing the production composition
+        root to obtain real provider intelligence.
+        """
+
+        if active_providers is None:
+            raise ValueError(
+                "Active providers cannot be None."
+            )
+
+        if active_providers is _UNSET:
+            if self._provider_service is None:
+                raise ValueError(
+                    "Active providers were not supplied "
+                    "and no provider service is configured."
+                )
+
+            resolved_active_providers = (
+                self._provider_service
+                .get_active_providers()
+            )
+        else:
+            resolved_active_providers = (
+                active_providers
+            )
+
+        counts = (
+            self._history_service
+            .count_by_status()
+        )
+
+        pending_approvals = counts[
+            EscalationWorkflowStatus
+            .AWAITING_APPROVAL
+        ]
+
+        approved = counts[
+            EscalationWorkflowStatus
+            .APPROVED
+        ]
+
+        rejected = counts[
+            EscalationWorkflowStatus
+            .REJECTED
+        ]
+
+        pending_notifications = counts[
+            EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+        ]
+
+        total_escalations = sum(
+            counts.values()
+        )
+
+        active_escalations = (
+            pending_approvals
+            + pending_notifications
+        )
+
+        monitoring_status = (
+            self._determine_monitoring_status(
+                active_escalations=(
+                    active_escalations
+                ),
+                pending_approvals=(
+                    pending_approvals
+                ),
+            )
+        )
+
+        confidence = (
+            self._calculate_confidence(
+                active_escalations=(
+                    active_escalations
+                ),
+                pending_approvals=(
+                    pending_approvals
+                ),
+                total_escalations=(
+                    total_escalations
+                ),
+            )
+        )
+
+        return OperationsCenterDashboard(
+            system_confidence=confidence,
+            monitoring_status=monitoring_status,
+            active_providers=(
+                resolved_active_providers
+            ),
+            active_escalations=(
+                active_escalations
+            ),
+            pending_approvals=(
+                pending_approvals
+            ),
+            approved_escalations=approved,
+            rejected_escalations=rejected,
+            pending_notifications=(
+                pending_notifications
+            ),
+            total_escalations=(
+                total_escalations
+            ),
+        )
+
+    @staticmethod
+    def _determine_monitoring_status(
+        *,
+        active_escalations: int,
+        pending_approvals: int,
+    ) -> MonitoringStatus:
+        """
+        Determine the dashboard monitoring status.
+
+        Critical operational state is represented by the
+        existence of active escalations.
+
+        Pending human approval is explicitly surfaced.
+        """
+
+        if active_escalations > 0:
+            return MonitoringStatus.INCIDENT
+
+        if pending_approvals > 0:
+            return (
+                MonitoringStatus
+                .ATTENTION_REQUIRED
+            )
+
+        return MonitoringStatus.HEALTHY
+
+    @staticmethod
+    def _calculate_confidence(
+        *,
+        active_escalations: int,
+        pending_approvals: int,
+        total_escalations: int,
+    ) -> float:
+        """
+        Calculate a deterministic dashboard confidence score.
+
+        This is deliberately a simple operational indicator
+        for the Hackathon.
+
+        It is NOT an AI model confidence score.
+
+        Rules:
+
+        - 100 when there are no escalations;
+        - subtract 15 per active escalation;
+        - pending approval receives no additional penalty;
+        - never below 0.
+
+        Pending approvals are already represented in
+        active_escalations, so applying another penalty would
+        double-count the same operational condition.
+        """
+
+        if total_escalations == 0:
+            return 100.0
+
+        score = 100.0
+
+        score -= (
+            active_escalations * 15.0
+        )
+
+        return max(
+            0.0,
+            min(100.0, score),
+        )
+

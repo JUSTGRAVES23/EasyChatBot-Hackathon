@@ -1,0 +1,622 @@
+============================================================
+FILE: backend\app\application\privacy\processing_activity.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessingActivity:
+    """Machine-readable Beta 1 processing activity definition."""
+
+    processing_id: str
+    name: str
+    purpose: str
+    data_categories: tuple[str, ...]
+    data_subjects: tuple[str, ...]
+    source: tuple[str, ...]
+    destinations: tuple[str, ...]
+    legal_basis: str
+    retention_id: str
+    processor_ids: tuple[str, ...] = ()
+    data_map_id: str = ""
+    dpia_screening_id: str = ""
+    gdpr_references: tuple[str, ...] = ()
+    security_controls: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+    approval_status: str = "PENDING"
+
+============================================================
+FILE: backend\app\application\privacy\data_processing_map.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class DataProcessingMapEntry:
+    """Describes the operational data flow for one processing activity."""
+
+    map_id: str
+    processing_id: str
+    source: str
+    input_data: tuple[str, ...]
+    runtime_processing: tuple[str, ...]
+    pseudonymisation: str
+    persistence: tuple[str, ...]
+    destinations: tuple[str, ...]
+    third_country_transfer: bool
+    transfer_safeguard: str | None = None
+
+
+class DataProcessingMap:
+    def __init__(self, entries: list[DataProcessingMapEntry] | None = None) -> None:
+        self._entries = {entry.processing_id: entry for entry in entries or []}
+
+    def add(self, entry: DataProcessingMapEntry) -> None:
+        if entry.processing_id in self._entries:
+            raise ValueError(
+                f"Data map already exists for: {entry.processing_id}"
+            )
+        self._entries[entry.processing_id] = entry
+
+    def get(self, processing_id: str) -> DataProcessingMapEntry:
+        return self._entries[processing_id]
+
+    def all(self) -> tuple[DataProcessingMapEntry, ...]:
+        return tuple(self._entries.values())
+
+============================================================
+FILE: backend\app\application\privacy\retention_registry.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionRule:
+    retention_id: str
+    data_domain: str
+    record_type: str
+    retention_period: str
+    trigger: str
+    deletion_action: str
+    legal_policy_basis: str
+
+
+class RetentionRegistry:
+    def __init__(self, rules: list[RetentionRule] | None = None) -> None:
+        self._rules = {rule.retention_id: rule for rule in rules or []}
+
+    def register(self, rule: RetentionRule) -> None:
+        if rule.retention_id in self._rules:
+            raise ValueError(
+                f"Retention rule already registered: {rule.retention_id}"
+            )
+        self._rules[rule.retention_id] = rule
+
+    def get(self, retention_id: str) -> RetentionRule:
+        return self._rules[retention_id]
+
+    def all(self) -> tuple[RetentionRule, ...]:
+        return tuple(self._rules.values())
+
+============================================================
+FILE: backend\app\application\privacy\processor_registry.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessorRecord:
+    processor_id: str
+    provider_name: str
+    role: str
+    processor_agreement_art28: str
+    hosting_location: str
+    third_country: bool
+    safeguard_art46_47: str | None
+    dpo_status: str
+    grc_status: str
+    legal_status: str
+
+
+class ProcessorRegistry:
+    def __init__(self, records: list[ProcessorRecord] | None = None) -> None:
+        self._records = {record.processor_id: record for record in records or []}
+
+    def register(self, record: ProcessorRecord) -> None:
+        if record.processor_id in self._records:
+            raise ValueError(
+                f"Processor already registered: {record.processor_id}"
+            )
+        self._records[record.processor_id] = record
+
+    def get(self, processor_id: str) -> ProcessorRecord:
+        return self._records[processor_id]
+
+    def all(self) -> tuple[ProcessorRecord, ...]:
+        return tuple(self._records.values())
+
+============================================================
+FILE: backend\app\application\privacy\dpia_screening.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class DPIAScreening:
+    screening_id: str
+    processing_id: str
+    overall_risk: str
+    dpia_required: str
+    dpo_assessment: str
+    grc_assessment: str
+    status: str
+
+
+class DPIAScreeningRegistry:
+    def __init__(self, screenings: list[DPIAScreening] | None = None) -> None:
+        self._screenings = {
+            screening.processing_id: screening
+            for screening in screenings or []
+        }
+
+    def register(self, screening: DPIAScreening) -> None:
+        if screening.processing_id in self._screenings:
+            raise ValueError(
+                f"DPIA screening already exists for: {screening.processing_id}"
+            )
+        self._screenings[screening.processing_id] = screening
+
+    def get(self, processing_id: str) -> DPIAScreening:
+        return self._screenings[processing_id]
+
+    def all(self) -> tuple[DPIAScreening, ...]:
+        return tuple(self._screenings.values())
+
+============================================================
+FILE: backend\app\application\privacy\privacy_change.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+
+class PrivacyChangeStatus(str, Enum):
+    DRAFT = "draft"
+    ASSESSED = "assessed"
+    PENDING_DPO_GRC = "pending_dpo_grc"
+    APPROVED = "approved"
+    BLOCKED = "blocked"
+
+
+class PrivacyChangeRisk(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyChange:
+    """A controlled record for a potentially privacy-impacting change."""
+
+    change_id: str
+    title: str
+    description: str
+    affected_processing_ids: list[str] = field(default_factory=list)
+    affected_data_map_ids: list[str] = field(default_factory=list)
+    data_categories_changed: bool = False
+    purpose_changed: bool = False
+    recipients_changed: bool = False
+    retention_changed: bool = False
+    processor_changed: bool = False
+    transfer_changed: bool = False
+    automated_decision_changed: bool = False
+    dpia_screening_required: bool = False
+    risk: PrivacyChangeRisk = PrivacyChangeRisk.LOW
+    status: PrivacyChangeStatus = PrivacyChangeStatus.DRAFT
+    dpo_required: bool = False
+    grc_required: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+============================================================
+FILE: backend\app\application\privacy\privacy_change_registry.py
+============================================================
+from __future__ import annotations
+
+from .privacy_change import PrivacyChange, PrivacyChangeStatus
+
+
+class PrivacyChangeRegistry:
+    """In-memory application registry for controlled privacy changes.
+
+    Beta 1 intentionally keeps this registry simple. Persistence can be
+    introduced behind the same contract once the workflow is proven.
+    """
+
+    def __init__(self) -> None:
+        self._changes: dict[str, PrivacyChange] = {}
+
+    def register(self, change: PrivacyChange) -> PrivacyChange:
+        if change is None:
+            raise ValueError("change cannot be None.")
+        if change.change_id in self._changes:
+            raise ValueError(f"Privacy change already registered: {change.change_id}")
+        self._changes[change.change_id] = change
+        return change
+
+    def get(self, change_id: str) -> PrivacyChange | None:
+        return self._changes.get(change_id)
+
+    def list_all(self) -> list[PrivacyChange]:
+        return list(self._changes.values())
+
+    def update(self, change: PrivacyChange) -> PrivacyChange:
+        if change is None:
+            raise ValueError("change cannot be None.")
+        if change.change_id not in self._changes:
+            raise KeyError(f"Unknown privacy change: {change.change_id}")
+        self._changes[change.change_id] = change
+        return change
+
+    def mark_blocked(self, change_id: str) -> PrivacyChange:
+        change = self._require(change_id)
+        updated = _replace(change, status=PrivacyChangeStatus.BLOCKED)
+        self._changes[change_id] = updated
+        return updated
+
+    def _require(self, change_id: str) -> PrivacyChange:
+        change = self.get(change_id)
+        if change is None:
+            raise KeyError(f"Unknown privacy change: {change_id}")
+        return change
+
+
+def _replace(change: PrivacyChange, **changes) -> PrivacyChange:
+    from dataclasses import replace
+    return replace(change, **changes)
+
+============================================================
+FILE: backend\app\application\privacy\privacy_governance_gate.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+from .privacy_approval_email_service import (
+    PrivacyApprovalEmailService,
+)
+from .privacy_change import (
+    PrivacyChange,
+    PrivacyChangeStatus,
+)
+from .privacy_change_registry import (
+    PrivacyChangeRegistry,
+)
+from .privacy_validation_service import (
+    PrivacyValidationResult,
+    PrivacyValidationService,
+)
+
+
+class PrivacyGovernanceGate:
+    """Privacy governance decision gate.
+
+    Responsibilities:
+    - consume deterministic privacy validation results;
+    - block changes with validation failures;
+    - route privacy-impacting changes to DPO/GRC;
+    - trigger an approval escalation only when validation passes;
+    - never interpret email delivery as approval.
+
+    Does NOT:
+    - make legal decisions;
+    - grant DPO/GRC approval;
+    - execute production changes;
+    - schedule recurring approval emails.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: PrivacyChangeRegistry,
+        validation_service: PrivacyValidationService | None = None,
+        approval_email_service: PrivacyApprovalEmailService | None = None,
+    ) -> None:
+        if registry is None:
+            raise ValueError(
+                "registry cannot be None."
+            )
+
+        self._registry = registry
+        self._validation = validation_service
+        self._approval_email = approval_email_service
+
+    def route(
+        self,
+        change: PrivacyChange,
+        *,
+        automated_validation_passed: bool | None = None,
+        dpo_approved: bool = False,
+        grc_approved: bool = False,
+    ) -> PrivacyChange:
+        """Route a change through the governance decision.
+
+        This synchronous method preserves the existing Beta contract.
+
+        If a validation service is configured, it is the authoritative
+        source for automated privacy validation.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        validation_passed = self._resolve_validation(
+            automated_validation_passed
+        )
+
+        if not validation_passed:
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.BLOCKED,
+            )
+
+        elif change.dpo_required or change.grc_required:
+            if not (
+                dpo_approved
+                and grc_approved
+            ):
+                updated = replace(
+                    change,
+                    status=(
+                        PrivacyChangeStatus.PENDING_DPO_GRC
+                    ),
+                )
+            else:
+                updated = replace(
+                    change,
+                    status=(
+                        PrivacyChangeStatus.APPROVED
+                    ),
+                )
+
+        else:
+            updated = replace(
+                change,
+                status=(
+                    PrivacyChangeStatus.APPROVED
+                ),
+            )
+
+        self._save(updated)
+
+        return updated
+
+    async def route_and_escalate(
+        self,
+        change: PrivacyChange,
+    ) -> PrivacyChange:
+        """Run automated validation and escalate when governance requires it.
+
+        Email is sent ONLY when:
+
+        1. PrivacyValidationService returns PASS;
+        2. the change requires DPO/GRC review;
+        3. the change is not already approved.
+
+        Email delivery never changes the governance status to APPROVED.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        if self._validation is None:
+            raise RuntimeError(
+                "PrivacyValidationService is required "
+                "for automatic governance routing."
+            )
+
+        if self._approval_email is None:
+            raise RuntimeError(
+                "PrivacyApprovalEmailService is required "
+                "for automatic governance escalation."
+            )
+
+        validation = self._validation.validate()
+
+        if validation.status != "PASS":
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.BLOCKED,
+            )
+
+            self._save(updated)
+            return updated
+
+        if not (
+            change.dpo_required
+            or change.grc_required
+        ):
+            updated = replace(
+                change,
+                status=PrivacyChangeStatus.APPROVED,
+            )
+
+            self._save(updated)
+            return updated
+
+        updated = replace(
+            change,
+            status=(
+                PrivacyChangeStatus.PENDING_DPO_GRC
+            ),
+        )
+
+        self._save(updated)
+
+        self._approval_email.escalate(
+    change=updated,
+    validation_passed=True,
+)
+        return updated
+
+    def can_proceed(
+        self,
+        change_id: str,
+    ) -> bool:
+        change = self._registry.get(
+            change_id
+        )
+
+        return bool(
+            change
+            and change.status
+            == PrivacyChangeStatus.APPROVED
+        )
+
+    def _resolve_validation(
+        self,
+        explicit_result: bool | None,
+    ) -> bool:
+        if self._validation is not None:
+            result = self._validation.validate()
+
+            return (
+                result.status == "PASS"
+            )
+
+        if explicit_result is None:
+            raise ValueError(
+                "automated_validation_passed is required "
+                "when no PrivacyValidationService is configured."
+            )
+
+        return explicit_result
+
+    def _save(
+        self,
+        change: PrivacyChange,
+    ) -> None:
+        existing = self._registry.get(
+            change.change_id
+        )
+
+        if existing is None:
+            self._registry.register(
+                change
+            )
+        else:
+            self._registry.update(
+                change
+            )
+
+============================================================
+FILE: backend\app\infrastructure\email\resend_approval_email_sender.py
+============================================================
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import resend
+
+from backend.app.application.privacy.privacy_approval_email_service import (
+    ApprovalEmailRequest,
+)
+
+
+class ResendApprovalEmailSender:
+    """Resend infrastructure adapter for privacy approval emails.
+
+    Responsibilities:
+    - translate ApprovalEmailRequest into a Resend API request;
+    - obtain the API key from configuration;
+    - delegate delivery to Resend.
+
+    Does NOT:
+    - approve or reject privacy changes;
+    - modify governance state;
+    - perform privacy validation;
+    - make DPO/GRC decisions.
+
+    No secrets are stored in source code.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        sender_email: str | None = None,
+    ) -> None:
+        self._api_key = (
+            api_key
+            if api_key is not None
+            else os.getenv("RESEND_API_KEY", "")
+        )
+
+        self._sender_email = (
+            sender_email
+            if sender_email is not None
+            else os.getenv(
+                "PRIVACY_APPROVAL_EMAIL_FROM",
+                "",
+            )
+        )
+
+    def send(
+        self,
+        request: ApprovalEmailRequest,
+    ) -> None:
+        """Send a privacy approval email through Resend."""
+
+        if request is None:
+            raise ValueError(
+                "request cannot be None."
+            )
+
+        if not self._api_key.strip():
+            raise RuntimeError(
+                "RESEND_API_KEY is not configured."
+            )
+
+        if not self._sender_email.strip():
+            raise RuntimeError(
+                "PRIVACY_APPROVAL_EMAIL_FROM is not configured."
+            )
+
+        resend.api_key = self._api_key
+
+        try:
+            resend.Emails.send(
+                {
+                    "from": self._sender_email,
+                    "to": [request.recipient],
+                    "subject": request.subject,
+                    "text": request.body,
+                }
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Resend privacy approval email delivery failed."
+            ) from exc
+

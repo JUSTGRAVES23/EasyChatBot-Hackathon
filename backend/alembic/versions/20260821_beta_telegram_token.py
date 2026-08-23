@@ -8,7 +8,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "20260821_beta_telegram_token"
-down_revision = "1c33dbcd7217"
+down_revision = "20260821_beta_telegram_access"
 branch_labels = None
 depends_on = None
 

@@ -1,0 +1,669 @@
+﻿"""
+LiveKit Agent Dispatcher.
+
+Infrastructure adapter responsible for dispatching
+an approved EasyChatBot voice call to the LiveKit
+realtime agent worker.
+
+Responsibilities:
+- Create a LiveKit agent dispatch.
+- Target the EasyChatBot voice worker.
+- Pass approved voice-call metadata to the worker.
+- Keep LiveKit API details inside infrastructure.
+
+Does NOT:
+- Decide whether a call is authorized.
+- Create voice-call business state.
+- Manage application lifecycle.
+- Resolve worlds or characters.
+- Execute AI agents.
+- Persist conversations.
+- Generate participant tokens.
+"""
+
+from __future__ import annotations
+
+
+import json
+import logging
+import os
+
+
+from dataclasses import dataclass
+
+
+from livekit import api
+
+
+logger = logging.getLogger(
+    __name__
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class LiveKitAgentDispatcher:
+    """
+    Infrastructure adapter for LiveKit Agent dispatch.
+
+    The application layer supplies an already-approved
+    voice-call context. This adapter translates that
+    context into a LiveKit AgentDispatch request.
+
+    LiveKit credentials are read from the environment
+    and remain inside the infrastructure boundary.
+    """
+
+    agent_name: str = "easychatbot-voice"
+
+
+    def dispatch(
+        self,
+        *,
+        room_name: str,
+        learner_id: str,
+        world_id: str,
+        character_id: str,
+        language_code: str,
+    ) -> str:
+        """
+        Dispatch the EasyChatBot voice agent to a room.
+
+        Parameters
+        ----------
+        room_name:
+            LiveKit room that the agent must join.
+
+        learner_id:
+            Approved learner identifier.
+
+        world_id:
+            Active learning world.
+
+        character_id:
+            Approved AI character.
+
+        language_code:
+            Active interaction language.
+
+        Returns
+        -------
+        str
+            LiveKit dispatch identifier.
+
+        Raises
+        ------
+        ValueError
+            If required values are empty or credentials
+            are not configured.
+        """
+
+        self._validate_required_value(
+            room_name,
+            "room_name",
+        )
+
+        self._validate_required_value(
+            learner_id,
+            "learner_id",
+        )
+
+        self._validate_required_value(
+            world_id,
+            "world_id",
+        )
+
+        self._validate_required_value(
+            character_id,
+            "character_id",
+        )
+
+        self._validate_required_value(
+            language_code,
+            "language_code",
+        )
+
+
+        api_key = os.getenv(
+            "LIVEKIT_API_KEY",
+        )
+
+        api_secret = os.getenv(
+            "LIVEKIT_API_SECRET",
+        )
+
+        livekit_url = os.getenv(
+            "LIVEKIT_URL",
+        )
+
+
+        if not api_key:
+            raise ValueError(
+                "LIVEKIT_API_KEY is not configured."
+            )
+
+
+        if not api_secret:
+            raise ValueError(
+                "LIVEKIT_API_SECRET is not configured."
+            )
+
+
+        if not livekit_url:
+            raise ValueError(
+                "LIVEKIT_URL is not configured."
+            )
+
+
+        metadata = {
+            "learner_id": learner_id.strip(),
+            "world_id": world_id.strip(),
+            "character_id": character_id.strip(),
+            "language_code": language_code.strip(),
+        }
+
+
+        metadata_json = json.dumps(
+            metadata,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+
+        logger.info(
+            "Dispatching EasyChatBot LiveKit agent",
+            extra={
+                "room_name": room_name,
+                "agent_name": self.agent_name,
+                "learner_id": learner_id,
+                "world_id": world_id,
+                "character_id": character_id,
+                "language_code": language_code,
+            },
+        )
+
+
+        livekit_api = api.LiveKitAPI(
+            url=livekit_url,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+
+
+        try:
+            dispatch = (
+                livekit_api
+                .agent_dispatch
+                .create_dispatch(
+                    api.CreateAgentDispatchRequest(
+                        agent_name=(
+                            self.agent_name
+                        ),
+                        room=room_name.strip(),
+                        metadata=metadata_json,
+                    )
+                )
+            )
+
+
+            logger.info(
+                "LiveKit agent dispatch created",
+                extra={
+                    "dispatch_id": (
+                        dispatch.id
+                    ),
+                    "room_name": room_name,
+                    "agent_name": (
+                        self.agent_name
+                    ),
+                },
+            )
+
+
+            return dispatch.id
+
+        finally:
+            livekit_api.aclose()
+
+
+    @staticmethod
+    def _validate_required_value(
+        value: str,
+        field_name: str,
+    ) -> None:
+        """
+        Validate a required string field.
+        """
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            raise ValueError(
+                f"{field_name} must be a string."
+            )
+
+
+        if not value.strip():
+            raise ValueError(
+                f"{field_name} cannot be empty."
+            )
+
+
+__all__ = [
+    "LiveKitAgentDispatcher",
+]
+"""
+Tests for LiveKit Agent Dispatcher.
+
+Validates the infrastructure boundary between
+EasyChatBot voice-call metadata and LiveKit Agent
+dispatch.
+
+These tests do not contact LiveKit Cloud.
+"""
+
+from __future__ import annotations
+
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+
+import pytest
+
+
+from app.infrastructure.voice.livekit_agent_dispatcher import (
+    LiveKitAgentDispatcher,
+)
+
+
+def create_dispatcher() -> LiveKitAgentDispatcher:
+    """
+    Create a configured dispatcher for tests.
+    """
+
+    return LiveKitAgentDispatcher(
+        agent_name="easychatbot-voice",
+    )
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_creates_livekit_agent_dispatch(
+    mock_livekit_api,
+):
+    """
+    Dispatcher creates a LiveKit Agent dispatch.
+    """
+
+    mock_dispatch = SimpleNamespace(
+        id="dispatch-001",
+    )
+
+    mock_api = MagicMock()
+
+    mock_api.agent_dispatch.create_dispatch.return_value = (
+        mock_dispatch
+    )
+
+    mock_livekit_api.return_value = mock_api
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": "test-api-key",
+            "LIVEKIT_API_SECRET": "test-api-secret",
+        },
+        clear=False,
+    ):
+
+        dispatcher = create_dispatcher()
+
+        dispatch_id = dispatcher.dispatch(
+            room_name="yeti-room-001",
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    assert dispatch_id == (
+        "dispatch-001"
+    )
+
+
+    mock_livekit_api.assert_called_once_with(
+        url="wss://test.livekit.cloud",
+        api_key="test-api-key",
+        api_secret="test-api-secret",
+    )
+
+
+    mock_api.agent_dispatch.create_dispatch.assert_called_once()
+
+
+    mock_api.aclose.assert_called_once()
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_passes_expected_metadata(
+    mock_livekit_api,
+):
+    """
+    Dispatcher passes the approved voice-call
+    metadata to the LiveKit worker.
+    """
+
+    mock_dispatch = SimpleNamespace(
+        id="dispatch-002",
+    )
+
+    mock_api = MagicMock()
+
+    mock_api.agent_dispatch.create_dispatch.return_value = (
+        mock_dispatch
+    )
+
+    mock_livekit_api.return_value = mock_api
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": "test-api-key",
+            "LIVEKIT_API_SECRET": "test-api-secret",
+        },
+        clear=False,
+    ):
+
+        dispatcher = create_dispatcher()
+
+        dispatcher.dispatch(
+            room_name="yeti-room-002",
+            learner_id="learner-002",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    request = (
+        mock_api
+        .agent_dispatch
+        .create_dispatch
+        .call_args.args[0]
+    )
+
+
+    assert request.agent_name == (
+        "easychatbot-voice"
+    )
+
+
+    assert request.room == (
+        "yeti-room-002"
+    )
+
+
+    assert request.metadata == (
+        '{"learner_id":"learner-002",'
+        '"world_id":"french_world",'
+        '"character_id":"yeti",'
+        '"language_code":"fr"}'
+    )
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_uses_configured_agent_name(
+    mock_livekit_api,
+):
+    """
+    Dispatcher uses its configured agent name.
+    """
+
+    mock_dispatch = SimpleNamespace(
+        id="dispatch-003",
+    )
+
+    mock_api = MagicMock()
+
+    mock_api.agent_dispatch.create_dispatch.return_value = (
+        mock_dispatch
+    )
+
+    mock_livekit_api.return_value = mock_api
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": "test-api-key",
+            "LIVEKIT_API_SECRET": "test-api-secret",
+        },
+        clear=False,
+    ):
+
+        dispatcher = LiveKitAgentDispatcher(
+            agent_name="custom-voice-agent",
+        )
+
+        dispatcher.dispatch(
+            room_name="room-003",
+            learner_id="learner-003",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    request = (
+        mock_api
+        .agent_dispatch
+        .create_dispatch
+        .call_args.args[0]
+    )
+
+
+    assert request.agent_name == (
+        "custom-voice-agent"
+    )
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_rejects_empty_room_name(
+    mock_livekit_api,
+):
+    """
+    Empty room names are rejected before
+    contacting LiveKit.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with pytest.raises(
+        ValueError,
+        match="room_name cannot be empty",
+    ):
+
+        dispatcher.dispatch(
+            room_name="",
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    mock_livekit_api.assert_not_called()
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_rejects_empty_character_id(
+    mock_livekit_api,
+):
+    """
+    Empty character identifiers are rejected.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with pytest.raises(
+        ValueError,
+        match="character_id cannot be empty",
+    ):
+
+        dispatcher.dispatch(
+            room_name="room-001",
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="",
+            language_code="fr",
+        )
+
+
+    mock_livekit_api.assert_not_called()
+
+
+def test_dispatch_requires_livekit_api_key():
+    """
+    Missing LiveKit API key is rejected.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_SECRET": (
+                "test-api-secret"
+            ),
+        },
+        clear=False,
+    ):
+
+        with patch(
+            "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+        ) as mock_livekit_api:
+
+            with pytest.raises(
+                ValueError,
+                match="LIVEKIT_API_KEY is not configured",
+            ):
+
+                dispatcher.dispatch(
+                    room_name="room-001",
+                    learner_id="learner-001",
+                    world_id="french_world",
+                    character_id="yeti",
+                    language_code="fr",
+                )
+
+
+            mock_livekit_api.assert_not_called()
+
+
+def test_dispatch_requires_livekit_api_secret():
+    """
+    Missing LiveKit API secret is rejected.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": (
+                "test-api-key"
+            ),
+        },
+        clear=False,
+    ):
+
+        with patch(
+            "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+        ) as mock_livekit_api:
+
+            with pytest.raises(
+                ValueError,
+                match="LIVEKIT_API_SECRET is not configured",
+            ):
+
+                dispatcher.dispatch(
+                    room_name="room-001",
+                    learner_id="learner-001",
+                    world_id="french_world",
+                    character_id="yeti",
+                    language_code="fr",
+                )
+
+
+            mock_livekit_api.assert_not_called()
+
+
+def test_dispatch_requires_livekit_url():
+    """
+    Missing LiveKit URL is rejected.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_API_KEY": (
+                "test-api-key"
+            ),
+            "LIVEKIT_API_SECRET": (
+                "test-api-secret"
+            ),
+        },
+        clear=False,
+    ):
+
+        with patch(
+            "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+        ) as mock_livekit_api:
+
+            with pytest.raises(
+                ValueError,
+                match="LIVEKIT_URL is not configured",
+            ):
+
+                dispatcher.dispatch(
+                    room_name="room-001",
+                    learner_id="learner-001",
+                    world_id="french_world",
+                    character_id="yeti",
+                    language_code="fr",
+                )
+
+
+            mock_livekit_api.assert_not_called()
