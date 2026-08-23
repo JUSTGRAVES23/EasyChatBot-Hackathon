@@ -1,0 +1,1131 @@
+﻿
+============================================================
+FILE: .\backend\app\api\cybersecurity_intelligence.py
+============================================================
+"""
+EasyChatBot Cybersecurity Intelligence API.
+
+Read-only endpoint exposing the Cybersecurity Intelligence Agent.
+
+Flow:
+
+HTTP API
+    ↓
+CybersecurityIntelligenceService
+    ↓
+RuntimeEngine
+    ↓
+CybersecurityIntelligenceAgent
+    ↓
+AgentResult
+
+This endpoint uses controlled DEMO cybersecurity data.
+
+Does NOT:
+- execute remediation;
+- modify production systems;
+- send email;
+- call external security providers;
+- bypass the Runtime.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+from backend.cybersecurity.dashboard_data_source import (
+    DashboardCybersecurityDataSource,
+)
+
+from backend.cybersecurity.intelligence_service import (
+    CybersecurityIntelligenceService,
+)
+
+
+router = APIRouter(
+    prefix="/api/cybersecurity-center",
+    tags=["cybersecurity-center"],
+)
+
+
+class CybersecurityIntelligenceResponse(BaseModel):
+    """
+    API response containing the Agent 1 decision-support result.
+    """
+
+    success: bool
+    agent_id: str
+    data_mode: str
+    posture: str
+    signal_count: int
+    open_signal_count: int
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    priority_signals: list[dict]
+    decision_note: str
+    execution_id: str | None = None
+
+
+@router.get(
+    "/intelligence",
+    response_model=CybersecurityIntelligenceResponse,
+)
+async def get_cybersecurity_intelligence() -> CybersecurityIntelligenceResponse:
+    """
+    Execute Cybersecurity Intelligence Agent using controlled demo data.
+
+    The agent executes through the existing RuntimeEngine via
+    CybersecurityIntelligenceService.
+    """
+
+    service = CybersecurityIntelligenceService(
+        data_source=DashboardCybersecurityDataSource(),
+    )
+
+    result = await service.analyse(
+        user_id="cybersecurity-center",
+        request=(
+            "Assess the current cybersecurity posture and identify "
+            "the highest-priority security signals requiring attention."
+        ),
+    )
+
+    if not result.success:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                result.error
+                or "Cybersecurity intelligence execution failed."
+            ),
+        )
+
+    output = result.output
+
+    return CybersecurityIntelligenceResponse(
+        success=result.success,
+        agent_id=result.agent_id,
+        data_mode="DEMO",
+        posture=output["posture"],
+        signal_count=output["signal_count"],
+        open_signal_count=output["open_signal_count"],
+        critical_count=output["critical_count"],
+        high_count=output["high_count"],
+        medium_count=output["medium_count"],
+        low_count=output["low_count"],
+        priority_signals=output["priority_signals"],
+        decision_note=output["decision_note"],
+        execution_id=output.get("execution_id"),
+    )
+
+============================================================
+FILE: .\backend\cybersecurity\dashboard_data_source.py
+============================================================
+"""
+Dashboard-backed demo cybersecurity data source.
+
+This adapter represents the cybersecurity observations displayed
+by the EasyChatBot Cybersecurity Operations Center dashboard.
+
+Purpose:
+- provide controlled DEMO security observations;
+- validate Agent 1 end-to-end flow;
+- keep the Cybersecurity Intelligence Agent independent
+  from the original data source.
+
+This does NOT:
+- connect to security products;
+- fetch live security information;
+- execute remediation;
+- modify infrastructure;
+- make security decisions.
+
+Future production implementations can replace this adapter
+with SIEM, vulnerability management, IAM, GRC, cloud-security,
+or other approved providers implementing the same contract.
+"""
+
+from __future__ import annotations
+
+from backend.cybersecurity.data_source import (
+    CybersecurityDataSource,
+)
+
+from backend.cybersecurity.intelligence_models import (
+    CybersecuritySignal,
+)
+
+
+class DashboardCybersecurityDataSource(
+    CybersecurityDataSource
+):
+    """
+    DEMO implementation of CybersecurityDataSource.
+
+    Converts controlled dashboard security events into
+    normalized CybersecuritySignal objects consumed by
+    the Cybersecurity Intelligence Agent.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            source_id="cybersecurity_dashboard_demo",
+        )
+
+    async def get_signals(
+        self,
+    ) -> list[CybersecuritySignal]:
+        """
+        Return controlled cybersecurity demonstration signals.
+
+        These observations are static demo data and do not
+        represent live production security telemetry.
+        """
+
+        return [
+            CybersecuritySignal(
+                signal_id="CYBER-DEMO-001",
+                category="AI Security",
+                title="AI prompt injection attempt detected",
+                severity="high",
+                confidence=0.96,
+                source="Cybersecurity Operations Center Demo",
+                affected_area="AI Runtime",
+                technique="Prompt Injection",
+                status="open",
+                metadata={
+                    "environment": "DEMO",
+                    "demo": True,
+                },
+            ),
+            CybersecuritySignal(
+                signal_id="CYBER-DEMO-002",
+                category="Access Security",
+                title="Suspicious API access detected",
+                severity="medium",
+                confidence=0.89,
+                source="Cybersecurity Operations Center Demo",
+                affected_area="API Gateway",
+                technique="Suspicious API Access",
+                status="open",
+                metadata={
+                    "environment": "DEMO",
+                    "demo": True,
+                },
+            ),
+            CybersecuritySignal(
+                signal_id="CYBER-DEMO-003",
+                category="Vulnerability",
+                title="Dependency vulnerability identified",
+                severity="low",
+                confidence=0.94,
+                source="Cybersecurity Operations Center Demo",
+                affected_area="Application Dependencies",
+                technique="Known Vulnerability",
+                status="open",
+                metadata={
+                    "environment": "DEMO",
+                    "demo": True,
+                },
+            ),
+            CybersecuritySignal(
+                signal_id="CYBER-DEMO-004",
+                category="AI Governance",
+                title="AI governance review requires attention",
+                severity="medium",
+                confidence=0.91,
+                source="Cybersecurity Operations Center Demo",
+                affected_area="AI Governance",
+                technique="Governance Control Review",
+                status="open",
+                metadata={
+                    "environment": "DEMO",
+                    "demo": True,
+                },
+            ),
+        ]
+
+============================================================
+FILE: .\backend\cybersecurity\data_source.py
+============================================================
+"""
+Cybersecurity data-source contract.
+
+The agent consumes normalized CybersecuritySignal objects and does not know
+where they came from.
+
+Future implementations may use SIEM, vulnerability scanners, IAM, GRC,
+cloud-security tooling, or other approved sources.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from backend.cybersecurity.intelligence_models import CybersecuritySignal
+
+
+class CybersecurityDataSource(ABC):
+    """Provider-independent source of normalized cybersecurity signals."""
+
+    source_id: str
+
+    def __init__(self, source_id: str) -> None:
+        if not source_id.strip():
+            raise ValueError("Cybersecurity data source_id cannot be empty.")
+        self.source_id = source_id
+
+    @abstractmethod
+    async def get_signals(self) -> list[CybersecuritySignal]:
+        """Return normalized cybersecurity observations."""
+        raise NotImplementedError
+
+
+============================================================
+FILE: .\backend\cybersecurity\intelligence_models.py
+============================================================
+"""
+Provider-independent models for Cybersecurity Intelligence.
+
+These models contain supplied security information only.
+They do not fetch data or perform security actions.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+_ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+
+
+@dataclass(frozen=True, slots=True)
+class CybersecuritySignal:
+    """
+    A normalised cybersecurity observation supplied by an application/service.
+    """
+
+    signal_id: str
+    category: str
+    title: str
+    severity: str
+    confidence: float = 0.0
+    source: str = ""
+    affected_area: str = ""
+    technique: str = ""
+    status: str = "open"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.signal_id.strip():
+            raise ValueError("signal_id cannot be empty.")
+        if not self.category.strip():
+            raise ValueError("category cannot be empty.")
+        if not self.title.strip():
+            raise ValueError("title cannot be empty.")
+
+        severity = self.severity.strip().lower()
+        if severity not in _ALLOWED_SEVERITIES:
+            raise ValueError(
+                f"Unsupported severity: {self.severity!r}."
+            )
+
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be between 0 and 1.")
+
+        object.__setattr__(self, "severity", severity)
+
+
+============================================================
+FILE: .\backend\cybersecurity\intelligence_service.py
+============================================================
+"""
+Cybersecurity Intelligence Application Service.
+
+Application-layer composition for Cybersecurity Intelligence Agent.
+
+Flow:
+
+CybersecurityDataSource
+        ↓
+ExecutionContext
+        ↓
+RuntimeEngine
+        ↓
+CybersecurityIntelligenceAgent
+        ↓
+AgentResult
+
+Does not:
+- call provider SDKs;
+- execute remediation;
+- send email;
+- modify production systems;
+- bypass the Runtime.
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_result import AgentResult
+from backend.agents.cybersecurity_intelligence_agent import (
+    CybersecurityIntelligenceAgent,
+)
+from backend.cybersecurity.data_source import CybersecurityDataSource
+from backend.runtime.context.execution_context import ExecutionContext
+from backend.runtime.runtime_engine import RuntimeEngine
+
+
+class CybersecurityIntelligenceService:
+    """
+    Application boundary for Cybersecurity Intelligence.
+
+    The service acquires normalized signals and delegates agent execution
+    to the existing RuntimeEngine.
+    """
+
+    def __init__(
+        self,
+        data_source: CybersecurityDataSource,
+        runtime: RuntimeEngine | None = None,
+        agent: CybersecurityIntelligenceAgent | None = None,
+    ) -> None:
+        if data_source is None:
+            raise ValueError(
+                "Cybersecurity data source cannot be None."
+            )
+
+        self.data_source = data_source
+        self.runtime = runtime or RuntimeEngine()
+        self.agent = agent or CybersecurityIntelligenceAgent()
+
+    async def analyse(
+        self,
+        *,
+        user_id: str,
+        request: str,
+    ) -> AgentResult:
+        """
+        Acquire cybersecurity signals and execute Agent 1 through Runtime.
+        """
+
+        if not user_id.strip():
+            raise ValueError(
+                "user_id cannot be empty."
+            )
+
+        if not request.strip():
+            raise ValueError(
+                "request cannot be empty."
+            )
+
+        signals = await self.data_source.get_signals()
+
+        context = ExecutionContext(
+            user_id=user_id,
+            request=request,
+            metadata={
+                "cybersecurity_signals": signals,
+                "data_source": self.data_source.source_id,
+                "data_mode": "DEMO",
+            },
+        )
+
+        return await self.runtime.execute(
+            agent=self.agent,
+            context=context,
+        )
+
+
+============================================================
+FILE: .\backend\agents\cybersecurity_intelligence_agent.py
+============================================================
+"""
+Cybersecurity Intelligence Agent.
+
+Agent 1 for the EasyChatBot Cybersecurity Operations Center.
+
+Responsibilities:
+- analyse supplied cybersecurity signals;
+- orchestrate cybersecurity intelligence skills;
+- produce a provider-independent decision-support result.
+
+Does NOT:
+- call provider SDKs directly;
+- modify production systems;
+- execute remediation;
+- send emails;
+- persist security state.
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.cybersecurity.intelligence_models import (
+    CybersecuritySignal,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.skills.skill import (
+    SkillInput,
+)
+
+from backend.skills.cybersecurity.executive_security_summary import (
+    ExecutiveSecuritySummarySkill,
+)
+
+from backend.skills.cybersecurity.security_signal_analysis import (
+    SecuritySignalAnalysisSkill,
+)
+
+from backend.skills.cybersecurity.threat_prioritisation import (
+    ThreatPrioritisationSkill,
+)
+
+
+class CybersecurityIntelligenceAgent(
+    BaseAgent
+):
+    """
+    Produces structured cybersecurity intelligence.
+
+    Stateless agent.
+
+    Security observations are supplied through
+    ExecutionContext metadata.
+    """
+
+    agent_id = (
+        "cybersecurity.intelligence"
+    )
+
+    name = (
+        "Cybersecurity Intelligence Agent"
+    )
+
+    version = (
+        "1.0.0"
+    )
+
+    def __init__(
+        self,
+        signal_analysis_skill:
+            SecuritySignalAnalysisSkill | None = None,
+
+        prioritisation_skill:
+            ThreatPrioritisationSkill | None = None,
+
+        summary_skill:
+            ExecutiveSecuritySummarySkill | None = None,
+    ) -> None:
+
+        self._signal_analysis = (
+            signal_analysis_skill
+            or SecuritySignalAnalysisSkill()
+        )
+
+        self._prioritisation = (
+            prioritisation_skill
+            or ThreatPrioritisationSkill()
+        )
+
+        self._summary = (
+            summary_skill
+            or ExecutiveSecuritySummarySkill()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Analyse supplied cybersecurity signals.
+        """
+
+        if context is None:
+
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error="Execution context cannot be None.",
+            )
+
+        raw_signals = (
+            context.metadata.get(
+                "cybersecurity_signals"
+            )
+        )
+
+        if raw_signals is None:
+
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    "cybersecurity_signals are required "
+                    "in execution metadata."
+                ),
+            )
+
+        if not isinstance(
+            raw_signals,
+            (list, tuple),
+        ):
+
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    "cybersecurity_signals must be "
+                    "a list or tuple."
+                ),
+            )
+
+        signals = [
+            item
+            for item in raw_signals
+            if isinstance(
+                item,
+                CybersecuritySignal,
+            )
+        ]
+
+        analysis_result = await (
+            self._signal_analysis.execute(
+                SkillInput(
+                    request=context.request,
+                    metadata={
+                        "signals": signals,
+                    },
+                )
+            )
+        )
+
+        if not analysis_result.success:
+
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    analysis_result.error
+                    or "Signal analysis failed."
+                ),
+            )
+
+        prioritisation_result = await (
+            self._prioritisation.execute(
+                SkillInput(
+                    request=context.request,
+                    metadata={
+                        "analysed_signals":
+                            analysis_result.output,
+                    },
+                )
+            )
+        )
+
+        if not prioritisation_result.success:
+
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    prioritisation_result.error
+                    or "Threat prioritisation failed."
+                ),
+            )
+
+        summary_result = await (
+            self._summary.execute(
+                SkillInput(
+                    request=context.request,
+                    metadata={
+                        "prioritised_signals":
+                            prioritisation_result.output,
+
+                        "execution_id":
+                            context.execution_id,
+                    },
+                )
+            )
+        )
+
+        if not summary_result.success:
+
+            return AgentResult(
+                success=False,
+                agent_id=self.agent_id,
+                output=None,
+                error=(
+                    summary_result.error
+                    or "Executive summary failed."
+                ),
+            )
+
+        critical_count = len(
+            [
+                signal
+                for signal in signals
+                if signal.severity.lower()
+                == "critical"
+            ]
+        )
+
+        high_count = len(
+            [
+                signal
+                for signal in signals
+                if signal.severity.lower()
+                == "high"
+            ]
+        )
+
+        medium_count = len(
+            [
+                signal
+                for signal in signals
+                if signal.severity.lower()
+                == "medium"
+            ]
+        )
+
+        low_count = len(
+            [
+                signal
+                for signal in signals
+                if signal.severity.lower()
+                == "low"
+            ]
+        )
+
+        open_signal_count = len(
+            [
+                signal
+                for signal in signals
+                if signal.status.lower()
+                == "open"
+            ]
+        )
+
+        if critical_count > 0:
+
+            posture = (
+                "CRITICAL ATTENTION REQUIRED"
+            )
+
+        elif high_count > 0:
+
+            posture = (
+                "HIGH ATTENTION REQUIRED"
+            )
+
+        elif medium_count > 0:
+
+            posture = (
+                "MEDIUM ATTENTION REQUIRED"
+            )
+
+        else:
+
+            posture = (
+                "NORMAL"
+            )
+
+        priority_signals = (
+            prioritisation_result.output
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.agent_id,
+            output={
+
+                "signal_count":
+                    len(signals),
+
+                "critical_count":
+                    critical_count,
+
+                "high_count":
+                    high_count,
+
+                "medium_count":
+                    medium_count,
+
+                "low_count":
+                    low_count,
+
+                "open_signal_count":
+                    open_signal_count,
+
+                "posture":
+                    posture,
+
+                #
+                # Primary contract
+                #
+                "priority_signals":
+                    priority_signals,
+
+                #
+                # Backwards compatibility
+                #
+                "prioritised_signals":
+                    priority_signals,
+
+                "signals":
+                    signals,
+
+                "analysis":
+                    analysis_result.output,
+
+                "summary":
+                    summary_result.output,
+
+                "execution_id":
+                    context.execution_id,
+            },
+        )
+
+============================================================
+FILE: .\backend\skills\cybersecurity\security_signal_analysis.py
+============================================================
+"""
+Security Signal Analysis Skill.
+
+Deterministically normalises and validates supplied cybersecurity signals.
+
+Responsibilities:
+- validate cybersecurity signals;
+- calculate deterministic severity ranking;
+- produce analysis metadata.
+
+Does NOT:
+- call external providers;
+- modify security systems;
+- execute remediation.
+"""
+
+from __future__ import annotations
+
+
+from cybersecurity.intelligence_models import (
+    CybersecuritySignal,
+)
+
+
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+
+
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+
+class SecuritySignalAnalysisSkill(
+    Skill
+):
+
+    skill_id = (
+        "cybersecurity.security_signal_analysis"
+    )
+
+    name = (
+        "Security Signal Analysis"
+    )
+
+    version = (
+        "1.0.0"
+    )
+
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+
+
+        if skill_input is None:
+
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "Skill input cannot be None."
+                ),
+            )
+
+
+        raw = (
+            skill_input.metadata.get(
+                "signals"
+            )
+        )
+
+
+        if not isinstance(
+            raw,
+            (list, tuple),
+        ):
+
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "signals must be a list or tuple."
+                ),
+            )
+
+
+        analysed = []
+
+
+        for signal in raw:
+
+            if not isinstance(
+                signal,
+                CybersecuritySignal,
+            ):
+                continue
+
+
+            analysed.append(
+
+                {
+                    "signal": signal,
+
+                    "severity":
+                        signal.severity,
+
+                    "severity_rank":
+                        self._severity_rank(
+                            signal.severity
+                        ),
+
+                    "confidence":
+                        signal.confidence,
+
+                    "is_open":
+                        signal.status.strip().lower()
+                        not in {
+                            "closed",
+                            "resolved",
+                        },
+                }
+
+            )
+
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=analysed,
+        )
+
+
+
+    @staticmethod
+    def _severity_rank(
+        severity: str,
+    ) -> int:
+
+        return {
+
+            "critical": 5,
+
+            "high": 4,
+
+            "medium": 3,
+
+            "low": 2,
+
+            "info": 1,
+
+        }.get(
+            severity.lower(),
+            0,
+        )
+
+============================================================
+FILE: .\backend\skills\cybersecurity\threat_prioritisation.py
+============================================================
+"""
+Threat Prioritisation Skill.
+
+Ranks already-analysed cybersecurity signals using transparent deterministic
+criteria. It does not invent findings or make remediation decisions.
+"""
+
+from __future__ import annotations
+
+from backend.skills.skill import Skill, SkillInput
+from backend.skills.skill_result import SkillResult
+
+
+class ThreatPrioritisationSkill(Skill):
+    skill_id = "cybersecurity.threat_prioritisation"
+    name = "Threat Prioritisation"
+    version = "1.0.0"
+
+    async def execute(self, skill_input: SkillInput) -> SkillResult:
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        raw = skill_input.metadata.get("analysed_signals")
+        if not isinstance(raw, (list, tuple)):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="analysed_signals must be a list or tuple.",
+            )
+
+        ranked = sorted(
+            (item for item in raw if isinstance(item, dict)),
+            key=lambda item: (
+                int(item.get("severity_rank", 0)),
+                1 if item.get("is_open") else 0,
+                float(item.get("confidence", 0.0)),
+            ),
+            reverse=True,
+        )
+
+        output = []
+        for index, item in enumerate(ranked, start=1):
+            signal = item.get("signal")
+            output.append(
+                {
+                    "priority": index,
+                    "signal": signal,
+                    "severity": item.get("severity"),
+                    "confidence": item.get("confidence"),
+                    "is_open": item.get("is_open"),
+                }
+            )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=output,
+        )
+
+
+============================================================
+FILE: .\backend\skills\cybersecurity\executive_security_summary.py
+============================================================
+"""
+Executive Security Summary Skill.
+
+Produces a concise decision-support summary from prioritised, supplied
+cybersecurity observations.
+
+No external calls, no fabricated data, no remediation.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+
+from backend.skills.skill import Skill, SkillInput
+from backend.skills.skill_result import SkillResult
+
+
+class ExecutiveSecuritySummarySkill(Skill):
+    skill_id = "cybersecurity.executive_security_summary"
+    name = "Executive Security Summary"
+    version = "1.0.0"
+
+    async def execute(self, skill_input: SkillInput) -> SkillResult:
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        items = skill_input.metadata.get("prioritised_signals")
+        if not isinstance(items, (list, tuple)):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="prioritised_signals must be a list or tuple.",
+            )
+
+        valid_items = [item for item in items if isinstance(item, dict)]
+        severities = Counter(
+            str(item.get("severity", "unknown")).lower()
+            for item in valid_items
+        )
+
+        critical = severities.get("critical", 0)
+        high = severities.get("high", 0)
+        open_count = sum(
+            1 for item in valid_items if item.get("is_open")
+        )
+
+        if critical:
+            posture = "CRITICAL ATTENTION REQUIRED"
+        elif high:
+            posture = "HIGH ATTENTION REQUIRED"
+        elif open_count:
+            posture = "MONITOR"
+        else:
+            posture = "NO OPEN SIGNALS"
+
+        priorities = []
+        for item in valid_items[:5]:
+            signal = item.get("signal")
+            if signal is None:
+                continue
+
+            priorities.append(
+                {
+                    "priority": item.get("priority"),
+                    "signal_id": signal.signal_id,
+                    "title": signal.title,
+                    "category": signal.category,
+                    "severity": signal.severity,
+                    "confidence": signal.confidence,
+                    "source": signal.source,
+                    "affected_area": signal.affected_area,
+                    "technique": signal.technique,
+                    "status": signal.status,
+                }
+            )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output={
+                "posture": posture,
+                "signal_count": len(valid_items),
+                "open_signal_count": open_count,
+                "critical_count": critical,
+                "high_count": high,
+                "medium_count": severities.get("medium", 0),
+                "low_count": severities.get("low", 0),
+                "priority_signals": priorities,
+                "decision_note": (
+                    "Review the highest-priority signals and associated evidence. "
+                    "This output is decision support only; no remediation is executed."
+                ),
+                "execution_id": skill_input.metadata.get("execution_id"),
+            },
+        )
+

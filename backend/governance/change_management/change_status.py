@@ -1,0 +1,12 @@
+from enum import Enum
+
+
+class ChangeStatus(str, Enum):
+    PROPOSED = "PROPOSED"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    SCHEDULED = "SCHEDULED"
+    EXECUTED = "EXECUTED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"

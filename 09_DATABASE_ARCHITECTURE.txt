@@ -1,0 +1,859 @@
+﻿===============================================================================
+
+===============================================================================
+PATH: .\backend\app\infrastructure\database.py
+===============================================================================
+
+===============================================================================
+PATH: .\backend\app\infrastructure\db.py
+===============================================================================
+
+===============================================================================
+PATH: .\backend\app\infrastructure\persistence\database.py
+===============================================================================
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def database_url() -> str:
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for Beta Telegram persistence."
+        )
+    return value
+
+
+def create_database_engine():
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(engine):
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+===============================================================================
+PATH: .\backend\app\infrastructure\persistence\models.py
+===============================================================================
+
+===============================================================================
+PATH: .\backend\alembic.ini
+===============================================================================
+
+===============================================================================
+PATH: .\backend\alembic\env.py
+===============================================================================
+
+===============================================================================
+PATH: .\backend\alembic\versions
+===============================================================================
+
+===============================================================================
+PATH: .\backend\app\infrastructure\persistence
+===============================================================================
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py ---
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .database import Base
+
+
+class BetaUserRecord(Base):
+    __tablename__ = "beta_users"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active_world_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BetaConnectionTokenRecord(Base):
+    __tablename__ = "beta_connection_tokens"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("beta_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TelegramBindingRecord(Base):
+    __tablename__ = "telegram_bindings"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", name="uq_telegram_binding_telegram_user"),
+        UniqueConstraint("user_id", name="uq_telegram_binding_beta_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("beta_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    telegram_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    chat_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py ---
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def database_url() -> str:
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for Beta Telegram persistence."
+        )
+    return value
+
+
+def create_database_engine():
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(engine):
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_beta_access_repository.py ---
+from __future__ import annotations
+
+from app.application.beta_access.models import BetaConnectionToken, BetaUserState, TelegramBinding
+
+
+class InMemoryBetaUserRepository:
+    def __init__(self):
+        self._users = {}
+
+    async def get(self, user_id):
+        return self._users.get(user_id)
+
+    async def save(self, user):
+        self._users[user.user_id] = user
+        return user
+
+    async def get_by_telegram_id(self, telegram_id):
+        return next(
+            (u for u in self._users.values() if u.telegram_id == telegram_id),
+            None,
+        )
+
+
+class InMemoryBetaTokenRepository:
+    def __init__(self):
+        self._tokens = {}
+
+    async def save(self, token):
+        self._tokens[token.token] = token
+
+    async def get_by_token(self, token):
+        return self._tokens.get(token)
+
+    async def mark_used(self, token):
+        record = self._tokens[token]
+        self._tokens[token] = BetaConnectionToken(
+            user_id=record.user_id,
+            token=record.token,
+            expires_at=record.expires_at,
+            used=True,
+        )
+
+
+class InMemoryTelegramBindingRepository:
+    def __init__(self):
+        self._bindings = {}
+
+    async def save(self, binding):
+        self._bindings[binding.telegram_id] = binding
+        return binding
+
+    async def get_by_telegram_id(self, telegram_id):
+        return self._bindings.get(telegram_id)
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_event_repository.py ---
+"""
+In-Memory Voice Call Event Repository.
+
+Infrastructure implementation for
+voice lifecycle event storage.
+
+Responsibilities:
+- Store VoiceCallEvent objects in memory.
+- Retrieve events by voice_call_id.
+- Provide Beta persistence adapter.
+
+Does NOT:
+- Contain business logic.
+- Execute workflows.
+- Send notifications.
+- Call external providers.
+- Replace production event storage.
+"""
+
+from __future__ import annotations
+
+
+
+from backend.app.application.uai.voice.voice_call_event_repository import (
+    VoiceCallEventRepository,
+)
+
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEvent,
+)
+
+
+
+class InMemoryVoiceCallEventRepository(
+    VoiceCallEventRepository,
+):
+    """
+    In-memory repository for Beta.
+
+    Future replacement:
+    PostgreSQL/event store implementation.
+    """
+
+
+
+    def __init__(
+        self,
+    ) -> None:
+        """
+        Initialise repository storage.
+        """
+
+        self._events: list[
+            VoiceCallEvent
+        ] = []
+
+
+
+    def save(
+        self,
+        *,
+        event: VoiceCallEvent,
+    ) -> VoiceCallEvent:
+        """
+        Store a voice call event.
+        """
+
+
+        self._events.append(
+            event
+        )
+
+
+        return event
+
+
+
+    def get_by_voice_call_id(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> list[VoiceCallEvent]:
+        """
+        Retrieve events for a voice call.
+        """
+
+
+        return [
+            event
+            for event in self._events
+            if event.voice_call_id
+            ==
+            voice_call_id
+        ]
+
+
+
+    def get_all(
+        self,
+    ) -> list[VoiceCallEvent]:
+        """
+        Return all stored events.
+
+        Useful for Beta diagnostics
+        and tests.
+        """
+
+
+        return list(
+            self._events
+        )
+
+
+
+__all__ = [
+    "InMemoryVoiceCallEventRepository",
+]
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py ---
+"""
+In Memory Voice Call Invitation Repository.
+
+Infrastructure implementation of the
+VoiceCallInvitationRepository port.
+
+Responsibilities:
+- Store voice call invitations in memory.
+- Retrieve invitations by identity.
+- Delete invitations.
+
+Does NOT:
+- Send notifications.
+- Send emails.
+- Execute voice calls.
+- Manage LiveKit.
+- Contain business rules.
+"""
+
+from __future__ import annotations
+
+
+from backend.app.application.uai.voice.voice_call_invitation_repository import (
+    VoiceCallInvitationRepository,
+)
+
+
+from app.domain.uai.voice.voice_call_invitation import (
+    VoiceCallInvitation,
+)
+
+
+
+class InMemoryVoiceCallInvitationRepository(
+    VoiceCallInvitationRepository,
+):
+    """
+    In-memory repository for Beta/testing.
+
+    Future replacement:
+
+        PostgreSQLVoiceCallInvitationRepository
+
+    without changing application services.
+    """
+
+
+
+    def __init__(
+        self,
+    ) -> None:
+
+        self._invitations: dict[
+            str,
+            VoiceCallInvitation,
+        ] = {}
+
+
+
+    def save(
+        self,
+        *,
+        invitation: VoiceCallInvitation,
+    ) -> VoiceCallInvitation:
+        """
+        Save invitation.
+        """
+
+
+        self._invitations[
+            invitation.id
+        ] = invitation
+
+
+        return invitation
+
+
+
+    def get_by_id(
+        self,
+        *,
+        invitation_id: str,
+    ) -> VoiceCallInvitation | None:
+        """
+        Retrieve invitation by id.
+        """
+
+
+        return self._invitations.get(
+            invitation_id
+        )
+
+
+
+    def delete(
+        self,
+        *,
+        invitation_id: str,
+    ) -> None:
+        """
+        Delete invitation.
+        """
+
+
+        self._invitations.pop(
+            invitation_id,
+            None,
+        )
+
+
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Remove all invitations.
+
+        Useful for tests.
+        """
+
+
+        self._invitations.clear()
+
+
+
+__all__ = [
+    "InMemoryVoiceCallInvitationRepository",
+]
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_notification_repository.py ---
+"""
+In Memory Voice Call Notification Repository.
+
+Infrastructure implementation of the
+VoiceCallNotificationRepository port.
+
+Responsibilities:
+- Store notifications in memory.
+- Retrieve notifications.
+- Delete notifications.
+
+Does NOT:
+- Send notifications.
+- Send emails.
+- Manage inbox UI.
+- Execute voice calls.
+"""
+
+from __future__ import annotations
+
+
+from backend.app.application.uai.notifications.voice_call_notification_repository import (
+    VoiceCallNotificationRepository,
+)
+
+
+from app.domain.uai.notifications.voice_call_notification import (
+    VoiceCallNotification,
+)
+
+
+
+class InMemoryVoiceCallNotificationRepository(
+    VoiceCallNotificationRepository,
+):
+    """
+    Beta/test repository implementation.
+
+    Future replacement:
+
+        PostgreSQLVoiceCallNotificationRepository
+
+    without changing application services.
+    """
+
+
+
+    def __init__(
+        self,
+    ) -> None:
+
+        self._notifications: dict[
+            str,
+            VoiceCallNotification,
+        ] = {}
+
+
+
+    def save(
+        self,
+        *,
+        notification: VoiceCallNotification,
+    ) -> VoiceCallNotification:
+        """
+        Save notification.
+        """
+
+
+        self._notifications[
+            notification.id
+        ] = notification
+
+
+        return notification
+
+
+
+    def get_by_id(
+        self,
+        *,
+        notification_id: str,
+    ) -> VoiceCallNotification | None:
+        """
+        Retrieve notification.
+        """
+
+
+        return self._notifications.get(
+            notification_id
+        )
+
+
+
+    def delete(
+        self,
+        *,
+        notification_id: str,
+    ) -> None:
+        """
+        Delete notification.
+        """
+
+
+        self._notifications.pop(
+            notification_id,
+            None,
+        )
+
+
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Clear repository.
+
+        Useful for tests.
+        """
+
+
+        self._notifications.clear()
+
+
+
+__all__ = [
+    "InMemoryVoiceCallNotificationRepository",
+]
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py ---
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from app.application.beta_access.models import BetaToken, BetaUser, TelegramBinding
+from app.application.beta_access.repositories import (
+    BetaTokenRepository,
+    BetaUserRepository,
+    TelegramBindingRepository,
+)
+
+from .beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PostgreSQLBetaUserRepository(BetaUserRepository):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    def get(self, user_id: str) -> BetaUser | None:
+        with self._session_factory() as session:
+            row = session.get(BetaUserRecord, user_id)
+            return None if row is None else _user_from_record(row)
+
+    def save(self, user: BetaUser) -> None:
+        now = _utcnow()
+        with self._session_factory() as session:
+            row = session.get(BetaUserRecord, user.user_id)
+            if row is None:
+                row = BetaUserRecord(
+                    id=user.user_id,
+                    email=user.email,
+                    email_verified=user.email_verified,
+                    approved=user.approved,
+                    active_world_id=user.active_world_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.email = user.email
+                row.email_verified = user.email_verified
+                row.approved = user.approved
+                row.active_world_id = user.active_world_id
+                row.updated_at = now
+            session.commit()
+
+
+class PostgreSQLBetaTokenRepository(BetaTokenRepository):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    def get_by_hash(self, token_hash: str) -> BetaToken | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(BetaConnectionTokenRecord).where(
+                    BetaConnectionTokenRecord.token_hash == token_hash
+                )
+            )
+            return None if row is None else _token_from_record(row)
+
+    def save(self, token: BetaToken) -> None:
+        now = _utcnow()
+        with self._session_factory() as session:
+            row = session.get(BetaConnectionTokenRecord, token.token_id)
+            if row is None:
+                row = BetaConnectionTokenRecord(
+                    id=token.token_id,
+                    token_hash=token.token_hash,
+                    user_id=token.user_id,
+                    expires_at=token.expires_at,
+                    used_at=token.used_at,
+                    created_at=now,
+                )
+                session.add(row)
+            else:
+                row.used_at = token.used_at
+            session.commit()
+
+
+class PostgreSQLTelegramBindingRepository(TelegramBindingRepository):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    def get_by_telegram_user_id(self, telegram_user_id: str) -> TelegramBinding | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id == telegram_user_id
+                )
+            )
+            return None if row is None else _binding_from_record(row)
+
+    def get_by_user_id(self, user_id: str) -> TelegramBinding | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.user_id == user_id
+                )
+            )
+            return None if row is None else _binding_from_record(row)
+
+    def save(self, binding: TelegramBinding) -> None:
+        with self._session_factory() as session:
+            row = session.get(TelegramBindingRecord, binding.binding_id)
+            if row is None:
+                row = TelegramBindingRecord(
+                    id=binding.binding_id,
+                    user_id=binding.user_id,
+                    telegram_user_id=binding.telegram_user_id,
+                    chat_id=binding.chat_id,
+                    connected_at=binding.connected_at,
+                )
+                session.add(row)
+            else:
+                row.telegram_user_id = binding.telegram_user_id
+                row.chat_id = binding.chat_id
+                row.connected_at = binding.connected_at
+            session.commit()
+
+
+def _user_from_record(row) -> BetaUser:
+    return BetaUser(
+        user_id=row.id,
+        email=row.email,
+        email_verified=row.email_verified,
+        approved=row.approved,
+        active_world_id=row.active_world_id,
+        telegram_id=None,
+    )
+
+
+def _token_from_record(row) -> BetaToken:
+    return BetaToken(
+        token_id=row.id,
+        token_hash=row.token_hash,
+        user_id=row.user_id,
+        expires_at=row.expires_at,
+        used_at=row.used_at,
+    )
+
+
+def _binding_from_record(row) -> TelegramBinding:
+    return TelegramBinding(
+        binding_id=row.id,
+        user_id=row.user_id,
+        telegram_user_id=row.telegram_user_id,
+        chat_id=row.chat_id,
+        connected_at=row.connected_at,
+    )
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\voice_call_repository.py ---
+"""
+Voice Call Repository Infrastructure Adapter.
+
+Infrastructure implementation for
+VoiceCall persistence.
+
+Responsibilities:
+- Implement application repository contract.
+- Provide persistence boundary.
+- Hide storage implementation details.
+
+Does NOT:
+- Handle HTTP.
+- Manage LiveKit.
+- Execute AI runtime.
+- Send notifications.
+- Own business lifecycle rules.
+
+Beta implementation:
+- In-memory storage placeholder.
+- Replace with SQLAlchemy implementation
+  when existing persistence pattern is confirmed.
+"""
+
+from __future__ import annotations
+
+
+from backend.app.application.uai.voice.voice_call_repository import (
+    VoiceCallRepository,
+)
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+
+class InMemoryVoiceCallRepository(
+    VoiceCallRepository,
+):
+    """
+    Temporary infrastructure repository.
+
+    Keeps persistence boundary ready
+    without introducing a new database
+    implementation prematurely.
+    """
+
+
+
+    def __init__(self) -> None:
+        """
+        Initialise storage.
+        """
+
+        self._storage: dict[
+            str,
+            VoiceCall,
+        ] = {}
+
+
+
+    def save(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCall:
+        """
+        Store voice call.
+        """
+
+
+        self._storage[
+            voice_call.id
+        ] = voice_call
+
+
+        return voice_call
+
+
+
+    def get_by_id(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> VoiceCall | None:
+        """
+        Retrieve voice call.
+        """
+
+
+        return self._storage.get(
+            voice_call_id,
+        )
+
+
+
+__all__ = [
+    "InMemoryVoiceCallRepository",
+]

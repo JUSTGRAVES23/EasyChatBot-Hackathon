@@ -1,0 +1,217 @@
+﻿"""
+Resend email provider.
+
+Infrastructure adapter responsible only for email delivery.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import resend
+
+from backend.cybersecurity.email.email_configuration import (
+    EMAIL_FROM,
+    RESEND_API_KEY,
+)
+
+
+class ResendEmailProvider:
+    """
+    Provider adapter for Resend email delivery.
+    """
+
+    provider_id = "resend"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        sender: str | None = None,
+    ) -> None:
+
+        self.api_key = (
+            api_key or RESEND_API_KEY
+        )
+
+        self.sender = (
+            sender or EMAIL_FROM
+        )
+
+        if not self.api_key:
+            raise ValueError(
+                "RESEND_API_KEY is not configured."
+            )
+
+        if not self.sender:
+            raise ValueError(
+                "Cybersecurity email sender is not configured."
+            )
+
+        resend.api_key = self.api_key
+
+    async def send(
+        self,
+        subject: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Send an email through Resend.
+        """
+
+        if not subject.strip():
+            raise ValueError(
+                "Email subject cannot be empty."
+            )
+
+        if not isinstance(content, dict):
+            raise TypeError(
+                "Email content must be a dictionary."
+            )
+
+        recipient = content.get("recipient")
+
+        if not recipient:
+            raise ValueError(
+                "Email recipient is required."
+            )
+
+        html = self._build_html(content)
+
+        params = {
+            "from": self.sender,
+            "to": [recipient],
+            "subject": subject,
+            "html": html,
+        }
+
+        response = await resend.Emails.send_async(
+            params
+        )
+
+        if isinstance(response, dict):
+            message_id = response.get("id")
+        else:
+            message_id = getattr(
+                response,
+                "id",
+                None,
+            )
+
+        return {
+            "provider": self.provider_id,
+            "status": "accepted",
+            "message_id": message_id,
+        }
+
+    @staticmethod
+    def _build_html(
+        content: dict[str, Any],
+    ) -> str:
+        """
+        Render the supplied cybersecurity report
+        into a readable HTML email.
+        """
+
+        posture = str(
+            content.get(
+                "posture",
+                "Security notification",
+            )
+        )
+
+        critical_count = content.get(
+            "critical_count",
+            0,
+        )
+
+        high_count = content.get(
+            "high_count",
+            0,
+        )
+
+        priority_signals = content.get(
+            "priority_signals",
+            [],
+        )
+
+        signal_rows = ""
+
+        if isinstance(
+            priority_signals,
+            list,
+        ):
+            for signal in priority_signals:
+
+                if not isinstance(
+                    signal,
+                    dict,
+                ):
+                    continue
+
+                title = str(
+                    signal.get(
+                        "title",
+                        "Security signal",
+                    )
+                )
+
+                severity = str(
+                    signal.get(
+                        "severity",
+                        "",
+                    )
+                ).upper()
+
+                signal_rows += (
+                    "<li>"
+                    f"<strong>{title}</strong>"
+                    f" — {severity}"
+                    "</li>"
+                )
+
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>EasyChatBot Cybersecurity</title>
+</head>
+<body>
+    <h2>EasyChatBot Cybersecurity Notification</h2>
+
+    <p>
+        <strong>Security posture:</strong>
+        {posture}
+    </p>
+
+    <p>
+        <strong>Critical findings:</strong>
+        {critical_count}
+    </p>
+
+    <p>
+        <strong>High findings:</strong>
+        {high_count}
+    </p>
+
+    <h3>Priority Security Signals</h3>
+
+    <ul>
+        {signal_rows}
+    </ul>
+
+    <hr>
+
+    <p>
+        This notification is decision support only.
+        No remediation action was executed by EasyChatBot.
+    </p>
+
+    <p>
+        <strong>Environment:</strong> DEMO
+    </p>
+</body>
+</html>
+"""
+

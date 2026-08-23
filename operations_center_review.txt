@@ -1,0 +1,1164 @@
+
+
+===== FILE: .\app\application\provider_management\health_dashboard_service.py =====
+
+"""
+EasyChatBot AI Operations Center health dashboard service.
+
+Provides the application-level data contract for the
+AI Operations Center health dashboard.
+
+Architecture:
+
+Provider Analytics
+        |
+        +----------------------+
+        |                      |
+        v                      v
+
+Provider Health         Escalation Repository
+        |                      |
+        +----------+-----------+
+                   |
+                   v
+        HealthDashboardService
+                   |
+                   v
+        AI Operations Center
+
+
+Responsibilities:
+
+- aggregate provider operational health;
+- expose active provider information;
+- expose active escalation information;
+- provide a dashboard-ready health summary.
+
+
+Does NOT:
+
+- execute providers;
+- change provider routing;
+- create escalations;
+- send emails;
+- render UI;
+- make autonomous operational changes.
+
+
+Important:
+
+"System confidence" represents operational confidence
+derived from provider execution success.
+
+It is not an AI quality score.
+
+Quality intelligence can be incorporated later when
+the approved quality evaluation framework is connected.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.application.provider_management.escalation_repository import (
+    EscalationRepository,
+)
+
+from app.application.analytics.ai_platform.provider_analytics_service import (
+    ProviderAnalyticsService,
+)
+
+from app.application.provider_management.models import (
+    EscalationSeverity,
+    EscalationStatus,
+)
+
+
+@dataclass(frozen=True)
+class AIHealthDashboard:
+    """
+    Dashboard-ready AI Operations Center health data.
+    """
+
+    system_confidence: float
+
+    active_providers: tuple[str, ...]
+
+    monitoring_active: bool
+
+    active_escalations: int
+
+    high_priority_escalations: int
+
+
+class AIHealthDashboardService:
+    """
+    Generates the AI Operations Center health summary.
+
+    This service is deliberately read-only.
+
+    It aggregates existing analytics and escalation
+    information instead of maintaining another source
+    of operational truth.
+    """
+
+    def __init__(
+        self,
+        *,
+        analytics_service: ProviderAnalyticsService,
+        escalation_repository: EscalationRepository,
+    ) -> None:
+
+        if analytics_service is None:
+            raise ValueError(
+                "ProviderAnalyticsService cannot be None."
+            )
+
+        if escalation_repository is None:
+            raise ValueError(
+                "EscalationRepository cannot be None."
+            )
+
+        self._analytics_service = (
+            analytics_service
+        )
+
+        self._escalation_repository = (
+            escalation_repository
+        )
+
+    def generate_dashboard(
+        self,
+    ) -> AIHealthDashboard:
+        """
+        Generate the current AI Operations health view.
+        """
+
+        analytics = (
+            self._analytics_service
+            .generate_summary()
+        )
+
+        escalations = (
+            self._escalation_repository
+            .get_all()
+        )
+
+        active_escalations = [
+            escalation
+            for escalation in escalations
+            if escalation.status
+            in (
+                EscalationStatus.OPEN,
+                EscalationStatus.ACKNOWLEDGED,
+            )
+        ]
+
+        high_priority_escalations = [
+            escalation
+            for escalation in active_escalations
+            if escalation.severity
+            in (
+                EscalationSeverity.HIGH,
+                EscalationSeverity.CRITICAL,
+            )
+        ]
+
+        return AIHealthDashboard(
+            system_confidence=(
+                analytics.success_rate
+            ),
+            active_providers=(
+                analytics.providers
+            ),
+            monitoring_active=True,
+            active_escalations=(
+                len(active_escalations)
+            ),
+            high_priority_escalations=(
+                len(high_priority_escalations)
+            ),
+        )
+
+
+===== FILE: .\tests\application\provider_management\test_health_dashboard_service.py =====
+
+"""
+EasyChatBot AI Operations Center health dashboard tests.
+
+Validates:
+
+Provider Analytics
+        |
+        +----------------------+
+        |                      |
+        v                      v
+
+Provider Health         Escalation Repository
+        |                      |
+        +----------+-----------+
+                   |
+                   v
+        AIHealthDashboardService
+                   |
+                   v
+        Dashboard Health Contract
+
+No UI is rendered and no external systems are called.
+"""
+
+from decimal import Decimal
+
+from src.ai_runtime.providers.usage.models import (
+    ProviderUsageEvent,
+)
+
+from src.ai_runtime.providers.usage.repository import (
+    InMemoryProviderUsageRepository,
+)
+
+from app.application.analytics.ai_platform.provider_analytics_service import (
+    ProviderAnalyticsService,
+)
+
+from app.application.provider_management.escalation_repository import (
+    InMemoryEscalationRepository,
+)
+
+from app.application.provider_management.escalation_service import (
+    EscalationService,
+)
+
+from app.application.provider_management.health_dashboard_service import (
+    AIHealthDashboardService,
+)
+
+from app.application.provider_management.models import (
+    EscalationSeverity,
+    EscalationStatus,
+    EscalationType,
+)
+
+
+def create_usage_event(
+    *,
+    provider: str,
+    success: bool = True,
+) -> ProviderUsageEvent:
+    """
+    Create deterministic provider usage data.
+    """
+
+    return ProviderUsageEvent(
+        provider=provider,
+        model="gpt-5-mini",
+        capability="conversation",
+        functionality="chat",
+        agent="conversation_agent",
+        input_tokens=1000,
+        output_tokens=500,
+        latency_ms=800,
+        estimated_cost=Decimal("0.010"),
+        quality_score=95.0,
+        success=success,
+    )
+
+
+def create_dashboard_service(
+    usage_repository: InMemoryProviderUsageRepository,
+    escalation_repository: InMemoryEscalationRepository,
+) -> AIHealthDashboardService:
+    """
+    Create the dashboard service from its dependencies.
+    """
+
+    analytics_service = ProviderAnalyticsService(
+        repository=usage_repository,
+    )
+
+    return AIHealthDashboardService(
+        analytics_service=analytics_service,
+        escalation_repository=escalation_repository,
+    )
+
+
+def test_health_dashboard_reports_provider_health() -> None:
+    """
+    Validate provider health information.
+    """
+
+    usage_repository = (
+        InMemoryProviderUsageRepository()
+    )
+
+    escalation_repository = (
+        InMemoryEscalationRepository()
+    )
+
+    usage_repository.save(
+        create_usage_event(
+            provider="openai",
+        )
+    )
+
+    usage_repository.save(
+        create_usage_event(
+            provider="gemini",
+        )
+    )
+
+    service = create_dashboard_service(
+        usage_repository,
+        escalation_repository,
+    )
+
+    dashboard = (
+        service.generate_dashboard()
+    )
+
+    assert dashboard.system_confidence == 100.0
+
+    assert dashboard.active_providers == (
+        "gemini",
+        "openai",
+    )
+
+    assert dashboard.monitoring_active is True
+
+    assert dashboard.active_escalations == 0
+
+    assert dashboard.high_priority_escalations == 0
+
+
+def test_health_dashboard_counts_active_escalations() -> None:
+    """
+    Validate active escalation aggregation.
+    """
+
+    usage_repository = (
+        InMemoryProviderUsageRepository()
+    )
+
+    escalation_repository = (
+        InMemoryEscalationRepository()
+    )
+
+    usage_repository.save(
+        create_usage_event(
+            provider="openai",
+        )
+    )
+
+    escalation_service = EscalationService(
+        repository=escalation_repository,
+    )
+
+    escalation_service.create_escalation(
+        escalation_type=(
+            EscalationType.COST_SPIKE
+        ),
+        severity=(
+            EscalationSeverity.MEDIUM
+        ),
+        provider="openai",
+        capability="conversation",
+        message="Provider cost increased.",
+    )
+
+    escalation_service.create_escalation(
+        escalation_type=(
+            EscalationType.LATENCY_DEGRADATION
+        ),
+        severity=(
+            EscalationSeverity.HIGH
+        ),
+        provider="openai",
+        capability="conversation",
+        message="Provider latency increased.",
+    )
+
+    service = create_dashboard_service(
+        usage_repository,
+        escalation_repository,
+    )
+
+    dashboard = (
+        service.generate_dashboard()
+    )
+
+    assert dashboard.active_escalations == 2
+
+    assert (
+        dashboard.high_priority_escalations
+        == 1
+    )
+
+
+def test_resolved_escalations_are_not_active() -> None:
+    """
+    Validate escalation lifecycle filtering.
+
+    Resolved and dismissed escalations must not
+    appear in the active dashboard count.
+    """
+
+    usage_repository = (
+        InMemoryProviderUsageRepository()
+    )
+
+    escalation_repository = (
+        InMemoryEscalationRepository()
+    )
+
+    usage_repository.save(
+        create_usage_event(
+            provider="openai",
+        )
+    )
+
+    escalation_service = EscalationService(
+        repository=escalation_repository,
+    )
+
+    escalation = (
+        escalation_service.create_escalation(
+            escalation_type=(
+                EscalationType.PROVIDER_FAILURE
+            ),
+            severity=(
+                EscalationSeverity.CRITICAL
+            ),
+            provider="openai",
+            capability="conversation",
+            message="Provider unavailable.",
+        )
+    )
+
+    resolved_escalation = (
+        escalation.__class__(
+            escalation_id=(
+                escalation.escalation_id
+            ),
+            escalation_type=(
+                escalation.escalation_type
+            ),
+            severity=(
+                escalation.severity
+            ),
+            provider=(
+                escalation.provider
+            ),
+            capability=(
+                escalation.capability
+            ),
+            message=(
+                escalation.message
+            ),
+            recommendation=(
+                escalation.recommendation
+            ),
+            created_at=(
+                escalation.created_at
+            ),
+            status=(
+                EscalationStatus.RESOLVED
+            ),
+        )
+    )
+
+    escalation_repository.clear()
+
+    escalation_repository.save(
+        resolved_escalation
+    )
+
+    service = create_dashboard_service(
+        usage_repository,
+        escalation_repository,
+    )
+
+    dashboard = (
+        service.generate_dashboard()
+    )
+
+    assert dashboard.active_escalations == 0
+
+    assert (
+        dashboard.high_priority_escalations
+        == 0
+    )
+
+
+def test_failed_provider_requests_reduce_system_confidence() -> None:
+    """
+    Validate that provider failures affect the current
+    operational confidence metric.
+    """
+
+    usage_repository = (
+        InMemoryProviderUsageRepository()
+    )
+
+    escalation_repository = (
+        InMemoryEscalationRepository()
+    )
+
+    usage_repository.save(
+        create_usage_event(
+            provider="openai",
+            success=True,
+        )
+    )
+
+    usage_repository.save(
+        create_usage_event(
+            provider="openai",
+            success=False,
+        )
+    )
+
+    service = create_dashboard_service(
+        usage_repository,
+        escalation_repository,
+    )
+
+    dashboard = (
+        service.generate_dashboard()
+    )
+
+    assert dashboard.system_confidence == 50.0
+
+    assert dashboard.active_providers == (
+        "openai",
+    )
+
+    assert dashboard.monitoring_active is True
+
+
+===== FILE: .\app\application\provider_management\operations_center_dashboard_service.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard service.
+
+Provides a read-only, user-friendly operational view
+for the AI Operations Center.
+
+Architecture:
+
+Provider Intelligence
+        |
+        v
+Provider Health / Escalations / Workflow
+        |
+        v
+OperationsCenterDashboardService
+        |
+        v
+Dashboard Read Model
+        |
+        v
+Frontend / API
+
+
+Responsibilities:
+
+- aggregate provider operational status;
+- expose active providers;
+- expose monitoring status;
+- expose escalation counts;
+- expose pending human approvals;
+- calculate an operational confidence score;
+- provide a stable presentation-independent read model.
+
+Does NOT:
+
+- execute providers;
+- change Runtime routing;
+- approve recommendations;
+- send emails;
+- modify escalation state;
+- modify provider configuration.
+
+This is a read-only application service.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_service import (
+    EscalationWorkflowStatus,
+)
+
+if TYPE_CHECKING:
+    from app.application.provider_management.operations_center_provider_service import (
+        OperationsCenterProviderService,
+    )
+
+
+class MonitoringStatus(str, Enum):
+    """
+    Overall monitoring state shown by the Operations Center.
+    """
+
+    HEALTHY = "healthy"
+
+    ATTENTION_REQUIRED = (
+        "attention_required"
+    )
+
+    INCIDENT = "incident"
+
+
+@dataclass(frozen=True)
+class ActiveProvider:
+    """
+    Provider information displayed by the Operations Center.
+    """
+
+    provider: str
+
+    model: str
+
+    capabilities: tuple[str, ...]
+
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class OperationsCenterDashboard:
+    """
+    User-friendly Operations Center dashboard read model.
+    """
+
+    system_confidence: float
+
+    monitoring_status: MonitoringStatus
+
+    active_providers: tuple[
+        ActiveProvider,
+        ...
+    ]
+
+    active_escalations: int
+
+    pending_approvals: int
+
+    approved_escalations: int
+
+    rejected_escalations: int
+
+    pending_notifications: int
+
+    total_escalations: int
+
+
+# Sentinel used to distinguish:
+#
+#     build_dashboard()
+#
+# from:
+#
+#     build_dashboard(active_providers=None)
+#
+# The former means "obtain providers from the configured
+# provider service".
+#
+# The latter is invalid input and must remain rejected.
+_UNSET = object()
+
+
+class OperationsCenterDashboardService:
+    """
+    Builds the read-only Operations Center dashboard.
+
+    Provider information can be explicitly supplied for
+    deterministic tests and controlled application use.
+
+    When active providers are omitted entirely, the configured
+    OperationsCenterProviderService is used.
+
+    Explicit None remains invalid.
+    """
+
+    def __init__(
+        self,
+        history_service: EscalationHistoryService,
+        provider_service: (
+            OperationsCenterProviderService
+            | None
+        ) = None,
+    ) -> None:
+        """
+        Initialise the dashboard service.
+        """
+
+        if history_service is None:
+            raise ValueError(
+                "Escalation history service "
+                "cannot be None."
+            )
+
+        self._history_service = (
+            history_service
+        )
+
+        self._provider_service = (
+            provider_service
+        )
+
+    def build_dashboard(
+        self,
+        *,
+        active_providers: (
+            tuple[
+                ActiveProvider,
+                ...
+            ]
+            | None
+            | object
+        ) = _UNSET,
+    ) -> OperationsCenterDashboard:
+        """
+        Build the current Operations Center dashboard.
+
+        Provider resolution rules:
+
+        1. Explicit tuple:
+               use the supplied providers.
+
+        2. Explicit None:
+               reject the invalid input.
+
+        3. Argument omitted:
+               use the configured provider service.
+
+        This distinction preserves the original dashboard
+        contract while allowing the production composition
+        root to obtain real provider intelligence.
+        """
+
+        if active_providers is None:
+            raise ValueError(
+                "Active providers cannot be None."
+            )
+
+        if active_providers is _UNSET:
+            if self._provider_service is None:
+                raise ValueError(
+                    "Active providers were not supplied "
+                    "and no provider service is configured."
+                )
+
+            resolved_active_providers = (
+                self._provider_service
+                .get_active_providers()
+            )
+        else:
+            resolved_active_providers = (
+                active_providers
+            )
+
+        counts = (
+            self._history_service
+            .count_by_status()
+        )
+
+        pending_approvals = counts[
+            EscalationWorkflowStatus
+            .AWAITING_APPROVAL
+        ]
+
+        approved = counts[
+            EscalationWorkflowStatus
+            .APPROVED
+        ]
+
+        rejected = counts[
+            EscalationWorkflowStatus
+            .REJECTED
+        ]
+
+        pending_notifications = counts[
+            EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+        ]
+
+        total_escalations = sum(
+            counts.values()
+        )
+
+        active_escalations = (
+            pending_approvals
+            + pending_notifications
+        )
+
+        monitoring_status = (
+            self._determine_monitoring_status(
+                active_escalations=(
+                    active_escalations
+                ),
+                pending_approvals=(
+                    pending_approvals
+                ),
+            )
+        )
+
+        confidence = (
+            self._calculate_confidence(
+                active_escalations=(
+                    active_escalations
+                ),
+                pending_approvals=(
+                    pending_approvals
+                ),
+                total_escalations=(
+                    total_escalations
+                ),
+            )
+        )
+
+        return OperationsCenterDashboard(
+            system_confidence=confidence,
+            monitoring_status=monitoring_status,
+            active_providers=(
+                resolved_active_providers
+            ),
+            active_escalations=(
+                active_escalations
+            ),
+            pending_approvals=(
+                pending_approvals
+            ),
+            approved_escalations=approved,
+            rejected_escalations=rejected,
+            pending_notifications=(
+                pending_notifications
+            ),
+            total_escalations=(
+                total_escalations
+            ),
+        )
+
+    @staticmethod
+    def _determine_monitoring_status(
+        *,
+        active_escalations: int,
+        pending_approvals: int,
+    ) -> MonitoringStatus:
+        """
+        Determine the dashboard monitoring status.
+
+        Critical operational state is represented by the
+        existence of active escalations.
+
+        Pending human approval is explicitly surfaced.
+        """
+
+        if active_escalations > 0:
+            return MonitoringStatus.INCIDENT
+
+        if pending_approvals > 0:
+            return (
+                MonitoringStatus
+                .ATTENTION_REQUIRED
+            )
+
+        return MonitoringStatus.HEALTHY
+
+    @staticmethod
+    def _calculate_confidence(
+        *,
+        active_escalations: int,
+        pending_approvals: int,
+        total_escalations: int,
+    ) -> float:
+        """
+        Calculate a deterministic dashboard confidence score.
+
+        This is deliberately a simple operational indicator
+        for the Hackathon.
+
+        It is NOT an AI model confidence score.
+
+        Rules:
+
+        - 100 when there are no escalations;
+        - subtract 15 per active escalation;
+        - pending approval receives no additional penalty;
+        - never below 0.
+
+        Pending approvals are already represented in
+        active_escalations, so applying another penalty would
+        double-count the same operational condition.
+        """
+
+        if total_escalations == 0:
+            return 100.0
+
+        score = 100.0
+
+        score -= (
+            active_escalations * 15.0
+        )
+
+        return max(
+            0.0,
+            min(100.0, score),
+        )
+
+
+===== FILE: .\app\application\provider_management\operations_center_dashboard_composition.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard composition.
+
+Composition root for the read-only Operations Center
+dashboard and provider-health application stack.
+
+Architecture:
+
+Provider Health Observation
+        |
+        v
+ProviderHealthApplicationService
+        |
+        v
+ProviderHealthMonitorService
+        |
+        +------------------------------+
+        |                              |
+        v                              v
+Provider Health Read Model      Provider Incident Service
+        |                              |
+        v                              v
+Operations Center Provider Service   Escalations
+        |                              |
+        +---------------+--------------+
+                        |
+                        v
+                Dashboard Service
+                        |
+                        v
+                Dashboard Facade
+                        |
+                        v
+                  Dashboard API
+                        |
+                        v
+                   HTTP Router
+
+
+Responsibilities:
+
+- construct the Operations Center application dependencies;
+- construct one shared provider health monitor;
+- construct provider incident management;
+- connect health ingestion to the same health state consumed
+  by the Operations Center;
+- keep dependency construction outside HTTP;
+- provide a single composition boundary.
+
+Does NOT:
+
+- execute providers;
+- modify Runtime routing;
+- approve escalations;
+- reject escalations;
+- send emails;
+- perform autonomous remediation.
+
+This module is infrastructure/composition code.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_repository import (
+    InMemoryEscalationWorkflowRepository,
+)
+
+from app.application.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+
+from app.application.provider_management.operations_center_dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    OperationsCenterDashboardService,
+)
+
+from app.application.provider_management.operations_center_provider_service import (
+    OperationsCenterProviderService,
+)
+
+from app.application.provider_management.provider_health_application_service import (
+    ProviderHealthApplicationService,
+)
+
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+
+from app.application.provider_management.provider_incident_service import (
+    InMemoryProviderIncidentRepository,
+    ProviderIncidentService,
+)
+
+
+@dataclass(frozen=True)
+class OperationsCenterComposition:
+    """
+    Composed Operations Center application graph.
+
+    Exposes the dashboard API and provider health application
+    boundary while keeping all dependencies internally owned
+    by the composition root.
+    """
+
+    dashboard_api: OperationsCenterDashboardAPI
+
+    health_application_service: (
+        ProviderHealthApplicationService
+    )
+
+
+def create_operations_center_composition() -> (
+    OperationsCenterComposition
+):
+    """
+    Construct the complete Operations Center application graph.
+
+    A single ProviderHealthMonitorService instance is shared
+    between health ingestion and provider intelligence.
+
+    This prevents multiple independent health-state stores.
+    """
+
+    # ---------------------------------------------------------
+    # Provider health state
+    # ---------------------------------------------------------
+
+    health_monitor = (
+        ProviderHealthMonitorService()
+    )
+
+    # ---------------------------------------------------------
+    # Provider incidents
+    # ---------------------------------------------------------
+
+    incident_repository = (
+        InMemoryProviderIncidentRepository()
+    )
+
+    incident_service = (
+        ProviderIncidentService(
+            repository=incident_repository
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Health application boundary
+    # ---------------------------------------------------------
+
+    health_application_service = (
+        ProviderHealthApplicationService(
+            health_monitor=health_monitor,
+            incident_service=incident_service,
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Escalation history
+    # ---------------------------------------------------------
+
+    workflow_repository = (
+        InMemoryEscalationWorkflowRepository()
+    )
+
+    history_service = (
+        EscalationHistoryService(
+            repository=workflow_repository
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Provider intelligence
+    # ---------------------------------------------------------
+
+    provider_service = (
+        OperationsCenterProviderService(
+            health_monitor=health_monitor
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Dashboard application service
+    # ---------------------------------------------------------
+
+    dashboard_service = (
+        OperationsCenterDashboardService(
+            history_service=history_service,
+            provider_service=provider_service,
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Presentation facade
+    # ---------------------------------------------------------
+
+    facade = (
+        OperationsCenterDashboardFacade(
+            dashboard_service=dashboard_service
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Application API
+    # ---------------------------------------------------------
+
+    dashboard_api = (
+        OperationsCenterDashboardAPI(
+            facade=facade
+        )
+    )
+
+    return OperationsCenterComposition(
+        dashboard_api=dashboard_api,
+        health_application_service=(
+            health_application_service
+        ),
+    )
+
+
+def create_operations_center_dashboard_api() -> (
+    OperationsCenterDashboardAPI
+):
+    """
+    Backward-compatible dashboard API composition entry point.
+
+    Existing callers that only require the dashboard continue
+    to receive the dashboard API.
+
+    The complete application graph is still composed through
+    create_operations_center_composition().
+    """
+
+    composition = (
+        create_operations_center_composition()
+    )
+
+    return composition.dashboard_api

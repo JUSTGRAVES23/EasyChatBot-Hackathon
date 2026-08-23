@@ -1,0 +1,80 @@
+"""
+Cybersecurity Email Generator.
+
+Builds controlled DEMO email payloads for cybersecurity
+notification workflows.
+
+This component:
+- prepares email content;
+- does not send email;
+- does not call external providers;
+- does not execute remediation.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+DEFAULT_RECIPIENT = "davdbarbero1999@gmail.com"
+
+
+class CybersecurityEmailGenerator:
+    """
+    Generate structured cybersecurity email payloads.
+
+    Email generation is deliberately separated from delivery.
+    """
+
+    def __init__(
+        self,
+        recipient: str = DEFAULT_RECIPIENT,
+    ) -> None:
+        self.recipient = recipient
+
+    def generate_critical_alert(
+        self,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Generate a critical-security alert email payload.
+        """
+
+        if not isinstance(report, dict):
+            raise TypeError("report must be a dictionary.")
+
+        posture = str(
+            report.get(
+                "posture",
+                "CRITICAL ATTENTION REQUIRED",
+            )
+        )
+
+        critical_count = int(
+            report.get("critical_count", 0)
+        )
+
+        high_count = int(
+            report.get("high_count", 0)
+        )
+
+        priority_signals = report.get(
+            "priority_signals",
+            [],
+        )
+
+        return {
+            "priority": "critical",
+            "recipient": self.recipient,
+            "subject": (
+                "CRITICAL - EasyChatBot "
+                "Cybersecurity Alert"
+            ),
+            "content": {
+                "posture": posture,
+                "critical_count": critical_count,
+                "high_count": high_count,
+                "priority_signals": priority_signals,
+            },
+            "delivery_mode": "DEMO",
+        }

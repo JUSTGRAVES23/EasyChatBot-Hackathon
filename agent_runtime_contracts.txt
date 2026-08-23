@@ -1,0 +1,859 @@
+﻿"""
+Base AI Agent Contract.
+
+All EasyChatBot AI Agents inherit this contract.
+
+The BaseAgent defines:
+- agent identity
+- execution interface
+- runtime interaction
+
+Agents do not:
+- call providers directly
+- manage memory
+- modify external systems
+
+The AI Runtime controls execution.
+"""
+
+from abc import ABC, abstractmethod
+
+from backend.runtime.context.execution_context import ExecutionContext
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+
+
+class BaseAgent(ABC):
+    """
+    Abstract base class for EasyChatBot agents.
+    """
+
+    def __init__(
+        self,
+        manifest: AgentManifest,
+    ):
+        """
+        Initialise an agent.
+
+        Args:
+            manifest:
+                Agent identity definition.
+        """
+
+        self.manifest = manifest
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the agent.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            AgentResult.
+        """
+
+        pass
+"""
+Agent Manifest Definition.
+
+The AgentManifest describes the identity and basic metadata
+of an EasyChatBot AI Agent.
+
+The manifest does not execute the agent.
+It only defines:
+- who the agent is
+- what the agent represents
+- its version information
+
+Execution is handled by the AI Runtime.
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class AgentManifest:
+    """
+    Immutable definition of an AI Agent.
+
+    Agents are identified through their manifest.
+    The Runtime uses this information for controlled execution.
+
+    Attributes:
+        agent_id:
+            Unique identifier of the agent.
+
+        name:
+            Human-readable agent name.
+
+        description:
+            Purpose and responsibility of the agent.
+
+        version:
+            Version of the agent definition.
+    """
+
+    agent_id: str
+    name: str
+    description: str
+    version: str = "1.0.0"
+"""
+Agent Result Contract.
+
+Defines the standard output returned by AI Agents.
+
+All agents should return the same structure
+so the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """
+    Immutable result returned after agent execution.
+
+    Attributes:
+        success:
+            Indicates whether execution completed successfully.
+
+        agent_id:
+            Identifier of the agent that produced the result.
+
+        output:
+            Agent response payload.
+
+        error:
+            Error message when execution fails.
+    """
+
+    success: bool
+    agent_id: str
+    output: Any = None
+    error: str | None = None
+"""
+Conversation Agent.
+
+Provides character-aware conversational responses
+for the EasyChatBot hackathon runtime.
+
+The agent remains provider-independent.
+
+Architecture:
+
+ExecutionContext
+|
+v
+ConversationAgent
+|
++--> CharacterProfile
++--> Optional MemoryContext
++--> Optional IntelligenceContext
+|
+v
+ConversationRequest
+|
+v
+LLMService
+|
+v
+LLMProvider
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import (
+    AgentManifest,
+)
+
+from backend.agents.agent_result import (
+    AgentResult,
+)
+
+from backend.agents.base_agent import (
+    BaseAgent,
+)
+
+from backend.characters.character_profile import (
+    CharacterProfile,
+)
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.services.llm_service import (
+    LLMService,
+)
+
+
+class ConversationAgent(BaseAgent):
+    """
+    Character-aware conversation agent.
+
+    The agent consumes the provider-independent
+    ExecutionContext.
+
+    Memory and Live Intelligence remain application/runtime
+    concerns. The agent only receives their prepared context.
+    """
+
+    LIVE_INTELLIGENCE_INSTRUCTION = (
+        "When responding using current live intelligence, "
+        "create a concise learning brief for the learner. "
+        "Do not reproduce articles or provide a long news "
+        "summary. Focus only on the most important information. "
+        "Keep the main summary between approximately 60 and "
+        "100 words. Present no more than three key ideas. "
+        "Then briefly explain why the information matters "
+        "to the learner. Adapt the language and complexity "
+        "to the learner's level and the character's learning "
+        "style. Use only information supported by the supplied "
+        "live intelligence. Do not invent facts, sources, "
+        "statistics, quotations, or URLs. Do not list every "
+        "retrieved source in the response. Source metadata is "
+        "retained separately by the application."
+    )
+
+    def __init__(
+        self,
+        character: CharacterProfile,
+        llm_service: LLMService | None = None,
+        llm_provider: LLMProvider | None = None,
+    ) -> None:
+
+        super().__init__(
+            AgentManifest(
+                agent_id="conversation_agent",
+                name="Conversation Agent",
+                description=(
+                    "Provides character-aware "
+                    "conversation responses."
+                ),
+            )
+        )
+
+        if (
+            llm_service is not None
+            and llm_provider is not None
+        ):
+            raise ValueError(
+                "Provide either llm_service or "
+                "llm_provider, not both."
+            )
+
+        self.character = character
+
+        if llm_service is not None:
+            self.llm_service = llm_service
+
+        elif llm_provider is not None:
+            self.llm_service = LLMService(
+                llm_provider
+            )
+
+        else:
+            self.llm_service = None
+
+    def build_request(
+        self,
+        context: ExecutionContext,
+    ) -> ConversationRequest:
+        """
+        Build a provider-independent conversation request.
+
+        Memory and intelligence are explicitly represented
+        as contextual information.
+
+        Neither is treated as an instruction.
+        """
+
+        system_instruction = (
+            f"You are {self.character.name}, "
+            f"a character in EasyChatBot. "
+            f"Your personality is: "
+            f"{self.character.personality} "
+            f"Your learning style is: "
+            f"{self.character.learning_style} "
+            f"Communicate in a way that is consistent "
+            f"with this character."
+        )
+
+        context_sections: list[str] = []
+
+        # -------------------------------------------------
+        # Learner memory
+        # -------------------------------------------------
+
+        if context.has_memory_context:
+            memory_text = (
+                context.memory_context.text
+            )
+
+            if memory_text.strip():
+                context_sections.append(
+                    "Learner memory context:\n"
+                    + memory_text
+                )
+
+        # -------------------------------------------------
+        # Live intelligence
+        # -------------------------------------------------
+
+        has_live_intelligence = (
+            context.has_intelligence_context
+        )
+
+        if has_live_intelligence:
+            intelligence_text = (
+                context.intelligence_context
+                .to_context_text()
+            )
+
+            if intelligence_text.strip():
+                context_sections.append(
+                    "Current live intelligence:\n"
+                    + intelligence_text
+                )
+
+                context_sections.append(
+                    "Live intelligence response rules:\n"
+                    + self.LIVE_INTELLIGENCE_INSTRUCTION
+                )
+
+        # -------------------------------------------------
+        # Combined contextual information
+        # -------------------------------------------------
+
+        conversation_context = None
+
+        if context_sections:
+            conversation_context = (
+                "\n\n".join(
+                    context_sections
+                )
+            )
+
+        # -------------------------------------------------
+        # User prompt
+        # -------------------------------------------------
+
+        user_prompt = context.request
+
+        if has_live_intelligence:
+            user_prompt = (
+                "Answer the learner's request using "
+                "the supplied current live intelligence. "
+                "Prioritize a concise learning experience "
+                "over information volume.\n\n"
+                "Learner request:\n"
+                + context.request
+            )
+
+        return ConversationRequest(
+            system_instruction=system_instruction,
+            user_prompt=user_prompt,
+            conversation_context=(
+                conversation_context
+            ),
+            character_id=(
+                self.character.character_id
+            ),
+            character_name=(
+                self.character.name
+            ),
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute the conversation agent.
+        """
+
+        conversation_request = (
+            self.build_request(context)
+        )
+
+        provider_result = None
+
+        if self.llm_service is not None:
+            provider_result = (
+                await self.llm_service.generate(
+                    conversation_request
+                )
+            )
+
+            if not provider_result.success:
+                return AgentResult(
+                    success=False,
+                    agent_id=(
+                        self.manifest.agent_id
+                    ),
+                    output={
+                        "character": (
+                            self.character.name
+                        ),
+                        "character_profile": {
+                            "character_id": (
+                                self.character.character_id
+                            ),
+                            "name": (
+                                self.character.name
+                            ),
+                            "description": (
+                                self.character.description
+                            ),
+                            "personality": (
+                                self.character.personality
+                            ),
+                            "learning_style": (
+                                self.character.learning_style
+                            ),
+                        },
+                        "personality": (
+                            self.character.personality
+                        ),
+                        "learning_style": (
+                            self.character.learning_style
+                        ),
+                        "message": (
+                            "The conversation provider "
+                            "could not generate a response."
+                        ),
+                        "intelligence_context": (
+                            conversation_request
+                            .conversation_context
+                        ),
+                        "conversation_request": (
+                            conversation_request
+                        ),
+                        "provider_id": (
+                            provider_result.provider_id
+                        ),
+                        "provider_error": (
+                            provider_result.error
+                        ),
+                    },
+                )
+
+        if provider_result is not None:
+            message = provider_result.output
+
+        else:
+            message = (
+                f"{self.character.name}: "
+                f"Let's explore this together. "
+                f"You asked: "
+                f"{context.request}"
+            )
+
+        output = {
+            "character": (
+                self.character.name
+            ),
+            "character_profile": {
+                "character_id": (
+                    self.character.character_id
+                ),
+                "name": (
+                    self.character.name
+                ),
+                "description": (
+                    self.character.description
+                ),
+                "personality": (
+                    self.character.personality
+                ),
+                "learning_style": (
+                    self.character.learning_style
+                ),
+            },
+            "personality": (
+                self.character.personality
+            ),
+            "learning_style": (
+                self.character.learning_style
+            ),
+            "message": message,
+            "intelligence_context": (
+                conversation_request
+                .conversation_context
+            ),
+            "conversation_request": (
+                conversation_request
+            ),
+        }
+
+        if provider_result is not None:
+            output["provider_id"] = (
+                provider_result.provider_id
+            )
+
+        return AgentResult(
+            success=True,
+            agent_id=(
+                self.manifest.agent_id
+            ),
+            output=output,
+        )
+"""
+Research Agent.
+
+Retrieves external information through approved
+knowledge providers and converts the result into
+provider-independent IntelligenceContext data.
+
+Architecture:
+
+Research Agent
+        |
+        v
+ParallelSearchProvider
+        |
+        v
+ParallelClientWrapper
+        |
+        v
+IntelligenceContext
+"""
+
+from __future__ import annotations
+
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+from backend.agents.base_agent import BaseAgent
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+    IntelligenceSource,
+)
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchAgent(BaseAgent):
+    """
+    Agent responsible for world information retrieval.
+    """
+
+    def __init__(
+        self,
+        provider=None,
+    ):
+        super().__init__(
+            AgentManifest(
+                agent_id="research_agent",
+                name="Research Agent",
+                description=(
+                    "Retrieves live world information "
+                    "for AI learning experiences."
+                ),
+            )
+        )
+
+        self.provider = (
+            provider
+            or ParallelSearchProvider()
+        )
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute research and produce a normalized
+        IntelligenceContext.
+        """
+
+        result = await self.provider.execute(
+            context
+        )
+
+        if not result.success:
+            return AgentResult(
+                success=False,
+                agent_id=self.manifest.agent_id,
+                output=None,
+                error=result.error,
+            )
+
+        intelligence = (
+            self._build_intelligence_context(
+                query=context.request,
+                provider_output=result.output,
+            )
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output=intelligence,
+        )
+
+    @staticmethod
+    def _build_intelligence_context(
+        query: str,
+        provider_output,
+    ) -> IntelligenceContext:
+        """
+        Convert provider output into the
+        provider-independent IntelligenceContext.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            raise TypeError(
+                "Research provider output must be a dictionary."
+            )
+
+        raw_results = provider_output.get(
+            "results",
+            {},
+        )
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            raw_results = []
+
+        sources: list[IntelligenceSource] = []
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+            if not title or not url:
+                continue
+
+            content = ResearchAgent._extract_content(
+                raw_result
+            )
+
+            sources.append(
+                IntelligenceSource(
+                    title=title,
+                    url=url,
+                    source="parallel",
+                    content=content,
+                )
+            )
+
+        return IntelligenceContext(
+            query=query,
+            sources=tuple(sources),
+        )
+
+    @staticmethod
+    def _extract_content(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract available content from a normalized
+        Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+        return str(
+            excerpts or ""
+        ).strip()
+"""
+Quality Agent.
+
+Internal AI operations agent.
+
+Evaluates AI outputs.
+
+It does not:
+- modify responses
+- control agents
+- interact with users
+
+It provides quality insights.
+"""
+
+
+from backend.agents.base_agent import BaseAgent
+from backend.agents.agent_manifest import AgentManifest
+from backend.agents.agent_result import AgentResult
+
+from backend.evaluation.quality_result import (
+    QualityResult,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class QualityAgent(BaseAgent):
+    """
+    Evaluates AI response quality.
+    """
+
+
+    def __init__(self):
+
+        super().__init__(
+            AgentManifest(
+                agent_id="quality_agent",
+                name="Quality Agent",
+                description=(
+                    "Evaluates AI outputs "
+                    "for quality and governance."
+                ),
+            )
+        )
+
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> AgentResult:
+
+        quality = QualityResult(
+            score=0.95,
+            passed=True,
+            findings=[],
+            recommendations=[
+                "Continue monitoring response quality"
+            ],
+        )
+
+        return AgentResult(
+            success=True,
+            agent_id=self.manifest.agent_id,
+            output={
+                "quality_score": quality.score,
+                "passed": quality.passed,
+                "findings": quality.findings,
+                "recommendations": (
+                    quality.recommendations
+                ),
+            },
+        )
+"""
+EasyChatBot Runtime Engine.
+
+The Runtime is responsible for orchestrating
+agent execution.
+
+Responsibilities:
+- receive execution requests
+- provide execution context
+- call approved agents
+- return structured results
+
+The Runtime does not:
+- implement business logic
+- call providers directly
+- manage user interfaces
+"""
+
+from backend.agents.base_agent import BaseAgent
+from backend.agents.agent_result import AgentResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class RuntimeEngine:
+    """
+    Central execution orchestrator.
+
+    Agents execute through the Runtime.
+    """
+
+    async def execute(
+        self,
+        agent: BaseAgent,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute an agent using runtime control.
+
+        Args:
+            agent:
+                Agent implementation.
+
+            context:
+                Runtime execution context.
+
+        Returns:
+            AgentResult.
+        """
+
+        return await agent.execute(context)

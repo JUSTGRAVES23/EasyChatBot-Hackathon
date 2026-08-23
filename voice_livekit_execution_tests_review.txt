@@ -1,0 +1,3175 @@
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\ai_runtime\voice\test_voice_call_execution_runtime.py
+======================================================================
+"""
+Tests for Voice Call Execution Runtime.
+
+Validates execution lifecycle
+for prepared AI character voice calls
+using execution context.
+"""
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_session(
+    *,
+    state: VoiceCallState,
+) -> VoiceCallSession:
+    """
+    Create test voice call session.
+    """
+
+    return VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=state,
+    )
+
+
+
+def create_room() -> VoiceCallRoom:
+    """
+    Create valid voice room.
+    """
+
+    return VoiceCallRoom(
+        room_id="room-001",
+        participants=(
+            VoiceCallParticipant(
+                participant_id="learner-001",
+                role=VoiceParticipantRole.LEARNER,
+                display_name="Learner",
+            ),
+            VoiceCallParticipant(
+                participant_id="yeti",
+                role=VoiceParticipantRole.CHARACTER,
+                display_name="Yeti",
+            ),
+        ),
+    )
+
+
+
+def create_context(
+    *,
+    state: VoiceCallState,
+) -> VoiceCallExecutionContext:
+    """
+    Create execution context.
+    """
+
+    return VoiceCallExecutionContext(
+        session=create_session(
+            state=state,
+        ),
+        room=create_room(),
+    )
+
+
+
+def test_start_ready_voice_call():
+
+    runtime = VoiceCallExecutionRuntime()
+
+
+    session = runtime.start(
+        context=create_context(
+            state=VoiceCallState.READY,
+        )
+    )
+
+
+    assert session.state == (
+        VoiceCallState.ACTIVE
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+
+def test_stop_active_voice_call():
+
+    runtime = VoiceCallExecutionRuntime()
+
+
+    session = runtime.stop(
+        context=create_context(
+            state=VoiceCallState.ACTIVE,
+        )
+    )
+
+
+    assert session.state == (
+        VoiceCallState.ENDED
+    )
+
+
+
+def test_fail_voice_call_execution():
+
+    runtime = VoiceCallExecutionRuntime()
+
+
+    session = runtime.fail(
+        context=create_context(
+            state=VoiceCallState.ACTIVE,
+        )
+    )
+
+
+    assert session.state == (
+        VoiceCallState.FAILED
+    )
+
+
+
+def test_start_without_ready_state_is_rejected():
+
+    runtime = VoiceCallExecutionRuntime()
+
+
+    try:
+
+        runtime.start(
+            context=create_context(
+                state=VoiceCallState.CREATED,
+            )
+        )
+
+
+        assert False
+
+    except ValueError:
+
+        assert True
+
+
+
+def test_stop_without_active_state_is_rejected():
+
+    runtime = VoiceCallExecutionRuntime()
+
+
+    try:
+
+        runtime.stop(
+            context=create_context(
+                state=VoiceCallState.READY,
+            )
+        )
+
+
+        assert False
+
+    except ValueError:
+
+        assert True
+
+
+
+def test_start_without_character_is_rejected():
+
+    runtime = VoiceCallExecutionRuntime()
+
+
+    context = VoiceCallExecutionContext(
+        session=create_session(
+            state=VoiceCallState.READY,
+        ),
+        room=VoiceCallRoom(
+            room_id="room-empty-character",
+            participants=(
+                VoiceCallParticipant(
+                    participant_id="learner-001",
+                    role=VoiceParticipantRole.LEARNER,
+                    display_name="Learner",
+                ),
+            ),
+        ),
+    )
+
+
+    try:
+
+        runtime.start(
+            context=context,
+        )
+
+
+        assert False
+
+    except ValueError:
+
+        assert True
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_voice_api_contracts.py
+======================================================================
+"""
+Voice API Contract Tests.
+
+Validates stable frontend contracts.
+
+Covers:
+- Trigger response contract.
+- Notification acceptance contract.
+- Reconnect contract.
+
+Does NOT:
+- Test domain logic.
+- Test repositories.
+- Test providers.
+"""
+
+from fastapi.testclient import TestClient
+
+
+from app.main import app
+
+
+
+client = TestClient(
+    app
+)
+
+
+
+def test_voice_trigger_contract():
+
+    response = client.post(
+        "/voice/trigger",
+        json={
+            "learner_id": "learner-001",
+            "character_id": "yeti",
+            "world_id": "french_world",
+            "language_code": "fr",
+            "channel": "inbox",
+        },
+    )
+
+
+    assert response.status_code == 200
+
+
+    body = response.json()
+
+
+    assert "voice_call_id" in body
+
+    assert "invitation_id" in body
+
+    assert "notification_id" in body
+
+
+
+def test_voice_acceptance_contract():
+
+    trigger = client.post(
+        "/voice/trigger",
+        json={
+            "learner_id": "learner-002",
+            "character_id": "alix",
+            "world_id": "french_world",
+            "language_code": "fr",
+            "channel": "inbox",
+        },
+    )
+
+
+    assert trigger.status_code == 200
+
+
+    notification_id = (
+        trigger.json()["notification_id"]
+    )
+
+
+    response = client.post(
+        f"/voice/notification/{notification_id}/accept"
+    )
+
+
+    assert response.status_code == 200
+
+
+    body = response.json()
+
+
+    assert "voice_call_id" in body
+
+    assert "learner_id" in body
+
+    assert "character_id" in body
+
+    assert "session_id" in body
+
+    assert "state" in body
+
+
+
+def test_voice_reconnect_contract():
+
+    trigger = client.post(
+        "/voice/trigger",
+        json={
+            "learner_id": "learner-003",
+            "character_id": "yeti",
+            "world_id": "french_world",
+            "language_code": "fr",
+            "channel": "inbox",
+        },
+    )
+
+
+    assert trigger.status_code == 200
+
+
+    voice_call_id = (
+        trigger.json()["voice_call_id"]
+    )
+
+
+    response = client.post(
+        f"/voice/call/{voice_call_id}/reconnect"
+    )
+
+
+    assert response.status_code == 200
+
+
+    body = response.json()
+
+
+    assert body["voice_call_id"] == (
+        voice_call_id
+    )
+
+
+    assert "session_id" in body
+
+    assert "state" in body
+
+
+
+def test_unknown_voice_notification_contract():
+
+    response = client.post(
+        "/voice/notification/unknown/accept"
+    )
+
+
+    assert response.status_code == 404
+
+
+
+def test_unknown_voice_call_reconnect_contract():
+
+    response = client.post(
+        "/voice/call/unknown/reconnect"
+    )
+
+
+    assert response.status_code == 404
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_voice_full_lifecycle.py
+======================================================================
+"""
+Tests for complete Voice Call Lifecycle.
+
+Validates end-to-end application journey:
+
+Trigger
+    |
+    ↓
+VoiceCall
+    |
+    ↓
+Invitation
+    |
+    ↓
+Notification
+    |
+    ↓
+Accept Notification
+    |
+    ↓
+Voice Session
+    |
+    ↓
+Reconnect
+    |
+    ↓
+Complete
+
+The same VoiceCall identity must
+remain unchanged throughout the lifecycle.
+"""
+
+from fastapi.testclient import TestClient
+
+
+from app.main import app
+
+
+
+client = TestClient(
+    app
+)
+
+
+
+def test_complete_voice_call_lifecycle():
+    """
+    Validate complete voice journey.
+    """
+
+    #
+    # Step 1:
+    # Trigger voice call
+    #
+
+    trigger_response = client.post(
+        "/voice/trigger",
+        json={
+            "learner_id": "learner-001",
+            "character_id": "yeti",
+            "world_id": "french_world",
+            "language_code": "fr",
+            "channel": "inbox",
+        },
+    )
+
+
+    assert trigger_response.status_code == 200
+
+
+    trigger_body = (
+        trigger_response.json()
+    )
+
+
+    voice_call_id = (
+        trigger_body["voice_call_id"]
+    )
+
+
+    notification_id = (
+        trigger_body["notification_id"]
+    )
+
+
+    assert voice_call_id
+
+    assert notification_id
+
+
+
+    #
+    # Step 2:
+    # Accept notification
+    #
+
+    acceptance_response = client.post(
+        f"/voice/notification/{notification_id}/accept"
+    )
+
+
+    print(
+        acceptance_response.json()
+    )
+
+
+    assert acceptance_response.status_code == 200
+
+
+    acceptance_body = (
+        acceptance_response.json()
+    )
+
+
+    assert acceptance_body[
+        "voice_call_id"
+    ] == voice_call_id
+
+
+    assert acceptance_body[
+        "learner_id"
+    ] == "learner-001"
+
+
+    assert acceptance_body[
+        "character_id"
+    ] == "yeti"
+
+
+    session_id = (
+        acceptance_body["session_id"]
+    )
+
+
+    assert session_id
+
+
+
+def test_unknown_notification_fails():
+
+    response = client.post(
+        "/voice/notification/unknown-id/accept"
+    )
+
+
+    assert response.status_code == 404
+
+
+
+def test_trigger_creates_unique_voice_identity():
+
+    first = client.post(
+        "/voice/trigger",
+        json={
+            "learner_id": "learner-001",
+            "character_id": "yeti",
+            "world_id": "french_world",
+            "language_code": "fr",
+            "channel": "inbox",
+        },
+    )
+
+
+    second = client.post(
+        "/voice/trigger",
+        json={
+            "learner_id": "learner-001",
+            "character_id": "alix",
+            "world_id": "french_world",
+            "language_code": "fr",
+            "channel": "inbox",
+        },
+    )
+
+
+    assert first.status_code == 200
+
+    assert second.status_code == 200
+
+
+    first_body = first.json()
+
+    second_body = second.json()
+
+
+    assert (
+        first_body["voice_call_id"]
+        !=
+        second_body["voice_call_id"]
+    )
+
+
+    assert (
+        first_body["notification_id"]
+        !=
+        second_body["notification_id"]
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\composition\test_voice_execution_composition.py
+======================================================================
+"""
+Tests for Voice Execution Composition.
+
+Validates:
+
+Composition Root
+        |
+        ↓
+VoiceCallExecutionService
+        |
+        ↓
+VoiceCallExecutionRuntime
+"""
+
+
+from app.application.composition.voice_execution_composition import (
+    create_voice_call_execution_service,
+    build_voice_call_execution_service,
+)
+
+
+from app.application.uai.voice.voice_call_execution_service import (
+    VoiceCallExecutionService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+
+def test_create_voice_execution_service():
+
+    service = (
+        create_voice_call_execution_service()
+    )
+
+
+    assert isinstance(
+        service,
+        VoiceCallExecutionService,
+    )
+
+
+    assert isinstance(
+        service.execution_runtime,
+        VoiceCallExecutionRuntime,
+    )
+
+
+
+def test_build_voice_execution_service():
+
+    service = (
+        build_voice_call_execution_service()
+    )
+
+
+    assert isinstance(
+        service,
+        VoiceCallExecutionService,
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\composition\test_voice_execution_coordinator_composition.py
+======================================================================
+"""
+Tests for Voice Execution Coordinator Composition.
+
+Validates that the composition root
+creates a correctly wired voice execution
+coordinator.
+"""
+
+from app.application.composition.voice_execution_coordinator_composition import (
+    create_voice_call_execution_coordinator,
+)
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+
+def test_create_voice_call_execution_coordinator():
+    """
+    Verify composition creates the coordinator.
+    """
+
+
+    coordinator = (
+        create_voice_call_execution_coordinator()
+    )
+
+
+    assert isinstance(
+        coordinator,
+        VoiceCallExecutionCoordinator,
+    )
+
+
+    assert isinstance(
+        coordinator.room_service,
+        VoiceRoomService,
+    )
+
+
+    assert isinstance(
+        coordinator.execution_runtime,
+        VoiceCallExecutionRuntime,
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_execution_coordinator.py
+======================================================================
+"""
+Tests for Voice Call Execution Coordinator.
+
+Validates the complete application flow:
+
+Execution Context
+        |
+        ↓
+Room Preparation
+        |
+        ↓
+Runtime Execution
+"""
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_execution_context(
+    *,
+    state: VoiceCallState = VoiceCallState.READY,
+) -> VoiceCallExecutionContext:
+    """
+    Create execution context.
+    """
+
+
+    session = VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=state,
+    )
+
+
+    room = VoiceCallRoom(
+        room_id="room-001",
+        participants=(
+            VoiceCallParticipant(
+                participant_id="learner-001",
+                role=VoiceParticipantRole.LEARNER,
+                display_name="Learner",
+            ),
+            VoiceCallParticipant(
+                participant_id="yeti",
+                role=VoiceParticipantRole.CHARACTER,
+                display_name="Yeti",
+            ),
+        ),
+    )
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def create_coordinator() -> VoiceCallExecutionCoordinator:
+    """
+    Create coordinator with real
+    application dependencies.
+    """
+
+
+    return VoiceCallExecutionCoordinator(
+        room_service=VoiceRoomService(
+            room_adapter=VoiceRoomAdapter(),
+        ),
+        execution_runtime=VoiceCallExecutionRuntime(),
+    )
+
+
+
+def test_start_prepares_room_and_executes_call():
+
+    coordinator = create_coordinator()
+
+
+    result = coordinator.start(
+        context=create_execution_context(),
+    )
+
+
+    assert "room" in result
+
+
+    assert "session" in result
+
+
+    assert result["room"]["room_name"] == (
+        "room-001"
+    )
+
+
+    assert result["room"]["provider"] == (
+        "livekit"
+    )
+
+
+    assert result["session"].state == (
+        VoiceCallState.ACTIVE
+    )
+
+
+
+def test_execution_contains_participants():
+
+    coordinator = create_coordinator()
+
+
+    result = coordinator.start(
+        context=create_execution_context(),
+    )
+
+
+    participants = (
+        result["room"]["participants"]
+    )
+
+
+    assert participants == [
+        "learner-001",
+        "yeti",
+    ]
+
+
+
+def test_execution_requires_ready_session():
+
+    coordinator = create_coordinator()
+
+
+    try:
+
+        coordinator.start(
+            context=create_execution_context(
+                state=VoiceCallState.CREATED,
+            )
+        )
+
+
+        assert False
+
+    except ValueError:
+
+        assert True
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_execution_service.py
+======================================================================
+"""
+Tests for Voice Call Execution Service.
+
+Validates the application boundary
+for controlling voice call execution.
+"""
+
+from app.application.uai.voice.voice_call_execution_service import (
+    VoiceCallExecutionService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_session(
+    *,
+    state: VoiceCallState,
+) -> VoiceCallSession:
+    """
+    Create test voice call session.
+    """
+
+    return VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=state,
+    )
+
+
+
+def create_service() -> VoiceCallExecutionService:
+    """
+    Create execution service.
+    """
+
+    return VoiceCallExecutionService(
+        execution_runtime=(
+            VoiceCallExecutionRuntime()
+        )
+    )
+
+
+
+def test_start_call():
+
+    service = create_service()
+
+
+    session = service.start_call(
+        session=create_session(
+            state=VoiceCallState.READY,
+        )
+    )
+
+
+    assert session.state == (
+        VoiceCallState.ACTIVE
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+
+def test_stop_call():
+
+    service = create_service()
+
+
+    session = service.stop_call(
+        session=create_session(
+            state=VoiceCallState.ACTIVE,
+        )
+    )
+
+
+    assert session.state == (
+        VoiceCallState.ENDED
+    )
+
+
+
+def test_fail_call():
+
+    service = create_service()
+
+
+    session = service.fail_call(
+        session=create_session(
+            state=VoiceCallState.ACTIVE,
+        )
+    )
+
+
+    assert session.state == (
+        VoiceCallState.FAILED
+    )
+
+
+
+def test_start_call_requires_ready_session():
+
+    service = create_service()
+
+
+    try:
+
+        service.start_call(
+            session=create_session(
+                state=VoiceCallState.CREATED,
+            )
+        )
+
+
+        assert False
+
+    except ValueError:
+
+        assert True
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_orchestrator.py
+======================================================================
+"""
+Tests for Voice Call Orchestrator.
+"""
+
+from app.application.uai.voice.voice_call_orchestrator import (
+    VoiceCallOrchestrator,
+)
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+from app.application.uai.voice.voice_character_session_service import (
+    VoiceCharacterSessionService,
+)
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+
+from app.application.uai.character.character_resolver import (
+    CharacterResolver,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+
+class FakeVoiceCharacterSessionService:
+    """
+    Fake character session service.
+
+    Avoids LiveKit and provider dependencies.
+    """
+
+
+    def create_session(
+        self,
+        *,
+        context,
+    ) -> VoiceSession:
+        """
+        Create fake voice session.
+        """
+
+        return VoiceSession(
+            session_id="voice-session-001",
+            room_name="room-001",
+            character_id=(
+                context.character.character_id
+            ),
+            language_code=(
+                context.voice.language_code
+            ),
+        )
+
+
+
+class FakeInteractionContextBuilder:
+    """
+    Fake interaction context builder.
+
+    Keeps this test focused on orchestration.
+    """
+
+
+    def build(
+        self,
+        *,
+        learner,
+        world_id,
+        character_id,
+        voice,
+    ):
+        """
+        Build minimal interaction context.
+        """
+
+        from app.domain.uai.context.character_context import (
+            CharacterContext,
+        )
+
+        from app.domain.uai.context.interaction_context import (
+            InteractionContext,
+        )
+
+        from app.domain.uai.context.world_context import (
+            WorldContext,
+        )
+
+
+        return InteractionContext(
+
+            learner=learner,
+
+            world=WorldContext(
+                world_id=world_id,
+                name="French World",
+                language_code="fr",
+                available_characters=[
+                    "yeti",
+                ],
+            ),
+
+            character=CharacterContext(
+                character_id=character_id,
+                name="Yeti",
+                personality_reference=(
+                    "storyteller"
+                ),
+                teaching_style=(
+                    "narrative learning"
+                ),
+            ),
+
+            voice=voice,
+        )
+
+
+
+def test_prepare_voice_call():
+
+    orchestrator = VoiceCallOrchestrator(
+        context_builder=(
+            FakeInteractionContextBuilder()
+        ),
+        session_service=(
+            FakeVoiceCharacterSessionService()
+        ),
+    )
+
+
+    request = VoiceCallRequest(
+        learner_id="learner-001",
+        world_id="french_world",
+        character_id="yeti",
+        language_code="fr",
+    )
+
+
+    session = (
+        orchestrator.prepare_call(
+            request=request
+        )
+    )
+
+
+    assert isinstance(
+        session,
+        VoiceCallSession,
+    )
+
+
+    assert session.session_id == (
+        "voice-session-001"
+    )
+
+
+    assert session.learner_id == (
+        "learner-001"
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+    assert session.world_id == (
+        "french_world"
+    )
+
+
+    assert session.language_code == (
+        "fr"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_orchestrator_runtime.py
+======================================================================
+"""
+Tests Voice Call Orchestrator runtime integration.
+
+Validates that the orchestrator
+creates a voice call session and
+applies runtime preparation.
+"""
+
+from app.application.uai.voice.voice_call_orchestrator import (
+    VoiceCallOrchestrator,
+)
+
+
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+
+from app.ai_runtime.voice.voice_call_runtime import (
+    VoiceCallRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+class FakeContextBuilder:
+    """
+    Fake context builder.
+
+    Keeps test independent from
+    infrastructure.
+    """
+
+    def build(
+        self,
+        *,
+        learner,
+        world_id,
+        character_id,
+        voice,
+    ):
+        from app.domain.uai.context.interaction_context import (
+            InteractionContext,
+        )
+
+        from app.domain.uai.context.character_context import (
+            CharacterContext,
+        )
+
+        from app.domain.uai.context.world_context import (
+            WorldContext,
+        )
+
+
+        return InteractionContext(
+            learner=learner,
+            world=WorldContext(
+                world_id=world_id,
+                name="French World",
+                language_code=voice.language_code,
+                available_characters=[
+                    character_id,
+                ],
+            ),
+            character=CharacterContext(
+                character_id=character_id,
+                name="Yeti",
+                personality_reference="storyteller",
+                teaching_style="narrative",
+            ),
+            voice=voice,
+        )
+
+
+
+class FakeSessionService:
+    """
+    Fake character session service.
+    """
+
+    def create_session(
+        self,
+        *,
+        context,
+    ):
+        from app.domain.uai.voice.voice_session import (
+            VoiceSession,
+        )
+
+        return VoiceSession(
+            session_id="session-001",
+            room_name="yeti-room",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+
+def test_orchestrator_prepares_runtime_voice_call():
+
+    orchestrator = VoiceCallOrchestrator(
+        context_builder=FakeContextBuilder(),
+        session_service=FakeSessionService(),
+        voice_runtime=VoiceCallRuntime(),
+    )
+
+
+    session = orchestrator.prepare_call(
+        request=VoiceCallRequest(
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+    )
+
+
+    assert session.session_id == (
+        "session-001"
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+    assert session.state == (
+        VoiceCallState.READY
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_session_service.py
+======================================================================
+"""
+Tests for Voice Call Session Service.
+
+Validates:
+- Creation of execution sessions.
+- Preservation of persistent VoiceCall identity.
+- Reconnection session creation.
+"""
+
+from datetime import datetime, timedelta
+
+
+from app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_voice_call(
+    *,
+    state: VoiceCallState = VoiceCallState.ACTIVE,
+) -> VoiceCall:
+    """
+    Create valid VoiceCall aggregate.
+    """
+
+    created_at = datetime.utcnow()
+
+
+    return VoiceCall(
+        id="vc-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=state,
+        created_at=created_at,
+        expires_at=(
+            created_at
+            + timedelta(
+                minutes=30
+            )
+        ),
+    )
+
+
+
+def test_create_session_from_voice_call():
+
+    service = (
+        VoiceCallSessionService()
+    )
+
+
+    voice_call = create_voice_call()
+
+
+    session = service.create_session(
+        voice_call=voice_call,
+    )
+
+
+    assert session.session_id == (
+        "vc-001-session"
+    )
+
+
+    assert session.learner_id == (
+        "learner-001"
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+    assert session.world_id == (
+        "french_world"
+    )
+
+
+    assert session.language_code == (
+        "fr"
+    )
+
+
+    assert session.state == (
+        VoiceCallState.READY
+    )
+
+
+
+def test_session_preserves_voice_call_identity():
+
+    service = (
+        VoiceCallSessionService()
+    )
+
+
+    voice_call = create_voice_call()
+
+
+    session = service.create_session(
+        voice_call=voice_call,
+    )
+
+
+    assert session.session_id.startswith(
+        voice_call.id
+    )
+
+
+    assert voice_call.id == (
+        "vc-001"
+    )
+
+
+
+def test_reconnect_session_from_active_call():
+
+    service = (
+        VoiceCallSessionService()
+    )
+
+
+    voice_call = create_voice_call(
+        state=VoiceCallState.ACTIVE,
+    )
+
+
+    session = service.reconnect_session(
+        voice_call=voice_call,
+    )
+
+
+    assert session.session_id == (
+        "vc-001-reconnect"
+    )
+
+
+    assert session.state == (
+        VoiceCallState.READY
+    )
+
+
+
+def test_reconnect_session_from_disconnected_call():
+
+    service = (
+        VoiceCallSessionService()
+    )
+
+
+    voice_call = create_voice_call(
+        state=VoiceCallState.DISCONNECTED,
+    )
+
+
+    session = service.reconnect_session(
+        voice_call=voice_call,
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+    assert session.state == (
+        VoiceCallState.READY
+    )
+
+
+
+def test_reconnect_invalid_state_is_rejected():
+
+    service = (
+        VoiceCallSessionService()
+    )
+
+
+    voice_call = create_voice_call(
+        state=VoiceCallState.ENDED,
+    )
+
+
+    try:
+
+        service.reconnect_session(
+            voice_call=voice_call,
+        )
+
+
+        assert False
+
+
+    except ValueError:
+
+        assert True
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_character_session_service.py
+======================================================================
+"""
+Tests for Voice Character Session Service.
+"""
+
+from app.application.uai.voice.voice_character_session_service import (
+    VoiceCharacterSessionService,
+)
+
+
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from app.domain.uai.context.character_context import (
+    CharacterContext,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+
+class FakeLiveKitAdapter:
+    """
+    Fake LiveKit adapter.
+
+    Matches production adapter contract.
+    """
+
+
+    def __init__(self):
+
+        self.created_session = None
+
+
+
+    def create_room_configuration(
+        self,
+        *,
+        session: VoiceSession,
+    ) -> dict[str, str]:
+        """
+        Prepare fake LiveKit configuration.
+        """
+
+
+        self.created_session = session
+
+
+        return {
+            "room_name": session.room_name,
+            "character_id": session.character_id,
+            "language_code": session.language_code,
+            "provider": "livekit",
+        }
+
+
+
+class FakeSpeechProvider:
+    """
+    Fake speech provider.
+    """
+
+    pass
+
+
+
+def create_context() -> InteractionContext:
+    """
+    Create test interaction context.
+    """
+
+
+    return InteractionContext(
+
+        learner=(
+            LearnerContext(
+                learner_id="learner-001",
+                learning_goals=[
+                    "conversation",
+                ],
+            )
+        ),
+
+        world=(
+            WorldContext(
+                world_id="french_world",
+                name="French World",
+                language_code="fr",
+                available_characters=[
+                    "yeti",
+                    "alix",
+                ],
+            )
+        ),
+
+        character=(
+            CharacterContext(
+                character_id="yeti",
+                name="Yeti",
+                personality_reference="storyteller",
+                teaching_style="narrative learning",
+            )
+        ),
+
+        voice=(
+            VoiceContext(
+                language_code="fr",
+                voice_provider="openai",
+                voice_profile="verse",
+            )
+        ),
+    )
+
+
+
+def test_create_character_voice_session():
+
+    livekit_adapter = FakeLiveKitAdapter()
+
+
+    speech_runtime = VoiceSpeechRuntime(
+        speech_provider=FakeSpeechProvider()
+    )
+
+
+    service = VoiceCharacterSessionService(
+        livekit_adapter=livekit_adapter,
+        speech_runtime=speech_runtime,
+    )
+
+
+    session = service.create_session(
+        context=create_context()
+    )
+
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+
+    assert session.language_code == (
+        "fr"
+    )
+
+
+    assert session.room_name == (
+        "yeti-voice-room"
+    )
+
+
+    assert livekit_adapter.created_session is not None
+
+
+    assert (
+        livekit_adapter
+        .created_session
+        .character_id
+        ==
+        "yeti"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_interaction_context_service.py
+======================================================================
+"""
+Tests for Voice Interaction Context Service.
+"""
+
+from __future__ import annotations
+
+
+from unittest.mock import Mock
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.application.uai.voice.voice_interaction_context_service import (
+    VoiceInteractionContextService,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_context() -> VoiceCallExecutionContext:
+    """
+    Create a valid voice execution context.
+    """
+
+    session = VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=VoiceCallState.READY,
+    )
+
+
+    room = Mock(
+        spec=VoiceCallRoom,
+    )
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def test_builds_interaction_context():
+    """
+    Service delegates to the existing
+    InteractionContextBuilder.
+    """
+
+    expected_context = Mock(
+        spec=InteractionContext,
+    )
+
+
+    builder = Mock(
+        spec=InteractionContextBuilder,
+    )
+
+
+    builder.build.return_value = (
+        expected_context
+    )
+
+
+    service = (
+        VoiceInteractionContextService(
+            context_builder=builder,
+        )
+    )
+
+
+    result = service.build(
+        context=create_context(),
+    )
+
+
+    assert result is expected_context
+
+
+    builder.build.assert_called_once()
+
+
+    call = (
+        builder.build.call_args.kwargs
+    )
+
+
+    assert (
+        call["learner"].learner_id
+        == "learner-001"
+    )
+
+
+    assert (
+        call["world_id"]
+        == "french_world"
+    )
+
+
+    assert (
+        call["character_id"]
+        == "yeti"
+    )
+
+
+    assert (
+        call["voice"].language_code
+        == "fr"
+    )
+
+
+    assert (
+        call["voice"].voice_provider
+        == "openai"
+    )
+
+
+    assert (
+        call["voice"].voice_profile
+        == "yeti"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_session_orchestrator.py
+======================================================================
+"""
+Tests for Voice Session Orchestrator.
+"""
+
+from app.application.uai.voice.voice_session_orchestrator import (
+    VoiceSessionOrchestrator,
+)
+
+from app.application.uai.voice.voice_session_service import (
+    VoiceSessionService,
+)
+
+from app.domain.uai.context.character_context import (
+    CharacterContext,
+)
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+from app.infrastructure.voice.livekit_adapter import (
+    LiveKitAdapter,
+)
+
+
+def create_interaction_context() -> InteractionContext:
+    """
+    Create valid interaction context.
+    """
+
+    learner = LearnerContext(
+        learner_id="learner-001",
+        learning_goals=[
+            "conversation",
+            "pronunciation",
+        ],
+    )
+
+
+    world = WorldContext(
+        world_id="french_world",
+        name="French World",
+        language_code="fr",
+        available_characters=[
+            "yeti",
+            "alix",
+        ],
+    )
+
+
+    character = CharacterContext(
+        character_id="yeti",
+        name="Yeti",
+        personality_reference="Storyteller",
+        teaching_style="Story-driven",
+    )
+
+
+    voice = VoiceContext(
+        language_code="fr",
+        voice_provider="openai",
+        voice_profile="verse",
+    )
+
+
+    return InteractionContext(
+        learner=learner,
+        world=world,
+        character=character,
+        voice=voice,
+    )
+
+
+def test_prepare_voice_session():
+
+    orchestrator = VoiceSessionOrchestrator(
+        voice_session_service=(
+            VoiceSessionService()
+        ),
+        livekit_adapter=(
+            LiveKitAdapter()
+        ),
+    )
+
+
+    context = (
+        create_interaction_context()
+    )
+
+
+    configuration = (
+        orchestrator.prepare_session(
+            interaction_context=context,
+        )
+    )
+
+
+    assert configuration["provider"] == (
+        "livekit"
+    )
+
+
+    assert configuration["character_id"] == (
+        "yeti"
+    )
+
+
+    assert configuration["language_code"] == (
+        "fr"
+    )
+
+
+    assert configuration["room_name"].startswith(
+        "yeti-"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_session_service.py
+======================================================================
+"""
+Tests for Voice Session Service.
+"""
+
+from app.application.uai.voice.voice_session_service import (
+    VoiceSessionService,
+)
+
+from app.domain.uai.context.character_context import (
+    CharacterContext,
+)
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+def create_interaction_context() -> InteractionContext:
+    """
+    Create test interaction context.
+    """
+
+    learner = LearnerContext(
+        learner_id="learner-001",
+        learning_goals=[
+            "conversation",
+        ],
+    )
+
+
+    world = WorldContext(
+        world_id="french_world",
+        name="French World",
+        language_code="fr",
+        available_characters=[
+            "yeti",
+            "alix",
+        ],
+    )
+
+
+    character = CharacterContext(
+        character_id="yeti",
+        name="Yeti",
+        personality_reference="Storyteller",
+        teaching_style="Story-driven",
+    )
+
+
+    voice = VoiceContext(
+        language_code="fr",
+        voice_provider="openai",
+        voice_profile="verse",
+    )
+
+
+    return InteractionContext(
+        learner=learner,
+        world=world,
+        character=character,
+        voice=voice,
+    )
+
+
+def test_create_voice_session():
+
+    service = VoiceSessionService()
+
+    context = create_interaction_context()
+
+
+    session = service.create_session(
+        interaction_context=context,
+    )
+
+
+    assert session.session_id
+
+    assert session.character_id == (
+        "yeti"
+    )
+
+    assert session.language_code == (
+        "fr"
+    )
+
+    assert session.room_name.startswith(
+        "yeti-"
+    )
+
+    assert session.status == (
+        "created"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_call_execution_context.py
+======================================================================
+"""
+Tests for Voice Call Execution Context.
+
+Validates the domain model that
+combines a voice call session with
+its logical room composition.
+"""
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+def create_session() -> VoiceCallSession:
+    """
+    Create test voice call session.
+    """
+
+    return VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+    )
+
+
+
+def create_room() -> VoiceCallRoom:
+    """
+    Create test voice call room.
+    """
+
+    return VoiceCallRoom(
+        room_id="room-001",
+        participants=(
+            VoiceCallParticipant(
+                participant_id="learner-001",
+                role=VoiceParticipantRole.LEARNER,
+                display_name="Learner",
+            ),
+            VoiceCallParticipant(
+                participant_id="yeti",
+                role=VoiceParticipantRole.CHARACTER,
+                display_name="Yeti",
+            ),
+        ),
+    )
+
+
+
+def test_create_execution_context():
+
+    context = VoiceCallExecutionContext(
+        session=create_session(),
+        room=create_room(),
+    )
+
+
+    assert context.session.session_id == (
+        "call-001"
+    )
+
+
+    assert context.room.room_id == (
+        "room-001"
+    )
+
+
+
+def test_execution_context_returns_participant_count():
+
+    context = VoiceCallExecutionContext(
+        session=create_session(),
+        room=create_room(),
+    )
+
+
+    assert context.participant_count() == (
+        2
+    )
+
+
+
+def test_execution_context_supports_character_room():
+
+    context = VoiceCallExecutionContext(
+        session=create_session(),
+        room=create_room(),
+    )
+
+
+    assert (
+        context.room.has_character()
+        is True
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_adapter.py
+======================================================================
+"""
+Tests for LiveKit Infrastructure Adapter.
+"""
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+from app.infrastructure.voice.livekit_adapter import (
+    LiveKitAdapter,
+)
+
+
+def test_create_room_configuration():
+
+    adapter = LiveKitAdapter()
+
+
+    session = VoiceSession(
+        session_id="session-001",
+        room_name="yeti-session-001",
+        character_id="yeti",
+        language_code="fr",
+    )
+
+
+    configuration = (
+        adapter.create_room_configuration(
+            session=session,
+        )
+    )
+
+
+    assert configuration["room_name"] == (
+        "yeti-session-001"
+    )
+
+
+    assert configuration["character_id"] == (
+        "yeti"
+    )
+
+
+    assert configuration["language_code"] == (
+        "fr"
+    )
+
+
+    assert configuration["provider"] == (
+        "livekit"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_agent_dispatcher.py
+======================================================================
+"""
+Tests for LiveKit Agent Dispatcher.
+
+Validates the infrastructure boundary between
+EasyChatBot voice-call metadata and LiveKit Agent
+dispatch.
+
+These tests do not contact LiveKit Cloud.
+"""
+
+from __future__ import annotations
+
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+
+import pytest
+
+
+from app.infrastructure.voice.livekit_agent_dispatcher import (
+    LiveKitAgentDispatcher,
+)
+
+
+def create_dispatcher() -> LiveKitAgentDispatcher:
+    """
+    Create a configured dispatcher for tests.
+    """
+
+    return LiveKitAgentDispatcher(
+        agent_name="easychatbot-voice",
+    )
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_creates_livekit_agent_dispatch(
+    mock_livekit_api,
+):
+    """
+    Dispatcher creates a LiveKit Agent dispatch.
+    """
+
+    mock_dispatch = SimpleNamespace(
+        id="dispatch-001",
+    )
+
+    mock_api = MagicMock()
+
+    mock_api.agent_dispatch.create_dispatch.return_value = (
+        mock_dispatch
+    )
+
+    mock_livekit_api.return_value = mock_api
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": "test-api-key",
+            "LIVEKIT_API_SECRET": "test-api-secret",
+        },
+        clear=False,
+    ):
+
+        dispatcher = create_dispatcher()
+
+        dispatch_id = dispatcher.dispatch(
+            room_name="yeti-room-001",
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    assert dispatch_id == (
+        "dispatch-001"
+    )
+
+
+    mock_livekit_api.assert_called_once_with(
+        url="wss://test.livekit.cloud",
+        api_key="test-api-key",
+        api_secret="test-api-secret",
+    )
+
+
+    mock_api.agent_dispatch.create_dispatch.assert_called_once()
+
+
+    mock_api.aclose.assert_called_once()
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_passes_expected_metadata(
+    mock_livekit_api,
+):
+    """
+    Dispatcher passes the approved voice-call
+    metadata to the LiveKit worker.
+    """
+
+    mock_dispatch = SimpleNamespace(
+        id="dispatch-002",
+    )
+
+    mock_api = MagicMock()
+
+    mock_api.agent_dispatch.create_dispatch.return_value = (
+        mock_dispatch
+    )
+
+    mock_livekit_api.return_value = mock_api
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": "test-api-key",
+            "LIVEKIT_API_SECRET": "test-api-secret",
+        },
+        clear=False,
+    ):
+
+        dispatcher = create_dispatcher()
+
+        dispatcher.dispatch(
+            room_name="yeti-room-002",
+            learner_id="learner-002",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    request = (
+        mock_api
+        .agent_dispatch
+        .create_dispatch
+        .call_args.args[0]
+    )
+
+
+    assert request.agent_name == (
+        "easychatbot-voice"
+    )
+
+
+    assert request.room == (
+        "yeti-room-002"
+    )
+
+
+    assert request.metadata == (
+        '{"learner_id":"learner-002",'
+        '"world_id":"french_world",'
+        '"character_id":"yeti",'
+        '"language_code":"fr"}'
+    )
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_uses_configured_agent_name(
+    mock_livekit_api,
+):
+    """
+    Dispatcher uses its configured agent name.
+    """
+
+    mock_dispatch = SimpleNamespace(
+        id="dispatch-003",
+    )
+
+    mock_api = MagicMock()
+
+    mock_api.agent_dispatch.create_dispatch.return_value = (
+        mock_dispatch
+    )
+
+    mock_livekit_api.return_value = mock_api
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": "test-api-key",
+            "LIVEKIT_API_SECRET": "test-api-secret",
+        },
+        clear=False,
+    ):
+
+        dispatcher = LiveKitAgentDispatcher(
+            agent_name="custom-voice-agent",
+        )
+
+        dispatcher.dispatch(
+            room_name="room-003",
+            learner_id="learner-003",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    request = (
+        mock_api
+        .agent_dispatch
+        .create_dispatch
+        .call_args.args[0]
+    )
+
+
+    assert request.agent_name == (
+        "custom-voice-agent"
+    )
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_rejects_empty_room_name(
+    mock_livekit_api,
+):
+    """
+    Empty room names are rejected before
+    contacting LiveKit.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with pytest.raises(
+        ValueError,
+        match="room_name cannot be empty",
+    ):
+
+        dispatcher.dispatch(
+            room_name="",
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="yeti",
+            language_code="fr",
+        )
+
+
+    mock_livekit_api.assert_not_called()
+
+
+@patch(
+    "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+)
+def test_dispatch_rejects_empty_character_id(
+    mock_livekit_api,
+):
+    """
+    Empty character identifiers are rejected.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with pytest.raises(
+        ValueError,
+        match="character_id cannot be empty",
+    ):
+
+        dispatcher.dispatch(
+            room_name="room-001",
+            learner_id="learner-001",
+            world_id="french_world",
+            character_id="",
+            language_code="fr",
+        )
+
+
+    mock_livekit_api.assert_not_called()
+
+
+def test_dispatch_requires_livekit_api_key():
+    """
+    Missing LiveKit API key is rejected.
+
+    The environment is cleared so the test cannot
+    accidentally inherit LIVEKIT_API_KEY from the
+    developer's local .env file.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_SECRET": (
+                "test-api-secret"
+            ),
+        },
+        clear=True,
+    ):
+
+        with patch(
+            "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+        ) as mock_livekit_api:
+
+            with pytest.raises(
+                ValueError,
+                match="LIVEKIT_API_KEY is not configured",
+            ):
+
+                dispatcher.dispatch(
+                    room_name="room-001",
+                    learner_id="learner-001",
+                    world_id="french_world",
+                    character_id="yeti",
+                    language_code="fr",
+                )
+
+
+            mock_livekit_api.assert_not_called()
+
+
+def test_dispatch_requires_livekit_api_secret():
+    """
+    Missing LiveKit API secret is rejected.
+
+    The environment is cleared so the test cannot
+    accidentally inherit LIVEKIT_API_SECRET from the
+    developer's local .env file.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_URL": (
+                "wss://test.livekit.cloud"
+            ),
+            "LIVEKIT_API_KEY": (
+                "test-api-key"
+            ),
+        },
+        clear=True,
+    ):
+
+        with patch(
+            "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+        ) as mock_livekit_api:
+
+            with pytest.raises(
+                ValueError,
+                match="LIVEKIT_API_SECRET is not configured",
+            ):
+
+                dispatcher.dispatch(
+                    room_name="room-001",
+                    learner_id="learner-001",
+                    world_id="french_world",
+                    character_id="yeti",
+                    language_code="fr",
+                )
+
+
+            mock_livekit_api.assert_not_called()
+
+
+def test_dispatch_requires_livekit_url():
+    """
+    Missing LiveKit URL is rejected.
+
+    The environment is cleared so the test cannot
+    accidentally inherit LIVEKIT_URL from the
+    developer's local .env file.
+    """
+
+    dispatcher = create_dispatcher()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "LIVEKIT_API_KEY": (
+                "test-api-key"
+            ),
+            "LIVEKIT_API_SECRET": (
+                "test-api-secret"
+            ),
+        },
+        clear=True,
+    ):
+
+        with patch(
+            "app.infrastructure.voice.livekit_agent_dispatcher.api.LiveKitAPI"
+        ) as mock_livekit_api:
+
+            with pytest.raises(
+                ValueError,
+                match="LIVEKIT_URL is not configured",
+            ):
+
+                dispatcher.dispatch(
+                    room_name="room-001",
+                    learner_id="learner-001",
+                    world_id="french_world",
+                    character_id="yeti",
+                    language_code="fr",
+                )
+
+
+            mock_livekit_api.assert_not_called()
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_realtime_agent.py
+======================================================================
+"""
+Tests for LiveKit Realtime Agent infrastructure adapter.
+
+Validates the boundary between EasyChatBot
+interaction context and LiveKit Agents.
+"""
+
+from __future__ import annotations
+
+
+from unittest.mock import Mock
+
+
+from livekit.agents import (
+    Agent,
+    AgentSession,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.infrastructure.voice.livekit_realtime_agent import (
+    LiveKitRealtimeAgent,
+)
+
+
+def create_context() -> InteractionContext:
+    """
+    Create a minimal interaction context for the adapter tests.
+
+    The actual construction of InteractionContext is repository-specific,
+    therefore this test uses a mock constrained to the required interface.
+    """
+
+    character = Mock()
+    character.character_id = "yeti"
+
+    world = Mock()
+    world.language_code = "fr"
+
+    context = Mock(
+        spec=InteractionContext,
+    )
+
+    context.character = character
+    context.world = world
+
+    return context
+
+
+def create_adapter() -> LiveKitRealtimeAgent:
+    """
+    Create a valid LiveKit realtime adapter.
+    """
+
+    return LiveKitRealtimeAgent(
+        context=create_context(),
+        instructions=(
+            "You are Yeti, a friendly French "
+            "conversation character."
+        ),
+    )
+
+
+def test_create_agent():
+    """
+    Adapter creates a LiveKit Agent.
+    """
+
+    adapter = create_adapter()
+
+    agent = adapter.create_agent()
+
+    assert isinstance(
+        agent,
+        Agent,
+    )
+
+
+def test_agent_preserves_character_instructions():
+    """
+    Character instructions are passed to the LiveKit Agent.
+    """
+
+    adapter = create_adapter()
+
+    agent = adapter.create_agent()
+
+    assert (
+        agent.instructions
+        == (
+            "You are Yeti, a friendly French "
+            "conversation character."
+        )
+    )
+
+
+def test_create_session():
+    """
+    Adapter creates a LiveKit AgentSession.
+    """
+
+    adapter = create_adapter()
+
+    session = adapter.create_session()
+
+    assert isinstance(
+        session,
+        AgentSession,
+    )
+
+
+def test_character_id():
+    """
+    Adapter exposes the EasyChatBot character identity.
+    """
+
+    adapter = create_adapter()
+
+    assert (
+        adapter.character_id()
+        == "yeti"
+    )
+
+
+def test_language_code():
+    """
+    Adapter exposes the interaction language.
+    """
+
+    adapter = create_adapter()
+
+    assert (
+        adapter.language_code()
+        == "fr"
+    )
+
+======================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py
+======================================================================
+"""
+Tests for LiveKit Token Service.
+
+Validates the real LiveKit infrastructure adapter.
+
+Responsibilities tested:
+- Real JWT generation.
+- Room binding.
+- Provider identity.
+- Participant identity.
+- Expiration handling.
+- Input validation.
+"""
+
+from __future__ import annotations
+
+
+from datetime import (
+    datetime,
+    timezone,
+)
+
+
+import base64
+import json
+
+
+import pytest
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+
+def decode_jwt_payload(
+    token: str,
+) -> dict:
+    """
+    Decode the JWT payload without verifying
+    the signature.
+
+    Signature verification belongs to LiveKit.
+    These tests only validate the claims generated
+    by our infrastructure adapter.
+    """
+
+    parts = token.split(".")
+
+    assert len(parts) == 3
+
+    payload = parts[1]
+
+    padding = (
+        "="
+        * (
+            4
+            - len(payload) % 4
+        )
+    )
+
+    decoded = base64.urlsafe_b64decode(
+        payload + padding
+    )
+
+    return json.loads(
+        decoded.decode("utf-8")
+    )
+
+
+
+def test_create_livekit_token():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    token = (
+        service.create_token(
+            room_name="yeti-room-001",
+        )
+    )
+
+
+    assert isinstance(
+        token,
+        VoiceConnectionToken,
+    )
+
+
+    assert token.room_name == (
+        "yeti-room-001"
+    )
+
+
+    assert token.provider == (
+        "livekit"
+    )
+
+
+    # A real LiveKit JWT is generated.
+    assert token.token.count(".") == 2
+
+
+    assert token.token.startswith(
+        "eyJ"
+    )
+
+
+    payload = (
+        decode_jwt_payload(
+            token.token
+        )
+    )
+
+
+    assert payload["sub"].startswith(
+        "learner-"
+    )
+
+
+    assert payload["video"]["roomJoin"] is True
+
+
+    assert payload["video"]["room"] == (
+        "yeti-room-001"
+    )
+
+
+
+def test_custom_expiration_time():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    token = (
+        service.create_token(
+            room_name="room-001",
+            expires_minutes=60,
+        )
+    )
+
+
+    now = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+
+    assert token.expires_at > (
+        now
+    )
+
+
+    remaining_seconds = (
+        token.expires_at - now
+    ).total_seconds()
+
+
+    # Allow a small execution-time tolerance.
+    assert 3500 < (
+        remaining_seconds
+    ) <= 3600
+
+
+    payload = (
+        decode_jwt_payload(
+            token.token
+        )
+    )
+
+
+    assert payload["exp"] > (
+        payload["nbf"]
+    )
+
+
+
+def test_empty_room_name_is_rejected():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    with pytest.raises(
+        ValueError,
+        match="room_name cannot be empty",
+    ):
+
+        service.create_token(
+            room_name="",
+        )
+
+
+
+def test_invalid_expiration_is_rejected():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    with pytest.raises(
+        ValueError,
+        match="expires_minutes must be positive",
+    ):
+
+        service.create_token(
+            room_name="room-001",
+            expires_minutes=0,
+        )

@@ -1,0 +1,423 @@
+﻿===============================================================================
+
+===============================================================================
+FILE: .\backend\app\application\beta_access\models.py
+===============================================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from datetime import datetime
+
+
+class BetaAccessStatus(StrEnum):
+    PENDING_VERIFICATION = "PENDING_VERIFICATION"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    ELIGIBLE = "ELIGIBLE"
+    TELEGRAM_CONNECTED = "TELEGRAM_CONNECTED"
+    ACTIVE = "ACTIVE"
+    DENIED = "DENIED"
+
+
+@dataclass(frozen=True, slots=True)
+class BetaUserState:
+    user_id: str
+    email: str
+    email_verified: bool
+    beta_approved: bool
+    telegram_id: int | None = None
+    active_world_id: str | None = None
+
+    @property
+    def eligible(self) -> bool:
+        return self.email_verified and self.beta_approved
+
+    @property
+    def active(self) -> bool:
+        return (
+            self.eligible
+            and self.telegram_id is not None
+            and self.active_world_id is not None
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BetaConnectionToken:
+    user_id: str
+    token: str
+    expires_at: datetime
+    used: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramBinding:
+    user_id: str
+    telegram_id: int
+    chat_id: int
+    connected_at: datetime
+
+===============================================================================
+FILE: .\backend\app\application\beta_access\repositories.py
+===============================================================================
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+from .models import BetaToken, BetaUser, TelegramBinding
+
+
+class BetaUserRepository(Protocol):
+    def get(self, user_id: str) -> BetaUser | None: ...
+    def save(self, user: BetaUser) -> None: ...
+
+
+class BetaTokenRepository(Protocol):
+    def get_by_hash(self, token_hash: str) -> BetaToken | None: ...
+    def save(self, token: BetaToken) -> None: ...
+
+
+class TelegramBindingRepository(Protocol):
+    def get_by_telegram_user_id(self, telegram_user_id: str) -> TelegramBinding | None: ...
+    def get_by_user_id(self, user_id: str) -> TelegramBinding | None: ...
+    def save(self, binding: TelegramBinding) -> None: ...
+
+===============================================================================
+FILE: .\backend\app\application\beta_access\beta_access_service.py
+===============================================================================
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import logging
+import secrets
+
+from .models import BetaConnectionToken, BetaUserState, TelegramBinding
+from .repositories import BetaTokenRepository, BetaUserRepository, TelegramBindingRepository
+
+logger = logging.getLogger(__name__)
+
+
+class BetaAccessService:
+    def __init__(
+        self,
+        *,
+        user_repository: BetaUserRepository,
+        token_repository: BetaTokenRepository,
+        binding_repository: TelegramBindingRepository,
+        expiration_minutes: int = 15,
+    ) -> None:
+        if expiration_minutes <= 0:
+            raise ValueError("expiration_minutes must be positive.")
+        self._users = user_repository
+        self._tokens = token_repository
+        self._bindings = binding_repository
+        self._expiration_minutes = expiration_minutes
+
+    async def approve_beta(self, user_id: str) -> BetaUserState:
+        user = await self._require_user(user_id)
+        if not user.email_verified:
+            raise ValueError("Email must be verified before Beta approval.")
+        return await self._users.save(replace(user, beta_approved=True))
+
+    async def create_connection_token(self, user_id: str) -> BetaConnectionToken:
+        user = await self._require_user(user_id)
+        if not user.email_verified:
+            raise ValueError("Email is not verified.")
+        if not user.beta_approved:
+            raise ValueError("User is not Beta approved.")
+
+        token = BetaConnectionToken(
+            user_id=user.user_id,
+            token=secrets.token_urlsafe(32),
+            expires_at=(
+                datetime.now(timezone.utc)
+                + timedelta(minutes=self._expiration_minutes)
+            ),
+        )
+        await self._tokens.save(token)
+        logger.info("Beta Telegram token created user_id=%s", user.user_id)
+        return token
+
+    async def validate_and_bind(
+        self,
+        *,
+        token: str,
+        telegram_id: int,
+        chat_id: int,
+    ) -> BetaUserState:
+        if not token:
+            raise ValueError("Connection token is required.")
+        if telegram_id <= 0:
+            raise ValueError("Telegram ID must be positive.")
+        if chat_id == 0:
+            raise ValueError("Chat ID is required.")
+
+        record = await self._tokens.get_by_token(token)
+        if record is None:
+            raise ValueError("Invalid connection token.")
+        if record.used:
+            raise ValueError("Connection token already used.")
+
+        expires_at = record.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            raise ValueError("Connection token expired.")
+
+        user = await self._require_user(record.user_id)
+        if not user.eligible:
+            raise ValueError("User is not eligible for Beta Telegram access.")
+
+        existing = await self._users.get_by_telegram_id(telegram_id)
+        if existing is not None and existing.user_id != user.user_id:
+            raise ValueError("Telegram account is already connected to another user.")
+
+        await self._bindings.save(
+            TelegramBinding(
+                user_id=user.user_id,
+                telegram_id=telegram_id,
+                chat_id=chat_id,
+                connected_at=datetime.now(timezone.utc),
+            )
+        )
+        await self._tokens.mark_used(token)
+        return await self._users.save(replace(user, telegram_id=telegram_id))
+
+    async def authorize_private_chat(self, telegram_id: int) -> BetaUserState:
+        if telegram_id <= 0:
+            raise ValueError("Telegram ID must be positive.")
+        user = await self._users.get_by_telegram_id(telegram_id)
+        if user is None:
+            raise PermissionError("Telegram account is not connected.")
+        if not user.active:
+            raise PermissionError(
+                "User is connected but is not ACTIVE for a Learning World."
+            )
+        return user
+
+    async def _require_user(self, user_id: str) -> BetaUserState:
+        user = await self._users.get(user_id)
+        if user is None:
+            raise ValueError("Academy user does not exist.")
+        return user
+
+===============================================================================
+FILE: .\backend\app\infrastructure\persistence\beta_access_models.py
+===============================================================================
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .database import Base
+
+
+class BetaUserRecord(Base):
+    __tablename__ = "beta_users"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active_world_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BetaConnectionTokenRecord(Base):
+    __tablename__ = "beta_connection_tokens"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("beta_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TelegramBindingRecord(Base):
+    __tablename__ = "telegram_bindings"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", name="uq_telegram_binding_telegram_user"),
+        UniqueConstraint("user_id", name="uq_telegram_binding_beta_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("beta_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    telegram_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    chat_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+===============================================================================
+FILE: .\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py
+===============================================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from app.application.beta_access.models import BetaToken, BetaUser, TelegramBinding
+from app.application.beta_access.repositories import (
+    BetaTokenRepository,
+    BetaUserRepository,
+    TelegramBindingRepository,
+)
+
+from .beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PostgreSQLBetaUserRepository(BetaUserRepository):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    def get(self, user_id: str) -> BetaUser | None:
+        with self._session_factory() as session:
+            row = session.get(BetaUserRecord, user_id)
+            return None if row is None else _user_from_record(row)
+
+    def save(self, user: BetaUser) -> None:
+        now = _utcnow()
+        with self._session_factory() as session:
+            row = session.get(BetaUserRecord, user.user_id)
+            if row is None:
+                row = BetaUserRecord(
+                    id=user.user_id,
+                    email=user.email,
+                    email_verified=user.email_verified,
+                    approved=user.approved,
+                    active_world_id=user.active_world_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.email = user.email
+                row.email_verified = user.email_verified
+                row.approved = user.approved
+                row.active_world_id = user.active_world_id
+                row.updated_at = now
+            session.commit()
+
+
+class PostgreSQLBetaTokenRepository(BetaTokenRepository):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    def get_by_hash(self, token_hash: str) -> BetaToken | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(BetaConnectionTokenRecord).where(
+                    BetaConnectionTokenRecord.token_hash == token_hash
+                )
+            )
+            return None if row is None else _token_from_record(row)
+
+    def save(self, token: BetaToken) -> None:
+        now = _utcnow()
+        with self._session_factory() as session:
+            row = session.get(BetaConnectionTokenRecord, token.token_id)
+            if row is None:
+                row = BetaConnectionTokenRecord(
+                    id=token.token_id,
+                    token_hash=token.token_hash,
+                    user_id=token.user_id,
+                    expires_at=token.expires_at,
+                    used_at=token.used_at,
+                    created_at=now,
+                )
+                session.add(row)
+            else:
+                row.used_at = token.used_at
+            session.commit()
+
+
+class PostgreSQLTelegramBindingRepository(TelegramBindingRepository):
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    def get_by_telegram_user_id(self, telegram_user_id: str) -> TelegramBinding | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id == telegram_user_id
+                )
+            )
+            return None if row is None else _binding_from_record(row)
+
+    def get_by_user_id(self, user_id: str) -> TelegramBinding | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.user_id == user_id
+                )
+            )
+            return None if row is None else _binding_from_record(row)
+
+    def save(self, binding: TelegramBinding) -> None:
+        with self._session_factory() as session:
+            row = session.get(TelegramBindingRecord, binding.binding_id)
+            if row is None:
+                row = TelegramBindingRecord(
+                    id=binding.binding_id,
+                    user_id=binding.user_id,
+                    telegram_user_id=binding.telegram_user_id,
+                    chat_id=binding.chat_id,
+                    connected_at=binding.connected_at,
+                )
+                session.add(row)
+            else:
+                row.telegram_user_id = binding.telegram_user_id
+                row.chat_id = binding.chat_id
+                row.connected_at = binding.connected_at
+            session.commit()
+
+
+def _user_from_record(row) -> BetaUser:
+    return BetaUser(
+        user_id=row.id,
+        email=row.email,
+        email_verified=row.email_verified,
+        approved=row.approved,
+        active_world_id=row.active_world_id,
+        telegram_id=None,
+    )
+
+
+def _token_from_record(row) -> BetaToken:
+    return BetaToken(
+        token_id=row.id,
+        token_hash=row.token_hash,
+        user_id=row.user_id,
+        expires_at=row.expires_at,
+        used_at=row.used_at,
+    )
+
+
+def _binding_from_record(row) -> TelegramBinding:
+    return TelegramBinding(
+        binding_id=row.id,
+        user_id=row.user_id,
+        telegram_user_id=row.telegram_user_id,
+        chat_id=row.chat_id,
+        connected_at=row.connected_at,
+    )

@@ -1,0 +1,316 @@
+﻿
+"""
+Operations Center Governance API.
+
+Read-only governance visibility API.
+
+Does NOT:
+- execute controls;
+- change system state.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+
+from backend.governance.operations_center.governance_dashboard_service import (
+    GovernanceDashboardService,
+)
+
+
+router = APIRouter(
+    prefix="/operations/governance",
+    tags=["Operations Center Governance"],
+)
+
+
+_dashboard_service = GovernanceDashboardService()
+
+
+def get_dashboard_service():
+    return _dashboard_service
+
+
+@router.get("/status")
+async def governance_status(
+    service: GovernanceDashboardService = Depends(
+        get_dashboard_service
+    ),
+) -> dict:
+    """
+    Return Operations Center governance state.
+    """
+
+    data = service.get_status()
+
+    message = (
+        "YETI Governance Assistant: "
+        "No active governance alerts."
+    )
+
+    for control in data["controls"]:
+        if control["status"] == "paused":
+            message = (
+                "âš ï¸ "
+                + control["component"]
+                + " is paused. "
+                + str(
+                    control["details"].get(
+                        "reason"
+                    )
+                )
+            )
+            break
+
+    return {
+        "yeti": {
+            "message": message,
+        },
+        **data,
+    }
+
+from fastapi import APIRouter, Depends
+
+from backend.governance.operations_center.governance_evidence_service import (
+    GovernanceEvidenceService,
+)
+
+
+router = APIRouter(
+    prefix="/operations/governance",
+    tags=["Governance Evidence"],
+)
+
+
+_service = GovernanceEvidenceService()
+
+
+def get_evidence_service():
+    return _service
+
+
+@router.get("/timeline")
+async def governance_timeline(
+    service: GovernanceEvidenceService = Depends(
+        get_evidence_service
+    ),
+):
+    return {
+        "events": service.timeline()
+    }
+
+from fastapi import APIRouter
+
+from backend.governance.timeline.governance_timeline_service import (
+    GovernanceTimelineService,
+)
+
+
+router = APIRouter(
+    prefix="/governance/timeline",
+    tags=["Governance Timeline"],
+)
+
+
+timeline_service = GovernanceTimelineService()
+
+
+@router.get("")
+async def get_timeline():
+
+    return {
+        "events": [
+            {
+                "event_id": item.event_id,
+                "event": item.event,
+                "component": item.component,
+                "actor": item.actor,
+                "reason": item.reason,
+                "severity": item.severity,
+                "evidence_available": item.evidence_available,
+                "timestamp": item.timestamp.isoformat(),
+            }
+            for item in timeline_service.list_events()
+        ]
+    }
+
+
+"""
+Governance Dashboard Service.
+
+Read-only operations center projection.
+
+Does NOT:
+- modify controls;
+- pause providers;
+- resume delivery;
+- execute workflows.
+"""
+
+from __future__ import annotations
+
+
+class GovernanceDashboardService:
+    """
+    Builds a read model for the Operations Center.
+    """
+
+    def __init__(
+        self,
+        audit_service=None,
+        provider_control=None,
+        cybersecurity_control=None,
+    ) -> None:
+
+        self.audit_service = audit_service
+        self.provider_control = provider_control
+        self.cybersecurity_control = cybersecurity_control
+
+
+    def get_status(self) -> dict:
+        """
+        Return governance dashboard state.
+        """
+
+        controls = []
+
+        if self.provider_control:
+
+            controls.append(
+                {
+                    "component": "provider_management",
+                    "status": (
+                        "paused"
+                        if self.provider_control.is_paused()
+                        else "active"
+                    ),
+                    "details": (
+                        self.provider_control.status()
+                    ),
+                }
+            )
+
+
+        if self.cybersecurity_control:
+
+            controls.append(
+                {
+                    "component": "cybersecurity_delivery",
+                    "status": (
+                        "paused"
+                        if self.cybersecurity_control.is_paused()
+                        else "active"
+                    ),
+                    "details": (
+                        self.cybersecurity_control.status()
+                    ),
+                }
+            )
+
+
+        events = []
+
+        if self.audit_service:
+
+            events = [
+                {
+                    "event": item.event,
+                    "actor": item.actor,
+                    "reason": item.reason,
+                    "component": item.component,
+                    "timestamp": (
+                        item.timestamp.isoformat()
+                    ),
+                }
+                for item in self.audit_service.list_events()
+            ]
+
+
+        return {
+            "controls": controls,
+            "recent_events": events,
+        }
+
+from __future__ import annotations
+
+
+class GovernanceEvidenceService:
+    '''
+    Read-only governance evidence projection.
+    '''
+
+    def __init__(
+        self,
+        audit_service=None,
+    ):
+        self.audit_service = audit_service
+
+
+    def timeline(self) -> list[dict]:
+
+        if not self.audit_service:
+            return []
+
+        return [
+            {
+                "event": event.event,
+                "actor": event.actor,
+                "reason": event.reason,
+                "component": event.component,
+                "timestamp": event.timestamp.isoformat(),
+            }
+            for event in self.audit_service.list_events()
+        ]
+
+class GovernanceTimelineDashboardService:
+    """
+    Read-only Operations Center aggregation boundary.
+    """
+
+    def build_dashboard(self, events):
+
+        return {
+            "timeline": events,
+            "total_events": len(events),
+            "evidence_available": sum(
+                1
+                for event in events
+                if event.evidence_available
+            ),
+        }
+
+"""
+Operations Center presentation models.
+
+YETI is a governance assistant only.
+It explains operational state and audit evidence.
+It has no authority to change controls.
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class OperationsCenterBrand:
+    product_name: str = "EasyChatBot Operations Center"
+    mascot: str = "YETI"
+    mascot_role: str = "Governance Assistant"
+    font_family: str = "Nunito"
+    character_font: str = "Fredoka"
+    accent_font: str = "Caveat"
+
+
+@dataclass(frozen=True)
+class YetiGovernanceMessage:
+    """
+    Human-readable governance explanation.
+
+    This is presentation data only. It cannot pause,
+    resume, approve, or execute any system action.
+    """
+
+    message: str
+    severity: str
+    component: str
+    action_required: bool
+

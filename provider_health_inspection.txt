@@ -1,0 +1,771 @@
+﻿===== provider_health_models.py =====
+"""
+EasyChatBot AI Operations Center provider health models.
+
+Defines the domain contracts used to monitor AI service
+provider availability and operational health.
+
+Architecture:
+
+Provider Health Probe
+        |
+        v
+ProviderHealthObservation
+        |
+        v
+ProviderHealthService
+        |
+        v
+ProviderIncidentService
+        |
+        v
+Escalation Service
+        |
+        v
+AI Operations Center
+
+
+Responsibilities:
+
+- represent provider health states;
+- represent individual health observations;
+- represent provider outage information;
+- represent health transitions;
+- provide immutable domain contracts.
+
+Does NOT:
+
+- execute providers;
+- perform health probes;
+- persist data;
+- send emails;
+- modify Runtime routing;
+- create autonomous failover.
+
+Human approval remains mandatory for operational changes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+
+
+class ProviderHealthStatus(
+    str,
+    Enum,
+):
+    """
+    Current operational health state of an AI provider.
+    """
+
+    HEALTHY = "healthy"
+
+    DEGRADED = "degraded"
+
+    UNAVAILABLE = "unavailable"
+
+    UNKNOWN = "unknown"
+
+
+class ProviderHealthTransition(
+    str,
+    Enum,
+):
+    """
+    Significant transition in provider health.
+
+    These transitions are useful for incident detection
+    and escalation decisions.
+    """
+
+    RECOVERED = "recovered"
+
+    DEGRADED = "degraded"
+
+    UNAVAILABLE = "unavailable"
+
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ProviderHealthObservation:
+    """
+    Immutable observation produced by a provider health
+    probe or an equivalent Runtime health signal.
+
+    An observation represents what was observed at one
+    point in time.
+
+    It is not itself an incident.
+    """
+
+    provider: str
+
+    model: str | None
+
+    capability: str | None
+
+    status: ProviderHealthStatus
+
+    observed_at: datetime
+
+    latency_ms: int | None = None
+
+    error_type: str | None = None
+
+    error_message: str | None = None
+
+    consecutive_failures: int = 0
+
+    consecutive_successes: int = 0
+
+
+@dataclass(frozen=True)
+class ProviderHealthState:
+    """
+    Current calculated health state of a provider.
+
+    This represents the operational state derived from
+    one or more health observations.
+
+    It does not represent historical incident storage.
+    """
+
+    provider: str
+
+    status: ProviderHealthStatus
+
+    checked_at: datetime
+
+    consecutive_failures: int
+
+    consecutive_successes: int
+
+    last_success_at: datetime | None = None
+
+    last_failure_at: datetime | None = None
+
+    degraded_since: datetime | None = None
+
+    unavailable_since: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ProviderIncident:
+    """
+    Provider availability incident.
+
+    An incident represents a sustained operational problem,
+    rather than an individual failed request.
+
+    Example:
+
+        OpenAI
+        unavailable
+        started 14:32
+        recovered 14:51
+        downtime 19 minutes
+    """
+
+    incident_id: str
+
+    provider: str
+
+    status: ProviderHealthStatus
+
+    started_at: datetime
+
+    last_observed_at: datetime
+
+    recovered_at: datetime | None = None
+
+    affected_capabilities: tuple[
+        str,
+        ...,
+    ] = ()
+
+    consecutive_failures: int = 0
+
+    resolution_message: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        """
+        Return whether the provider incident remains open.
+        """
+
+        return self.recovered_at is None
+
+    @property
+    def downtime_seconds(self) -> float | None:
+        """
+        Return completed downtime in seconds.
+
+        Returns None while the incident remains open because
+        final downtime has not yet been established.
+        """
+
+        if self.recovered_at is None:
+            return None
+
+        return (
+            self.recovered_at
+            - self.started_at
+        ).total_seconds()
+
+
+@dataclass(frozen=True)
+class ProviderHealthTransitionEvent:
+    """
+    Significant provider health transition.
+
+    Used by application services to determine whether an
+    incident should be created, updated, recovered, or
+    escalated.
+    """
+
+    provider: str
+
+    transition: ProviderHealthTransition
+
+    previous_status: ProviderHealthStatus
+
+    current_status: ProviderHealthStatus
+
+    occurred_at: datetime
+
+    consecutive_failures: int
+
+    consecutive_successes: int
+
+    affected_capabilities: tuple[
+        str,
+        ...,
+    ] = ()
+===== provider_health_service.py =====
+"""
+EasyChatBot AI Operations Center provider health service.
+
+Transforms provider health observations into the current
+provider health state and significant health transitions.
+
+Architecture:
+
+Provider Health Probe
+        |
+        v
+ProviderHealthObservation
+        |
+        v
+ProviderHealthService
+        |
+        +--------------------+
+        |                    |
+        v                    v
+ProviderHealthState   HealthTransitionEvent
+        |                    |
+        +---------+----------+
+                  |
+                  v
+        ProviderIncidentService
+                  |
+                  v
+           EscalationService
+
+
+Responsibilities:
+
+- process provider health observations;
+- maintain provider health state;
+- track consecutive failures;
+- track consecutive successes;
+- detect degradation;
+- detect unavailability;
+- detect recovery;
+- expose the current provider health state.
+
+Does NOT:
+
+- execute health probes;
+- persist incidents;
+- send emails;
+- modify Runtime routing;
+- perform autonomous failover.
+
+The service is an application-layer health state
+processor. Incident persistence and escalation remain
+separate responsibilities.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthState,
+    ProviderHealthStatus,
+    ProviderHealthTransition,
+    ProviderHealthTransitionEvent,
+)
+
+
+class ProviderHealthService:
+    """
+    Application service responsible for provider health
+    state tracking.
+
+    Health policy for the Hackathon:
+
+    1. First failure:
+       DEGRADED
+
+    2. Three consecutive failures:
+       UNAVAILABLE
+
+    3. Successful observation after degradation:
+       HEALTHY
+
+    4. Successful observation after unavailability:
+       HEALTHY / RECOVERED transition
+
+    The thresholds are intentionally kept in the service
+    for the Hackathon and can later become validated
+    configuration.
+    """
+
+    DEGRADED_FAILURE_THRESHOLD = 1
+
+    UNAVAILABLE_FAILURE_THRESHOLD = 3
+
+    RECOVERY_SUCCESS_THRESHOLD = 2
+
+    def __init__(self) -> None:
+        """
+        Initialise an empty provider health registry.
+        """
+
+        self._states: dict[
+            str,
+            ProviderHealthState,
+        ] = {}
+
+    def observe(
+        self,
+        observation: ProviderHealthObservation,
+    ) -> ProviderHealthTransitionEvent:
+        """
+        Process one provider health observation.
+
+        Returns the health transition generated by the
+        observation.
+
+        The method updates only application-level health
+        state. It does not create incidents or external
+        side effects.
+        """
+
+        if observation is None:
+            raise ValueError(
+                "Provider health observation cannot be None."
+            )
+
+        self._validate_observation(
+            observation
+        )
+
+        previous_state = self._states.get(
+            observation.provider
+        )
+
+        next_state = self._calculate_next_state(
+            observation=observation,
+            previous_state=previous_state,
+        )
+
+        self._states[
+            observation.provider
+        ] = next_state
+
+        transition = (
+            self._determine_transition(
+                previous_state=previous_state,
+                current_state=next_state,
+            )
+        )
+
+        return ProviderHealthTransitionEvent(
+            provider=observation.provider,
+            transition=transition,
+            previous_status=(
+                previous_state.status
+                if previous_state is not None
+                else ProviderHealthStatus.UNKNOWN
+            ),
+            current_status=next_state.status,
+            occurred_at=observation.observed_at,
+            consecutive_failures=(
+                next_state.consecutive_failures
+            ),
+            consecutive_successes=(
+                next_state.consecutive_successes
+            ),
+            affected_capabilities=(
+                (observation.capability,)
+                if observation.capability
+                else ()
+            ),
+        )
+
+    def get_state(
+        self,
+        provider: str,
+    ) -> ProviderHealthState | None:
+        """
+        Return the current state of a provider.
+
+        Returns None when the provider has not yet been
+        observed.
+        """
+
+        if not provider.strip():
+            raise ValueError(
+                "Provider cannot be empty."
+            )
+
+        return self._states.get(
+            provider
+        )
+
+    def get_all_states(
+        self,
+    ) -> tuple[ProviderHealthState, ...]:
+        """
+        Return current health states for all observed
+        providers.
+        """
+
+        return tuple(
+            self._states[
+                provider
+            ]
+            for provider in sorted(
+                self._states
+            )
+        )
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Clear tracked health state.
+
+        Intended primarily for tests and isolated
+        demonstrations.
+        """
+
+        self._states.clear()
+
+    def _calculate_next_state(
+        self,
+        *,
+        observation: ProviderHealthObservation,
+        previous_state: ProviderHealthState | None,
+    ) -> ProviderHealthState:
+        """
+        Calculate the next provider health state.
+        """
+
+        if observation.status == (
+            ProviderHealthStatus.UNAVAILABLE
+        ):
+            consecutive_failures = (
+                observation.consecutive_failures
+                if observation.consecutive_failures > 0
+                else (
+                    (
+                        previous_state.consecutive_failures
+                        if previous_state is not None
+                        else 0
+                    )
+                    + 1
+                )
+            )
+
+            return ProviderHealthState(
+                provider=observation.provider,
+                status=(
+                    ProviderHealthStatus.UNAVAILABLE
+                    if consecutive_failures
+                    >= self.UNAVAILABLE_FAILURE_THRESHOLD
+                    else ProviderHealthStatus.DEGRADED
+                ),
+                checked_at=observation.observed_at,
+                consecutive_failures=(
+                    consecutive_failures
+                ),
+                consecutive_successes=0,
+                last_success_at=(
+                    previous_state.last_success_at
+                    if previous_state is not None
+                    else None
+                ),
+                last_failure_at=(
+                    observation.observed_at
+                ),
+                degraded_since=(
+                    previous_state.degraded_since
+                    if (
+                        previous_state is not None
+                        and previous_state.degraded_since
+                        is not None
+                    )
+                    else observation.observed_at
+                ),
+                unavailable_since=(
+                    (
+                        previous_state.unavailable_since
+                        if previous_state is not None
+                        and previous_state.unavailable_since
+                        is not None
+                        else observation.observed_at
+                    )
+                    if consecutive_failures
+                    >= self.UNAVAILABLE_FAILURE_THRESHOLD
+                    else None
+                ),
+            )
+
+        if observation.status == (
+            ProviderHealthStatus.DEGRADED
+        ):
+            consecutive_failures = (
+                observation.consecutive_failures
+                if observation.consecutive_failures > 0
+                else (
+                    (
+                        previous_state.consecutive_failures
+                        if previous_state is not None
+                        else 0
+                    )
+                    + 1
+                )
+            )
+
+            return ProviderHealthState(
+                provider=observation.provider,
+                status=(
+                    ProviderHealthStatus.UNAVAILABLE
+                    if consecutive_failures
+                    >= self.UNAVAILABLE_FAILURE_THRESHOLD
+                    else ProviderHealthStatus.DEGRADED
+                ),
+                checked_at=observation.observed_at,
+                consecutive_failures=(
+                    consecutive_failures
+                ),
+                consecutive_successes=0,
+                last_success_at=(
+                    previous_state.last_success_at
+                    if previous_state is not None
+                    else None
+                ),
+                last_failure_at=(
+                    observation.observed_at
+                ),
+                degraded_since=(
+                    previous_state.degraded_since
+                    if (
+                        previous_state is not None
+                        and previous_state.degraded_since
+                        is not None
+                    )
+                    else observation.observed_at
+                ),
+                unavailable_since=(
+                    (
+                        previous_state.unavailable_since
+                        if previous_state is not None
+                        and previous_state.unavailable_since
+                        is not None
+                        else observation.observed_at
+                    )
+                    if consecutive_failures
+                    >= self.UNAVAILABLE_FAILURE_THRESHOLD
+                    else None
+                ),
+            )
+
+        if observation.status == (
+            ProviderHealthStatus.HEALTHY
+        ):
+            consecutive_successes = (
+                observation.consecutive_successes
+                if observation.consecutive_successes > 0
+                else (
+                    (
+                        previous_state.consecutive_successes
+                        if previous_state is not None
+                        else 0
+                    )
+                    + 1
+                )
+            )
+
+            return ProviderHealthState(
+                provider=observation.provider,
+                status=ProviderHealthStatus.HEALTHY,
+                checked_at=observation.observed_at,
+                consecutive_failures=0,
+                consecutive_successes=(
+                    consecutive_successes
+                ),
+                last_success_at=(
+                    observation.observed_at
+                ),
+                last_failure_at=(
+                    previous_state.last_failure_at
+                    if previous_state is not None
+                    else None
+                ),
+                degraded_since=None,
+                unavailable_since=None,
+            )
+
+        return ProviderHealthState(
+            provider=observation.provider,
+            status=ProviderHealthStatus.UNKNOWN,
+            checked_at=observation.observed_at,
+            consecutive_failures=(
+                previous_state.consecutive_failures
+                if previous_state is not None
+                else 0
+            ),
+            consecutive_successes=(
+                previous_state.consecutive_successes
+                if previous_state is not None
+                else 0
+            ),
+            last_success_at=(
+                previous_state.last_success_at
+                if previous_state is not None
+                else None
+            ),
+            last_failure_at=(
+                previous_state.last_failure_at
+                if previous_state is not None
+                else None
+            ),
+            degraded_since=(
+                previous_state.degraded_since
+                if previous_state is not None
+                else None
+            ),
+            unavailable_since=(
+                previous_state.unavailable_since
+                if previous_state is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _determine_transition(
+        *,
+        previous_state: ProviderHealthState | None,
+        current_state: ProviderHealthState,
+    ) -> ProviderHealthTransition:
+        """
+        Determine the significant transition represented
+        by the latest observation.
+        """
+
+        previous_status = (
+            previous_state.status
+            if previous_state is not None
+            else ProviderHealthStatus.UNKNOWN
+        )
+
+        current_status = current_state.status
+
+        if (
+            previous_status
+            == ProviderHealthStatus.UNAVAILABLE
+            and current_status
+            == ProviderHealthStatus.HEALTHY
+        ):
+            return ProviderHealthTransition.RECOVERED
+
+        if (
+            current_status
+            == ProviderHealthStatus.UNAVAILABLE
+        ):
+            return ProviderHealthTransition.UNAVAILABLE
+
+        if (
+            current_status
+            == ProviderHealthStatus.DEGRADED
+        ):
+            return ProviderHealthTransition.DEGRADED
+
+        if (
+            current_status
+            == ProviderHealthStatus.UNKNOWN
+        ):
+            return ProviderHealthTransition.UNKNOWN
+
+        return ProviderHealthTransition.RECOVERED
+
+    @staticmethod
+    def _validate_observation(
+        observation: ProviderHealthObservation,
+    ) -> None:
+        """
+        Validate required health observation fields.
+        """
+
+        if not observation.provider.strip():
+            raise ValueError(
+                "Provider cannot be empty."
+            )
+
+        if observation.latency_ms is not None:
+            if observation.latency_ms < 0:
+                raise ValueError(
+                    "Latency cannot be negative."
+                )
+
+        if observation.consecutive_failures < 0:
+            raise ValueError(
+                "Consecutive failures cannot be negative."
+            )
+
+        if observation.consecutive_successes < 0:
+            raise ValueError(
+                "Consecutive successes cannot be negative."
+            )
+===== provider_management files =====
+capability_optimisation_service.py
+email_notification_adapter.py
+escalation_detail_service.py
+escalation_history_service.py
+escalation_notification_service.py
+escalation_repository.py
+escalation_service.py
+escalation_type_service.py
+escalation_workflow_repository.py
+escalation_workflow_service.py
+health_dashboard_service.py
+models.py
+operations_center_dashboard_api.py
+operations_center_dashboard_composition.py
+operations_center_dashboard_facade.py
+operations_center_dashboard_service.py
+provider_comparison_service.py
+provider_health_escalation_service.py
+provider_health_models.py
+provider_health_service.py
+provider_incident_service.py
+provider_manager_service.py
+recommendation_service.py

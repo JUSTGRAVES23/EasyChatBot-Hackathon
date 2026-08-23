@@ -1,0 +1,4419 @@
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py =====
+
+"""
+Base Provider Contract.
+
+Defines the interface for external AI and knowledge providers.
+
+Examples:
+- Gemini
+- Parallel Search
+- Future LLM providers
+
+The Runtime communicates with providers through this contract.
+
+Providers are replaceable implementations.
+The Agent layer must remain independent from provider details.
+"""
+
+from abc import ABC, abstractmethod
+
+from backend.providers.provider_result import ProviderResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class BaseProvider(ABC):
+    """
+    Abstract base class for EasyChatBot providers.
+
+    Providers are responsible for communicating
+    with external services.
+
+    They are NOT responsible for:
+    - agent decisions
+    - workflow orchestration
+    - memory management
+    - user interaction
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ):
+        """
+        Initialise provider.
+
+        Args:
+            provider_id:
+                Unique provider identifier.
+        """
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute provider operation.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            ProviderResult containing provider output.
+        """
+
+        pass
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\providers\provider_result.py =====
+
+"""
+Provider Result Contract.
+
+Defines the standard response returned
+by external providers.
+
+All providers return this structure so
+the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    """
+    Immutable provider execution result.
+
+    Attributes:
+
+        success:
+            Indicates whether provider execution succeeded.
+
+        provider_id:
+            Identifier of the provider.
+
+        output:
+            Provider response payload.
+
+        error:
+            Error details if execution failed.
+    """
+
+    success: bool
+    provider_id: str
+    output: Any = None
+    error: str | None = None
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\parallel_gateway.py =====
+
+"""
+Parallel Discovery Gateway.
+
+Adapts the existing ParallelSearchProvider to the
+provider-independent DiscoveryGateway contract.
+
+This adapter belongs at the infrastructure boundary.
+
+Architecture:
+
+ContentProductDiscoverySkill
+|
+v
+DiscoveryGateway
+|
+v
+ParallelDiscoveryGateway
+|
+v
+ParallelSearchProvider
+|
+v
+ParallelClientWrapper
+|
+v
+Parallel API
+"""
+
+from __future__ import annotations
+
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.skills.discovery.content_product_discovery import (
+    DiscoveryCandidate,
+    DiscoveryGateway,
+)
+
+from backend.skills.discovery.query_generation import (
+    DiscoveryQuery,
+)
+
+
+class ParallelDiscoveryGateway:
+    """
+    DiscoveryGateway implementation backed by Parallel.
+
+    The Discovery Skill remains unaware of Parallel.
+
+    Provider creation remains outside this class and
+    is owned by application composition.
+    """
+
+    def __init__(
+        self,
+        provider: ParallelSearchProvider,
+    ) -> None:
+        """
+        Initialise Parallel discovery gateway.
+
+        Args:
+            provider:
+                Injected Parallel search provider.
+
+        Raises:
+            ValueError:
+                If provider is missing.
+        """
+
+        if provider is None:
+            raise ValueError(
+                "ParallelSearchProvider cannot be None."
+            )
+
+        self.provider = provider
+
+
+    async def discover(
+        self,
+        query: DiscoveryQuery,
+    ) -> list[DiscoveryCandidate]:
+        """
+        Execute a discovery query through Parallel.
+
+        The gateway converts provider output into the
+        provider-independent DiscoveryCandidate contract.
+        """
+
+        context = ExecutionContext(
+            user_id="discovery-system",
+            request=query.query,
+            metadata={
+                "content_type": query.content_type,
+                "topics": query.topics,
+                "languages": query.languages,
+                "learning_level": query.learning_level,
+                "constraints": query.constraints,
+            },
+        )
+
+        result = await self.provider.execute(
+            context,
+        )
+
+        if not result.success:
+            raise RuntimeError(
+                result.error
+                or "Parallel discovery failed."
+            )
+
+        return self._normalise_results(
+            result.output,
+            content_type=query.content_type,
+        )
+
+
+    @staticmethod
+    def _normalise_results(
+        provider_output,
+        *,
+        content_type: str,
+    ) -> list[DiscoveryCandidate]:
+        """
+        Convert Parallel provider output into
+        provider-independent discovery candidates.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            return []
+
+
+        raw_results = provider_output.get(
+            "results",
+            [],
+        )
+
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            return []
+
+
+        candidates: list[DiscoveryCandidate] = []
+
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+
+            if not title or not url:
+                continue
+
+
+            candidates.append(
+                DiscoveryCandidate(
+                    title=title,
+                    url=url,
+                    description=(
+                        ParallelDiscoveryGateway
+                        ._extract_description(
+                            raw_result,
+                        )
+                    ),
+                    content_type=content_type,
+                    source="parallel",
+                    metadata={
+                        "raw_result": raw_result,
+                    },
+                )
+            )
+
+
+        return candidates
+
+
+    @staticmethod
+    def _extract_description(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract provider-neutral description from
+        normalized Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+
+        return str(
+            excerpts or "",
+        ).strip()
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\content_product_discovery.py =====
+
+"""
+Content/Product Discovery Skill.
+
+Executes provider-independent discovery queries through an injected
+Discovery Gateway.
+
+The Skill converts discovery intent into normalized discovery
+candidates.
+
+It does not:
+
+- call provider SDKs directly
+- select providers
+- manage memory
+- modify learner preferences
+- rank recommendations
+- decide final recommendations
+- perform uncontrolled external actions
+
+Provider selection and external communication remain outside the Skill.
+
+Architecture:
+
+DiscoveryQueryGenerationSkill
+            |
+            v
+ContentProductDiscoverySkill
+            |
+            v
+DiscoveryGateway
+            |
+            v
+Approved Provider
+            |
+            v
+DiscoveryCandidate[]
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from backend.skills.discovery.query_generation import (
+    DiscoveryQuery,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class DiscoveryCandidate:
+    """
+    Normalized provider-independent discovery candidate.
+
+    The candidate represents an item discovered from an external
+    source without exposing provider-specific response structures
+    to downstream Skills.
+
+    Attributes
+    ----------
+    title:
+        Human-readable candidate title.
+
+    url:
+        Canonical candidate URL.
+
+    description:
+        Short candidate description or excerpt.
+
+    content_type:
+        Canonical discovery type.
+
+    source:
+        Provider or source identifier.
+
+    metadata:
+        Additional provider-neutral metadata.
+    """
+
+    title: str
+    url: str
+    description: str = ""
+    content_type: str = "article"
+    source: str = "unknown"
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a serialisable representation."""
+
+        return {
+            "title": self.title,
+            "url": self.url,
+            "description": self.description,
+            "content_type": self.content_type,
+            "source": self.source,
+            "metadata": dict(self.metadata),
+        }
+
+
+class DiscoveryGateway(Protocol):
+    """
+    Provider-independent Discovery Gateway contract.
+
+    Implementations belong to the infrastructure/provider boundary.
+
+    The Skill knows only that the gateway can execute a
+    DiscoveryQuery and return provider-independent candidates.
+
+    The gateway must not:
+
+    - modify learner memory
+    - modify learner preferences
+    - perform uncontrolled actions
+    """
+
+    async def discover(
+        self,
+        query: DiscoveryQuery,
+    ) -> list[DiscoveryCandidate]:
+        """Discover candidates for the supplied query."""
+        ...
+
+
+class ContentProductDiscoverySkill(Skill):
+    """
+    Discover podcasts, news, articles and products.
+
+    The Skill delegates external discovery to an injected
+    DiscoveryGateway.
+
+    This keeps the Skill independent from Parallel, Spotify,
+    YouTube, news providers, commerce providers, or future
+    discovery services.
+    """
+
+    skill_id = (
+        "discovery.content_product_discovery"
+    )
+
+    name = "Content/Product Discovery"
+
+    version = "1.0.0"
+
+    _MAX_CANDIDATES = 20
+
+    def __init__(
+        self,
+        gateway: DiscoveryGateway,
+    ) -> None:
+        """
+        Initialise the Skill.
+
+        Parameters
+        ----------
+        gateway:
+            Provider-independent discovery gateway.
+        """
+
+        if gateway is None:
+            raise ValueError(
+                "Discovery gateway is required."
+            )
+
+        self.gateway = gateway
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Execute discovery for previously generated queries.
+
+        Expected metadata:
+
+            {
+                "discovery_queries": (
+                    DiscoveryQuery(...)
+                )
+            }
+
+        Query generation remains the responsibility of
+        DiscoveryQueryGenerationSkill.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        raw_queries = skill_input.metadata.get(
+            "discovery_queries"
+        )
+
+        if raw_queries is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="discovery_queries are required.",
+            )
+
+        if not isinstance(
+            raw_queries,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "discovery_queries must be a "
+                    "list or tuple of DiscoveryQuery."
+                ),
+            )
+
+        queries: list[DiscoveryQuery] = []
+
+        for query in raw_queries:
+            if not isinstance(
+                query,
+                DiscoveryQuery,
+            ):
+                return SkillResult.failed(
+                    skill_id=self.skill_id,
+                    error=(
+                        "All discovery_queries must "
+                        "be DiscoveryQuery instances."
+                    ),
+                )
+
+            queries.append(query)
+
+        if not queries:
+            return SkillResult.succeeded(
+                skill_id=self.skill_id,
+                output=[],
+            )
+
+        candidates: list[DiscoveryCandidate] = []
+
+        for query in queries:
+            discovered = await self.gateway.discover(
+                query
+            )
+
+            if not discovered:
+                continue
+
+            for candidate in discovered:
+
+                if not isinstance(
+                    candidate,
+                    DiscoveryCandidate,
+                ):
+                    continue
+
+                if not candidate.title.strip():
+                    continue
+
+                if not candidate.url.strip():
+                    continue
+
+                candidates.append(candidate)
+
+                if len(candidates) >= (
+                    self._MAX_CANDIDATES
+                ):
+                    return SkillResult.succeeded(
+                        skill_id=self.skill_id,
+                        output=candidates,
+                    )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=candidates,
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\discovery_quality_verification.py =====
+
+"""
+Discovery Quality Verification Skill.
+
+Validates recommendations before they are presented
+to the learner.
+
+The Skill is deterministic for Beta 1.
+
+It does not:
+
+- perform discovery
+- call external providers
+- call LLMs
+- modify recommendation ranking
+- modify learner preferences
+- persist memory
+- silently repair invalid data
+
+Architecture:
+
+Discovery
+    |
+    v
+Relevance Matching
+    |
+    v
+Recommendation Ranking
+    |
+    v
+Recommendation Explanation
+    |
+    v
+Personalised Content Adaptation
+    |
+    v
+Discovery Quality Verification
+    |
+    +--> approved recommendations
+    |
+    +--> rejected recommendations
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.skills.discovery.personalised_content_adaptation import (
+    PersonalisedRecommendation,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class QualityFinding:
+    """
+    A deterministic quality finding for one recommendation.
+    """
+
+    rank: int
+    passed: bool
+    findings: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "rank": self.rank,
+            "passed": self.passed,
+            "findings": list(
+                self.findings
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class VerifiedRecommendation:
+    """
+    Recommendation that passed the quality gate.
+    """
+
+    recommendation: PersonalisedRecommendation
+    quality: QualityFinding
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "recommendation": (
+                self.recommendation.as_dict()
+            ),
+            "quality": (
+                self.quality.as_dict()
+            ),
+        }
+
+
+class DiscoveryQualityVerificationSkill(Skill):
+    """
+    Verify personalised recommendations before presentation.
+
+    Expected metadata:
+
+        {
+            "personalised_recommendations": [
+                PersonalisedRecommendation(...),
+                ...
+            ]
+        }
+    """
+
+    skill_id = "discovery.quality_verification"
+    name = "Discovery Quality Verification"
+    version = "1.0.0"
+
+    MIN_SCORE = 0.0
+    MAX_SCORE = 1.0
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Verify supplied personalised recommendations.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        raw_recommendations = (
+            skill_input.metadata.get(
+                "personalised_recommendations"
+            )
+        )
+
+        if raw_recommendations is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "personalised_recommendations "
+                    "are required."
+                ),
+            )
+
+        if not isinstance(
+            raw_recommendations,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "personalised_recommendations must "
+                    "be a list or tuple."
+                ),
+            )
+
+        verified: list[
+            VerifiedRecommendation
+        ] = []
+
+        rejected: list[
+            QualityFinding
+        ] = []
+
+        for recommendation in raw_recommendations:
+            if not isinstance(
+                recommendation,
+                PersonalisedRecommendation,
+            ):
+                continue
+
+            finding = self._verify(
+                recommendation
+            )
+
+            if finding.passed:
+                verified.append(
+                    VerifiedRecommendation(
+                        recommendation=recommendation,
+                        quality=finding,
+                    )
+                )
+            else:
+                rejected.append(
+                    finding
+                )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output={
+                "verified": verified,
+                "rejected": rejected,
+                "verified_count": len(
+                    verified
+                ),
+                "rejected_count": len(
+                    rejected
+                ),
+            },
+        )
+
+    @classmethod
+    def _verify(
+        cls,
+        recommendation: PersonalisedRecommendation,
+    ) -> QualityFinding:
+        """
+        Verify one recommendation.
+
+        No data is modified during verification.
+        """
+
+        findings: list[str] = []
+
+        ranked = (
+            recommendation
+            .recommendation
+            .recommendation
+        )
+
+        candidate = ranked.candidate
+
+        # ---------------------------------------------
+        # Rank
+        # ---------------------------------------------
+
+        if ranked.rank <= 0:
+            findings.append(
+                "Recommendation rank must be positive."
+            )
+
+        # ---------------------------------------------
+        # Score
+        # ---------------------------------------------
+
+        if not (
+            cls.MIN_SCORE
+            <= ranked.score
+            <= cls.MAX_SCORE
+        ):
+            findings.append(
+                "Recommendation score must be "
+                "between 0 and 1."
+            )
+
+        # ---------------------------------------------
+        # Candidate identity
+        # ---------------------------------------------
+
+        if not candidate.title.strip():
+            findings.append(
+                "Recommendation title is missing."
+            )
+
+        if not candidate.url.strip():
+            findings.append(
+                "Recommendation URL is missing."
+            )
+
+        # ---------------------------------------------
+        # Content
+        # ---------------------------------------------
+
+        if not candidate.description.strip():
+            findings.append(
+                "Recommendation description is missing."
+            )
+
+        if not candidate.content_type.strip():
+            findings.append(
+                "Recommendation content type is missing."
+            )
+
+        # ---------------------------------------------
+        # Explanation
+        # ---------------------------------------------
+
+        if not recommendation.recommendation.explanation.strip():
+            findings.append(
+                "Recommendation explanation is missing."
+            )
+
+        # ---------------------------------------------
+        # Personalised presentation
+        # ---------------------------------------------
+
+        if not recommendation.personalised_title.strip():
+            findings.append(
+                "Personalised title is missing."
+            )
+
+        if not recommendation.personalised_summary.strip():
+            findings.append(
+                "Personalised summary is missing."
+            )
+
+        if not recommendation.learning_suggestion.strip():
+            findings.append(
+                "Learning suggestion is missing."
+            )
+
+        return QualityFinding(
+            rank=ranked.rank,
+            passed=not findings,
+            findings=tuple(
+                findings
+            ),
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\hackathon_preference_source.py =====
+
+"""
+Hackathon Preference Source.
+
+Provides Discovery preferences from the EasyChatBot onboarding
+questionnaire.
+
+This implementation deliberately does not depend on the future
+platform Memory repository.
+
+The interface is designed so it can later be replaced by a
+production PlatformPreferenceSource without changing Discovery Skills.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from backend.skills.discovery.preference_source import (
+    PreferenceContext,
+)
+
+
+class HackathonPreferenceSource:
+    """
+    In-memory onboarding preference source for the hackathon.
+
+    The application can initialise this source with the answers
+    collected during onboarding.
+    """
+
+    def __init__(
+        self,
+        preferences: Mapping[str, object] | None = None,
+    ) -> None:
+        self._preferences = dict(
+            preferences or {}
+        )
+
+    async def get_preferences(
+        self,
+        user_id: str,
+    ) -> PreferenceContext:
+        """
+        Return onboarding preferences for the learner.
+
+        The hackathon implementation stores only the explicitly
+        supplied onboarding data.
+        """
+
+        if not isinstance(user_id, str):
+            raise ValueError(
+                "user_id must be a string."
+            )
+
+        if not user_id.strip():
+            raise ValueError(
+                "user_id cannot be empty."
+            )
+
+        return PreferenceContext(
+            topics=self._normalise_values(
+                self._preferences.get("topics")
+            ),
+            content_types=self._normalise_values(
+                self._preferences.get("content_types")
+            ),
+            languages=self._normalise_values(
+                self._preferences.get("languages")
+            ),
+            learning_level=self._normalise_level(
+                self._preferences.get(
+                    "learning_level"
+                )
+            ),
+            source="onboarding",
+            metadata={
+                "repository": "hackathon",
+                "preference_source": "onboarding_questionnaire",
+            },
+        )
+
+    @staticmethod
+    def _normalise_values(
+        value: object,
+    ) -> tuple[str, ...]:
+        if value is None:
+            return ()
+
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (list, tuple, set)):
+            values = value
+        else:
+            raise ValueError(
+                "Preference values must be strings or collections "
+                "of strings."
+            )
+
+        result: list[str] = []
+
+        for item in values:
+            if not isinstance(item, str):
+                raise ValueError(
+                    "Preference values must contain strings only."
+                )
+
+            normalised = item.strip().lower()
+
+            if normalised and normalised not in result:
+                result.append(normalised)
+
+        return tuple(result)
+
+    @staticmethod
+    def _normalise_level(
+        value: object,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        if not isinstance(value, str):
+            raise ValueError(
+                "learning_level must be a string."
+            )
+
+        level = value.strip().upper()
+
+        if level not in {
+            "A1",
+            "A2",
+            "B1",
+            "B2",
+            "C1",
+            "C2",
+        }:
+            raise ValueError(
+                "learning_level must be A1, A2, B1, B2, C1, or C2."
+            )
+
+        return level
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\parallel_gateway.py =====
+
+"""
+Parallel Discovery Gateway.
+
+Adapts the existing ParallelSearchProvider to the
+provider-independent DiscoveryGateway contract.
+
+This adapter belongs at the infrastructure boundary.
+
+Architecture:
+
+ContentProductDiscoverySkill
+|
+v
+DiscoveryGateway
+|
+v
+ParallelDiscoveryGateway
+|
+v
+ParallelSearchProvider
+|
+v
+ParallelClientWrapper
+|
+v
+Parallel API
+"""
+
+from __future__ import annotations
+
+
+from backend.providers.parallel.parallel_provider import (
+    ParallelSearchProvider,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+from backend.skills.discovery.content_product_discovery import (
+    DiscoveryCandidate,
+    DiscoveryGateway,
+)
+
+from backend.skills.discovery.query_generation import (
+    DiscoveryQuery,
+)
+
+
+class ParallelDiscoveryGateway:
+    """
+    DiscoveryGateway implementation backed by Parallel.
+
+    The Discovery Skill remains unaware of Parallel.
+
+    Provider creation remains outside this class and
+    is owned by application composition.
+    """
+
+    def __init__(
+        self,
+        provider: ParallelSearchProvider,
+    ) -> None:
+        """
+        Initialise Parallel discovery gateway.
+
+        Args:
+            provider:
+                Injected Parallel search provider.
+
+        Raises:
+            ValueError:
+                If provider is missing.
+        """
+
+        if provider is None:
+            raise ValueError(
+                "ParallelSearchProvider cannot be None."
+            )
+
+        self.provider = provider
+
+
+    async def discover(
+        self,
+        query: DiscoveryQuery,
+    ) -> list[DiscoveryCandidate]:
+        """
+        Execute a discovery query through Parallel.
+
+        The gateway converts provider output into the
+        provider-independent DiscoveryCandidate contract.
+        """
+
+        context = ExecutionContext(
+            user_id="discovery-system",
+            request=query.query,
+            metadata={
+                "content_type": query.content_type,
+                "topics": query.topics,
+                "languages": query.languages,
+                "learning_level": query.learning_level,
+                "constraints": query.constraints,
+            },
+        )
+
+        result = await self.provider.execute(
+            context,
+        )
+
+        if not result.success:
+            raise RuntimeError(
+                result.error
+                or "Parallel discovery failed."
+            )
+
+        return self._normalise_results(
+            result.output,
+            content_type=query.content_type,
+        )
+
+
+    @staticmethod
+    def _normalise_results(
+        provider_output,
+        *,
+        content_type: str,
+    ) -> list[DiscoveryCandidate]:
+        """
+        Convert Parallel provider output into
+        provider-independent discovery candidates.
+        """
+
+        if not isinstance(
+            provider_output,
+            dict,
+        ):
+            return []
+
+
+        raw_results = provider_output.get(
+            "results",
+            [],
+        )
+
+
+        if isinstance(
+            raw_results,
+            dict,
+        ):
+            raw_results = raw_results.get(
+                "results",
+                [],
+            )
+
+
+        if not isinstance(
+            raw_results,
+            list,
+        ):
+            return []
+
+
+        candidates: list[DiscoveryCandidate] = []
+
+
+        for raw_result in raw_results:
+
+            if not isinstance(
+                raw_result,
+                dict,
+            ):
+                continue
+
+
+            title = str(
+                raw_result.get(
+                    "title",
+                    "",
+                )
+            ).strip()
+
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    "",
+                )
+            ).strip()
+
+
+            if not title or not url:
+                continue
+
+
+            candidates.append(
+                DiscoveryCandidate(
+                    title=title,
+                    url=url,
+                    description=(
+                        ParallelDiscoveryGateway
+                        ._extract_description(
+                            raw_result,
+                        )
+                    ),
+                    content_type=content_type,
+                    source="parallel",
+                    metadata={
+                        "raw_result": raw_result,
+                    },
+                )
+            )
+
+
+        return candidates
+
+
+    @staticmethod
+    def _extract_description(
+        raw_result: dict,
+    ) -> str:
+        """
+        Extract provider-neutral description from
+        normalized Parallel result.
+        """
+
+        excerpts = raw_result.get(
+            "excerpts",
+        )
+
+
+        if excerpts is None:
+            excerpts = raw_result.get(
+                "snippet",
+                raw_result.get(
+                    "content",
+                    "",
+                ),
+            )
+
+
+        if isinstance(
+            excerpts,
+            list,
+        ):
+            return "\n\n".join(
+                str(item).strip()
+                for item in excerpts
+                if str(item).strip()
+            )
+
+
+        return str(
+            excerpts or "",
+        ).strip()
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\personalised_content_adaptation.py =====
+
+"""
+Discovery Personalised Content Adaptation Skill.
+
+Adapts already-ranked recommendations to the learner's
+approved discovery profile.
+
+The Skill is deterministic for Beta 1.
+
+It does not:
+
+- perform discovery
+- call external providers
+- call LLMs
+- change recommendation ranking
+- modify learner preferences
+- persist memory
+- perform external side effects
+
+The Skill adapts presentation and learning guidance while
+preserving the original recommendation evidence.
+
+Architecture:
+
+Ranked Recommendation
+        |
+        v
+Personalised Content Adaptation
+        |
+        v
+Learner-ready Recommendation
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.skills.discovery.preference_understanding import (
+    DiscoveryProfile,
+)
+from backend.skills.discovery.recommendation_explanation import (
+    RecommendationExplanation,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class PersonalisedRecommendation:
+    """
+    Learner-adapted recommendation.
+
+    The original recommendation remains available so
+    adaptation never destroys discovery evidence.
+    """
+
+    recommendation: RecommendationExplanation
+    personalised_title: str
+    personalised_summary: str
+    learning_suggestion: str
+    adaptation_reasons: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "rank": self.recommendation.recommendation.rank,
+            "score": self.recommendation.recommendation.score,
+            "title": self.personalised_title,
+            "url": self.recommendation.recommendation.candidate.url,
+            "summary": self.personalised_summary,
+            "learning_suggestion": self.learning_suggestion,
+            "explanation": self.recommendation.explanation,
+            "adaptation_reasons": list(
+                self.adaptation_reasons
+            ),
+        }
+
+
+class PersonalisedContentAdaptationSkill(Skill):
+    """
+    Adapt recommendations to approved learner preferences.
+
+    Expected metadata:
+
+        {
+            "discovery_profile": DiscoveryProfile(...),
+            "recommendation_explanations": [
+                RecommendationExplanation(...),
+                ...
+            ]
+        }
+
+    The Skill does not infer hidden preferences.
+
+    Only explicit profile information is used.
+    """
+
+    skill_id = "discovery.personalised_content_adaptation"
+    name = "Personalised Content Adaptation"
+    version = "1.0.0"
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Adapt supplied recommendation explanations.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        profile = skill_input.metadata.get(
+            "discovery_profile"
+        )
+
+        if not isinstance(
+            profile,
+            DiscoveryProfile,
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="discovery_profile is required.",
+            )
+
+        raw_recommendations = (
+            skill_input.metadata.get(
+                "recommendation_explanations"
+            )
+        )
+
+        if raw_recommendations is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "recommendation_explanations "
+                    "are required."
+                ),
+            )
+
+        if not isinstance(
+            raw_recommendations,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "recommendation_explanations must "
+                    "be a list or tuple."
+                ),
+            )
+
+        recommendations: list[
+            PersonalisedRecommendation
+        ] = []
+
+        for recommendation in raw_recommendations:
+            if not isinstance(
+                recommendation,
+                RecommendationExplanation,
+            ):
+                continue
+
+            recommendations.append(
+                self._adapt(
+                    recommendation=recommendation,
+                    profile=profile,
+                )
+            )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=recommendations,
+        )
+
+    @staticmethod
+    def _adapt(
+        *,
+        recommendation: RecommendationExplanation,
+        profile: DiscoveryProfile,
+    ) -> PersonalisedRecommendation:
+        """
+        Adapt one recommendation using explicit profile data.
+        """
+
+        candidate = (
+            recommendation
+            .recommendation
+            .candidate
+        )
+
+        reasons: list[str] = []
+
+        personalised_title = (
+            candidate.title
+        )
+
+        summary = (
+            candidate.description.strip()
+            or "A discovery result selected for you."
+        )
+
+        if profile.learning_level:
+            learning_suggestion = (
+                "Explore this at your "
+                f"{profile.learning_level} level."
+            )
+
+            reasons.append(
+                f"adapted to learning level "
+                f"{profile.learning_level}"
+            )
+        else:
+            learning_suggestion = (
+                "Explore this and decide whether "
+                "it matches your current level."
+            )
+
+        if profile.languages:
+            languages = ", ".join(
+                profile.languages
+            )
+
+            reasons.append(
+                f"considered preferred language(s): "
+                f"{languages}"
+            )
+
+        if profile.topics:
+            topics = ", ".join(
+                profile.topics[:3]
+            )
+
+            reasons.append(
+                f"focused on preferred topic(s): "
+                f"{topics}"
+            )
+
+        if profile.content_types:
+            content_types = ", ".join(
+                profile.content_types
+            )
+
+            reasons.append(
+                f"considered preferred content type(s): "
+                f"{content_types}"
+            )
+
+        return PersonalisedRecommendation(
+            recommendation=recommendation,
+            personalised_title=personalised_title,
+            personalised_summary=summary,
+            learning_suggestion=learning_suggestion,
+            adaptation_reasons=tuple(
+                reasons
+            ),
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\preference_source.py =====
+
+"""
+Discovery Preference Source Contract.
+
+Defines the provider-independent boundary used by Discovery Skills
+to obtain learner preference information.
+
+The Discovery Skills do not know whether preferences originate from:
+
+- onboarding
+- learner memory
+- platform usage
+- recommendation feedback
+- another repository
+
+The source implementation is responsible for that concern.
+
+Hackathon:
+    HackathonPreferenceSource
+
+Future production:
+    PlatformPreferenceSource
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class PreferenceContext:
+    """
+    Approved learner preference context.
+
+    Explicit onboarding preferences are represented separately from
+    behavioural enrichment so downstream components can preserve
+    provenance and precedence.
+    """
+
+    topics: tuple[str, ...] = ()
+    content_types: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    learning_level: str | None = None
+
+    source: str = "unknown"
+
+    metadata: dict[str, object] = field(
+        default_factory=dict
+    )
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether no preferences are available."""
+        return not any(
+            (
+                self.topics,
+                self.content_types,
+                self.languages,
+                self.learning_level,
+            )
+        )
+
+
+class PreferenceSource(Protocol):
+    """
+    Provider-independent preference source.
+
+    Implementations retrieve already-approved preference information.
+
+    They must not:
+    - call LLM providers
+    - perform discovery
+    - modify memory
+    - perform uncontrolled external actions
+    """
+
+    async def get_preferences(
+        self,
+        user_id: str,
+    ) -> PreferenceContext:
+        """
+        Return approved preferences for a learner.
+
+        Parameters
+        ----------
+        user_id:
+            Learner identifier.
+
+        Returns
+        -------
+        PreferenceContext
+            Approved preference context.
+        """
+        ...
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\preference_understanding.py =====
+
+"""
+Preference Understanding Skill.
+
+Transforms explicit learner discovery intent and approved preference
+context into a bounded DiscoveryProfile.
+
+The Skill is intentionally deterministic for Beta 1.
+
+It does not:
+- call an LLM
+- search the web
+- call product/content providers
+- persist preferences
+- modify memory
+- infer sensitive attributes
+- perform external actions
+
+Preference sources are supplied by the owning Discovery Agent through
+SkillInput.metadata. The Skill does not access repositories directly.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Iterable
+
+from backend.skills.skill import Skill, SkillInput
+from backend.skills.skill_result import SkillResult
+from backend.skills.discovery.preference_source import (
+    PreferenceContext,
+)
+
+
+@dataclass(frozen=True)
+class DiscoveryProfile:
+    """
+    Bounded profile used by the Discovery Agent.
+
+    Explicit learner instructions are represented separately from
+    approved contextual preferences so downstream Skills can apply
+    appropriate precedence.
+    """
+
+    topics: tuple[str, ...] = ()
+    content_types: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    learning_level: str | None = None
+    explicit_constraints: tuple[str, ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether the profile contains no discovery signals."""
+        return not any(
+            (
+                self.topics,
+                self.content_types,
+                self.languages,
+                self.learning_level,
+                self.explicit_constraints,
+            )
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+        return {
+            "topics": list(self.topics),
+            "content_types": list(self.content_types),
+            "languages": list(self.languages),
+            "learning_level": self.learning_level,
+            "explicit_constraints": list(
+                self.explicit_constraints
+            ),
+        }
+
+
+class PreferenceUnderstandingSkill(Skill):
+    """
+    Extracts bounded discovery preferences from:
+
+    1. the learner's current explicit request
+    2. approved PreferenceContext supplied by the Discovery Agent
+
+    Current explicit requests have precedence over contextual defaults.
+
+    The Skill does not retrieve memory or usage data itself.
+    """
+
+    skill_id = "discovery.preference_understanding"
+    name = "Preference Understanding"
+    version = "1.1.0"
+
+    _CONTENT_TYPES: tuple[tuple[str, str], ...] = (
+        ("podcasts", "podcast"),
+        ("podcast", "podcast"),
+        ("news", "news"),
+        ("articles", "article"),
+        ("article", "article"),
+        ("products", "product"),
+        ("product", "product"),
+    )
+
+    _LANGUAGES: tuple[str, ...] = (
+        "english",
+        "french",
+        "spanish",
+        "german",
+        "italian",
+        "portuguese",
+        "russian",
+        "dutch",
+    )
+
+    _LEVEL_PATTERN = re.compile(
+        r"\b(?:A1|A2|B1|B2|C1|C2)\b",
+        re.IGNORECASE,
+    )
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Build a bounded DiscoveryProfile.
+
+        Approved PreferenceContext is read from:
+
+            skill_input.metadata["preference_context"]
+
+        The generic SkillInput contract therefore remains independent
+        from the Discovery workstream.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        if not isinstance(skill_input.request, str):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill request must be a string.",
+            )
+
+        request = skill_input.request.strip()
+
+        if not request:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill request cannot be empty.",
+            )
+
+        preference_context = (
+            self._get_preference_context(
+                skill_input.metadata
+            )
+        )
+
+        try:
+            profile = self._build_profile(
+                request=request,
+                preference_context=preference_context,
+            )
+        except ValueError as exc:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=str(exc),
+            )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=profile,
+        )
+
+    def _get_preference_context(
+        self,
+        metadata: dict[str, object],
+    ) -> PreferenceContext | None:
+        """
+        Retrieve the approved PreferenceContext from Skill metadata.
+
+        Missing preference context is valid for the hackathon because
+        discovery must remain functional without learner-memory access.
+        """
+
+        value = metadata.get(
+            "preference_context"
+        )
+
+        if value is None:
+            return None
+
+        if not isinstance(
+            value,
+            PreferenceContext,
+        ):
+            raise ValueError(
+                "preference_context must be a PreferenceContext."
+            )
+
+        return value
+
+    def _build_profile(
+        self,
+        *,
+        request: str,
+        preference_context: PreferenceContext | None,
+    ) -> DiscoveryProfile:
+        """
+        Build the profile using deterministic extraction.
+
+        Precedence:
+
+        Current request
+            ↓
+        Explicit learner requirements
+
+        Approved preference context
+            ↓
+        Contextual defaults
+
+        The current request is therefore never silently overridden by
+        onboarding preferences.
+        """
+
+        request_lower = request.lower()
+
+        # ---------------------------------------------------------
+        # Contextual defaults from the approved preference source
+        # ---------------------------------------------------------
+
+        topics: list[str] = []
+
+        content_types: list[str] = []
+
+        languages: list[str] = []
+
+        learning_level: str | None = None
+
+        if preference_context is not None:
+            topics = list(
+                preference_context.topics
+            )
+
+            content_types = (
+                self._normalise_content_types(
+                    preference_context.content_types
+                )
+            )
+
+            languages = list(
+                preference_context.languages
+            )
+
+            learning_level = (
+                preference_context.learning_level
+            )
+
+        # ---------------------------------------------------------
+        # Explicit current request
+        # ---------------------------------------------------------
+
+        explicit_content_types = (
+            self._extract_content_types(
+                request_lower
+            )
+        )
+
+        explicit_languages = (
+            self._extract_languages(
+                request_lower
+            )
+        )
+
+        explicit_learning_level = (
+            self._extract_learning_level(
+                request
+            )
+        )
+
+        explicit_topics = self._extract_topics(
+            request=request,
+            request_lower=request_lower,
+            content_types=explicit_content_types,
+        )
+
+        explicit_constraints = (
+            self._extract_constraints(
+                request=request,
+                request_lower=request_lower,
+            )
+        )
+
+        # Explicit request values are placed first.
+        content_types = self._merge_unique(
+            explicit_content_types,
+            content_types,
+        )
+
+        languages = self._merge_unique(
+            explicit_languages,
+            languages,
+        )
+
+        topics = self._merge_unique(
+            explicit_topics,
+            topics,
+        )
+
+        if explicit_learning_level is not None:
+            learning_level = (
+                explicit_learning_level
+            )
+
+        return DiscoveryProfile(
+            topics=tuple(topics),
+            content_types=tuple(content_types),
+            languages=tuple(languages),
+            learning_level=learning_level,
+            explicit_constraints=tuple(
+                explicit_constraints
+            ),
+        )
+
+    @staticmethod
+    def _normalise_content_types(
+        values: Iterable[str],
+    ) -> list[str]:
+        """
+        Convert supported content-type vocabulary into the
+        canonical DiscoveryProfile representation.
+
+        Canonical values:
+        - podcast
+        - news
+        - article
+        - product
+
+        Normalisation occurs at the Skill boundary so downstream
+        Discovery Skills can rely on one stable vocabulary.
+        """
+
+        aliases = {
+            "podcast": "podcast",
+            "podcasts": "podcast",
+            "news": "news",
+            "article": "article",
+            "articles": "article",
+            "product": "product",
+            "products": "product",
+        }
+
+        result: list[str] = []
+
+        for value in values:
+            if not isinstance(value, str):
+                continue
+
+            normalised = value.strip().lower()
+
+            canonical = aliases.get(normalised)
+
+            if (
+                canonical is not None
+                and canonical not in result
+            ):
+                result.append(canonical)
+
+        return result
+
+    def _extract_content_types(
+        self,
+        request_lower: str,
+    ) -> list[str]:
+        return self._merge_unique(
+            [],
+            [
+                normalised
+                for marker, normalised
+                in self._CONTENT_TYPES
+                if re.search(
+                    rf"\b{re.escape(marker)}\b",
+                    request_lower,
+                )
+            ],
+        )
+
+    def _extract_languages(
+        self,
+        request_lower: str,
+    ) -> list[str]:
+        return self._merge_unique(
+            [],
+            [
+                language
+                for language in self._LANGUAGES
+                if re.search(
+                    rf"\b{re.escape(language)}\b",
+                    request_lower,
+                )
+            ],
+        )
+
+    def _extract_learning_level(
+        self,
+        request: str,
+    ) -> str | None:
+        match = self._LEVEL_PATTERN.search(
+            request
+        )
+
+        return (
+            match.group(0).upper()
+            if match
+            else None
+        )
+
+    def _extract_topics(
+        self,
+        *,
+        request: str,
+        request_lower: str,
+        content_types: Iterable[str],
+    ) -> list[str]:
+        """
+        Extract obvious topic phrases without broad semantic inference.
+        """
+
+        patterns = (
+            r"\babout\s+(.+?)(?=\s+(?:in|for|on)\s+\w+|$)",
+            r"\b(?:on|around)\s+(.+?)(?=\s+(?:in|for)\s+\w+|$)",
+        )
+
+        topics: list[str] = []
+
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                request_lower,
+            )
+
+            if match:
+                candidate = self._clean_topic(
+                    match.group(1)
+                )
+
+                if candidate:
+                    topics.append(candidate)
+
+        if (
+            "artificial intelligence"
+            in request_lower
+            or re.search(
+                r"\bai\b",
+                request_lower,
+            )
+        ):
+            topics.append(
+                "artificial intelligence"
+            )
+
+        if "machine learning" in request_lower:
+            topics.append(
+                "machine learning"
+            )
+
+        return self._merge_unique(
+            [],
+            topics,
+        )
+
+    def _extract_constraints(
+        self,
+        *,
+        request: str,
+        request_lower: str,
+    ) -> list[str]:
+        constraints: list[str] = []
+
+        for pattern in (
+            r"\b(?:only|just)\s+(.+?)(?:[.!?]|$)",
+            r"\bwithout\s+(.+?)(?:[.!?]|$)",
+        ):
+            for match in re.finditer(
+                pattern,
+                request_lower,
+            ):
+                candidate = (
+                    self._clean_constraint(
+                        match.group(1)
+                    )
+                )
+
+                if candidate:
+                    constraints.append(
+                        candidate
+                    )
+
+        return self._merge_unique(
+            [],
+            constraints,
+        )
+
+    @staticmethod
+    def _clean_topic(
+        value: str,
+    ) -> str:
+        value = re.sub(
+            r"\s+",
+            " ",
+            value,
+        ).strip(
+            " ,.;:!?"
+        )
+
+        return (
+            value
+            if 2 <= len(value) <= 100
+            else ""
+        )
+
+    @staticmethod
+    def _clean_constraint(
+        value: str,
+    ) -> str:
+        value = re.sub(
+            r"\s+",
+            " ",
+            value,
+        ).strip(
+            " ,.;:!?"
+        )
+
+        return (
+            value
+            if 2 <= len(value) <= 120
+            else ""
+        )
+
+    @staticmethod
+    def _merge_unique(
+        existing: list[str],
+        values: Iterable[str],
+    ) -> list[str]:
+        result = list(existing)
+
+        for value in values:
+            if value and value not in result:
+                result.append(value)
+
+        return result
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\query_generation.py =====
+
+"""
+Discovery Query Generation Skill.
+
+Generates bounded, provider-independent discovery queries from
+validated learner preferences and the current discovery request.
+
+The Skill is intentionally deterministic for Beta 1.
+
+It does not:
+- call an LLM
+- call search providers
+- call product providers
+- access memory repositories
+- persist preferences
+- perform external actions
+- contain provider-specific search syntax
+
+Responsibilities:
+
+- consume the canonical DiscoveryProfile
+- preserve explicit learner constraints
+- generate queries for supported discovery types
+- incorporate topics, languages and learning level
+- produce bounded provider-independent search intent
+
+Architecture:
+
+PreferenceUnderstandingSkill
+        |
+        v
+DiscoveryProfile
+        |
+        v
+DiscoveryQueryGenerationSkill
+        |
+        v
+DiscoveryQuery[]
+        |
+        v
+Content/Product Discovery
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable
+
+from backend.skills.discovery.preference_understanding import (
+    DiscoveryProfile,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class DiscoveryQuery:
+    """
+    Provider-independent discovery query.
+
+    Attributes
+    ----------
+    query:
+        Human-readable search intent.
+
+    content_type:
+        Canonical discovery type.
+
+    topics:
+        Topics represented by the query.
+
+    languages:
+        Languages represented by the query.
+
+    learning_level:
+        Optional learner level.
+
+    constraints:
+        Explicit learner constraints that must be preserved.
+    """
+
+    query: str
+    content_type: str
+    topics: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    learning_level: str | None = None
+    constraints: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+        return {
+            "query": self.query,
+            "content_type": self.content_type,
+            "topics": list(self.topics),
+            "languages": list(self.languages),
+            "learning_level": self.learning_level,
+            "constraints": list(self.constraints),
+        }
+
+
+class DiscoveryQueryGenerationSkill(Skill):
+    """
+    Generate bounded discovery queries.
+
+    The Skill consumes a DiscoveryProfile supplied through
+    SkillInput.metadata.
+
+    Expected metadata:
+
+        {
+            "discovery_profile": DiscoveryProfile(...)
+        }
+
+    The current request remains available through SkillInput.request
+    and is preserved as the primary learner intent.
+    """
+
+    skill_id = "discovery.query_generation"
+    name = "Discovery Query Generation"
+    version = "1.0.0"
+
+    _SUPPORTED_CONTENT_TYPES = (
+        "podcast",
+        "news",
+        "article",
+        "product",
+    )
+
+    _MAX_QUERIES = 8
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Generate provider-independent discovery queries.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        if not isinstance(
+            skill_input.request,
+            str,
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill request must be a string.",
+            )
+
+        request = skill_input.request.strip()
+
+        if not request:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill request cannot be empty.",
+            )
+
+        try:
+            profile = self._get_profile(
+                skill_input.metadata
+            )
+        except ValueError as exc:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=str(exc),
+            )
+
+        queries = self._generate_queries(
+            request=request,
+            profile=profile,
+        )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=queries,
+        )
+
+    def _get_profile(
+        self,
+        metadata: dict[str, object],
+    ) -> DiscoveryProfile:
+        """
+        Retrieve the validated DiscoveryProfile.
+
+        Query Generation does not construct or retrieve preferences.
+        PreferenceUnderstandingSkill owns that responsibility.
+        """
+
+        value = metadata.get(
+            "discovery_profile"
+        )
+
+        if value is None:
+            raise ValueError(
+                "discovery_profile is required."
+            )
+
+        if not isinstance(
+            value,
+            DiscoveryProfile,
+        ):
+            raise ValueError(
+                "discovery_profile must be a DiscoveryProfile."
+            )
+
+        return value
+
+    def _generate_queries(
+        self,
+        *,
+        request: str,
+        profile: DiscoveryProfile,
+    ) -> tuple[DiscoveryQuery, ...]:
+        """
+        Generate bounded queries.
+
+        Explicit content types are used when available.
+
+        If no content type is available, the query is represented
+        as a general discovery query using the first supported
+        discovery type: article.
+
+        This fallback keeps the Skill usable without silently
+        inventing multiple discovery channels.
+        """
+
+        content_types = self._normalise_content_types(
+            profile.content_types
+        )
+
+        if not content_types:
+            content_types = ["article"]
+
+        topics = self._normalise_values(
+            profile.topics
+        )
+
+        languages = self._normalise_values(
+            profile.languages
+        )
+
+        constraints = self._normalise_values(
+            profile.explicit_constraints
+        )
+
+        generated: list[DiscoveryQuery] = []
+
+        for content_type in content_types:
+            query = self._build_query(
+                request=request,
+                content_type=content_type,
+                topics=topics,
+                languages=languages,
+                learning_level=profile.learning_level,
+                constraints=constraints,
+            )
+
+            generated.append(
+                DiscoveryQuery(
+                    query=query,
+                    content_type=content_type,
+                    topics=tuple(topics),
+                    languages=tuple(languages),
+                    learning_level=profile.learning_level,
+                    constraints=tuple(constraints),
+                )
+            )
+
+            if len(generated) >= self._MAX_QUERIES:
+                break
+
+        return tuple(generated)
+
+    def _build_query(
+        self,
+        *,
+        request: str,
+        content_type: str,
+        topics: list[str],
+        languages: list[str],
+        learning_level: str | None,
+        constraints: list[str],
+    ) -> str:
+        """
+        Build a human-readable provider-independent query.
+
+        The current request is retained as the primary intent.
+        Profile information enriches it rather than replacing it.
+        """
+
+        parts: list[str] = [
+            request
+        ]
+
+        if topics:
+            parts.append(
+                "Topics: "
+                + ", ".join(topics)
+            )
+
+        parts.append(
+            f"Content type: {content_type}"
+        )
+
+        if languages:
+            parts.append(
+                "Language: "
+                + ", ".join(languages)
+            )
+
+        if learning_level:
+            parts.append(
+                "Learning level: "
+                + learning_level
+            )
+
+        if constraints:
+            parts.append(
+                "Constraints: "
+                + "; ".join(constraints)
+            )
+
+        return " | ".join(parts)
+
+    @classmethod
+    def _normalise_content_types(
+        cls,
+        values: Iterable[str],
+    ) -> list[str]:
+        """
+        Convert supported content-type aliases into canonical values.
+        """
+
+        aliases = {
+            "podcast": "podcast",
+            "podcasts": "podcast",
+            "news": "news",
+            "article": "article",
+            "articles": "article",
+            "product": "product",
+            "products": "product",
+        }
+
+        result: list[str] = []
+
+        for value in values:
+            if not isinstance(
+                value,
+                str,
+            ):
+                continue
+
+            canonical = aliases.get(
+                value.strip().lower()
+            )
+
+            if (
+                canonical is not None
+                and canonical not in result
+            ):
+                result.append(canonical)
+
+        return [
+            value
+            for value in result
+            if value in cls._SUPPORTED_CONTENT_TYPES
+        ]
+
+    @staticmethod
+    def _normalise_values(
+        values: Iterable[str],
+    ) -> list[str]:
+        """
+        Normalise bounded textual preference values.
+        """
+
+        result: list[str] = []
+
+        for value in values:
+            if not isinstance(
+                value,
+                str,
+            ):
+                continue
+
+            normalised = " ".join(
+                value.strip().split()
+            )
+
+            if (
+                normalised
+                and normalised not in result
+            ):
+                result.append(
+                    normalised
+                )
+
+        return result
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\recommendation_explanation.py =====
+
+"""
+Discovery Recommendation Explanation Skill.
+
+Produces concise, evidence-based explanations for ranked
+recommendations.
+
+The Skill uses only information already produced by the
+discovery pipeline.
+
+It does not:
+
+- perform discovery
+- call external providers
+- call LLMs
+- recalculate relevance
+- change ranking
+- persist memory
+- modify learner preferences
+
+Architecture:
+
+Discovery
+    |
+    v
+Relevance Matching
+    |
+    v
+Recommendation Ranking
+    |
+    v
+Recommendation Explanation
+    |
+    v
+User-facing recommendation explanation
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.skills.discovery.recommendation_ranking import (
+    RankedRecommendation,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class RecommendationExplanation:
+    """
+    Evidence-based explanation for one recommendation.
+    """
+
+    recommendation: RankedRecommendation
+    explanation: str
+    reasons: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "rank": self.recommendation.rank,
+            "score": self.recommendation.score,
+            "title": (
+                self.recommendation.candidate.title
+            ),
+            "url": (
+                self.recommendation.candidate.url
+            ),
+            "explanation": self.explanation,
+            "reasons": list(self.reasons),
+        }
+
+
+class RecommendationExplanationSkill(Skill):
+    """
+    Explain why ranked recommendations match the learner.
+
+    Expected metadata:
+
+        {
+            "ranked_recommendations": [
+                RankedRecommendation(...),
+                ...
+            ]
+        }
+    """
+
+    skill_id = "discovery.recommendation_explanation"
+    name = "Discovery Recommendation Explanation"
+    version = "1.0.0"
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Generate deterministic explanations.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        raw_recommendations = (
+            skill_input.metadata.get(
+                "ranked_recommendations"
+            )
+        )
+
+        if raw_recommendations is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "ranked_recommendations are required."
+                ),
+            )
+
+        if not isinstance(
+            raw_recommendations,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "ranked_recommendations must be "
+                    "a list or tuple."
+                ),
+            )
+
+        explanations: list[
+            RecommendationExplanation
+        ] = []
+
+        for recommendation in raw_recommendations:
+            if not isinstance(
+                recommendation,
+                RankedRecommendation,
+            ):
+                continue
+
+            explanations.append(
+                self._explain(
+                    recommendation
+                )
+            )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=explanations,
+        )
+
+    @staticmethod
+    def _explain(
+        recommendation: RankedRecommendation,
+    ) -> RecommendationExplanation:
+        """
+        Build an explanation strictly from existing
+        relevance evidence.
+        """
+
+        match = recommendation.match
+        candidate = recommendation.candidate
+
+        reasons: list[str] = []
+
+        if match.matched_topics:
+            topics = ", ".join(
+                match.matched_topics
+            )
+
+            reasons.append(
+                f"matches your interests in {topics}"
+            )
+
+        if match.matched_content_type:
+            reasons.append(
+                f"matches your preferred "
+                f"content type ({candidate.content_type})"
+            )
+
+        if match.matched_languages:
+            languages = ", ".join(
+                match.matched_languages
+            )
+
+            reasons.append(
+                f"matches your language preference "
+                f"({languages})"
+            )
+
+        if match.matched_learning_level:
+            reasons.append(
+                "matches your learning level"
+            )
+
+        if match.matched_constraints:
+            constraints = ", ".join(
+                match.matched_constraints
+            )
+
+            reasons.append(
+                f"matches your constraints "
+                f"({constraints})"
+            )
+
+        if not reasons:
+            reasons.append(
+                "was selected because it received "
+                "a relevance assessment from the "
+                "discovery pipeline"
+            )
+
+        explanation = (
+            f"{candidate.title} was recommended because "
+            + "; ".join(reasons)
+            + "."
+        )
+
+        return RecommendationExplanation(
+            recommendation=recommendation,
+            explanation=explanation,
+            reasons=tuple(reasons),
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\recommendation_ranking.py =====
+
+"""
+Discovery Recommendation Ranking Skill.
+
+Ranks already-matched discovery candidates using their
+relevance scores.
+
+The Skill is deterministic for Beta 1.
+
+It does not:
+
+- perform discovery
+- call external providers
+- call LLMs
+- recalculate relevance
+- persist memory
+- modify learner preferences
+
+Architecture:
+
+Discovery Candidates
+        |
+        v
+Relevance Matching
+        |
+        v
+RelevanceMatch[]
+        |
+        v
+Recommendation Ranking
+        |
+        v
+RankedRecommendation[]
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable
+
+from backend.skills.discovery.relevance_matching import (
+    RelevanceMatch,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class RankedRecommendation:
+    """
+    A discovery candidate with its final ranking position.
+    """
+
+    match: RelevanceMatch
+    rank: int
+
+    @property
+    def score(self) -> float:
+        """Return the underlying relevance score."""
+        return self.match.score
+
+    @property
+    def candidate(self):
+        """Return the underlying discovery candidate."""
+        return self.match.candidate
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "rank": self.rank,
+            "score": self.score,
+            "candidate": (
+                self.match.candidate.as_dict()
+            ),
+            "matched_topics": list(
+                self.match.matched_topics
+            ),
+            "matched_languages": list(
+                self.match.matched_languages
+            ),
+            "matched_content_type": (
+                self.match.matched_content_type
+            ),
+            "matched_learning_level": (
+                self.match.matched_learning_level
+            ),
+            "matched_constraints": list(
+                self.match.matched_constraints
+            ),
+        }
+
+
+class RecommendationRankingSkill(Skill):
+    """
+    Rank relevance matches into an ordered recommendation list.
+
+    Expected metadata:
+
+        {
+            "relevance_matches": [
+                RelevanceMatch(...),
+                ...
+            ]
+        }
+
+    Optional metadata:
+
+        {
+            "recommendation_limit": 10
+        }
+    """
+
+    skill_id = "discovery.recommendation_ranking"
+    name = "Discovery Recommendation Ranking"
+    version = "1.0.0"
+
+    DEFAULT_LIMIT = 10
+    MAX_LIMIT = 20
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Rank supplied relevance matches.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        raw_matches = skill_input.metadata.get(
+            "relevance_matches"
+        )
+
+        if raw_matches is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "relevance_matches are required."
+                ),
+            )
+
+        if not isinstance(
+            raw_matches,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "relevance_matches must be "
+                    "a list or tuple."
+                ),
+            )
+
+        matches = [
+            match
+            for match in raw_matches
+            if isinstance(
+                match,
+                RelevanceMatch,
+            )
+        ]
+
+        limit = self._resolve_limit(
+            skill_input.metadata.get(
+                "recommendation_limit"
+            )
+        )
+
+        ranked_matches = self._rank(
+            matches
+        )
+
+        recommendations = [
+            RankedRecommendation(
+                match=match,
+                rank=index,
+            )
+            for index, match in enumerate(
+                ranked_matches[:limit],
+                start=1,
+            )
+        ]
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=recommendations,
+        )
+
+    @classmethod
+    def _rank(
+        cls,
+        matches: Iterable[RelevanceMatch],
+    ) -> list[RelevanceMatch]:
+        """
+        Rank matches by relevance score.
+
+        Python's sorting is stable, so candidates with
+        identical scores preserve their discovery order.
+        This makes Beta 1 ranking deterministic.
+        """
+
+        return sorted(
+            matches,
+            key=lambda match: match.score,
+            reverse=True,
+        )
+
+    @classmethod
+    def _resolve_limit(
+        cls,
+        value,
+    ) -> int:
+        """
+        Resolve and bound the recommendation limit.
+        """
+
+        if value is None:
+            return cls.DEFAULT_LIMIT
+
+        if isinstance(
+            value,
+            bool,
+        ):
+            return cls.DEFAULT_LIMIT
+
+        try:
+            limit = int(value)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return cls.DEFAULT_LIMIT
+
+        if limit <= 0:
+            return cls.DEFAULT_LIMIT
+
+        return min(
+            limit,
+            cls.MAX_LIMIT,
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\relevance_matching.py =====
+
+"""
+Discovery Relevance Matching Skill.
+
+Evaluates how well discovered candidates match the learner's
+current discovery request and approved preferences.
+
+The Skill is deterministic for Beta 1.
+
+It does not:
+
+- perform discovery
+- call external providers
+- call LLMs
+- rank recommendations globally
+- persist memory
+- modify learner preferences
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable
+
+from backend.skills.discovery.content_product_discovery import (
+    DiscoveryCandidate,
+)
+from backend.skills.discovery.preference_understanding import (
+    DiscoveryProfile,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class RelevanceMatch:
+    """
+    Candidate with an explainable relevance score.
+    """
+
+    candidate: DiscoveryCandidate
+    score: float
+    matched_topics: tuple[str, ...] = ()
+    matched_languages: tuple[str, ...] = ()
+    matched_content_type: bool = False
+    matched_learning_level: bool = False
+    matched_constraints: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "candidate": self.candidate.as_dict(),
+            "score": self.score,
+            "matched_topics": list(
+                self.matched_topics
+            ),
+            "matched_languages": list(
+                self.matched_languages
+            ),
+            "matched_content_type": (
+                self.matched_content_type
+            ),
+            "matched_learning_level": (
+                self.matched_learning_level
+            ),
+            "matched_constraints": list(
+                self.matched_constraints
+            ),
+        }
+
+
+class RelevanceMatchingSkill(Skill):
+    """
+    Match discovery candidates against learner preferences.
+
+    Expected metadata:
+
+        {
+            "discovery_profile": DiscoveryProfile(...),
+            "discovery_candidates": [
+                DiscoveryCandidate(...)
+            ]
+        }
+    """
+
+    skill_id = "discovery.relevance_matching"
+    name = "Discovery Relevance Matching"
+    version = "1.0.0"
+
+    _TOPIC_WEIGHT = 0.40
+    _CONTENT_TYPE_WEIGHT = 0.20
+    _LANGUAGE_WEIGHT = 0.15
+    _LEVEL_WEIGHT = 0.10
+    _CONSTRAINT_WEIGHT = 0.15
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Evaluate all supplied discovery candidates.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        profile = skill_input.metadata.get(
+            "discovery_profile"
+        )
+
+        if not isinstance(
+            profile,
+            DiscoveryProfile,
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="discovery_profile is required.",
+            )
+
+        raw_candidates = skill_input.metadata.get(
+            "discovery_candidates"
+        )
+
+        if raw_candidates is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "discovery_candidates are required."
+                ),
+            )
+
+        if not isinstance(
+            raw_candidates,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "discovery_candidates must be "
+                    "a list or tuple."
+                ),
+            )
+
+        matches: list[RelevanceMatch] = []
+
+        for candidate in raw_candidates:
+            if not isinstance(
+                candidate,
+                DiscoveryCandidate,
+            ):
+                continue
+
+            matches.append(
+                self._match_candidate(
+                    candidate=candidate,
+                    profile=profile,
+                    request=skill_input.request,
+                )
+            )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output=matches,
+        )
+
+    def _match_candidate(
+        self,
+        *,
+        candidate: DiscoveryCandidate,
+        profile: DiscoveryProfile,
+        request: str,
+    ) -> RelevanceMatch:
+        """
+        Produce a transparent relevance assessment.
+        """
+
+        text = " ".join(
+            (
+                candidate.title,
+                candidate.description,
+            )
+        ).lower()
+
+        request_text = request.lower()
+
+        profile_topics = self._normalise(
+            profile.topics
+        )
+
+        matched_topics = tuple(
+            topic
+            for topic in profile_topics
+            if topic.lower() in text
+            or topic.lower() in request_text
+        )
+
+        # Candidate metadata is already part of the
+        # provider-independent DiscoveryCandidate contract.
+        #
+        # Do not require a metadata_text() method on
+        # DiscoveryCandidate. Relevance matching consumes
+        # the existing metadata contract directly.
+        metadata_text = " ".join(
+            str(value)
+            for value in candidate.metadata.values()
+        ).lower()
+
+        matched_languages = tuple(
+            language
+            for language in self._normalise(
+                profile.languages
+            )
+            if (
+                language.lower() in text
+                or language.lower() in metadata_text
+            )
+        )
+
+        content_type = (
+            self._normalise_content_type(
+                candidate.content_type
+            )
+        )
+
+        expected_types = {
+            self._normalise_content_type(value)
+            for value in profile.content_types
+        }
+
+        matched_content_type = (
+            bool(content_type)
+            and content_type in expected_types
+        )
+
+        learning_level = (
+            profile.learning_level
+        )
+
+        matched_learning_level = (
+            learning_level is not None
+            and learning_level.lower()
+            in text
+        )
+
+        matched_constraints = tuple(
+            constraint
+            for constraint in self._normalise(
+                profile.explicit_constraints
+            )
+            if constraint.lower() in text
+        )
+
+        score = (
+            self._TOPIC_WEIGHT
+            * self._ratio(
+                len(matched_topics),
+                len(profile_topics),
+            )
+            + self._CONTENT_TYPE_WEIGHT
+            * float(matched_content_type)
+            + self._LANGUAGE_WEIGHT
+            * self._ratio(
+                len(matched_languages),
+                len(profile.languages),
+            )
+            + self._LEVEL_WEIGHT
+            * float(matched_learning_level)
+            + self._CONSTRAINT_WEIGHT
+            * self._ratio(
+                len(matched_constraints),
+                len(profile.explicit_constraints),
+            )
+        )
+
+        return RelevanceMatch(
+            candidate=candidate,
+            score=round(
+                min(max(score, 0.0), 1.0),
+                4,
+            ),
+            matched_topics=matched_topics,
+            matched_languages=matched_languages,
+            matched_content_type=matched_content_type,
+            matched_learning_level=matched_learning_level,
+            matched_constraints=matched_constraints,
+        )
+
+    @staticmethod
+    def _ratio(
+        matched: int,
+        total: int,
+    ) -> float:
+        if total <= 0:
+            return 0.0
+
+        return matched / total
+
+    @staticmethod
+    def _normalise(
+        values: Iterable[str],
+    ) -> list[str]:
+        result: list[str] = []
+
+        for value in values:
+            if not isinstance(
+                value,
+                str,
+            ):
+                continue
+
+            normalised = " ".join(
+                value.strip().split()
+            )
+
+            if (
+                normalised
+                and normalised not in result
+            ):
+                result.append(
+                    normalised
+                )
+
+        return result
+
+    @staticmethod
+    def _normalise_content_type(
+        value: str,
+    ) -> str:
+        aliases = {
+            "podcasts": "podcast",
+            "podcast": "podcast",
+            "news": "news",
+            "articles": "article",
+            "article": "article",
+            "products": "product",
+            "product": "product",
+        }
+
+        return aliases.get(
+            value.strip().lower(),
+            value.strip().lower(),
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\user_choice_handoff.py =====
+
+"""
+Discovery User Choice & Controlled Handoff Skill.
+
+Presents verified recommendations and converts an explicit
+learner choice into a controlled handoff request.
+
+The Skill establishes the human decision boundary.
+
+It does not:
+
+- perform discovery
+- call external providers
+- call LLMs
+- automatically select a recommendation for the learner
+- execute external actions
+- persist memory
+- modify learner preferences
+- bypass Runtime controls
+
+Architecture:
+
+Verified Recommendations
+        |
+        v
+User Choice & Controlled Handoff
+        |
+        +--> Awaiting learner choice
+        |
+        v
+Explicit learner selection
+        |
+        v
+Controlled Handoff
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.skills.discovery.personalised_content_adaptation import (
+    PersonalisedRecommendation,
+)
+from backend.skills.discovery.discovery_quality_verification import (
+    VerifiedRecommendation,
+)
+from backend.skills.skill import (
+    Skill,
+    SkillInput,
+)
+from backend.skills.skill_result import (
+    SkillResult,
+)
+
+
+@dataclass(frozen=True)
+class HandoffOption:
+    """
+    Recommendation option presented to the learner.
+    """
+
+    option_id: str
+    rank: int
+    recommendation: PersonalisedRecommendation
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "option_id": self.option_id,
+            "rank": self.rank,
+            "recommendation": (
+                self.recommendation.as_dict()
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class ControlledHandoff:
+    """
+    Explicit learner-approved handoff.
+
+    A handoff is created only after the learner provides
+    a valid option identifier.
+    """
+
+    option_id: str
+    rank: int
+    recommendation: PersonalisedRecommendation
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a serialisable representation."""
+
+        return {
+            "option_id": self.option_id,
+            "rank": self.rank,
+            "recommendation": (
+                self.recommendation.as_dict()
+            ),
+        }
+
+
+class UserChoiceControlledHandoffSkill(Skill):
+    """
+    Present verified recommendations and process explicit
+    learner selection.
+
+    Expected metadata:
+
+        {
+            "verified_recommendations": [
+                VerifiedRecommendation(...),
+                ...
+            ],
+
+            "selected_option_id": "recommendation-1"
+        }
+
+    If selected_option_id is absent, the Skill returns the
+    available options and an awaiting-choice state.
+
+    The Skill never automatically selects an option.
+    """
+
+    skill_id = "discovery.user_choice_handoff"
+    name = "User Choice and Controlled Handoff"
+    version = "1.0.0"
+
+    @staticmethod
+    def _option_id(rank: int) -> str:
+        """Create a stable option identifier."""
+
+        return f"recommendation-{rank}"
+
+    async def execute(
+        self,
+        skill_input: SkillInput,
+    ) -> SkillResult:
+        """
+        Present verified recommendations or process an
+        explicit learner selection.
+        """
+
+        if skill_input is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error="Skill input cannot be None.",
+            )
+
+        raw_recommendations = (
+            skill_input.metadata.get(
+                "verified_recommendations"
+            )
+        )
+
+        if raw_recommendations is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "verified_recommendations are required."
+                ),
+            )
+
+        if not isinstance(
+            raw_recommendations,
+            (list, tuple),
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "verified_recommendations must be "
+                    "a list or tuple."
+                ),
+            )
+
+        options: list[HandoffOption] = []
+
+        for item in raw_recommendations:
+            if not isinstance(
+                item,
+                VerifiedRecommendation,
+            ):
+                continue
+
+            recommendation = item.recommendation
+
+            options.append(
+                HandoffOption(
+                    option_id=self._option_id(
+                        recommendation
+                        .recommendation
+                        .recommendation
+                        .rank
+                    ),
+                    rank=(
+                        recommendation
+                        .recommendation
+                        .recommendation
+                        .rank
+                    ),
+                    recommendation=recommendation,
+                )
+            )
+
+        selected_option_id = (
+            skill_input.metadata.get(
+                "selected_option_id"
+            )
+        )
+
+        # -------------------------------------------------
+        # Human decision boundary
+        #
+        # No selection means the learner must choose.
+        # -------------------------------------------------
+
+        if selected_option_id is None:
+            return SkillResult.succeeded(
+                skill_id=self.skill_id,
+                output={
+                    "status": "awaiting_user_choice",
+                    "options": options,
+                    "handoff": None,
+                },
+            )
+
+        if not isinstance(
+            selected_option_id,
+            str,
+        ):
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "selected_option_id must be a string."
+                ),
+            )
+
+        selected_option_id = (
+            selected_option_id.strip()
+        )
+
+        if not selected_option_id:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "selected_option_id cannot be empty."
+                ),
+            )
+
+        selected = next(
+            (
+                option
+                for option in options
+                if option.option_id
+                == selected_option_id
+            ),
+            None,
+        )
+
+        if selected is None:
+            return SkillResult.failed(
+                skill_id=self.skill_id,
+                error=(
+                    "Selected recommendation does not "
+                    "exist in the verified options."
+                ),
+            )
+
+        handoff = ControlledHandoff(
+            option_id=selected.option_id,
+            rank=selected.rank,
+            recommendation=selected.recommendation,
+        )
+
+        return SkillResult.succeeded(
+            skill_id=self.skill_id,
+            output={
+                "status": "handoff_approved",
+                "options": options,
+                "handoff": handoff,
+            },
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\intelligence\intelligence_context.py =====
+
+"""
+Intelligence Context.
+
+Provider-independent representation of external
+information prepared for AI execution.
+
+Architecture:
+
+Research Agent
+        |
+        v
+IntelligenceContext
+        |
+        v
+AI Runtime integration
+        |
+        v
+LLMRequest.context
+
+The context must not expose provider-specific
+implementation details to the application layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceSource:
+    """
+    Normalised external information source.
+    """
+
+    title: str
+    url: str
+    source: str
+    content: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError(
+                "Intelligence source title cannot be empty."
+            )
+
+        if not self.url.strip():
+            raise ValueError(
+                "Intelligence source URL cannot be empty."
+            )
+
+        if not self.source.strip():
+            raise ValueError(
+                "Intelligence source name cannot be empty."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceContext:
+    """
+    Provider-independent intelligence context.
+
+    Represents external information that may be supplied
+    to an existing AI conversation.
+
+    This object deliberately does not contain:
+    - provider SDK objects
+    - API credentials
+    - model information
+    - runtime state
+    - persistence objects
+    """
+
+    query: str
+
+    sources: tuple[IntelligenceSource, ...] = field(
+        default_factory=tuple,
+    )
+
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.query.strip():
+            raise ValueError(
+                "Intelligence query cannot be empty."
+            )
+
+        if not isinstance(
+            self.sources,
+            tuple,
+        ):
+            raise ValueError(
+                "Intelligence sources must be a tuple."
+            )
+
+        if not isinstance(
+            self.summary,
+            str,
+        ):
+            raise ValueError(
+                "Intelligence summary must be a string."
+            )
+
+    @property
+    def has_sources(self) -> bool:
+        """
+        Return whether external sources are available.
+        """
+
+        return bool(self.sources)
+
+    @property
+    def source_count(self) -> int:
+        """
+        Return the number of external sources.
+        """
+
+        return len(self.sources)
+
+    @property
+    def has_summary(self) -> bool:
+        """
+        Return whether a summary is available.
+        """
+
+        return bool(
+            self.summary.strip()
+        )
+
+    def to_context_text(self) -> str:
+        """
+        Convert intelligence into a safe textual context.
+
+        The result is suitable for eventual inclusion
+        in an existing LLMRequest.context field.
+        """
+
+        sections: list[str] = [
+            "LIVE INTELLIGENCE",
+            f"Research query: {self.query.strip()}",
+        ]
+
+        if self.summary.strip():
+            sections.extend(
+                (
+                    "",
+                    "Summary:",
+                    self.summary.strip(),
+                )
+            )
+
+        if self.sources:
+            sections.extend(
+                (
+                    "",
+                    "Sources:",
+                )
+            )
+
+            for index, source in enumerate(
+                self.sources,
+                start=1,
+            ):
+                sections.append(
+                    f"{index}. {source.title}"
+                )
+                sections.append(
+                    f"   URL: {source.url}"
+                )
+                sections.append(
+                    f"   Source: {source.source}"
+                )
+
+                if source.content.strip():
+                    sections.append(
+                        f"   Content: {source.content.strip()}"
+                    )
+
+        return "\n".join(sections)
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\intelligence\research_service.py =====
+
+"""
+Research Service.
+
+Coordinates the Research Agent and exposes a
+provider-independent intelligence capability.
+
+Architecture:
+
+Application / Runtime
+        |
+        v
+ResearchService
+        |
+        v
+ResearchAgent
+        |
+        v
+Search Provider
+        |
+        v
+IntelligenceContext
+
+The service does not know about Parallel SDK details.
+"""
+
+from __future__ import annotations
+
+from backend.agents.research_agent import (
+    ResearchAgent,
+)
+
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ResearchService:
+    """
+    Application-facing service for live research.
+
+    The service coordinates the Research Agent but does
+    not implement provider-specific search behaviour.
+    """
+
+    def __init__(
+        self,
+        agent: ResearchAgent | None = None,
+    ) -> None:
+        self.agent = (
+            agent
+            or ResearchAgent()
+        )
+
+    async def research(
+        self,
+        user_id: str,
+        query: str,
+    ) -> IntelligenceContext:
+        """
+        Execute research and return normalized intelligence.
+
+        Args:
+            user_id:
+                Identifier for the current user/session.
+
+            query:
+                Research question.
+
+        Returns:
+            Provider-independent IntelligenceContext.
+
+        Raises:
+            ValueError:
+                If the query is empty.
+
+            RuntimeError:
+                If the Research Agent fails.
+        """
+
+        if not query.strip():
+            raise ValueError(
+                "Research query cannot be empty."
+            )
+
+        context = ExecutionContext(
+            user_id=user_id,
+            request=query,
+        )
+
+        result = await self.agent.execute(
+            context
+        )
+
+        if not result.success:
+            raise RuntimeError(
+                result.error
+                or "Research execution failed."
+            )
+
+        if not isinstance(
+            result.output,
+            IntelligenceContext,
+        ):
+            raise TypeError(
+                "Research Agent did not return "
+                "an IntelligenceContext."
+            )
+
+        return result.output
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\runtime\runtime_engine.py =====
+
+"""
+EasyChatBot Runtime Engine.
+
+The Runtime is responsible for orchestrating
+agent execution.
+
+Responsibilities:
+- receive execution requests
+- provide execution context
+- call approved agents
+- return structured results
+
+The Runtime does not:
+- implement business logic
+- call providers directly
+- manage user interfaces
+"""
+
+from backend.agents.base_agent import BaseAgent
+from backend.agents.agent_result import AgentResult
+from backend.runtime.context.execution_context import ExecutionContext
+
+
+class RuntimeEngine:
+    """
+    Central execution orchestrator.
+
+    Agents execute through the Runtime.
+    """
+
+    async def execute(
+        self,
+        agent: BaseAgent,
+        context: ExecutionContext,
+    ) -> AgentResult:
+        """
+        Execute an agent using runtime control.
+
+        Args:
+            agent:
+                Agent implementation.
+
+            context:
+                Runtime execution context.
+
+        Returns:
+            AgentResult.
+        """
+
+        return await agent.execute(context)
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\runtime\external_runtime_container.py =====
+
+"""
+External Runtime Container.
+
+Owns the configured ExternalRuntimeService instance.
+
+Responsibilities:
+
+- store configured runtime service;
+- provide runtime dependency access;
+- reset runtime state for controlled tests.
+
+Does NOT:
+
+- create providers;
+- create executors;
+- build gateways;
+- execute capabilities;
+- implement governance.
+
+Composition belongs to:
+
+    backend.application.bootstrap
+
+"""
+
+from __future__ import annotations
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+
+_runtime_service: ExternalRuntimeService | None = None
+
+
+def configure_external_runtime_service(
+    service: ExternalRuntimeService,
+) -> None:
+    """
+    Register configured ExternalRuntimeService.
+
+    Called by application bootstrap.
+
+    The container only stores the already-created
+    service instance.
+
+    It does not perform composition.
+
+    Args:
+        service:
+            Configured ExternalRuntimeService.
+
+    Raises:
+        ValueError:
+            If service is None.
+    """
+
+    global _runtime_service
+
+    if service is None:
+        raise ValueError(
+            "ExternalRuntimeService cannot be None."
+        )
+
+    _runtime_service = service
+
+
+def get_external_runtime_service() -> ExternalRuntimeService:
+    """
+    Retrieve configured ExternalRuntimeService.
+
+    Used by application boundaries requiring
+    Runtime capability execution.
+
+    Raises:
+        RuntimeError:
+            If bootstrap has not completed.
+    """
+
+    if _runtime_service is None:
+        raise RuntimeError(
+            "ExternalRuntimeService has not been configured."
+        )
+
+    return _runtime_service
+
+
+def reset_runtime_container() -> None:
+    """
+    Reset configured ExternalRuntimeService.
+
+    Test utility only.
+
+    Production lifecycle:
+
+        bootstrap
+            |
+            v
+        configure service
+
+    This function does not:
+
+    - create Runtime services;
+    - create providers;
+    - create gateways;
+    - execute capabilities.
+    """
+
+    global _runtime_service
+
+    _runtime_service = None
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\services\external_runtime_service.py =====
+
+"""
+External Runtime Application Service.
+
+Provides the application-layer boundary to the external/user-assistance
+AI Runtime.
+
+Architecture:
+
+Application
+    |
+    v
+ExternalRuntimeService
+    |
+    v
+CapabilityGateway
+    |
+    v
+CapabilityRegistry
+    |
+    v
+Capability Executor
+
+
+Responsibilities:
+
+- receive approved capability requests from application services;
+- delegate execution to the external Runtime;
+- keep API routes independent from Runtime implementation details;
+- preserve dependency injection.
+
+This service does not:
+
+- implement capability business logic;
+- construct capability executors;
+- construct the CapabilityRegistry;
+- construct the CapabilityGateway;
+- make governance decisions;
+- call providers directly;
+- execute agents directly;
+- modify production systems.
+
+The external Runtime remains responsible for capability execution
+and governance enforcement.
+"""
+
+from __future__ import annotations
+
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityRequest,
+    CapabilityResult,
+)
+
+
+class ExternalRuntimeService:
+    """
+    Application-layer adapter for the external AI Runtime.
+
+    The CapabilityGateway is injected by the application
+    composition layer.
+
+    This keeps the application layer independent from:
+
+    - capability registry;
+    - executor implementations;
+    - provider integrations.
+    """
+
+    def __init__(
+        self,
+        gateway: CapabilityGateway,
+    ) -> None:
+        """
+        Initialise External Runtime service.
+
+        Args:
+            gateway:
+                Configured external Runtime gateway.
+
+        Raises:
+            ValueError:
+                If gateway is missing.
+        """
+
+        if gateway is None:
+            raise ValueError(
+                "CapabilityGateway cannot be None."
+            )
+
+        self._gateway = gateway
+
+    async def execute(
+        self,
+        request: CapabilityRequest,
+    ) -> CapabilityResult:
+        """
+        Execute an approved Runtime capability.
+
+        Governance and execution remain delegated to
+        CapabilityGateway.
+
+        Args:
+            request:
+                Explicit Runtime capability request.
+
+        Returns:
+            Provider-independent CapabilityResult.
+
+        Raises:
+            ValueError:
+                If request is missing.
+        """
+
+        if request is None:
+            raise ValueError(
+                "CapabilityRequest cannot be None."
+            )
+
+        return await self._gateway.execute(
+            request,
+        )

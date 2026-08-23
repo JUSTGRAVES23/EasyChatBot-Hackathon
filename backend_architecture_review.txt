@@ -1,0 +1,434 @@
+﻿===== backend/runtime/context/execution_context.py =====
+"""
+Runtime Execution Context.
+
+Provides immutable runtime context shared with agents.
+
+Responsibilities:
+- identify an execution
+- carry user request information
+- provide runtime metadata
+- optionally carry live intelligence context
+- optionally carry bounded learner memory context
+
+Does not:
+- execute providers
+- manage memory persistence
+- modify systems
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from src.ai_runtime.memory.context_builder import (
+    MemoryContext,
+)
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """
+    Runtime execution context shared with agents.
+
+    The context is immutable. Enrichment must therefore use
+    dataclasses.replace() rather than mutating an existing
+    instance.
+    """
+
+    user_id: str
+
+    request: str
+
+    execution_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    intelligence_context: Any | None = None
+
+    memory_context: MemoryContext | None = None
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return whether live intelligence is attached.
+        """
+
+        return (
+            self.intelligence_context is not None
+        )
+
+    @property
+    def has_memory_context(self) -> bool:
+        """
+        Return whether bounded learner memory context
+        is attached.
+        """
+
+        return (
+            self.memory_context is not None
+            and not self.memory_context.is_empty
+        )
+
+===== backend/services/llm_service.py =====
+"""
+LLM Service.
+
+Application-level service responsible for executing
+provider-independent ConversationRequest objects.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+Concrete LLM Provider
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- receive a ConversationRequest
+- delegate execution to an injected LLMProvider
+- return the provider-independent ProviderResult
+- keep provider execution behind an application service boundary
+
+Does not:
+
+- build prompts
+- manage characters
+- perform research
+- select providers
+- create providers
+- call provider SDKs directly
+- manage memory
+- manage conversations
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class LLMService:
+    """
+    Application service for LLM execution.
+
+    The service depends only on the provider-independent
+    LLMProvider contract.
+
+    Provider construction and provider selection remain
+    outside this service.
+    """
+
+    def __init__(
+        self,
+        llm_provider: LLMProvider,
+    ) -> None:
+        """
+        Initialise the LLM service.
+
+        Parameters
+        ----------
+        llm_provider:
+            Provider implementing the LLMProvider contract.
+        """
+
+        if llm_provider is None:
+            raise ValueError(
+                "LLM provider cannot be None."
+            )
+
+        self.llm_provider = llm_provider
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        The service delegates execution to the injected
+        provider without knowing the provider's concrete
+        implementation.
+
+        Parameters
+        ----------
+        request:
+            Provider-independent conversation request.
+
+        Returns
+        -------
+        ProviderResult
+            Standard provider execution result.
+
+        Raises
+        ------
+        ValueError
+            If the conversation request is None.
+
+        RuntimeError
+            If the provider returns no result.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        logger.info(
+            "LLM generation started."
+        )
+
+        result = await self.llm_provider.generate(
+            request
+        )
+
+        if result is None:
+            raise RuntimeError(
+                "LLM provider returned no result."
+            )
+
+        logger.info(
+            (
+                "LLM generation completed. "
+                "success=%s provider=%s"
+            ),
+            result.success,
+            result.provider_id,
+        )
+
+        return result
+
+===== backend/providers/llm/llm_provider.py =====
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+
+===== backend/providers/parallel/parallel_provider.py =====
+"""
+Parallel Search Provider.
+
+Provides live world information
+through the Parallel Search API.
+"""
+
+from backend.providers.base_provider import (
+    BaseProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+from backend.runtime.context.execution_context import (
+    ExecutionContext,
+)
+
+
+class ParallelSearchProvider(BaseProvider):
+    """
+    Provider implementation using Parallel Search.
+
+    The SDK client is created only when required.
+    This allows tests to run without API credentials.
+    """
+
+    def __init__(
+        self,
+        client=None,
+    ):
+        super().__init__(
+            provider_id="parallel_search"
+        )
+
+        self.client = client
+
+
+    def _get_client(self):
+        """
+        Lazy-load the real Parallel client.
+
+        Avoids requiring API keys during unit tests.
+        """
+
+        if self.client is None:
+
+            from backend.providers.parallel.parallel_client import (
+                ParallelClientWrapper,
+            )
+
+            self.client = ParallelClientWrapper()
+
+        return self.client
+
+
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute a live Parallel search.
+        """
+
+        try:
+
+            client = self._get_client()
+
+            result = await client.search(
+                query=context.request
+            )
+
+            return ProviderResult(
+                success=True,
+                provider_id=self.provider_id,
+                output=result,
+            )
+
+        except Exception as exc:
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error=str(exc),
+            )

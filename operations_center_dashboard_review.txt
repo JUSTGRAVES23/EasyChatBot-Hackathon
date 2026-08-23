@@ -1,0 +1,2289 @@
+
+
+===== FILE: .\app\application\provider_management\operations_center_dashboard_service.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard service.
+
+Provides a read-only, user-friendly operational view
+for the AI Operations Center.
+
+Architecture:
+
+Provider Intelligence
+        |
+        v
+Provider Health / Escalations / Workflow
+        |
+        v
+OperationsCenterDashboardService
+        |
+        v
+Dashboard Read Model
+        |
+        v
+Frontend / API
+
+
+Responsibilities:
+
+- aggregate provider operational status;
+- expose active providers;
+- expose monitoring status;
+- expose escalation counts;
+- expose pending human approvals;
+- calculate an operational confidence score;
+- provide a stable presentation-independent read model.
+
+Does NOT:
+
+- execute providers;
+- change Runtime routing;
+- approve recommendations;
+- send emails;
+- modify escalation state;
+- modify provider configuration.
+
+This is a read-only application service.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_service import (
+    EscalationWorkflowStatus,
+)
+
+if TYPE_CHECKING:
+    from app.application.provider_management.operations_center_provider_service import (
+        OperationsCenterProviderService,
+    )
+
+
+class MonitoringStatus(str, Enum):
+    """
+    Overall monitoring state shown by the Operations Center.
+    """
+
+    HEALTHY = "healthy"
+
+    ATTENTION_REQUIRED = (
+        "attention_required"
+    )
+
+    INCIDENT = "incident"
+
+
+@dataclass(frozen=True)
+class ActiveProvider:
+    """
+    Provider information displayed by the Operations Center.
+    """
+
+    provider: str
+
+    model: str
+
+    capabilities: tuple[str, ...]
+
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class OperationsCenterDashboard:
+    """
+    User-friendly Operations Center dashboard read model.
+    """
+
+    system_confidence: float
+
+    monitoring_status: MonitoringStatus
+
+    active_providers: tuple[
+        ActiveProvider,
+        ...
+    ]
+
+    active_escalations: int
+
+    pending_approvals: int
+
+    approved_escalations: int
+
+    rejected_escalations: int
+
+    pending_notifications: int
+
+    total_escalations: int
+
+
+# Sentinel used to distinguish:
+#
+#     build_dashboard()
+#
+# from:
+#
+#     build_dashboard(active_providers=None)
+#
+# The former means "obtain providers from the configured
+# provider service".
+#
+# The latter is invalid input and must remain rejected.
+_UNSET = object()
+
+
+class OperationsCenterDashboardService:
+    """
+    Builds the read-only Operations Center dashboard.
+
+    Provider information can be explicitly supplied for
+    deterministic tests and controlled application use.
+
+    When active providers are omitted entirely, the configured
+    OperationsCenterProviderService is used.
+
+    Explicit None remains invalid.
+    """
+
+    def __init__(
+        self,
+        history_service: EscalationHistoryService,
+        provider_service: (
+            OperationsCenterProviderService
+            | None
+        ) = None,
+    ) -> None:
+        """
+        Initialise the dashboard service.
+        """
+
+        if history_service is None:
+            raise ValueError(
+                "Escalation history service "
+                "cannot be None."
+            )
+
+        self._history_service = (
+            history_service
+        )
+
+        self._provider_service = (
+            provider_service
+        )
+
+    def build_dashboard(
+        self,
+        *,
+        active_providers: (
+            tuple[
+                ActiveProvider,
+                ...
+            ]
+            | None
+            | object
+        ) = _UNSET,
+    ) -> OperationsCenterDashboard:
+        """
+        Build the current Operations Center dashboard.
+
+        Provider resolution rules:
+
+        1. Explicit tuple:
+               use the supplied providers.
+
+        2. Explicit None:
+               reject the invalid input.
+
+        3. Argument omitted:
+               use the configured provider service.
+
+        This distinction preserves the original dashboard
+        contract while allowing the production composition
+        root to obtain real provider intelligence.
+        """
+
+        if active_providers is None:
+            raise ValueError(
+                "Active providers cannot be None."
+            )
+
+        if active_providers is _UNSET:
+            if self._provider_service is None:
+                raise ValueError(
+                    "Active providers were not supplied "
+                    "and no provider service is configured."
+                )
+
+            resolved_active_providers = (
+                self._provider_service
+                .get_active_providers()
+            )
+        else:
+            resolved_active_providers = (
+                active_providers
+            )
+
+        counts = (
+            self._history_service
+            .count_by_status()
+        )
+
+        pending_approvals = counts[
+            EscalationWorkflowStatus
+            .AWAITING_APPROVAL
+        ]
+
+        approved = counts[
+            EscalationWorkflowStatus
+            .APPROVED
+        ]
+
+        rejected = counts[
+            EscalationWorkflowStatus
+            .REJECTED
+        ]
+
+        pending_notifications = counts[
+            EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+        ]
+
+        total_escalations = sum(
+            counts.values()
+        )
+
+        active_escalations = (
+            pending_approvals
+            + pending_notifications
+        )
+
+        monitoring_status = (
+            self._determine_monitoring_status(
+                active_escalations=(
+                    active_escalations
+                ),
+                pending_approvals=(
+                    pending_approvals
+                ),
+            )
+        )
+
+        confidence = (
+            self._calculate_confidence(
+                active_escalations=(
+                    active_escalations
+                ),
+                pending_approvals=(
+                    pending_approvals
+                ),
+                total_escalations=(
+                    total_escalations
+                ),
+            )
+        )
+
+        return OperationsCenterDashboard(
+            system_confidence=confidence,
+            monitoring_status=monitoring_status,
+            active_providers=(
+                resolved_active_providers
+            ),
+            active_escalations=(
+                active_escalations
+            ),
+            pending_approvals=(
+                pending_approvals
+            ),
+            approved_escalations=approved,
+            rejected_escalations=rejected,
+            pending_notifications=(
+                pending_notifications
+            ),
+            total_escalations=(
+                total_escalations
+            ),
+        )
+
+    @staticmethod
+    def _determine_monitoring_status(
+        *,
+        active_escalations: int,
+        pending_approvals: int,
+    ) -> MonitoringStatus:
+        """
+        Determine the dashboard monitoring status.
+
+        Critical operational state is represented by the
+        existence of active escalations.
+
+        Pending human approval is explicitly surfaced.
+        """
+
+        if active_escalations > 0:
+            return MonitoringStatus.INCIDENT
+
+        if pending_approvals > 0:
+            return (
+                MonitoringStatus
+                .ATTENTION_REQUIRED
+            )
+
+        return MonitoringStatus.HEALTHY
+
+    @staticmethod
+    def _calculate_confidence(
+        *,
+        active_escalations: int,
+        pending_approvals: int,
+        total_escalations: int,
+    ) -> float:
+        """
+        Calculate a deterministic dashboard confidence score.
+
+        This is deliberately a simple operational indicator
+        for the Hackathon.
+
+        It is NOT an AI model confidence score.
+
+        Rules:
+
+        - 100 when there are no escalations;
+        - subtract 15 per active escalation;
+        - pending approval receives no additional penalty;
+        - never below 0.
+
+        Pending approvals are already represented in
+        active_escalations, so applying another penalty would
+        double-count the same operational condition.
+        """
+
+        if total_escalations == 0:
+            return 100.0
+
+        score = 100.0
+
+        score -= (
+            active_escalations * 15.0
+        )
+
+        return max(
+            0.0,
+            min(100.0, score),
+        )
+
+
+===== FILE: .\app\application\provider_management\operations_center_dashboard_facade.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard facade.
+
+Provides a stable application-facing contract for the
+Operations Center presentation/API layer.
+
+Architecture:
+
+Provider Health
+      |
+Escalations
+      |
+Workflow
+      |
+History Service
+      |
+Dashboard Service
+      |
+      v
+OperationsCenterDashboardFacade
+      |
+      v
+API / Frontend
+
+
+Responsibilities:
+
+- expose dashboard information to presentation layers;
+- convert domain/application read models into
+  presentation-safe dictionaries;
+- keep frontend/API code independent from internal
+  workflow objects;
+- provide stable field names for the Operations Center UI;
+- preserve compatibility with explicit provider input.
+
+Does NOT:
+
+- execute providers;
+- change Runtime routing;
+- approve escalations;
+- reject escalations;
+- send emails;
+- modify persistence;
+- perform autonomous operational actions.
+
+This is a read-only presentation boundary.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+    OperationsCenterDashboard,
+    OperationsCenterDashboardService,
+)
+
+
+_UNSET = object()
+
+
+class OperationsCenterDashboardFacade:
+    """
+    Presentation-facing facade for the AI Operations Center.
+
+    Provider resolution normally remains below this boundary.
+
+    For compatibility and deterministic testing, callers may
+    explicitly supply active providers.
+
+    Calling get_dashboard() without provider input delegates
+    provider resolution to OperationsCenterDashboardService.
+    """
+
+    def __init__(
+        self,
+        dashboard_service: OperationsCenterDashboardService,
+    ) -> None:
+        """
+        Initialise the dashboard facade.
+        """
+
+        if dashboard_service is None:
+            raise ValueError(
+                "Operations Center dashboard service "
+                "cannot be None."
+            )
+
+        self._dashboard_service = (
+            dashboard_service
+        )
+
+    def get_dashboard(
+        self,
+        *,
+        active_providers: (
+            tuple[
+                ActiveProvider,
+                ...
+            ]
+            | None
+            | object
+        ) = _UNSET,
+    ) -> dict[str, Any]:
+        """
+        Return a frontend-safe dashboard representation.
+
+        Resolution rules:
+
+        - omitted:
+            use provider resolution configured in the
+            dashboard service;
+
+        - explicit tuple:
+            use the supplied providers;
+
+        - explicit None:
+            reject the invalid input.
+
+        This preserves the existing application contract
+        while supporting the new production composition.
+        """
+
+        if active_providers is None:
+            raise ValueError(
+                "Active providers cannot be None."
+            )
+
+        if active_providers is _UNSET:
+            dashboard = (
+                self._dashboard_service
+                .build_dashboard()
+            )
+        else:
+            dashboard = (
+                self._dashboard_service
+                .build_dashboard(
+                    active_providers=(
+                        active_providers
+                    )
+                )
+            )
+
+        return self._serialize_dashboard(
+            dashboard
+        )
+
+    @staticmethod
+    def _serialize_dashboard(
+        dashboard: OperationsCenterDashboard,
+    ) -> dict[str, Any]:
+        """
+        Convert the dashboard read model into a stable
+        presentation contract.
+        """
+
+        return {
+            "system_confidence": (
+                dashboard.system_confidence
+            ),
+            "monitoring_status": (
+                dashboard.monitoring_status.value
+            ),
+            "active_providers": [
+                OperationsCenterDashboardFacade
+                ._serialize_provider(provider)
+                for provider
+                in dashboard.active_providers
+            ],
+            "active_escalations": (
+                dashboard.active_escalations
+            ),
+            "pending_approvals": (
+                dashboard.pending_approvals
+            ),
+            "approved_escalations": (
+                dashboard.approved_escalations
+            ),
+            "rejected_escalations": (
+                dashboard.rejected_escalations
+            ),
+            "pending_notifications": (
+                dashboard.pending_notifications
+            ),
+            "total_escalations": (
+                dashboard.total_escalations
+            ),
+        }
+
+    @staticmethod
+    def _serialize_provider(
+        provider: ActiveProvider,
+    ) -> dict[str, Any]:
+        """
+        Convert an active provider into a frontend-safe
+        representation.
+        """
+
+        return {
+            "provider": provider.provider,
+            "model": provider.model,
+            "capabilities": list(
+                provider.capabilities
+            ),
+            "active": provider.active,
+        }
+
+
+===== FILE: .\app\application\provider_management\operations_center_dashboard_api.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard API.
+
+Provides the application-facing API boundary for the
+Operations Center dashboard.
+
+Architecture:
+
+Provider Health / Intelligence
+        |
+        v
+OperationsCenterDashboardService
+        |
+        v
+OperationsCenterDashboardFacade
+        |
+        v
+OperationsCenterDashboardAPI
+        |
+        v
+HTTP Router / Frontend
+
+
+Responsibilities:
+
+- expose the dashboard through a stable application API;
+- delegate dashboard generation to the facade;
+- preserve the existing explicit-provider contract;
+- allow production composition to resolve providers below
+  the API boundary;
+- keep HTTP concerns outside the application layer.
+
+Does NOT:
+
+- access repositories directly;
+- execute providers;
+- change Runtime routing;
+- approve escalations;
+- reject escalations;
+- send emails;
+- modify provider configuration;
+- perform autonomous operational actions.
+
+The API is read-only.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.application.provider_management.operations_center_dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+)
+
+
+_UNSET = object()
+
+
+class OperationsCenterDashboardAPI:
+    """
+    Application-facing API for the Operations Center
+    dashboard.
+
+    Provider information may be supplied explicitly for
+    deterministic callers/tests.
+
+    In production, the composed facade/dashboard service can
+    resolve provider information when the argument is omitted.
+    """
+
+    def __init__(
+        self,
+        facade: OperationsCenterDashboardFacade,
+    ) -> None:
+        """
+        Initialise the dashboard API.
+        """
+
+        if facade is None:
+            raise ValueError(
+                "Operations Center dashboard facade "
+                "cannot be None."
+            )
+
+        self._facade = facade
+
+    def get_dashboard(
+        self,
+        *,
+        active_providers: (
+            tuple[
+                ActiveProvider,
+                ...
+            ]
+            | None
+            | object
+        ) = _UNSET,
+    ) -> dict[str, Any]:
+        """
+        Return the current Operations Center dashboard.
+
+        Resolution rules:
+
+        - omitted:
+            provider information is resolved by the composed
+            application stack;
+
+        - explicit tuple:
+            the supplied provider information is passed through;
+
+        - explicit None:
+            rejected as invalid input.
+
+        The API itself does not discover providers.
+        """
+
+        if active_providers is None:
+            raise ValueError(
+                "Active providers cannot be None."
+            )
+
+        if active_providers is _UNSET:
+            return self._facade.get_dashboard()
+
+        return self._facade.get_dashboard(
+            active_providers=(
+                active_providers
+            )
+        )
+
+
+===== FILE: .\tests\application\provider_management\test_operations_center_dashboard_service.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard service tests.
+
+Validates the read-only dashboard contract used by the
+Operations Center.
+
+Coverage:
+
+- system confidence;
+- monitoring status;
+- active providers;
+- active escalations;
+- pending approvals;
+- approved escalations;
+- rejected escalations;
+- pending notifications;
+- total escalation counts.
+
+The dashboard service must not modify workflow state.
+
+Confidence model:
+
+- 100 when there are no escalations;
+- subtract 15 points per active escalation;
+- pending approval is informational and is not
+  penalised a second time;
+- confidence cannot fall below 0.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_repository import (
+    InMemoryEscalationWorkflowRepository,
+)
+
+from app.application.provider_management.escalation_workflow_service import (
+    EscalationWorkflow,
+    EscalationWorkflowStatus,
+)
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+    MonitoringStatus,
+    OperationsCenterDashboardService,
+)
+
+
+def create_workflow(
+    *,
+    escalation_id: str,
+    status: EscalationWorkflowStatus,
+    minute: int,
+) -> EscalationWorkflow:
+    """
+    Create deterministic workflow data.
+    """
+
+    return EscalationWorkflow(
+        escalation_id=escalation_id,
+        status=status,
+        created_at=datetime(
+            2026,
+            8,
+            14,
+            14,
+            minute,
+            tzinfo=timezone.utc,
+        ),
+        notification_recipient=(
+            "operations@example.com"
+            if status
+            != EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+            else None
+        ),
+        notification_subject=(
+            "EasyChatBot AI Operations Escalation"
+            if status
+            != EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+            else None
+        ),
+        approved_at=(
+            datetime(
+                2026,
+                8,
+                14,
+                15,
+                minute,
+                tzinfo=timezone.utc,
+            )
+            if status
+            == EscalationWorkflowStatus.APPROVED
+            else None
+        ),
+        rejected_at=(
+            datetime(
+                2026,
+                8,
+                14,
+                15,
+                minute,
+                tzinfo=timezone.utc,
+            )
+            if status
+            == EscalationWorkflowStatus.REJECTED
+            else None
+        ),
+        decision_reason=(
+            "Operations decision recorded."
+            if status
+            in (
+                EscalationWorkflowStatus.APPROVED,
+                EscalationWorkflowStatus.REJECTED,
+            )
+            else None
+        ),
+    )
+
+
+def create_service() -> (
+    tuple[
+        OperationsCenterDashboardService,
+        InMemoryEscalationWorkflowRepository,
+    ]
+):
+    """
+    Create a dashboard service and repository.
+    """
+
+    repository = (
+        InMemoryEscalationWorkflowRepository()
+    )
+
+    history_service = (
+        EscalationHistoryService(
+            repository=repository
+        )
+    )
+
+    dashboard_service = (
+        OperationsCenterDashboardService(
+            history_service=history_service
+        )
+    )
+
+    return dashboard_service, repository
+
+
+def create_active_providers() -> tuple[
+    ActiveProvider,
+    ...,
+]:
+    """
+    Create deterministic active provider data.
+    """
+
+    return (
+        ActiveProvider(
+            provider="openai",
+            model="gpt-5-mini",
+            capabilities=(
+                "conversation",
+                "reasoning",
+            ),
+        ),
+        ActiveProvider(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            capabilities=(
+                "summarisation",
+            ),
+        ),
+        ActiveProvider(
+            provider="ollama",
+            model="gemma4",
+            capabilities=(
+                "internal_experiments",
+            ),
+        ),
+    )
+
+
+def test_empty_operations_center_is_healthy() -> None:
+    """
+    Validate the initial healthy dashboard.
+    """
+
+    service, _ = create_service()
+
+    dashboard = service.build_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    assert (
+        dashboard.system_confidence
+        == 100.0
+    )
+
+    assert (
+        dashboard.monitoring_status
+        == MonitoringStatus.HEALTHY
+    )
+
+    assert (
+        dashboard.active_escalations
+        == 0
+    )
+
+    assert (
+        dashboard.pending_approvals
+        == 0
+    )
+
+    assert (
+        dashboard.approved_escalations
+        == 0
+    )
+
+    assert (
+        dashboard.rejected_escalations
+        == 0
+    )
+
+    assert (
+        dashboard.pending_notifications
+        == 0
+    )
+
+    assert (
+        dashboard.total_escalations
+        == 0
+    )
+
+
+def test_dashboard_exposes_active_providers() -> None:
+    """
+    Validate provider information reaches the dashboard.
+    """
+
+    service, _ = create_service()
+
+    providers = create_active_providers()
+
+    dashboard = service.build_dashboard(
+        active_providers=providers
+    )
+
+    assert (
+        dashboard.active_providers
+        == providers
+    )
+
+    assert len(
+        dashboard.active_providers
+    ) == 3
+
+    assert (
+        dashboard.active_providers[0]
+        .provider
+        == "openai"
+    )
+
+    assert (
+        dashboard.active_providers[1]
+        .provider
+        == "gemini"
+    )
+
+    assert (
+        dashboard.active_providers[2]
+        .provider
+        == "ollama"
+    )
+
+
+def test_pending_approval_creates_incident_state() -> None:
+    """
+    Validate dashboard behaviour when human approval
+    is required.
+    """
+
+    service, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    dashboard = service.build_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        dashboard.pending_approvals
+        == 1
+    )
+
+    assert (
+        dashboard.active_escalations
+        == 1
+    )
+
+    assert (
+        dashboard.monitoring_status
+        == MonitoringStatus.INCIDENT
+    )
+
+    assert (
+        dashboard.total_escalations
+        == 1
+    )
+
+
+def test_pending_notification_is_active_escalation() -> None:
+    """
+    Validate that a notification awaiting delivery is
+    still considered active.
+    """
+
+    service, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .PENDING_NOTIFICATION
+            ),
+            minute=30,
+        )
+    )
+
+    dashboard = service.build_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        dashboard.pending_notifications
+        == 1
+    )
+
+    assert (
+        dashboard.active_escalations
+        == 1
+    )
+
+    assert (
+        dashboard.monitoring_status
+        == MonitoringStatus.INCIDENT
+    )
+
+
+def test_approved_and_rejected_escalations_are_not_active() -> None:
+    """
+    Validate terminal workflow states do not count as
+    active escalations.
+    """
+
+    service, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .APPROVED
+            ),
+            minute=30,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-002",
+            status=(
+                EscalationWorkflowStatus
+                .REJECTED
+            ),
+            minute=31,
+        )
+    )
+
+    dashboard = service.build_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        dashboard.active_escalations
+        == 0
+    )
+
+    assert (
+        dashboard.approved_escalations
+        == 1
+    )
+
+    assert (
+        dashboard.rejected_escalations
+        == 1
+    )
+
+    assert (
+        dashboard.total_escalations
+        == 2
+    )
+
+    assert (
+        dashboard.monitoring_status
+        == MonitoringStatus.HEALTHY
+    )
+
+
+def test_dashboard_confidence_decreases_with_active_escalation() -> None:
+    """
+    Validate deterministic operational confidence scoring.
+
+    One active escalation:
+
+        100 - 15 = 85
+
+    Pending approval does not receive an additional
+    penalty because it is already represented by the
+    active escalation.
+    """
+
+    service, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    dashboard = service.build_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        dashboard.system_confidence
+        == 85.0
+    )
+
+
+def test_dashboard_confidence_never_goes_below_zero() -> None:
+    """
+    Validate confidence lower bound.
+    """
+
+    service, repository = create_service()
+
+    for index in range(1, 20):
+        repository.save(
+            create_workflow(
+                escalation_id=(
+                    f"esc-{index:03d}"
+                ),
+                status=(
+                    EscalationWorkflowStatus
+                    .AWAITING_APPROVAL
+                ),
+                minute=(
+                    30 + index
+                ),
+            )
+        )
+
+    dashboard = service.build_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        dashboard.system_confidence
+        == 0.0
+    )
+
+
+def test_dashboard_confidence_is_capped_at_one_hundred() -> None:
+    """
+    Validate confidence upper bound.
+    """
+
+    service, _ = create_service()
+
+    dashboard = service.build_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        dashboard.system_confidence
+        <= 100.0
+    )
+
+
+def test_multiple_workflow_states_are_aggregated() -> None:
+    """
+    Validate the complete dashboard aggregation.
+
+    Active workflows:
+
+        1 pending notification
+        2 awaiting approval
+
+    Therefore:
+
+        active escalations = 3
+
+    Confidence:
+
+        100 - (3 * 15) = 55
+    """
+
+    service, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .PENDING_NOTIFICATION
+            ),
+            minute=30,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-002",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=31,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-003",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=32,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-004",
+            status=(
+                EscalationWorkflowStatus
+                .APPROVED
+            ),
+            minute=33,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-005",
+            status=(
+                EscalationWorkflowStatus
+                .REJECTED
+            ),
+            minute=34,
+        )
+    )
+
+    dashboard = service.build_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    assert (
+        dashboard.pending_notifications
+        == 1
+    )
+
+    assert (
+        dashboard.pending_approvals
+        == 2
+    )
+
+    assert (
+        dashboard.active_escalations
+        == 3
+    )
+
+    assert (
+        dashboard.approved_escalations
+        == 1
+    )
+
+    assert (
+        dashboard.rejected_escalations
+        == 1
+    )
+
+    assert (
+        dashboard.total_escalations
+        == 5
+    )
+
+    assert (
+        dashboard.monitoring_status
+        == MonitoringStatus.INCIDENT
+    )
+
+    assert (
+        dashboard.system_confidence
+        == 55.0
+    )
+
+
+def test_none_active_providers_are_rejected() -> None:
+    """
+    Validate required provider input.
+    """
+
+    service, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match="Active providers cannot be None.",
+    ):
+        service.build_dashboard(
+            active_providers=None,  # type: ignore[arg-type]
+        )
+
+
+def test_dashboard_is_read_only() -> None:
+    """
+    Validate that dashboard generation does not modify
+    persisted workflow state.
+    """
+
+    service, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    before = repository.get_all()
+
+    service.build_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    after = repository.get_all()
+
+    assert before == after
+
+
+===== FILE: .\tests\application\provider_management\test_operations_center_dashboard_facade.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard facade tests.
+
+Validates the presentation-facing dashboard contract.
+
+The facade must:
+
+- expose JSON-safe primitive values;
+- serialize monitoring status;
+- serialize active providers;
+- preserve dashboard counts;
+- preserve system confidence;
+- avoid exposing internal Enum/dataclass objects;
+- remain read-only.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_repository import (
+    InMemoryEscalationWorkflowRepository,
+)
+
+from app.application.provider_management.escalation_workflow_service import (
+    EscalationWorkflow,
+    EscalationWorkflowStatus,
+)
+
+from app.application.provider_management.operations_center_dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+    OperationsCenterDashboardService,
+)
+
+
+def create_workflow(
+    *,
+    escalation_id: str,
+    status: EscalationWorkflowStatus,
+    minute: int,
+) -> EscalationWorkflow:
+    """
+    Create deterministic workflow data.
+    """
+
+    return EscalationWorkflow(
+        escalation_id=escalation_id,
+        status=status,
+        created_at=datetime(
+            2026,
+            8,
+            14,
+            14,
+            minute,
+            tzinfo=timezone.utc,
+        ),
+        notification_recipient=(
+            "operations@example.com"
+            if status
+            != EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+            else None
+        ),
+        notification_subject=(
+            "EasyChatBot AI Operations Escalation"
+            if status
+            != EscalationWorkflowStatus
+            .PENDING_NOTIFICATION
+            else None
+        ),
+        approved_at=None,
+        rejected_at=None,
+        decision_reason=None,
+    )
+
+
+def create_service() -> (
+    tuple[
+        OperationsCenterDashboardFacade,
+        InMemoryEscalationWorkflowRepository,
+    ]
+):
+    """
+    Create the facade with its application dependencies.
+    """
+
+    repository = (
+        InMemoryEscalationWorkflowRepository()
+    )
+
+    history_service = (
+        EscalationHistoryService(
+            repository=repository
+        )
+    )
+
+    dashboard_service = (
+        OperationsCenterDashboardService(
+            history_service=history_service
+        )
+    )
+
+    facade = OperationsCenterDashboardFacade(
+        dashboard_service=dashboard_service
+    )
+
+    return facade, repository
+
+
+def create_active_providers() -> tuple[
+    ActiveProvider,
+    ...
+]:
+    """
+    Create deterministic provider data.
+    """
+
+    return (
+        ActiveProvider(
+            provider="openai",
+            model="gpt-5-mini",
+            capabilities=(
+                "conversation",
+                "reasoning",
+            ),
+        ),
+        ActiveProvider(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            capabilities=(
+                "summarisation",
+            ),
+        ),
+        ActiveProvider(
+            provider="ollama",
+            model="gemma4",
+            capabilities=(
+                "internal_experiments",
+            ),
+        ),
+    )
+
+
+def test_facade_returns_healthy_dashboard() -> None:
+    """
+    Validate the basic healthy Operations Center response.
+    """
+
+    facade, _ = create_service()
+
+    result = facade.get_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    assert isinstance(
+        result,
+        dict,
+    )
+
+    assert (
+        result["system_confidence"]
+        == 100.0
+    )
+
+    assert (
+        result["monitoring_status"]
+        == "healthy"
+    )
+
+    assert (
+        result["active_escalations"]
+        == 0
+    )
+
+    assert (
+        result["pending_approvals"]
+        == 0
+    )
+
+    assert (
+        result["approved_escalations"]
+        == 0
+    )
+
+    assert (
+        result["rejected_escalations"]
+        == 0
+    )
+
+    assert (
+        result["pending_notifications"]
+        == 0
+    )
+
+    assert (
+        result["total_escalations"]
+        == 0
+    )
+
+
+def test_facade_serializes_active_providers() -> None:
+    """
+    Validate provider serialization.
+    """
+
+    facade, _ = create_service()
+
+    result = facade.get_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    providers = result[
+        "active_providers"
+    ]
+
+    assert isinstance(
+        providers,
+        list,
+    )
+
+    assert len(providers) == 3
+
+    assert providers[0] == {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "capabilities": [
+            "conversation",
+            "reasoning",
+        ],
+        "active": True,
+    }
+
+    assert providers[1] == {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "capabilities": [
+            "summarisation",
+        ],
+        "active": True,
+    }
+
+    assert providers[2] == {
+        "provider": "ollama",
+        "model": "gemma4",
+        "capabilities": [
+            "internal_experiments",
+        ],
+        "active": True,
+    }
+
+
+def test_facade_serializes_monitoring_status_as_string() -> None:
+    """
+    Validate that internal Enum objects are not exposed.
+    """
+
+    facade, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    result = facade.get_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        result["monitoring_status"]
+        == "incident"
+    )
+
+    assert isinstance(
+        result["monitoring_status"],
+        str,
+    )
+
+
+def test_facade_serializes_active_escalation_state() -> None:
+    """
+    Validate dashboard information needed by the
+    Operations Center landing page.
+    """
+
+    facade, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .PENDING_NOTIFICATION
+            ),
+            minute=30,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-002",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=31,
+        )
+    )
+
+    result = facade.get_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    assert (
+        result["active_escalations"]
+        == 2
+    )
+
+    assert (
+        result["pending_notifications"]
+        == 1
+    )
+
+    assert (
+        result["pending_approvals"]
+        == 1
+    )
+
+    assert (
+        result["total_escalations"]
+        == 2
+    )
+
+    assert (
+        result["system_confidence"]
+        == 70.0
+    )
+
+
+def test_facade_serializes_terminal_workflows() -> None:
+    """
+    Validate approved and rejected history.
+    """
+
+    facade, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .APPROVED
+            ),
+            minute=30,
+        )
+    )
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-002",
+            status=(
+                EscalationWorkflowStatus
+                .REJECTED
+            ),
+            minute=31,
+        )
+    )
+
+    result = facade.get_dashboard(
+        active_providers=()
+    )
+
+    assert (
+        result["active_escalations"]
+        == 0
+    )
+
+    assert (
+        result["approved_escalations"]
+        == 1
+    )
+
+    assert (
+        result["rejected_escalations"]
+        == 1
+    )
+
+    assert (
+        result["total_escalations"]
+        == 2
+    )
+
+    assert (
+        result["system_confidence"]
+        == 100.0
+    )
+
+    assert (
+        result["monitoring_status"]
+        == "healthy"
+    )
+
+
+def test_facade_result_is_json_safe() -> None:
+    """
+    Validate that the complete dashboard result consists
+    only of JSON-compatible primitive/container values.
+
+    This deliberately avoids importing a JSON framework so
+    the application layer remains infrastructure-independent.
+    """
+
+    facade, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    result = facade.get_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    def assert_json_safe(
+        value: object,
+    ) -> None:
+        if value is None:
+            return
+
+        if isinstance(
+            value,
+            (
+                str,
+                int,
+                float,
+                bool,
+            ),
+        ):
+            return
+
+        if isinstance(value, list):
+            for item in value:
+                assert_json_safe(item)
+            return
+
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert isinstance(
+                    key,
+                    str,
+                )
+                assert_json_safe(item)
+            return
+
+        raise AssertionError(
+            "Dashboard contains a non-JSON-safe "
+            f"value: {type(value)!r}"
+        )
+
+    assert_json_safe(result)
+
+
+def test_facade_does_not_expose_internal_workflow_objects() -> None:
+    """
+    Validate that the presentation boundary returns plain
+    dictionaries rather than internal workflow objects.
+    """
+
+    facade, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    result = facade.get_dashboard(
+        active_providers=()
+    )
+
+    assert isinstance(
+        result,
+        dict,
+    )
+
+    assert all(
+        not isinstance(
+            value,
+            EscalationWorkflow,
+        )
+        for value in result.values()
+    )
+
+
+def test_facade_is_read_only() -> None:
+    """
+    Validate that generating the dashboard does not modify
+    repository state.
+    """
+
+    facade, repository = create_service()
+
+    repository.save(
+        create_workflow(
+            escalation_id="esc-001",
+            status=(
+                EscalationWorkflowStatus
+                .AWAITING_APPROVAL
+            ),
+            minute=30,
+        )
+    )
+
+    before = repository.get_all()
+
+    facade.get_dashboard(
+        active_providers=(
+            create_active_providers()
+        )
+    )
+
+    after = repository.get_all()
+
+    assert before == after
+
+
+def test_none_dashboard_service_is_rejected() -> None:
+    """
+    Validate dependency injection.
+    """
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Operations Center dashboard service "
+            "cannot be None."
+        ),
+    ):
+        OperationsCenterDashboardFacade(
+            dashboard_service=None,  # type: ignore[arg-type]
+        )
+
+
+def test_none_active_providers_are_rejected() -> None:
+    """
+    Validate required provider input.
+    """
+
+    facade, _ = create_service()
+
+    with pytest.raises(
+        ValueError,
+        match="Active providers cannot be None.",
+    ):
+        facade.get_dashboard(
+            active_providers=None,  # type: ignore[arg-type]
+        )
+
+
+===== FILE: .\tests\application\provider_management\test_operations_center_dashboard_api.py =====
+
+"""
+EasyChatBot AI Operations Center dashboard API tests.
+
+Validates the thin API adapter boundary.
+
+The API adapter must:
+
+- delegate to the dashboard facade;
+- expose the facade result unchanged;
+- reject invalid provider input;
+- reject a missing facade dependency;
+- avoid introducing business logic;
+- remain read-only.
+"""
+
+from unittest.mock import Mock
+
+import pytest
+
+from app.application.provider_management.operations_center_dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+)
+
+from app.interfaces.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+
+
+def create_active_providers() -> tuple[
+    ActiveProvider,
+    ...
+]:
+    """
+    Create deterministic provider data.
+    """
+
+    return (
+        ActiveProvider(
+            provider="openai",
+            model="gpt-5-mini",
+            capabilities=(
+                "conversation",
+                "reasoning",
+            ),
+        ),
+        ActiveProvider(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            capabilities=(
+                "summarisation",
+            ),
+        ),
+    )
+
+
+def create_facade_mock() -> Mock:
+    """
+    Create a facade test double.
+    """
+
+    facade = Mock(
+        spec=OperationsCenterDashboardFacade
+    )
+
+    facade.get_dashboard.return_value = {
+        "system_confidence": 85.0,
+        "monitoring_status": "incident",
+        "active_providers": [
+            {
+                "provider": "openai",
+                "model": "gpt-5-mini",
+                "capabilities": [
+                    "conversation",
+                    "reasoning",
+                ],
+                "active": True,
+            }
+        ],
+        "active_escalations": 1,
+        "pending_approvals": 1,
+        "approved_escalations": 0,
+        "rejected_escalations": 0,
+        "pending_notifications": 0,
+        "total_escalations": 1,
+    }
+
+    return facade
+
+
+def test_api_delegates_to_facade() -> None:
+    """
+    Validate that dashboard generation is delegated to the
+    application facade.
+    """
+
+    facade = create_facade_mock()
+
+    api = OperationsCenterDashboardAPI(
+        facade=facade
+    )
+
+    providers = create_active_providers()
+
+    result = api.get_dashboard(
+        active_providers=providers
+    )
+
+    facade.get_dashboard.assert_called_once_with(
+        active_providers=providers,
+    )
+
+    assert result == (
+        facade.get_dashboard.return_value
+    )
+
+
+def test_api_returns_facade_result_unchanged() -> None:
+    """
+    Validate that the API adapter does not transform or
+    alter the application contract.
+    """
+
+    facade = create_facade_mock()
+
+    expected = {
+        "system_confidence": 100.0,
+        "monitoring_status": "healthy",
+        "active_providers": [],
+        "active_escalations": 0,
+        "pending_approvals": 0,
+        "approved_escalations": 0,
+        "rejected_escalations": 0,
+        "pending_notifications": 0,
+        "total_escalations": 0,
+    }
+
+    facade.get_dashboard.return_value = (
+        expected
+    )
+
+    api = OperationsCenterDashboardAPI(
+        facade=facade
+    )
+
+    result = api.get_dashboard(
+        active_providers=()
+    )
+
+    assert result is expected
+
+
+def test_api_rejects_none_active_providers() -> None:
+    """
+    Validate required provider input.
+    """
+
+    facade = create_facade_mock()
+
+    api = OperationsCenterDashboardAPI(
+        facade=facade
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Active providers cannot be None.",
+    ):
+        api.get_dashboard(
+            active_providers=None,  # type: ignore[arg-type]
+        )
+
+    facade.get_dashboard.assert_not_called()
+
+
+def test_api_rejects_none_facade() -> None:
+    """
+    Validate dependency injection.
+    """
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Operations Center dashboard facade "
+            "cannot be None."
+        ),
+    ):
+        OperationsCenterDashboardAPI(
+            facade=None,  # type: ignore[arg-type]
+        )
+
+
+def test_api_does_not_add_business_logic() -> None:
+    """
+    Validate that the API simply exposes the facade contract.
+
+    The API must not calculate confidence, classify incidents,
+    or interpret escalation state itself.
+    """
+
+    facade = create_facade_mock()
+
+    facade.get_dashboard.return_value = {
+        "system_confidence": 55.0,
+        "monitoring_status": "incident",
+        "active_providers": [],
+        "active_escalations": 3,
+        "pending_approvals": 2,
+        "approved_escalations": 1,
+        "rejected_escalations": 1,
+        "pending_notifications": 1,
+        "total_escalations": 5,
+    }
+
+    api = OperationsCenterDashboardAPI(
+        facade=facade
+    )
+
+    result = api.get_dashboard(
+        active_providers=()
+    )
+
+    assert result[
+        "system_confidence"
+    ] == 55.0
+
+    assert result[
+        "active_escalations"
+    ] == 3
+
+    assert result[
+        "pending_approvals"
+    ] == 2
+
+    assert result[
+        "monitoring_status"
+    ] == "incident"
+
+    facade.get_dashboard.assert_called_once()
+
+
+def test_api_is_read_only() -> None:
+    """
+    Validate that the API adapter only reads through the
+    facade and has no mutation operation.
+    """
+
+    facade = create_facade_mock()
+
+    api = OperationsCenterDashboardAPI(
+        facade=facade
+    )
+
+    result = api.get_dashboard(
+        active_providers=()
+    )
+
+    assert result is not None
+
+    assert not hasattr(
+        api,
+        "approve",
+    )
+
+    assert not hasattr(
+        api,
+        "reject",
+    )
+
+    assert not hasattr(
+        api,
+        "update_provider",
+    )
+
+    assert not hasattr(
+        api,
+        "change_routing",
+    )

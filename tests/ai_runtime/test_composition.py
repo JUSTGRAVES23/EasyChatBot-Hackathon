@@ -27,6 +27,10 @@ from src.ai_runtime.capabilities.executor import (
     CapabilityExecutor,
 )
 
+from src.ai_runtime.capabilities.flashcard_generation_executor import (
+    FlashcardGenerationExecutor,
+)
+
 from src.ai_runtime.capabilities.gateway import (
     CapabilityGateway,
 )
@@ -140,8 +144,8 @@ def make_governance() -> Any:
 
 def test_create_capability_executors_creates_all_supported_executors():
     """
-    Verify that the composition root creates every supported
-    external Runtime capability executor.
+    Verify that the composition root creates every currently
+    supported external Runtime capability executor.
     """
 
     live_agent = make_live_intelligence_agent()
@@ -154,7 +158,7 @@ def test_create_capability_executors_creates_all_supported_executors():
         podcast_providers=providers,
     )
 
-    assert len(executors) == 4
+    assert len(executors) == 5
 
     assert all(
         isinstance(
@@ -192,6 +196,14 @@ def test_create_capability_executors_creates_all_supported_executors():
         isinstance(
             executor,
             ListeningProposalExecutor,
+        )
+        for executor in executors
+    )
+
+    assert any(
+        isinstance(
+            executor,
+            FlashcardGenerationExecutor,
         )
         for executor in executors
     )
@@ -236,7 +248,8 @@ def test_create_capability_executors_preserves_injected_agents():
 
 def test_create_capability_registry_registers_all_capabilities():
     """
-    Verify that all external Runtime capabilities are registered.
+    Verify that all currently supported external Runtime
+    capabilities are registered.
     """
 
     registry = create_capability_registry(
@@ -270,6 +283,10 @@ def test_create_capability_registry_registers_all_capabilities():
 
     assert registry.contains(
         CapabilityType.PODCAST_LISTENING_PROPOSAL,
+    )
+
+    assert registry.contains(
+        CapabilityType.FLASHCARD_GENERATION,
     )
 
 
@@ -317,6 +334,13 @@ def test_create_capability_registry_resolves_expected_executors():
             CapabilityType.PODCAST_LISTENING_PROPOSAL,
         ),
         ListeningProposalExecutor,
+    )
+
+    assert isinstance(
+        registry.resolve(
+            CapabilityType.FLASHCARD_GENERATION,
+        ),
+        FlashcardGenerationExecutor,
     )
 
 
@@ -386,14 +410,18 @@ def test_create_external_runtime_gateway_creates_configured_gateway():
         CapabilityType.PODCAST_LISTENING_PROPOSAL,
     )
 
+    assert gateway._registry.contains(
+        CapabilityType.FLASHCARD_GENERATION,
+    )
+
 
 def test_composition_does_not_execute_capabilities():
     """
     Verify that composition only constructs dependencies.
 
     Creating the Runtime gateway must not execute a capability,
-    contact a provider, generate a learning challenge, or create
-    a listening proposal.
+    contact a provider, generate a learning challenge, create
+    a listening proposal, or generate flashcards.
     """
 
     governance = make_governance()
@@ -415,7 +443,7 @@ def test_composition_does_not_execute_capabilities():
 
     capabilities = gateway._registry.capabilities()
 
-    assert len(capabilities) == 4
+    assert len(capabilities) == 5
 
     assert (
         CapabilityType.LIVE_INTELLIGENCE
@@ -434,5 +462,10 @@ def test_composition_does_not_execute_capabilities():
 
     assert (
         CapabilityType.PODCAST_LISTENING_PROPOSAL
+        in capabilities
+    )
+
+    assert (
+        CapabilityType.FLASHCARD_GENERATION
         in capabilities
     )

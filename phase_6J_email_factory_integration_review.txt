@@ -1,0 +1,1019 @@
+﻿
+============================================================
+FILE: backend\cybersecurity\email\cybersecurity_email_service.py
+============================================================
+"""
+Cybersecurity Email Service.
+
+Controlled email delivery boundary.
+
+Includes:
+- circuit breaker protection;
+- provider abstraction;
+- DEMO email preparation;
+- backward-compatible response contracts.
+
+This service does not:
+- perform cybersecurity analysis;
+- execute remediation;
+- modify infrastructure;
+- bypass governance controls.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backend.cybersecurity.cybersecurity_email_generator import (
+    CybersecurityEmailGenerator,
+)
+
+from backend.cybersecurity.email.email_circuit_breaker import (
+    EmailCircuitBreaker,
+)
+
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+DEFAULT_RECIPIENT = "davdbarbero1999@gmail.com"
+
+
+class CybersecurityEmailService:
+    """
+    Application boundary for cybersecurity email handling.
+
+    Email preparation remains separate from actual delivery.
+    """
+
+    def __init__(
+        self,
+        recipient: str | None = None,
+        provider_manager: EmailProviderManager | None = None,
+        circuit_breaker: EmailCircuitBreaker | None = None,
+        generator: CybersecurityEmailGenerator | None = None,
+    ) -> None:
+
+        self.recipient = (
+            recipient
+            or DEFAULT_RECIPIENT
+        )
+
+        self.provider_manager = (
+            provider_manager
+            or EmailProviderManager()
+        )
+
+        self.circuit_breaker = (
+            circuit_breaker
+            or EmailCircuitBreaker()
+        )
+
+        self.generator = (
+            generator
+            or CybersecurityEmailGenerator(
+                recipient=self.recipient,
+            )
+        )
+
+    async def create_daily_email(
+        self,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Prepare a DEMO daily cybersecurity email.
+
+        This method prepares the payload only.
+        It does not send an email.
+        """
+
+        if not isinstance(report, dict):
+            raise TypeError("report must be a dictionary.")
+
+        return {
+            "status": "prepared",
+            "delivery_mode": "DEMO",
+            "recipient": self.recipient,
+            "subject": (
+                "EasyChatBot Cybersecurity "
+                "Daily Report"
+            ),
+            "content": report,
+        }
+
+    async def create_critical_alert(
+        self,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Prepare a DEMO critical cybersecurity alert.
+
+        This method prepares the payload only.
+        It does not send an email.
+        """
+
+        if not isinstance(report, dict):
+            raise TypeError("report must be a dictionary.")
+
+        generated = (
+            self.generator.generate_critical_alert(
+                report,
+            )
+        )
+
+        return {
+            "status": "prepared",
+            "delivery_mode": "DEMO",
+            "recipient": self.recipient,
+            "subject": generated["subject"],
+            "content": generated["content"],
+            "priority": generated["priority"],
+        }
+
+    async def send_report(
+        self,
+        subject: str,
+        content: dict,
+    ) -> dict:
+
+        if not self.circuit_breaker.allow_request():
+            return {
+                "status": "blocked",
+                "delivery_status": "blocked",
+                "reason": "email_circuit_open",
+            }
+
+        try:
+
+            result = await self.provider_manager.send(
+                subject,
+                content,
+            )
+
+            self.circuit_breaker.record_success()
+
+            return {
+                "status": "prepared",
+                "delivery_status": "sent",
+                "recipient": self.recipient,
+                "provider": result,
+            }
+
+        except Exception as exc:
+
+            self.circuit_breaker.record_failure()
+
+            return {
+                "status": "prepared",
+                "delivery_status": "failed",
+                "error": str(exc),
+                "circuit": self.circuit_breaker.status(),
+            }
+
+============================================================
+FILE: backend\cybersecurity\email\email_circuit_breaker.py
+============================================================
+"""
+Email Circuit Breaker.
+
+Protects email delivery from repeated failures.
+
+States:
+
+CLOSED
+    |
+    v
+OPEN
+    |
+    v
+HALF_OPEN
+
+
+Does NOT:
+- send emails;
+- manage providers;
+- generate reports.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+
+
+class EmailCircuitBreaker:
+
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        cooldown_minutes: int = 30,
+    ) -> None:
+
+
+        self.failure_threshold = (
+            failure_threshold
+        )
+
+
+        self.cooldown = timedelta(
+            minutes=cooldown_minutes
+        )
+
+
+        self.failures = 0
+
+
+        self.open_until = None
+
+
+
+    def allow_request(
+        self,
+    ) -> bool:
+
+
+        if self.open_until is None:
+
+            return True
+
+
+        if datetime.utcnow() >= self.open_until:
+
+            return True
+
+
+        return False
+
+
+
+    def record_success(
+        self,
+    ) -> None:
+
+
+        self.failures = 0
+
+        self.open_until = None
+
+
+
+    def record_failure(
+        self,
+    ) -> None:
+
+
+        self.failures += 1
+
+
+        if (
+            self.failures
+            >= self.failure_threshold
+        ):
+
+            self.open_until = (
+                datetime.utcnow()
+                +
+                self.cooldown
+            )
+
+
+
+    def status(
+        self,
+    ) -> dict:
+
+
+        return {
+
+            "failures":
+                self.failures,
+
+            "open":
+                self.open_until is not None,
+
+            "open_until":
+                self.open_until,
+
+        }
+
+============================================================
+FILE: backend\app\application\privacy\privacy_approval_email_service.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from .privacy_change import PrivacyChange
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalEmailRequest:
+    """Immutable request to escalate a privacy change for human approval."""
+
+    change_id: str
+    recipient: str
+    subject: str
+    body: str
+    requires_dpo_approval: bool
+    requires_grc_approval: bool
+
+
+class ApprovalEmailSender(Protocol):
+    """Application-level email delivery boundary.
+
+    The application layer does not know whether delivery uses
+    Resend, SMTP, or another provider.
+    """
+
+    def send(
+        self,
+        request: ApprovalEmailRequest,
+    ) -> None:
+        ...
+
+
+class PrivacyApprovalEmailService:
+    """Creates privacy governance approval requests.
+
+    Responsibilities:
+    - validate that automated privacy validation has passed;
+    - determine whether DPO/GRC review is required;
+    - construct the approval request;
+    - delegate email delivery to the injected sender.
+
+    Does NOT:
+    - approve privacy changes;
+    - make legal decisions;
+    - modify governance status;
+    - call Resend directly;
+    - interpret email delivery as approval.
+    """
+
+    def __init__(
+        self,
+        *,
+        sender: ApprovalEmailSender,
+        approval_recipient: str,
+    ) -> None:
+        if sender is None:
+            raise ValueError(
+                "sender cannot be None."
+            )
+
+        if not approval_recipient.strip():
+            raise ValueError(
+                "approval_recipient is required."
+            )
+
+        self._sender = sender
+        self._recipient = approval_recipient
+
+    def escalate(
+        self,
+        change: PrivacyChange,
+        *,
+        validation_passed: bool,
+    ) -> ApprovalEmailRequest:
+        """Create and send a governance approval request.
+
+        A request can only be escalated after automated privacy
+        validation has passed.
+
+        Sending the email never constitutes DPO/GRC approval.
+        """
+
+        if change is None:
+            raise ValueError(
+                "change cannot be None."
+            )
+
+        if not validation_passed:
+            raise ValueError(
+                "Cannot request approval while privacy "
+                "validation is failing."
+            )
+
+        if not (
+            change.dpo_required
+            or change.grc_required
+        ):
+            raise ValueError(
+                "Email escalation is only required for "
+                "governance-routed changes."
+            )
+
+        roles: list[str] = []
+
+        if change.dpo_required:
+            roles.append("DPO")
+
+        if change.grc_required:
+            roles.append("GRC")
+
+        subject = (
+            "[EasyChatBot Privacy Governance] "
+            f"Approval Required â€” {change.change_id}"
+        )
+
+        body = (
+            "EasyChatBot Beta 1 Privacy Governance Review\n"
+            "\n"
+            "ACTION REQUIRED\n"
+            "A privacy-impacting change has passed automated "
+            "privacy validation and requires explicit human "
+            "governance review before it may proceed.\n"
+            "\n"
+            "CHANGE\n"
+            f"Change ID: {change.change_id}\n"
+            f"Title: {change.title}\n"
+            f"Description: {change.description}\n"
+            f"Risk: {change.risk.value}\n"
+            "\n"
+            "GOVERNANCE\n"
+            f"Required reviewers: {', '.join(roles)}\n"
+            "Automated privacy validation: PASS\n"
+            "Current governance status: PENDING_DPO_GRC\n"
+            "\n"
+            "DECISION REQUIRED\n"
+            "Please review the controlled Privacy Change Registry "
+            "and explicitly record the applicable governance decision.\n"
+            "\n"
+            "Possible decisions:\n"
+            "- APPROVE\n"
+            "- REJECT\n"
+            "- REQUEST CHANGES\n"
+            "\n"
+            "IMPORTANT GOVERNANCE CONTROL\n"
+            "This email is an escalation and approval request only.\n"
+            "It does not itself constitute approval.\n"
+            "Sending, receiving, or replying to this email does not "
+            "constitute DPO or GRC approval.\n"
+            "\n"
+            "The change must remain pending until the required "
+            "governance decision is explicitly recorded in the "
+            "controlled governance system.\n"
+            "\n"
+            "Applicable GDPR references should be reviewed in the "
+            "controlled privacy assessment for this change.\n"
+            "\n"
+            "EasyChatBot Privacy & Governance\n"
+            "Automated validation provides decision support and "
+            "control evidence. It does not replace DPO, GRC, or "
+            "Legal judgement."
+        )
+
+        request = ApprovalEmailRequest(
+            change_id=change.change_id,
+            recipient=self._recipient,
+            subject=subject,
+            body=body,
+            requires_dpo_approval=change.dpo_required,
+            requires_grc_approval=change.grc_required,
+        )
+
+        self._sender.send(request)
+
+        return request
+
+============================================================
+FILE: backend\app\application\privacy\privacy_governance_reminder_scheduler.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Protocol
+
+from .privacy_governance_case_registry import PrivacyGovernanceCaseRegistry
+from .privacy_governance_reminder_policy import PrivacyGovernanceReminderPolicy
+from .privacy_governance_reminder_result import PrivacyGovernanceReminderResult
+
+
+class PrivacyGovernanceReminderEmailPort(Protocol):
+    """Controlled email boundary used by the reminder application service."""
+
+    async def send_governance_reminder(
+        self,
+        *,
+        case: Any,
+        recipient_role: str,
+        reason: str,
+    ) -> Any:
+        ...
+
+
+@dataclass(slots=True)
+class PrivacyGovernanceReminderScheduler:
+    """Application workflow executed by the existing scheduler infrastructure.
+
+    This is NOT a scheduler implementation. APScheduler remains outside this
+    class. The existing CybersecuritySchedulerRuntime/Adapter invokes this
+    workflow at the configured interval.
+
+    Flow:
+        pending case
+          -> reminder due
+          -> DPO/GRC notification
+          -> human opens case
+          -> human decides
+
+    This service never approves, rejects, requests changes, or mutates a case.
+    """
+
+    case_registry: PrivacyGovernanceCaseRegistry
+    policy: PrivacyGovernanceReminderPolicy
+    email_service: PrivacyGovernanceReminderEmailPort | None = None
+
+    async def run(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[PrivacyGovernanceReminderResult, ...]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware.")
+
+        results: list[PrivacyGovernanceReminderResult] = []
+
+        for case in self.case_registry.all():
+            results.append(await self._evaluate_case(case, now=current))
+
+        return tuple(results)
+
+    async def run_case(
+        self,
+        case_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> PrivacyGovernanceReminderResult:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware.")
+
+        case = self.case_registry.get(case_id)
+        return await self._evaluate_case(case, now=current)
+
+    async def _evaluate_case(
+        self,
+        case: Any,
+        *,
+        now: datetime,
+    ) -> PrivacyGovernanceReminderResult:
+        generated_at = now
+
+        if not self.policy.is_eligible(case):
+            return PrivacyGovernanceReminderResult(
+                status="NOT_ELIGIBLE",
+                case_id=case.case_id,
+                governance_status=case.governance_status,
+                due=False,
+                recipient_role=self.policy.recipient_role,
+                reason="case_not_pending_dpo_grc",
+                generated_at=generated_at,
+            )
+
+        if not self.policy.is_due(case, now=now):
+            return PrivacyGovernanceReminderResult(
+                status="NOT_DUE",
+                case_id=case.case_id,
+                governance_status=case.governance_status,
+                due=False,
+                recipient_role=self.policy.recipient_role,
+                reason="reminder_interval_not_reached",
+                generated_at=generated_at,
+            )
+
+        reason = "pending_dpo_grc_reminder_due"
+
+        if self.email_service is None:
+            return PrivacyGovernanceReminderResult(
+                status="DUE",
+                case_id=case.case_id,
+                governance_status=case.governance_status,
+                due=True,
+                recipient_role=self.policy.recipient_role,
+                reason=reason,
+                generated_at=generated_at,
+                email_status="not_configured",
+            )
+
+        try:
+            response = await self.email_service.send_governance_reminder(
+                case=case,
+                recipient_role=self.policy.recipient_role,
+                reason=reason,
+            )
+        except Exception as exc:
+            return PrivacyGovernanceReminderResult(
+                status="EMAIL_FAILED",
+                case_id=case.case_id,
+                governance_status=case.governance_status,
+                due=True,
+                recipient_role=self.policy.recipient_role,
+                reason=reason,
+                generated_at=generated_at,
+                email_status="failed",
+                error=str(exc),
+            )
+
+        email_status = "sent"
+        email_reference: str | None = None
+
+        if isinstance(response, dict):
+            email_status = str(response.get("status", "sent"))
+            reference = response.get("reference") or response.get("message_id")
+            email_reference = str(reference) if reference is not None else None
+        elif response is not None:
+            email_reference = str(response)
+
+        return PrivacyGovernanceReminderResult(
+            status="REMINDER_SENT",
+            case_id=case.case_id,
+            governance_status=case.governance_status,
+            due=True,
+            recipient_role=self.policy.recipient_role,
+            reason=reason,
+            generated_at=generated_at,
+            email_status=email_status,
+            email_reference=email_reference,
+        )
+
+
+__all__ = [
+    "PrivacyGovernanceReminderEmailPort",
+    "PrivacyGovernanceReminderScheduler",
+]
+
+============================================================
+FILE: backend\app\application\privacy\privacy_governance_reminder_policy.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyGovernanceReminderPolicy:
+    """Pure policy for determining whether a governance reminder is due.
+
+    Governance state is never changed by this policy.
+
+    Default:
+    - only PENDING_DPO_GRC cases are eligible;
+    - a reminder is due after ``reminder_after``;
+    - approved and blocked cases are never eligible.
+    """
+
+    reminder_after: timedelta = timedelta(hours=24)
+    recipient_role: str = "DPO/GRC"
+
+    def __post_init__(self) -> None:
+        if self.reminder_after.total_seconds() < 0:
+            raise ValueError("reminder_after cannot be negative.")
+        if not self.recipient_role.strip():
+            raise ValueError("recipient_role is required.")
+
+    def is_eligible(self, case: Any) -> bool:
+        return getattr(case, "governance_status", None) == "PENDING_DPO_GRC"
+
+    def due_at(self, case: Any) -> datetime:
+        triggered_at = getattr(case, "triggered_at", None)
+        if not isinstance(triggered_at, datetime):
+            raise ValueError("case.triggered_at must be a datetime.")
+        if triggered_at.tzinfo is None:
+            raise ValueError("case.triggered_at must be timezone-aware.")
+        return triggered_at + self.reminder_after
+
+    def is_due(self, case: Any, *, now: datetime | None = None) -> bool:
+        if not self.is_eligible(case):
+            return False
+
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware.")
+
+        return current >= self.due_at(case)
+
+    def evaluate(
+        self,
+        case: Any,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        due = self.is_due(case, now=now)
+        return {
+            "case_id": case.case_id,
+            "governance_status": case.governance_status,
+            "eligible": self.is_eligible(case),
+            "due": due,
+            "due_at": self.due_at(case).isoformat()
+            if self.is_eligible(case)
+            else None,
+            "recipient_role": self.recipient_role,
+        }
+
+============================================================
+FILE: backend\app\application\privacy\privacy_governance_reminder_result.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyGovernanceReminderResult:
+    """Result of one governance-reminder evaluation/execution.
+
+    A reminder is a notification only. This result never represents a
+    governance decision and therefore cannot approve, reject, or mutate a case.
+    """
+
+    status: str
+    case_id: str
+    governance_status: str
+    due: bool
+    recipient_role: str
+    reason: str
+    generated_at: datetime
+    email_status: str | None = None
+    email_reference: str | None = None
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "case_id": self.case_id,
+            "governance_status": self.governance_status,
+            "due": self.due,
+            "recipient_role": self.recipient_role,
+            "reason": self.reason,
+            "generated_at": self.generated_at.isoformat(),
+            "email_status": self.email_status,
+            "email_reference": self.email_reference,
+            "error": self.error,
+        }
+
+============================================================
+FILE: backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py
+============================================================
+"""
+Cybersecurity Scheduler Factory.
+
+Creates the cybersecurity scheduler runtime stack.
+
+Composition:
+
+Factory
+    |
+    +--> APScheduler Infrastructure
+    |
+    +--> APScheduler Adapter
+    |
+    +--> Scheduler Runtime
+    |
+    +--> Workflow
+            |
+            +--> Report Service
+            |
+            +--> Email Service
+
+
+Does NOT:
+- execute cybersecurity decisions;
+- send emails directly;
+- perform remediation.
+"""
+
+from __future__ import annotations
+
+
+
+from apscheduler.schedulers.asyncio import (
+    AsyncIOScheduler,
+)
+
+
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    CybersecuritySchedulerRuntime,
+)
+
+
+
+from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+
+
+from backend.cybersecurity.scheduler.scheduler_configuration import (
+    SCHEDULER_TIMEZONE,
+)
+
+
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+    CybersecuritySchedulerWorkflow,
+)
+
+
+
+from backend.cybersecurity.email.cybersecurity_email_service import (
+    CybersecurityEmailService,
+)
+
+
+
+def create_cybersecurity_scheduler_runtime(
+    workflow_service=None,
+) -> CybersecuritySchedulerRuntime:
+    """
+    Create configured cybersecurity scheduler runtime.
+
+    Dependencies can be injected for:
+    - testing;
+    - production providers;
+    - future integrations.
+    """
+
+
+
+    #
+    # Default workflow composition
+    #
+
+    if workflow_service is None:
+
+
+        email_service = (
+            CybersecurityEmailService(
+                recipient=(
+                    "davdbarbero1999@gmail.com"
+                ),
+            )
+        )
+
+
+
+        workflow_service = (
+            CybersecuritySchedulerWorkflow(
+
+                email_service=email_service,
+
+            )
+        )
+
+
+
+    #
+    # APScheduler infrastructure
+    #
+
+    scheduler = AsyncIOScheduler(
+
+        timezone=SCHEDULER_TIMEZONE,
+
+    )
+
+
+
+    #
+    # Infrastructure adapter boundary
+    #
+
+    adapter = (
+        CybersecurityAPSchedulerAdapter(
+
+            scheduler=scheduler,
+
+            workflow_service=workflow_service,
+
+        )
+    )
+
+
+
+    #
+    # Runtime boundary
+    #
+
+    runtime = (
+        CybersecuritySchedulerRuntime(
+
+            scheduler_adapter=adapter,
+
+        )
+    )
+
+
+
+    return runtime
+
+============================================================
+FILE: backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py
+============================================================
+"""
+Cybersecurity APScheduler Adapter.
+
+Infrastructure boundary for scheduled workflows.
+
+Phase 6J extension:
+- optionally registers the Privacy Governance reminder workflow;
+- does not own privacy governance state;
+- does not make governance decisions;
+- does not create a second scheduler.
+"""
+
+from __future__ import annotations
+
+from backend.cybersecurity.scheduler.scheduler_configuration import (
+    DAILY_REPORT_HOUR,
+    DAILY_REPORT_MINUTE,
+    WEEKLY_REPORT_DAY,
+    WEEKLY_REPORT_HOUR,
+    WEEKLY_REPORT_MINUTE,
+)
+
+
+class CybersecurityAPSchedulerAdapter:
+    """APScheduler implementation boundary.
+
+    The privacy reminder workflow is optional so existing cybersecurity-only
+    tests and deployments remain backwards compatible.
+    """
+
+    def __init__(
+        self,
+        scheduler,
+        workflow_service,
+        governance_reminder_workflow=None,
+        governance_reminder_interval_minutes: int = 60,
+    ) -> None:
+        if scheduler is None:
+            raise ValueError("scheduler cannot be None.")
+        if workflow_service is None:
+            raise ValueError("workflow_service cannot be None.")
+        if governance_reminder_interval_minutes <= 0:
+            raise ValueError("governance_reminder_interval_minutes must be > 0.")
+
+        self.scheduler = scheduler
+        self.workflow_service = workflow_service
+        self.governance_reminder_workflow = governance_reminder_workflow
+        self.governance_reminder_interval_minutes = (
+            governance_reminder_interval_minutes
+        )
+
+    def register_jobs(self) -> None:
+        self.scheduler.add_job(
+            self.workflow_service.create_daily_report,
+            trigger="cron",
+            hour=DAILY_REPORT_HOUR,
+            minute=DAILY_REPORT_MINUTE,
+            id="cybersecurity_daily_report",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self.workflow_service.create_weekly_report,
+            trigger="cron",
+            day_of_week=WEEKLY_REPORT_DAY,
+            hour=WEEKLY_REPORT_HOUR,
+            minute=WEEKLY_REPORT_MINUTE,
+            id="cybersecurity_weekly_report",
+            replace_existing=True,
+        )
+
+        if self.governance_reminder_workflow is not None:
+            self.scheduler.add_job(
+                self.governance_reminder_workflow.run,
+                trigger="interval",
+                minutes=self.governance_reminder_interval_minutes,
+                id="privacy_governance_reminder",
+                replace_existing=True,
+            )
+
+    def register_critical_handler(self, handler) -> None:
+        self.critical_handler = handler
+
+    async def trigger_critical_event(self, event: dict):
+        if not hasattr(self, "critical_handler"):
+            return None
+        return await self.critical_handler(event)
+
+    def start(self) -> None:
+        if not self.scheduler.running:
+            self.scheduler.start()
+
+    def shutdown(self) -> None:
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+
+
+__all__ = ["CybersecurityAPSchedulerAdapter"]

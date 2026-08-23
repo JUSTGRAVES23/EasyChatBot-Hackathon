@@ -1,0 +1,1243 @@
+﻿============================================================
+=== 1. PRIVACY GOVERNANCE CASE MODEL =======================
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class PrivacyTriggerType(StrEnum):
+    NEW_PROCESSING = "NEW_PROCESSING"
+    PROCESSING_CHANGE = "PROCESSING_CHANGE"
+    DATA_MAPPING_CHANGE = "DATA_MAPPING_CHANGE"
+    RETENTION_CHANGE = "RETENTION_CHANGE"
+    PROCESSOR_CHANGE = "PROCESSOR_CHANGE"
+    DPIA_CHANGE = "DPIA_CHANGE"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyGovernanceCase:
+    """Case-centric governance record rendered by the Operations Center.
+
+    ``change_id`` is the stable link to the authoritative PrivacyChange.
+    It is optional at model level for backward compatibility with older Beta
+    fixtures; newly created runtime cases should always populate it.
+    """
+
+    case_id: str
+    title: str
+    summary: str
+    trigger_type: PrivacyTriggerType
+    triggered_at: datetime
+    trigger_source: str
+    change_id: str | None = None
+    processing_ids: tuple[str, ...] = ()
+    data_map_ids: tuple[str, ...] = ()
+    risk: str = "MEDIUM"
+    validation_status: str = "PENDING"
+    email_status: str = "NOT_SENT"
+    governance_status: str = "PENDING_DPO_GRC"
+    final_decision: str | None = None
+    final_decision_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("case_id", "title", "summary", "trigger_source"):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"{field_name} is required.")
+        if self.change_id is not None and not self.change_id.strip():
+            raise ValueError("change_id cannot be blank when provided.")
+        if self.triggered_at.tzinfo is None:
+            raise ValueError("triggered_at must be timezone-aware.")
+        if self.final_decision_at is not None and self.final_decision_at.tzinfo is None:
+            raise ValueError("final_decision_at must be timezone-aware.")
+
+============================================================
+=== 2. CASE SERVICE ========================================
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .privacy_approval_record import (
+    ApprovalDecision,
+    PrivacyApprovalRecord,
+)
+from .privacy_approval_registry import PrivacyApprovalRegistry
+from .privacy_change import (
+    PrivacyChange,
+    PrivacyChangeStatus,
+)
+from .privacy_change_registry import PrivacyChangeRegistry
+from .privacy_governance_case import (
+    PrivacyGovernanceCase,
+    PrivacyTriggerType,
+)
+from .privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+from .privacy_governance_decision_service import (
+    PrivacyGovernanceDecisionService,
+)
+
+
+class PrivacyGovernanceCaseService:
+    """Application service for privacy governance cases.
+
+    This service is the application boundary between privacy processing and
+    the case-centric governance model rendered by the Operations Center.
+
+    It owns no persistence. Registries are injected so Beta can use in-memory
+    state while the same contracts can later be backed by repositories.
+
+    The registries remain authoritative. Downstream adapters such as the
+    Excel evidence synchronizer receive read-only access to these same
+    registry instances and must never create a second governance state store.
+    """
+
+    def __init__(
+        self,
+        *,
+        case_registry: PrivacyGovernanceCaseRegistry,
+        change_registry: PrivacyChangeRegistry,
+        approval_registry: PrivacyApprovalRegistry,
+        decision_service: PrivacyGovernanceDecisionService,
+    ) -> None:
+        if case_registry is None:
+            raise ValueError("case_registry cannot be None.")
+
+        if change_registry is None:
+            raise ValueError("change_registry cannot be None.")
+
+        if approval_registry is None:
+            raise ValueError("approval_registry cannot be None.")
+
+        if decision_service is None:
+            raise ValueError("decision_service cannot be None.")
+
+        self._cases = case_registry
+        self._changes = change_registry
+        self._approvals = approval_registry
+        self._decision_service = decision_service
+
+    @property
+    def case_registry(self) -> PrivacyGovernanceCaseRegistry:
+        """Return the authoritative governance case registry."""
+
+        return self._cases
+
+    @property
+    def change_registry(self) -> PrivacyChangeRegistry:
+        """Return the authoritative privacy change registry."""
+
+        return self._changes
+
+    @property
+    def approval_registry(self) -> PrivacyApprovalRegistry:
+        """Return the authoritative approval evidence registry."""
+
+        return self._approvals
+
+    def create_case(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        trigger_type: PrivacyTriggerType,
+        trigger_source: str,
+        validation_status: str = "PENDING",
+        email_status: str = "NOT_SENT",
+        processing_ids: tuple[str, ...] = (),
+        data_map_ids: tuple[str, ...] = (),
+    ) -> PrivacyGovernanceCase:
+        """Create a governance case from a registered privacy change.
+
+        The authoritative PrivacyChange status determines the initial
+        governance case status.
+
+        Status mapping:
+
+            PrivacyChangeStatus.APPROVED
+                -> APPROVED
+
+            PrivacyChangeStatus.BLOCKED
+                -> BLOCKED
+
+            PrivacyChangeStatus.PENDING_DPO_GRC
+                -> PENDING_DPO_GRC
+
+        The enum is compared directly rather than comparing ``.value`` to
+        hard-coded uppercase strings. This is important because the
+        PrivacyChangeStatus values are lowercase.
+        """
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        self._require_text(
+            "change_id",
+            change_id,
+        )
+
+        self._require_text(
+            "trigger_source",
+            trigger_source,
+        )
+
+        existing = (
+            self._cases.get(case_id)
+            if self._case_exists(case_id)
+            else None
+        )
+
+        if existing is not None:
+            return existing
+
+        change = self._changes.get(
+            change_id
+        )
+
+        if change is None:
+            raise KeyError(
+                f"Privacy change not found: {change_id}"
+            )
+
+        #
+        # IMPORTANT:
+        #
+        # Compare the authoritative enum directly.
+        #
+        # Do NOT use:
+        #
+        #     change.status.value == "BLOCKED"
+        #
+        # because PrivacyChangeStatus.BLOCKED.value is "blocked".
+        #
+
+        if change.status == PrivacyChangeStatus.BLOCKED:
+            governance_status = "BLOCKED"
+
+        elif change.status == PrivacyChangeStatus.APPROVED:
+            governance_status = "APPROVED"
+
+        else:
+            governance_status = "PENDING_DPO_GRC"
+
+        case = PrivacyGovernanceCase(
+            case_id=case_id,
+            title=change.title,
+            summary=change.description,
+            trigger_type=trigger_type,
+            triggered_at=datetime.now(timezone.utc),
+            trigger_source=trigger_source,
+            change_id=change_id,
+            processing_ids=processing_ids,
+            data_map_ids=data_map_ids,
+            risk=change.risk.value,
+            validation_status=validation_status,
+            email_status=email_status,
+            governance_status=governance_status,
+        )
+
+        self._cases.register(
+            case
+        )
+
+        return case
+
+    def get_case(
+        self,
+        case_id: str,
+    ) -> PrivacyGovernanceCase:
+        """Return one authoritative governance case."""
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        return self._cases.get(
+            case_id
+        )
+
+    def list_cases(
+        self,
+    ) -> tuple[PrivacyGovernanceCase, ...]:
+        """Return all authoritative governance cases."""
+
+        return self._cases.all()
+
+    def list_pending_cases(
+        self,
+    ) -> tuple[PrivacyGovernanceCase, ...]:
+        """Return all governance cases awaiting human review."""
+
+        return self._cases.pending()
+
+    def get_approval_history(
+        self,
+        case_id: str,
+    ) -> tuple[PrivacyApprovalRecord, ...]:
+        """Return authoritative approval evidence for a case."""
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        self._cases.get(
+            case_id
+        )
+
+        return self._approvals.for_case(
+            case_id
+        )
+
+    def approve(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        approval_id: str,
+        reviewer: str,
+        role: str,
+        comment: str,
+    ) -> PrivacyApprovalRecord:
+        """Record an explicit human approval."""
+
+        self._validate_decision_inputs(
+            case_id=case_id,
+            change_id=change_id,
+            reviewer=reviewer,
+            role=role,
+        )
+
+        return self._decision_service.record_decision(
+            case_id=case_id,
+            change_id=change_id,
+            approval_id=approval_id,
+            reviewer=reviewer,
+            role=role,
+            decision=ApprovalDecision.APPROVED,
+            comment=comment,
+        )
+
+    def reject(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        approval_id: str,
+        reviewer: str,
+        role: str,
+        comment: str,
+    ) -> PrivacyApprovalRecord:
+        """Record an explicit human rejection."""
+
+        self._validate_decision_inputs(
+            case_id=case_id,
+            change_id=change_id,
+            reviewer=reviewer,
+            role=role,
+        )
+
+        return self._decision_service.record_decision(
+            case_id=case_id,
+            change_id=change_id,
+            approval_id=approval_id,
+            reviewer=reviewer,
+            role=role,
+            decision=ApprovalDecision.REJECTED,
+            comment=comment,
+        )
+
+    def request_changes(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        approval_id: str,
+        reviewer: str,
+        role: str,
+        comment: str,
+    ) -> PrivacyApprovalRecord:
+        """Record an explicit request-for-changes decision."""
+
+        self._validate_decision_inputs(
+            case_id=case_id,
+            change_id=change_id,
+            reviewer=reviewer,
+            role=role,
+        )
+
+        return self._decision_service.record_decision(
+            case_id=case_id,
+            change_id=change_id,
+            approval_id=approval_id,
+            reviewer=reviewer,
+            role=role,
+            decision=ApprovalDecision.REQUEST_CHANGES,
+            comment=comment,
+        )
+
+    def _validate_decision_inputs(
+        self,
+        *,
+        case_id: str,
+        change_id: str,
+        reviewer: str,
+        role: str,
+    ) -> None:
+        """Validate the context required for a human decision."""
+
+        self._require_text(
+            "case_id",
+            case_id,
+        )
+
+        self._require_text(
+            "change_id",
+            change_id,
+        )
+
+        self._require_text(
+            "reviewer",
+            reviewer,
+        )
+
+        self._cases.get(
+            case_id
+        )
+
+        change = self._changes.get(
+            change_id
+        )
+
+        if change is None:
+            raise KeyError(
+                f"Privacy change not found: {change_id}"
+            )
+
+        self._require_text(
+            "role",
+            role,
+        )
+
+    def _case_exists(
+        self,
+        case_id: str,
+    ) -> bool:
+        """Return whether a case exists."""
+
+        try:
+            self._cases.get(
+                case_id
+            )
+
+        except KeyError:
+            return False
+
+        return True
+
+    @staticmethod
+    def _require_text(
+        field_name: str,
+        value: str,
+    ) -> None:
+        """Validate a required text field."""
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"{field_name} is required."
+            )
+
+============================================================
+=== 3. CASE REGISTRY =======================================
+============================================================
+from __future__ import annotations
+
+from .privacy_governance_case import PrivacyGovernanceCase
+
+
+class PrivacyGovernanceCaseRegistry:
+    """Beta registry for privacy governance cases."""
+
+    def __init__(
+        self,
+        cases: list[PrivacyGovernanceCase] | None = None,
+    ) -> None:
+        self._cases: dict[str, PrivacyGovernanceCase] = {}
+        for case in cases or []:
+            self.register(case)
+
+    def register(self, case: PrivacyGovernanceCase) -> None:
+        if case.case_id in self._cases:
+            raise ValueError(f"Case already registered: {case.case_id}")
+        self._cases[case.case_id] = case
+
+    def get(self, case_id: str) -> PrivacyGovernanceCase:
+        try:
+            return self._cases[case_id]
+        except KeyError as exc:
+            raise KeyError(f"Governance case not found: {case_id}") from exc
+
+    def update(self, case: PrivacyGovernanceCase) -> None:
+        if case.case_id not in self._cases:
+            raise KeyError(f"Governance case not found: {case.case_id}")
+        self._cases[case.case_id] = case
+
+    def all(self) -> tuple[PrivacyGovernanceCase, ...]:
+        return tuple(self._cases.values())
+
+    def pending(self) -> tuple[PrivacyGovernanceCase, ...]:
+        return tuple(
+            case
+            for case in self._cases.values()
+            if case.governance_status == "PENDING_DPO_GRC"
+        )
+
+============================================================
+=== 4. GOVERNANCE API ======================================
+============================================================
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field
+
+from backend.app.application.privacy.privacy_change import (
+    PrivacyChange,
+    PrivacyChangeRisk,
+)
+from backend.app.application.privacy.privacy_governance_api_sync import (
+    PrivacyGovernanceAPIEvidenceSync,
+)
+from backend.app.application.privacy.privacy_governance_composition import (
+    get_privacy_governance_composition,
+)
+from backend.app.application.privacy.privacy_governance_dashboard_api import (
+    PrivacyGovernanceDashboardAPI,
+)
+
+
+# ============================================================================
+# PRIVACY GOVERNANCE API
+# ============================================================================
+#
+# This is the single canonical privacy governance router.
+#
+# READ:
+#   GET  /api/privacy/governance/summary
+#   GET  /api/privacy/governance/status-chart
+#   GET  /api/privacy/governance/cases
+#   GET  /api/privacy/governance/cases/{case_id}
+#
+# HUMAN GOVERNANCE:
+#   POST /api/privacy/governance/cases/{case_id}/approve
+#   POST /api/privacy/governance/cases/{case_id}/reject
+#   POST /api/privacy/governance/cases/{case_id}/request-changes
+#
+# BETA / DEVELOPMENT:
+#   POST /api/privacy/governance/demo/create-case
+#
+# Existing tests and application integrations intentionally import:
+#
+#     from backend.app.api.privacy_governance import router
+#
+# Therefore all privacy governance endpoints remain attached to this
+# canonical router.
+# ============================================================================
+
+router = APIRouter(
+    prefix="/api/privacy/governance",
+    tags=["privacy-governance"],
+)
+
+
+class PrivacyGovernanceDecisionRequest(BaseModel):
+    """Explicit human governance decision request."""
+
+    change_id: str = Field(
+        min_length=1,
+    )
+
+    approval_id: str = Field(
+        min_length=1,
+    )
+
+    reviewer: str = Field(
+        min_length=1,
+    )
+
+    role: str = Field(
+        min_length=1,
+    )
+
+    comment: str = Field(
+        min_length=1,
+    )
+
+
+class PrivacyGovernanceDemoCaseRequest(BaseModel):
+    """Controlled Beta/demo governance case creation request.
+
+    This endpoint exists only for development and demonstration.
+
+    Production case creation must use the governed application workflow
+    rather than this demo adapter.
+    """
+
+    case_id: str = Field(
+        default="CASE-E2E-001",
+        min_length=1,
+    )
+
+    change_id: str = Field(
+        default="PCR-E2E-001",
+        min_length=1,
+    )
+
+
+def _composition():
+    """Resolve the process-wide governance composition."""
+
+    return get_privacy_governance_composition()
+
+
+def _dashboard_api() -> PrivacyGovernanceDashboardAPI:
+    """Resolve the read-only governance dashboard API."""
+
+    composition = _composition()
+
+    return PrivacyGovernanceDashboardAPI(
+        dashboard_service=composition.dashboard_service,
+    )
+
+
+def _evidence_sync() -> PrivacyGovernanceAPIEvidenceSync:
+    """Resolve the API-to-Excel evidence synchronization adapter."""
+
+    composition = _composition()
+
+    return PrivacyGovernanceAPIEvidenceSync(
+        case_service=composition.case_service,
+    )
+
+
+def _require_decision_role(
+    role: str,
+) -> str:
+    """Validate the explicitly submitted governance role."""
+
+    normalized = role.strip().upper()
+
+    if normalized not in {
+        "DPO",
+        "GRC",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="role must be DPO or GRC.",
+        )
+
+    return normalized
+
+
+def _decision_response(
+    *,
+    case_id: str,
+    record: object,
+) -> dict[str, object]:
+    """Return decision evidence, refreshed case state, and Excel sync status."""
+
+    dashboard = _dashboard_api()
+
+    try:
+        case = dashboard.get_case_detail(
+            case_id,
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    evidence = _evidence_sync().sync_decision(
+        case_id,
+    )
+
+    return {
+        "case": case,
+        "approval_record": jsonable_encoder(
+            record,
+        ),
+        "excel_sync": {
+            "status": evidence.status,
+            "workbook_path": evidence.workbook_path,
+            "error": evidence.error,
+        },
+    }
+
+
+# ============================================================================
+# READ-ONLY GOVERNANCE ENDPOINTS
+# ============================================================================
+
+
+@router.get("/summary")
+def get_summary() -> dict[str, int]:
+    """Return current privacy governance dashboard KPIs."""
+
+    return _dashboard_api().get_summary()
+
+
+@router.get("/status-chart")
+def get_status_chart() -> list[dict[str, object]]:
+    """Return current governance status chart data."""
+
+    return list(
+        _dashboard_api().get_status_chart(),
+    )
+
+
+@router.get("/cases")
+def get_cases() -> list[dict[str, object]]:
+    """Return current governance case rows."""
+
+    return list(
+        _dashboard_api().get_cases(),
+    )
+
+
+@router.get("/cases/{case_id}")
+def get_case_detail(
+    case_id: str,
+) -> dict[str, object]:
+    """Return complete read-only governance case detail."""
+
+    try:
+        return _dashboard_api().get_case_detail(
+            case_id,
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================================
+# EXPLICIT HUMAN GOVERNANCE DECISION ENDPOINTS
+# ============================================================================
+#
+# IMPORTANT:
+#
+# These endpoints intentionally use `router`.
+#
+# Do NOT create a second `decision_router` here.
+#
+# The existing tests directly import and register `router`.
+# ============================================================================
+
+
+@router.post(
+    "/cases/{case_id}/approve",
+)
+def approve_case(
+    case_id: str,
+    request: PrivacyGovernanceDecisionRequest,
+) -> dict[str, object]:
+    """Record one explicit human approval."""
+
+    role = _require_decision_role(
+        request.role,
+    )
+
+    composition = _composition()
+
+    try:
+        record = composition.case_service.approve(
+            case_id=case_id,
+            change_id=request.change_id,
+            approval_id=request.approval_id,
+            reviewer=request.reviewer.strip(),
+            role=role,
+            comment=request.comment.strip(),
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return _decision_response(
+        case_id=case_id,
+        record=record,
+    )
+
+
+@router.post(
+    "/cases/{case_id}/reject",
+)
+def reject_case(
+    case_id: str,
+    request: PrivacyGovernanceDecisionRequest,
+) -> dict[str, object]:
+    """Record an explicit human rejection."""
+
+    role = _require_decision_role(
+        request.role,
+    )
+
+    composition = _composition()
+
+    try:
+        record = composition.case_service.reject(
+            case_id=case_id,
+            change_id=request.change_id,
+            approval_id=request.approval_id,
+            reviewer=request.reviewer.strip(),
+            role=role,
+            comment=request.comment.strip(),
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return _decision_response(
+        case_id=case_id,
+        record=record,
+    )
+
+
+@router.post(
+    "/cases/{case_id}/request-changes",
+)
+def request_case_changes(
+    case_id: str,
+    request: PrivacyGovernanceDecisionRequest,
+) -> dict[str, object]:
+    """Record an explicit human request-for-changes decision."""
+
+    role = _require_decision_role(
+        request.role,
+    )
+
+    composition = _composition()
+
+    try:
+        record = composition.case_service.request_changes(
+            case_id=case_id,
+            change_id=request.change_id,
+            approval_id=request.approval_id,
+            reviewer=request.reviewer.strip(),
+            role=role,
+            comment=request.comment.strip(),
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return _decision_response(
+        case_id=case_id,
+        record=record,
+    )
+
+
+# ============================================================================
+# CONTROLLED BETA / DEVELOPMENT ENDPOINT
+# ============================================================================
+
+
+@router.post(
+    "/demo/create-case",
+)
+def create_demo_case(
+    request: PrivacyGovernanceDemoCaseRequest | None = None,
+) -> dict[str, object]:
+    """Create a controlled Beta demonstration governance case.
+
+    Development/demo only.
+
+    Production case creation must use the governed application workflow.
+    """
+
+    composition = _composition()
+
+    demo_request = (
+        request
+        if request is not None
+        else PrivacyGovernanceDemoCaseRequest()
+    )
+
+    case_id = demo_request.case_id.strip()
+    change_id = demo_request.change_id.strip()
+
+    if not case_id:
+        raise HTTPException(
+            status_code=400,
+            detail="case_id cannot be blank.",
+        )
+
+    if not change_id:
+        raise HTTPException(
+            status_code=400,
+            detail="change_id cannot be blank.",
+        )
+
+    change = PrivacyChange(
+        change_id=change_id,
+        title="New learner data processing",
+        description=(
+            "Beta demonstration of a new privacy-impacting "
+            "learner processing activity."
+        ),
+        risk=PrivacyChangeRisk.MEDIUM,
+        dpo_required=True,
+        grc_required=True,
+    )
+
+    try:
+        result = composition.flow_service.process_new_processing(
+            change,
+            automated_validation_passed=True,
+            case_id=case_id,
+            trigger_source="Processing Registry",
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    evidence = _evidence_sync().sync_case(
+        result.case.case_id,
+    )
+
+    return {
+        "case_id": result.case.case_id,
+        "change_id": result.change.change_id,
+        "validation_status": result.case.validation_status,
+        "governance_status": result.case.governance_status,
+        "excel_sync": {
+            "status": evidence.status,
+            "workbook_path": evidence.workbook_path,
+            "error": evidence.error,
+        },
+    }
+
+
+__all__ = [
+    "PrivacyGovernanceDecisionRequest",
+    "PrivacyGovernanceDemoCaseRequest",
+    "router",
+]
+
+============================================================
+=== 5. CASE-RELATED API REFERENCES =========================
+============================================================
+
+Path                                                                                                                  LineNumber Line                                                                  
+----                                                                                                                  ---------- ----                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py                                                                       332     # GET /api/privacy/governance/cases/{case_id}                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py                                                                       336     # POST /api/privacy/governance/cases/{case_id}/approve            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py                                                                       337     # POST /api/privacy/governance/cases/{case_id}/reject             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py                                                                       338     # POST /api/privacy/governance/cases/{case_id}/request-changes    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                      32 #   GET  /api/privacy/governance/cases/{case_id}                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                      35 #   POST /api/privacy/governance/cases/{case_id}/approve              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                      36 #   POST /api/privacy/governance/cases/{case_id}/reject               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                      37 #   POST /api/privacy/governance/cases/{case_id}/request-changes      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                      89     case_id: str = Field(                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     147     case_id: str,                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     155         case = dashboard.get_case_detail(                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     156             case_id,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     166         case_id,                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     204 def get_cases() -> list[dict[str, object]]:                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     208         _dashboard_api().get_cases(),                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     212 @router.get("/cases/{case_id}")                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     213 def get_case_detail(                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     214     case_id: str,                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     219         return _dashboard_api().get_case_detail(                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     220             case_id,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     245     "/cases/{case_id}/approve",                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     248     case_id: str,                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     261             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     282         case_id=case_id,                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     288     "/cases/{case_id}/reject",                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     291     case_id: str,                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     304             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     325         case_id=case_id,                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     331     "/cases/{case_id}/request-changes",                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     334     case_id: str,                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     347             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     368         case_id=case_id,                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     399     case_id = demo_request.case_id.strip()                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     402     if not case_id:                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     405             detail="case_id cannot be blank.",                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     430             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     431             trigger_source="Processing Registry",                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     447         result.case.case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py                                                     451         "case_id": result.case.case_id,                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_record.py                                 20     case_id: str                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_record.py                                 31             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_registry.py                               32     def for_case(self, case_id: str) -> tuple[PrivacyApprovalRecord...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_registry.py                               36             if record.case_id == case_id                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                              7 from .privacy_governance_case_service import PrivacyGovernanceCaseS...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                             37         case_service: PrivacyGovernanceCaseService,                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                             57         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                             60             lambda: self._runtime_sync.sync_case(case_id)             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                             65         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                             68             lambda: self._runtime_sync.sync_decision(case_id)         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_approval_email.py                        3     case_id: str                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case.py                                 19 class PrivacyGovernanceCase:                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case.py                                 27     case_id: str                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case.py                                 30     trigger_type: PrivacyTriggerType                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case.py                                 32     trigger_source: str                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case.py                                 44         for field_name in ("case_id", "title", "summary", "trigger_...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                      7 from .privacy_governance_case import PrivacyGovernanceCase            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                      8 from .privacy_governance_case_registry import PrivacyGovernanceCase...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     12 class PrivacyGovernanceCaseChangeLink:                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     24     case: PrivacyGovernanceCase                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     28 class PrivacyGovernanceCaseChangeLinkService:                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     36         PrivacyGovernanceCase.change_id                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     48         case_registry: PrivacyGovernanceCaseRegistry,                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     66         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     70         case = self.get_case(case_id)                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     76         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     77     ) -> PrivacyGovernanceCaseChangeLink:                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     80         case = self.get_case(case_id)                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     84         return PrivacyGovernanceCaseChangeLink(                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     91     ) -> tuple[PrivacyGovernanceCaseChangeLink, ...]:                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                     95             PrivacyGovernanceCaseChangeLink(                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    102     def get_case(                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    104         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    105     ) -> PrivacyGovernanceCase:                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    109             not isinstance(case_id, str)                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    110             or not case_id.strip()                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    113                 "case_id is required."                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    116         return self._cases.get(case_id)                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    120         case: PrivacyGovernanceCase,                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    141                 f"change_id relationship: {case.case_id}"             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    151                 f"governance case {case.case_id}: "                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    159     "PrivacyGovernanceCaseChangeLink",                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_change_link.py                    160     "PrivacyGovernanceCaseChangeLinkService",                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                         3 from .privacy_governance_case import PrivacyGovernanceCase            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                         6 class PrivacyGovernanceCaseRegistry:                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        11         cases: list[PrivacyGovernanceCase] | None = None,             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        13         self._cases: dict[str, PrivacyGovernanceCase] = {}            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        17     def register(self, case: PrivacyGovernanceCase) -> None:          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        18         if case.case_id in self._cases:                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        19             raise ValueError(f"Case already registered: {case.case_...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        20         self._cases[case.case_id] = case                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        22     def get(self, case_id: str) -> PrivacyGovernanceCase:             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        24             return self._cases[case_id]                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        26             raise KeyError(f"Governance case not found: {case_id}")...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        28     def update(self, case: PrivacyGovernanceCase) -> None:            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        29         if case.case_id not in self._cases:                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        30             raise KeyError(f"Governance case not found: {case.case_...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        31         self._cases[case.case_id] = case                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        33     def all(self) -> tuple[PrivacyGovernanceCase, ...]:               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py                        36     def pending(self) -> tuple[PrivacyGovernanceCase, ...]:           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         16     PrivacyGovernanceCase,                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         20     PrivacyGovernanceCaseRegistry,                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         27 class PrivacyGovernanceCaseService:                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         44         case_registry: PrivacyGovernanceCaseRegistry,                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         67     def case_registry(self) -> PrivacyGovernanceCaseRegistry:         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         87         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         89         trigger_type: PrivacyTriggerType,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         90         trigger_source: str,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                         95     ) -> PrivacyGovernanceCase:                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        118             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        119             case_id,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        128             "trigger_source",                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        129             trigger_source,                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        133             self._cases.get(case_id)                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        134             if self._case_exists(case_id)                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        171         case = PrivacyGovernanceCase(                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        172             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        175             trigger_type=trigger_type,                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        177             trigger_source=trigger_source,                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        193     def get_case(                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        195         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        196     ) -> PrivacyGovernanceCase:                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        200             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        201             case_id,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        205             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        210     ) -> tuple[PrivacyGovernanceCase, ...]:                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        217     ) -> tuple[PrivacyGovernanceCase, ...]:                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        224         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        229             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        230             case_id,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        234             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        238             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        244         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        254             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        261             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        273         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        283             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        290             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        302         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        312             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        319             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        331         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        339             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        340             case_id,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        354             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        373         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_service.py                        379                 case_id                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_url.py                              6 class PrivacyGovernanceCaseURLBuilder:                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_url.py                             15     def build(self, case_id: str) -> str:                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_url.py                             16         if not isinstance(case_id, str) or not case_id.strip():       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_url.py                             17             raise ValueError("case_id is required.")                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_url.py                             20             f"{quote(case_id.strip(), safe='')}"                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_url.py                             24 __all__ = ["PrivacyGovernanceCaseURLBuilder"]                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py                           8 from .privacy_governance_case_registry import PrivacyGovernanceCase...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py                           9 from .privacy_governance_case_service import PrivacyGovernanceCaseS...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py                          30     case_registry: PrivacyGovernanceCaseRegistry                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py                          34     case_service: PrivacyGovernanceCaseService                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py                          47     case_registry = PrivacyGovernanceCaseRegistry()                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py                          62     case_service = PrivacyGovernanceCaseService(                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_api.py                        26     def get_cases(self) -> tuple[dict[str, object], ...]:             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_api.py                        29     def get_case_detail(self, case_id: str) -> dict[str, object]:     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_api.py                        30         return self._dashboard.case_detail(case_id)                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                     4 from .privacy_governance_case_registry import PrivacyGovernanceCase...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                    25         case_registry: PrivacyGovernanceCaseRegistry,                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                    88         ``case_id`` is the stable navigation identifier for the UI.   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                    97                 "case_id": case.case_id,                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   101                 "trigger_type": case.trigger_type.value,              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   119         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   131         case = self._cases.get(case_id)                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   133         records = self._approvals.for_case(case_id)                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   136             "case_id": case.case_id,                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   141                 "type": case.trigger_type.value,                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_service.py                   143                 "source": case.trigger_source,                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py                     10 from .privacy_governance_case_registry import PrivacyGovernanceCase...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py                     21         case_registry: PrivacyGovernanceCaseRegistry,                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py                     36         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py                     45         case = self._cases.get(case_id)                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py                     49             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py                     59         records = self._approvals.for_case(case_id)                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py                           18 CASES_TABLE = "PrivacyGovernanceCasesTable"                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py                          131                     case.case_id                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py                          252                     case.case_id,                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py                          264                         case.trigger_type                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py                          266                     case.trigger_source,                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py                          318                     record.case_id,                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                         11     PrivacyGovernanceCase,                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                         14 from .privacy_governance_case_service import PrivacyGovernanceCaseS...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                         23     case: PrivacyGovernanceCase                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                         53         case_service: PrivacyGovernanceCaseService,                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                         79         case_id: str | None = None,                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                         80         trigger_source: str = "Processing Registry",                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        108         # This is important because PrivacyGovernanceCaseService reads
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        113         resolved_case_id = (                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        114             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        115             if case_id is not None                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        132             case_id=resolved_case_id,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        134             trigger_type=PrivacyTriggerType.NEW_PROCESSING,           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                        135             trigger_source=trigger_source,                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_email.py                      118             f"Decision Reminder - {proposal.case_id}"                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_email.py                      146                 f"Case ID: {proposal.case_id}",                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                      9     case_id: str                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     28         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     30         return self._records.get(case_id)                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     35         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     40         if not case_id.strip():                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     41             raise ValueError("case_id is required.")                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     46             case_id=case_id,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_history.py                     51         self._records[case_id] = record                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_policy.py                      20     case_id: str                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_policy.py                      39             f"Case {self.case_id} concerns change {change}. "         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_policy.py                     156             previous = history.get_last_sent(case.case_id)            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_policy.py                     198         case_id=case.case_id,                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_result.py                      11     case_id: str                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_result.py                      25             "case_id": self.case_id,                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                   20     def get_last_sent(self, case_id: str) -> Any:                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                   26         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                   69     case_ids_reminded: tuple[str, ...]                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                   72 class PrivacyGovernanceCaseRegistryPort(Protocol):                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                   76     def get(self, case_id: str) -> Any:                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  159                     case.case_id                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  165             case_ids_reminded=tuple(reminded),                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  192             case_id=case.case_id,                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  230         case_id: str,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  241             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  258                 case_id=case.case_id,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  273                 case_id=case.case_id,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  288                 case_id=case.case_id,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  308                 case_id=case.case_id,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  347             case_id=case.case_id,                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  355             case_id=case.case_id,                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                  381     "PrivacyGovernanceCaseRegistryPort",                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime.py                              14     case_id: str | None = None,                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime.py                              15     trigger_source: str = "Processing Registry",                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime.py                              33         case_id=case_id,                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime.py                              34         trigger_source=trigger_source,                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                          6 from .privacy_governance_case import PrivacyGovernanceCase            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                          7 from .privacy_governance_case_service import PrivacyGovernanceCaseS...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         22     def sync_case(self, case: PrivacyGovernanceCase) -> None:         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         25     def sync_approval(self, case_id: str) -> None:                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         37     case_service: PrivacyGovernanceCaseService                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         40     def sync_case(self, case_id: str) -> PrivacyGovernanceCase:       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         41         case = self.case_service.get_case(case_id)                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         50     def sync_decision(self, case_id: str) -> PrivacyGovernanceCase:   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         51         case = self.case_service.get_case(case_id)                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_runtime_sync.py                         57             self.excel_sync.sync_approval(case_id)                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py          8     PrivacyGovernanceCaseURLBuilder,                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py         51     case_url_builder: PrivacyGovernanceCaseURLBuilder                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py         85         case_id = getattr(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py         87             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py         91         if not case_id:                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py         93                 "case.case_id is required."                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        144             {case_id}                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        284         case_id = getattr(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        286             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        290         if not case_id:                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        292                 "case.case_id is required."                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        301             f"{case_id}\n"                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        363         case_id = getattr(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        365             "case_id",                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        369         if not isinstance(case_id, str) or not case_id.strip():       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        371                 "case.case_id is required."                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        375             case_id                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\email\privacy_governance_reminder_email_service.py        380             f"Reminder — Decision Required for {case_id}"             
+
+

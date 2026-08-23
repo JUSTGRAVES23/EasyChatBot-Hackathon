@@ -1,0 +1,632 @@
+/*
+ * =========================================================
+ * EasyChatBot Character Theme Adapter
+ * =========================================================
+ *
+ * The frontend does not define character themes.
+ *
+ * The backend resolves:
+ *
+ *     Character
+ *          +
+ *       World
+ *          +
+ *      Languages
+ *          ↓
+ *     Theme Response
+ *
+ * This adapter applies the resolved presentation
+ * to the existing EasyChatBot UI.
+ *
+ * Core UI structure remains unchanged.
+ *
+ * Character-specific presentation may change:
+ *
+ * - colours
+ * - atmosphere
+ * - background
+ * - surfaces
+ * - accents
+ * - decorative elements
+ * - character identity
+ * - world identity
+ *
+ * IMPORTANT:
+ *
+ * app.js owns the dashboard's active theme state.
+ *
+ * This file therefore uses its own adapter state:
+ *
+ *     themeAdapterState
+ *
+ * This prevents a global JavaScript variable collision
+ * with app.js.
+ */
+
+
+/*
+ * =========================================================
+ * Theme Adapter State
+ * =========================================================
+ *
+ * This is the theme.js adapter's local global state.
+ *
+ * app.js separately owns:
+ *
+ *     activeDashboardTheme
+ *
+ * Do NOT rename this back to activeDashboardTheme.
+ */
+
+let themeAdapterState = null;
+
+
+/*
+ * =========================================================
+ * Main Theme Application
+ * =========================================================
+ */
+
+
+function applyCharacterTheme(
+    themeResponse
+) {
+
+    if (!themeResponse) {
+
+        console.error(
+            "Character theme response is empty."
+        );
+
+        return;
+
+    }
+
+
+    /*
+     * Store the theme inside the adapter state.
+     *
+     * This is intentionally separate from the
+     * activeDashboardTheme variable owned by app.js.
+     */
+
+    themeAdapterState =
+        themeResponse;
+
+
+    const theme =
+        themeResponse.theme;
+
+
+    if (!theme) {
+
+        console.error(
+            "Character theme payload is missing."
+        );
+
+        return;
+
+    }
+
+
+    const root =
+        document.documentElement;
+
+
+    /*
+     * -------------------------------------------------------
+     * Palette
+     * -------------------------------------------------------
+     */
+
+
+    const palette =
+        theme.palette || {};
+
+
+    applyPalette(
+        root,
+        palette
+    );
+
+
+    /*
+     * -------------------------------------------------------
+     * Character / World identity
+     * -------------------------------------------------------
+     */
+
+
+    if (
+        themeResponse.character_id
+    ) {
+
+        root.dataset.character =
+            themeResponse.character_id;
+
+    }
+
+
+    if (
+        themeResponse.world_id
+    ) {
+
+        root.dataset.world =
+            themeResponse.world_id;
+
+    }
+
+
+    /*
+     * -------------------------------------------------------
+     * Language context
+     * -------------------------------------------------------
+     */
+
+
+    const languages =
+        themeResponse.languages || {};
+
+
+    if (
+        languages.primary
+    ) {
+
+        root.dataset.primaryLanguage =
+            languages.primary;
+
+    }
+
+
+    if (
+        languages.secondary
+    ) {
+
+        root.dataset.secondaryLanguage =
+            languages.secondary;
+
+    }
+
+
+    /*
+     * -------------------------------------------------------
+     * Theme metadata
+     * -------------------------------------------------------
+     */
+
+
+    if (
+        theme.name
+    ) {
+
+        root.dataset.theme =
+            theme.name;
+
+    }
+
+
+    if (
+        theme.version
+    ) {
+
+        root.dataset.themeVersion =
+            theme.version;
+
+    }
+
+
+    /*
+     * -------------------------------------------------------
+     * Atmosphere
+     * -------------------------------------------------------
+     */
+
+
+    applyAtmosphere(
+        root,
+        theme
+    );
+
+
+    /*
+     * -------------------------------------------------------
+     * Log resolved theme
+     * -------------------------------------------------------
+     */
+
+
+    console.log(
+        "EasyChatBot theme applied:",
+        themeResponse.character_id,
+        themeResponse.world_id
+    );
+
+}
+
+
+/*
+ * =========================================================
+ * Palette Application
+ * =========================================================
+ */
+
+
+function applyPalette(
+    root,
+    palette
+) {
+
+    /*
+     * Primary
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-primary",
+        palette.primary
+    );
+
+
+    /*
+     * Secondary
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-secondary",
+        palette.secondary
+    );
+
+
+    /*
+     * Accent
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-accent",
+        palette.accent
+    );
+
+
+    /*
+     * Background
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-background",
+        palette.background
+    );
+
+
+    /*
+     * Surface
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-surface",
+        palette.surface
+    );
+
+
+    /*
+     * Alternative surface
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-surface-alt",
+        palette.surface_alt
+    );
+
+
+    /*
+     * Primary text
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-text-primary",
+        palette.text_primary
+    );
+
+
+    /*
+     * Secondary text
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-text-secondary",
+        palette.text_secondary
+    );
+
+
+    /*
+     * Highlight
+     */
+
+    setThemeVariable(
+        root,
+        "--ecb-character-highlight",
+        palette.highlight
+    );
+
+}
+
+
+/*
+ * =========================================================
+ * Safe CSS Variable Setter
+ * =========================================================
+ */
+
+
+function setThemeVariable(
+    root,
+    variableName,
+    value
+) {
+
+    if (
+        value === undefined ||
+        value === null ||
+        value === ""
+    ) {
+
+        return;
+
+    }
+
+
+    root.style.setProperty(
+        variableName,
+        value
+    );
+
+}
+
+
+/*
+ * =========================================================
+ * Atmosphere
+ * =========================================================
+ *
+ * The theme may define an atmosphere/background
+ * representation.
+ *
+ * The core dashboard layout is not changed here.
+ */
+
+
+function applyAtmosphere(
+    root,
+    theme
+) {
+
+    const atmosphere =
+        theme.atmosphere;
+
+
+    if (!atmosphere) {
+
+        return;
+
+    }
+
+
+    if (
+        typeof atmosphere ===
+        "string"
+    ) {
+
+        root.dataset.atmosphere =
+            atmosphere;
+
+        return;
+
+    }
+
+
+    if (
+        typeof atmosphere ===
+        "object"
+    ) {
+
+        if (
+            atmosphere.id
+        ) {
+
+            root.dataset.atmosphere =
+                atmosphere.id;
+
+        }
+
+
+        if (
+            atmosphere.type
+        ) {
+
+            root.dataset.atmosphereType =
+                atmosphere.type;
+
+        }
+
+
+        if (
+            atmosphere.background
+        ) {
+
+            root.style.setProperty(
+                "--ecb-character-atmosphere",
+                atmosphere.background
+            );
+
+        }
+
+    }
+
+}
+
+
+/*
+ * =========================================================
+ * Active Theme Accessor
+ * =========================================================
+ *
+ * Useful for dashboard components that need to read
+ * the theme currently held by the theme adapter.
+ *
+ * This returns the adapter state.
+ *
+ * app.js separately exposes its own
+ * getActiveDashboardTheme().
+ */
+
+
+function getThemeAdapterState() {
+
+    return themeAdapterState;
+
+}
+
+
+/*
+ * =========================================================
+ * Character / World Helpers
+ * =========================================================
+ *
+ * These helpers intentionally use the theme adapter state.
+ *
+ * They do not use app.js's activeDashboardTheme variable.
+ */
+
+
+function getThemeAdapterCharacterId() {
+
+    if (
+        !themeAdapterState
+    ) {
+
+        return null;
+
+    }
+
+
+    return (
+        themeAdapterState.character_id ||
+        null
+    );
+
+}
+
+
+function getThemeAdapterWorldId() {
+
+    if (
+        !themeAdapterState
+    ) {
+
+        return null;
+
+    }
+
+
+    return (
+        themeAdapterState.world_id ||
+        null
+    );
+
+}
+
+
+/*
+ * =========================================================
+ * Theme Reset
+ * =========================================================
+ *
+ * Useful when the learner changes character or when the
+ * dashboard needs to return to the EasyChatBot core state.
+ *
+ * Home itself does NOT provide character selection.
+ *
+ * This function simply resets the visual theme state.
+ */
+
+
+function resetCharacterTheme() {
+
+    const root =
+        document.documentElement;
+
+
+    const themeVariables = [
+
+        "--ecb-character-primary",
+
+        "--ecb-character-secondary",
+
+        "--ecb-character-accent",
+
+        "--ecb-character-background",
+
+        "--ecb-character-surface",
+
+        "--ecb-character-surface-alt",
+
+        "--ecb-character-text-primary",
+
+        "--ecb-character-text-secondary",
+
+        "--ecb-character-highlight",
+
+        "--ecb-character-atmosphere"
+
+    ];
+
+
+    themeVariables.forEach(
+        function (variableName) {
+
+            root.style.removeProperty(
+                variableName
+            );
+
+        }
+    );
+
+
+    delete root.dataset.character;
+
+    delete root.dataset.world;
+
+    delete root.dataset.primaryLanguage;
+
+    delete root.dataset.secondaryLanguage;
+
+    delete root.dataset.theme;
+
+    delete root.dataset.themeVersion;
+
+    delete root.dataset.atmosphere;
+
+    delete root.dataset.atmosphereType;
+
+
+    /*
+     * Reset ONLY theme.js adapter state.
+     *
+     * app.js owns its own activeDashboardTheme.
+     */
+
+    themeAdapterState =
+        null;
+
+
+    console.log(
+        "EasyChatBot character theme reset."
+    );
+
+}

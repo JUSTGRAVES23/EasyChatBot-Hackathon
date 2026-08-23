@@ -1,0 +1,406 @@
+﻿"""
+Resend email provider.
+
+Infrastructure adapter responsible only for email delivery.
+
+The provider supports multiple controlled email contracts:
+
+- Cybersecurity notifications:
+  rendered by the existing cybersecurity HTML renderer.
+
+- Privacy Governance reminders:
+  the application service supplies the authoritative HTML and
+  plain-text content. The provider delivers that content without
+  replacing it with the cybersecurity template.
+
+The provider does not:
+- make governance decisions;
+- modify governance state;
+- execute remediation;
+- generate application decisions;
+- access provider credentials outside configuration.
+"""
+
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+from typing import Any
+
+import resend
+
+from backend.cybersecurity.email.email_configuration import (
+    EMAIL_FROM,
+    RESEND_API_KEY,
+)
+
+
+class ResendEmailProvider:
+    """
+    Provider adapter for Resend email delivery.
+
+    Routing rule:
+
+        privacy_governance_reminder
+            -> supplied html_body
+
+        all other email types
+            -> existing cybersecurity renderer
+    """
+
+    provider_id = "resend"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        sender: str | None = None,
+    ) -> None:
+        self.api_key = api_key or RESEND_API_KEY
+        self.sender = sender or EMAIL_FROM
+
+        if not self.api_key:
+            raise ValueError(
+                "RESEND_API_KEY is not configured."
+            )
+
+        if not self.sender:
+            raise ValueError(
+                "Email sender is not configured."
+            )
+
+        resend.api_key = self.api_key
+
+    async def send(
+        self,
+        subject: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send an email through Resend."""
+
+        if not isinstance(subject, str) or not subject.strip():
+            raise ValueError(
+                "Email subject cannot be empty."
+            )
+
+        if not isinstance(content, dict):
+            raise TypeError(
+                "Email content must be a dictionary."
+            )
+
+        recipient = content.get("recipient")
+
+        if not isinstance(recipient, str) or not recipient.strip():
+            raise ValueError(
+                "Email recipient is required."
+            )
+
+        recipient = recipient.strip()
+
+        email_type = content.get(
+            "email_type",
+            "",
+        )
+
+        # Privacy Governance owns its complete presentation.
+        #
+        # Do not replace the supplied HTML with the
+        # Cybersecurity renderer.
+        if email_type == "privacy_governance_reminder":
+            html = self._get_supplied_html_body(content)
+        else:
+            # Preserve existing Cybersecurity behaviour.
+            html = self._build_html(content)
+
+        text_body = content.get("body")
+
+        if text_body is not None:
+            if not isinstance(text_body, str):
+                raise TypeError(
+                    "body must be a string when provided."
+                )
+
+            if not text_body.strip():
+                raise ValueError(
+                    "body cannot be empty when provided."
+                )
+
+        params: dict[str, Any] = {
+            "from": self.sender,
+            "to": [recipient],
+            "subject": subject,
+            "html": html,
+        }
+
+        if isinstance(text_body, str) and text_body.strip():
+            params["text"] = text_body
+
+        attachments = content.get("attachments")
+
+        if attachments is not None:
+            params["attachments"] = self._build_attachments(
+                attachments
+            )
+
+        response = await resend.Emails.send_async(
+            params
+        )
+
+        if isinstance(response, dict):
+            message_id = response.get("id")
+        else:
+            message_id = getattr(
+                response,
+                "id",
+                None,
+            )
+
+        return {
+            "provider": self.provider_id,
+            "status": "accepted",
+            "message_id": message_id,
+        }
+
+    @staticmethod
+    def _get_supplied_html_body(
+        content: dict[str, Any],
+    ) -> str:
+        """
+        Return the application-owned Privacy Governance HTML.
+
+        The provider deliberately does not generate or alter this
+        HTML because the application service owns the presentation
+        and governance message.
+        """
+
+        html_body = content.get("html_body")
+
+        if not isinstance(html_body, str):
+            raise TypeError(
+                "Privacy Governance email requires "
+                "html_body to be a string."
+            )
+
+        if not html_body.strip():
+            raise ValueError(
+                "Privacy Governance email html_body cannot be empty."
+            )
+
+        return html_body
+
+    @staticmethod
+    def _build_attachments(
+        attachments: Any,
+    ) -> list[dict[str, Any]]:
+        """
+        Convert local application attachment metadata into the
+        Resend attachment representation.
+
+        Resend rejects Windows/local filesystem paths supplied
+        directly as ``path`` values. Therefore local files are
+        read and encoded as base64 ``content``.
+
+        Supports inline Privacy Governance assets:
+
+            cid:easychatbot-governance-logo
+        """
+
+        if not isinstance(attachments, list):
+            raise TypeError(
+                "attachments must be a list when provided."
+            )
+
+        normalized: list[dict[str, Any]] = []
+
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                raise TypeError(
+                    "Each email attachment must be a dictionary."
+                )
+
+            path_value = attachment.get("path")
+
+            if not path_value:
+                raise ValueError(
+                    "Email attachment path is required."
+                )
+
+            path = Path(str(path_value))
+
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Email attachment not found: {path}"
+                )
+
+            if not path.is_file():
+                raise ValueError(
+                    f"Email attachment is not a file: {path}"
+                )
+
+            filename = attachment.get("filename")
+
+            resolved_filename = (
+                str(filename).strip()
+                if filename
+                else path.name
+            )
+
+            if not resolved_filename:
+                raise ValueError(
+                    "Email attachment filename is required."
+                )
+
+            content_id = attachment.get(
+                "content_id"
+            )
+
+            inline = bool(
+                attachment.get(
+                    "inline",
+                    False,
+                )
+            )
+
+            if inline and not content_id:
+                raise ValueError(
+                    "Inline email attachments require "
+                    "content_id."
+                )
+
+            # Read the local file and encode it for Resend.
+            encoded_content = base64.b64encode(
+                path.read_bytes()
+            ).decode("ascii")
+
+            resend_attachment: dict[str, Any] = {
+                "filename": resolved_filename,
+                "content": encoded_content,
+            }
+
+            if content_id:
+                resend_attachment["content_id"] = str(
+                    content_id
+                )
+
+            normalized.append(
+                resend_attachment
+            )
+
+        return normalized
+
+    @staticmethod
+    def _build_html(
+        content: dict[str, Any],
+    ) -> str:
+        """
+        Existing Cybersecurity HTML renderer.
+
+        This remains the Cybersecurity fallback and is intentionally
+        not used for Privacy Governance reminders.
+        """
+
+        posture = str(
+            content.get(
+                "posture",
+                "Security notification",
+            )
+        )
+
+        critical_count = content.get(
+            "critical_count",
+            0,
+        )
+
+        high_count = content.get(
+            "high_count",
+            0,
+        )
+
+        priority_signals = content.get(
+            "priority_signals",
+            [],
+        )
+
+        signal_rows = ""
+
+        if isinstance(
+            priority_signals,
+            list,
+        ):
+            for signal in priority_signals:
+                if not isinstance(
+                    signal,
+                    dict,
+                ):
+                    continue
+
+                title = str(
+                    signal.get(
+                        "title",
+                        "Security signal",
+                    )
+                )
+
+                severity = str(
+                    signal.get(
+                        "severity",
+                        "",
+                    )
+                ).upper()
+
+                signal_rows += (
+                    "<li>"
+                    f"<strong>{title}</strong>"
+                    f" — {severity}"
+                    "</li>"
+                )
+
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>EasyChatBot Cybersecurity</title>
+</head>
+<body>
+    <h2>EasyChatBot Cybersecurity Notification</h2>
+
+    <p>
+        <strong>Security posture:</strong>
+        {posture}
+    </p>
+
+    <p>
+        <strong>Critical findings:</strong>
+        {critical_count}
+    </p>
+
+    <p>
+        <strong>High findings:</strong>
+        {high_count}
+    </p>
+
+    <h3>Priority Security Signals</h3>
+
+    <ul>
+        {signal_rows}
+    </ul>
+
+    <hr>
+
+    <p>
+        This notification is decision support only.
+        No remediation action was executed by EasyChatBot.
+    </p>
+
+    <p>
+        <strong>Environment:</strong> DEMO
+    </p>
+</body>
+</html>
+"""
+
+
+__all__ = [
+    "ResendEmailProvider",
+]

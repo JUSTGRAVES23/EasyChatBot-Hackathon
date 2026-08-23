@@ -1,0 +1,839 @@
+﻿"""
+Voice Call Lifecycle Service.
+
+Application facade for the complete
+voice call lifecycle.
+
+Responsibilities:
+- Coordinate voice call execution.
+- Create persistent voice call identity.
+- Create execution sessions.
+- Generate voice connections.
+- Handle reconnect lifecycle.
+- Record lifecycle events.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers directly.
+- Connect LiveKit directly.
+- Persist directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_connection_service import (
+    VoiceConnectionService,
+)
+
+
+from app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+
+
+from app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+
+from app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallLifecycleService:
+    """
+    Application lifecycle facade.
+    """
+
+
+    execution_coordinator: (
+        VoiceCallExecutionCoordinator
+    )
+
+
+    connection_service: (
+        VoiceConnectionService | None
+    ) = None
+
+
+    voice_call_management_service: (
+        VoiceCallManagementService | None
+    ) = None
+
+
+    voice_call_session_service: (
+        VoiceCallSessionService | None
+    ) = None
+
+
+    voice_call_event_service: (
+        VoiceCallEventService | None
+    ) = None
+
+
+
+    def start_call(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room, execute call,
+        create connection and record event.
+        """
+
+
+        result = (
+            self.execution_coordinator
+            .start(
+                context=context,
+            )
+        )
+
+
+        session = result["session"]
+
+
+        if self.voice_call_event_service is not None:
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=(
+                    session.session_id
+                ),
+                learner_id=(
+                    session.learner_id
+                ),
+                character_id=(
+                    session.character_id
+                ),
+                event_type=(
+                    VoiceCallEventType.STARTED
+                ),
+            )
+
+
+        if self.connection_service is not None:
+
+            connection = (
+                self.connection_service
+                .create_connection(
+                    room_name=(
+                        result["room"]["room_name"]
+                    ),
+                )
+            )
+
+
+            result["connection"] = (
+                connection
+            )
+
+
+        return result
+
+
+
+    def create_voice_call(
+        self,
+        *,
+        learner_id: str,
+        character_id: str,
+        world_id: str,
+        language_code: str,
+    ) -> VoiceCall:
+        """
+        Create persistent voice identity.
+        """
+
+
+        if (
+            self.voice_call_management_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call management service "
+                "not configured."
+            )
+
+
+        return (
+            self.voice_call_management_service
+            .create_call(
+                learner_id=learner_id,
+                character_id=character_id,
+                world_id=world_id,
+                language_code=language_code,
+            )
+        )
+
+
+
+    def create_session(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Create execution session.
+        """
+
+
+        if (
+            self.voice_call_session_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call session service "
+                "not configured."
+            )
+
+
+        return (
+            self.voice_call_session_service
+            .create_session(
+                voice_call=voice_call,
+            )
+        )
+
+
+
+    def reconnect_call(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Reconnect existing voice call.
+        """
+
+
+        if (
+            self.voice_call_session_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call session service "
+                "not configured."
+            )
+
+
+        session = (
+            self.voice_call_session_service
+            .reconnect_session(
+                voice_call=voice_call,
+            )
+        )
+
+
+        if self.voice_call_event_service is not None:
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=(
+                    voice_call.id
+                ),
+                learner_id=(
+                    voice_call.learner_id
+                ),
+                character_id=(
+                    voice_call.character_id
+                ),
+                event_type=(
+                    VoiceCallEventType.RECONNECTED
+                ),
+            )
+
+
+        return session
+
+
+
+__all__ = [
+    "VoiceCallLifecycleService",
+]
+"""
+Voice Lifecycle Composition.
+
+Composition root for the complete
+voice call lifecycle application service.
+
+Responsibilities:
+- Build lifecycle dependencies.
+- Wire execution coordinator.
+- Wire connection services.
+- Wire persistent voice call services.
+- Wire lifecycle event services.
+- Return ready application facade.
+
+Does NOT:
+- Handle HTTP.
+- Execute voice calls.
+- Manage providers.
+- Persist data directly.
+"""
+
+from __future__ import annotations
+
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+
+
+from app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+
+from app.application.composition.voice_connection_composition import (
+    create_voice_connection_service,
+)
+
+
+from app.application.composition.voice_call_dependencies import (
+    voice_call_repository,
+)
+
+
+from app.application.composition.voice_call_event_composition import (
+    build_voice_call_event_service,
+)
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+
+def create_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Create configured voice lifecycle service.
+    """
+
+
+    room_service = VoiceRoomService(
+        room_adapter=(
+            VoiceRoomAdapter()
+        ),
+    )
+
+
+    execution_runtime = (
+        VoiceCallExecutionRuntime()
+    )
+
+
+    execution_coordinator = (
+        VoiceCallExecutionCoordinator(
+            room_service=room_service,
+            execution_runtime=execution_runtime,
+        )
+    )
+
+
+    connection_service = (
+        create_voice_connection_service()
+    )
+
+
+    voice_call_management_service = (
+        VoiceCallManagementService(
+            repository=(
+                voice_call_repository
+            ),
+        )
+    )
+
+
+    voice_call_session_service = (
+        VoiceCallSessionService()
+    )
+
+
+    voice_call_event_service = (
+        build_voice_call_event_service()
+    )
+
+
+    return VoiceCallLifecycleService(
+
+        execution_coordinator=(
+            execution_coordinator
+        ),
+
+        connection_service=(
+            connection_service
+        ),
+
+        voice_call_management_service=(
+            voice_call_management_service
+        ),
+
+        voice_call_session_service=(
+            voice_call_session_service
+        ),
+
+        voice_call_event_service=(
+            voice_call_event_service
+        ),
+    )
+
+
+
+def build_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Dependency builder for application adapters.
+
+    Keeps API composition isolated from
+    internal dependency creation.
+    """
+
+
+    return (
+        create_voice_call_lifecycle_service()
+    )
+
+
+
+__all__ = [
+    "create_voice_call_lifecycle_service",
+    "build_voice_call_lifecycle_service",
+]
+"""
+Voice Interaction Context Service.
+
+Application service responsible for translating
+a voice call execution context into the existing
+UAI InteractionContext.
+
+Responsibilities:
+- Build LearnerContext from the voice call session.
+- Build VoiceContext from the voice call session.
+- Delegate world and character resolution to
+  InteractionContextBuilder.
+- Return the established InteractionContext contract.
+
+Does NOT:
+- Handle HTTP.
+- Connect to LiveKit.
+- Execute AI agents.
+- Manage LiveKit sessions.
+- Persist data.
+- Resolve worlds or characters directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceInteractionContextService:
+    """
+    Application boundary for creating the established
+    UAI InteractionContext from a voice call context.
+    """
+
+    context_builder: InteractionContextBuilder
+
+
+
+    def build(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> InteractionContext:
+        """
+        Build InteractionContext for a voice call.
+        """
+
+        session = context.session
+
+
+        learner = LearnerContext(
+            learner_id=session.learner_id,
+        )
+
+
+        voice = VoiceContext(
+            language_code=session.language_code,
+            voice_provider="openai",
+            voice_profile=session.character_id,
+        )
+
+
+        return (
+            self.context_builder
+            .build(
+                learner=learner,
+                world_id=session.world_id,
+                character_id=session.character_id,
+                voice=voice,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceInteractionContextService",
+]
+"""
+Voice Dependency Composition.
+
+Application composition root
+for voice call services.
+
+Responsibilities:
+- Build voice dependencies.
+- Wire application services.
+- Build the UAI interaction-context bridge.
+
+Does NOT:
+- Handle HTTP.
+- Execute calls.
+- Persist data.
+- Manage LiveKit directly.
+"""
+
+from __future__ import annotations
+
+
+from pathlib import Path
+
+
+from app.application.uai.voice.voice_call_service import (
+    VoiceCallService,
+)
+
+
+from app.application.uai.voice.voice_call_orchestrator import (
+    VoiceCallOrchestrator,
+)
+
+
+from app.application.uai.voice.voice_character_session_service import (
+    VoiceCharacterSessionService,
+)
+
+
+from app.application.uai.voice.voice_interaction_context_service import (
+    VoiceInteractionContextService,
+)
+
+
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+
+from app.application.uai.character.character_resolver import (
+    CharacterResolver,
+)
+
+
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+
+from app.infrastructure.characters.yaml_character_repository import (
+    YamlCharacterRepository,
+)
+
+
+from app.infrastructure.voice.livekit_adapter import (
+    LiveKitAdapter,
+)
+
+
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from app.providers.speech.speech_provider_factory import (
+    SpeechProviderFactory,
+)
+
+
+from app.configuration.providers.speech_provider_config import (
+    SpeechProviderConfig,
+)
+
+
+
+def build_voice_call_service() -> VoiceCallService:
+    """
+    Create configured voice call service.
+    """
+
+    #
+    # Application configuration root:
+    #
+    # backend/app
+    #
+
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[3]
+    )
+
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+
+    character_repository = YamlCharacterRepository(
+        profiles_path=(
+            Path(
+                r"C:\AI Folder\FrenchTeacherAI"
+            )
+            / "docs"
+            / "specifications"
+            / "characters"
+            / "profiles"
+        )
+    )
+
+
+    context_builder = InteractionContextBuilder(
+        world_resolver=WorldResolver(
+            world_repository=world_repository,
+        ),
+        character_resolver=CharacterResolver(
+            character_repository=character_repository,
+        ),
+    )
+
+
+    #
+    # Voice interaction-context bridge.
+    #
+    # Converts the existing voice call execution
+    # context into the established UAI InteractionContext.
+    #
+
+    interaction_context_service = (
+        VoiceInteractionContextService(
+            context_builder=context_builder,
+        )
+    )
+
+
+    #
+    # LiveKit infrastructure boundary.
+    #
+
+    livekit_adapter = LiveKitAdapter()
+
+
+    #
+    # Speech provider configuration.
+    #
+
+    speech_config = SpeechProviderConfig(
+        provider_name="openai",
+        model_name="tts-1",
+        default_language="fr",
+    )
+
+
+    speech_provider = (
+        SpeechProviderFactory.create(
+            config=speech_config,
+        )
+    )
+
+
+    speech_runtime = VoiceSpeechRuntime(
+        speech_provider=speech_provider,
+    )
+
+
+    session_service = VoiceCharacterSessionService(
+        livekit_adapter=livekit_adapter,
+        speech_runtime=speech_runtime,
+    )
+
+
+    orchestrator = VoiceCallOrchestrator(
+        context_builder=context_builder,
+        session_service=session_service,
+    )
+
+
+    #
+    # Keep the interaction-context bridge available
+    # through the composition root for realtime voice
+    # infrastructure.
+    #
+    # The existing VoiceCallService contract remains
+    # unchanged.
+    #
+
+    _ = interaction_context_service
+
+
+    return VoiceCallService(
+        orchestrator=orchestrator,
+    )
+
+
+
+def build_voice_interaction_context_service(
+) -> VoiceInteractionContextService:
+    """
+    Build the application service that converts
+    a voice execution context into InteractionContext.
+
+    This is the composition entry point for
+    realtime voice infrastructure.
+    """
+
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[3]
+    )
+
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+
+    character_repository = YamlCharacterRepository(
+        profiles_path=(
+            Path(
+                r"C:\AI Folder\FrenchTeacherAI"
+            )
+            / "docs"
+            / "specifications"
+            / "characters"
+            / "profiles"
+        )
+    )
+
+
+    context_builder = InteractionContextBuilder(
+        world_resolver=WorldResolver(
+            world_repository=world_repository,
+        ),
+        character_resolver=CharacterResolver(
+            character_repository=character_repository,
+        ),
+    )
+
+
+    return VoiceInteractionContextService(
+        context_builder=context_builder,
+    )
+
+
+
+__all__ = [
+    "build_voice_call_service",
+    "build_voice_interaction_context_service",
+]

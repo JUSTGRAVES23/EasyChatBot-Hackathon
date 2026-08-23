@@ -1,0 +1,1051 @@
+﻿"""
+EasyChatBot AI Operations Center dashboard models.
+
+Stable read models exposed to the dashboard layer.
+
+This module defines the Operations Center contract.
+
+Architecture:
+
+Provider Health
+      |
+      v
+Operations Center Read Models
+      |
+      v
+Dashboard API
+      |
+      v
+Frontend
+
+
+Responsibilities:
+
+- define dashboard contracts;
+- separate dashboard representation from domain services;
+- allow future providers and metrics without breaking API.
+
+Does NOT:
+
+- execute providers;
+- calculate health;
+- perform routing;
+- persist data;
+- modify infrastructure.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class MonitoringStatus(str, Enum):
+    """
+    Overall Operations Center monitoring state.
+    """
+
+    HEALTHY = "healthy"
+
+    ATTENTION_REQUIRED = "attention_required"
+
+    INCIDENT = "incident"
+
+
+@dataclass(frozen=True)
+class ActiveProvider:
+    """
+    Dashboard representation of one provider.
+    """
+
+    provider: str
+
+    model: str
+
+    capabilities: tuple[str, ...]
+
+    active: bool = True
+
+    health_status: str = "unknown"
+
+    latency_ms: int | None = None
+
+    average_latency_ms: int | None = None
+
+    success_rate: float | None = None
+
+    error_rate: float | None = None
+
+    last_check: str | None = None
+
+    consecutive_failures: int = 0
+
+    consecutive_successes: int = 0
+
+    current_incident: bool = False
+
+    incident_id: str | None = None
+
+    estimated_cost: float | None = None
+
+    approved: bool = True
+
+    environment: str = "unknown"
+
+
+@dataclass(frozen=True)
+class OperationsMetrics:
+    """
+    Execution and platform metrics.
+    """
+
+    total_executions: int = 0
+
+    successful_executions: int = 0
+
+    failed_executions: int = 0
+
+    success_rate: float | None = None
+
+    average_latency_ms: float | None = None
+
+    estimated_cost: float = 0.0
+
+    quality_score: float | None = None
+
+
+@dataclass(frozen=True)
+class EscalationSummary:
+    """
+    Escalation overview displayed in dashboard.
+    """
+
+    active: int = 0
+
+    pending: int = 0
+
+    pending_notifications: int = 0
+
+    approved: int = 0
+
+    rejected: int = 0
+
+    total: int = 0
+
+
+@dataclass(frozen=True)
+class MonitoringSummary:
+    """
+    Monitoring state information.
+    """
+
+    status: MonitoringStatus
+
+    message: str
+
+    read_only: bool = True
+
+
+@dataclass(frozen=True)
+class OperationsCenterDashboard:
+    """
+    Complete Operations Center dashboard contract.
+    """
+
+    system_confidence: float
+
+    metrics: OperationsMetrics
+
+    providers: tuple[
+        ActiveProvider,
+        ...
+    ]
+
+    escalations: EscalationSummary
+
+    monitoring: MonitoringSummary
+
+
+    #
+    # Backward compatibility aliases
+    #
+
+    @property
+    def active_providers(
+        self,
+    ) -> tuple[ActiveProvider, ...]:
+        return self.providers
+
+
+    @property
+    def monitoring_status(
+        self,
+    ) -> MonitoringStatus:
+        return self.monitoring.status
+
+
+    @property
+    def active_escalations(
+        self,
+    ) -> int:
+        return self.escalations.active
+
+
+    @property
+    def pending_approvals(
+        self,
+    ) -> int:
+        return self.escalations.pending
+
+
+    @property
+    def approved_escalations(
+        self,
+    ) -> int:
+        return self.escalations.approved
+
+
+    @property
+    def rejected_escalations(
+        self,
+    ) -> int:
+        return self.escalations.rejected
+
+
+    @property
+    def pending_notifications(
+        self,
+    ) -> int:
+        return self.escalations.pending_notifications
+
+
+    @property
+    def total_escalations(
+        self,
+    ) -> int:
+        return self.escalations.total
+"""
+EasyChatBot AI Operations Center dashboard service.
+
+Builds the read-only Operations Center dashboard.
+
+Architecture:
+
+Provider Health
+        |
+Provider Service
+        |
+OperationsCenterDashboardService
+        |
+OperationsCenterDashboard
+        |
+Dashboard API
+
+
+Responsibilities:
+
+- compose dashboard information;
+- aggregate escalation state;
+- calculate operational confidence;
+- create dashboard read models.
+
+Does NOT:
+
+- execute providers;
+- modify Runtime routing;
+- approve escalations;
+- send notifications;
+- perform remediation.
+"""
+
+from __future__ import annotations
+
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+
+from app.application.provider_management.operations_center_dashboard_models import (
+    ActiveProvider,
+    EscalationSummary,
+    MonitoringStatus,
+    MonitoringSummary,
+    OperationsCenterDashboard,
+    OperationsMetrics,
+)
+
+
+_UNSET = object()
+
+
+class OperationsCenterDashboardService:
+    """
+    Application service responsible for dashboard composition.
+    """
+
+    def __init__(
+        self,
+        *,
+        history_service: EscalationHistoryService,
+        provider_service=None,
+    ) -> None:
+
+        if history_service is None:
+            raise ValueError(
+                "Escalation history service cannot be None."
+            )
+
+        self._history_service = history_service
+        self._provider_service = provider_service
+
+
+    def build_dashboard(
+        self,
+        *,
+        active_providers=_UNSET,
+    ) -> OperationsCenterDashboard:
+        """
+        Build Operations Center dashboard.
+        """
+
+
+        if active_providers is _UNSET:
+
+            if self._provider_service is None:
+                providers = ()
+
+            else:
+                providers = (
+                    self._provider_service
+                    .get_active_providers()
+                )
+
+        else:
+
+            if active_providers is None:
+                raise ValueError(
+                    "Active providers cannot be None."
+                )
+
+            providers = active_providers
+
+
+        #
+        # Escalation aggregation
+        #
+        # Use EscalationHistoryService as the application
+        # read boundary.
+        #
+
+        pending_notifications = len(
+            self._history_service
+            .list_pending_notification()
+        )
+
+
+        pending_approvals = len(
+            self._history_service
+            .list_pending_approval()
+        )
+
+
+        approved = len(
+            self._history_service
+            .list_approved()
+        )
+
+
+        rejected = len(
+            self._history_service
+            .list_rejected()
+        )
+
+
+        total = (
+            pending_notifications
+            +
+            pending_approvals
+            +
+            approved
+            +
+            rejected
+        )
+
+
+        active_escalations = (
+            pending_notifications
+            +
+            pending_approvals
+        )
+
+
+        escalation_summary = EscalationSummary(
+            active=active_escalations,
+
+            pending=pending_approvals,
+
+            pending_notifications=(
+                pending_notifications
+            ),
+
+            approved=approved,
+
+            rejected=rejected,
+
+            total=total,
+        )
+
+
+        #
+        # Monitoring state
+        #
+
+        if active_escalations > 0:
+
+            monitoring = MonitoringSummary(
+                status=MonitoringStatus.INCIDENT,
+                message=(
+                    "Operational attention required"
+                ),
+            )
+
+        else:
+
+            monitoring = MonitoringSummary(
+                status=MonitoringStatus.HEALTHY,
+                message=(
+                    "Monitoring is healthy"
+                ),
+            )
+
+
+        #
+        # Confidence calculation
+        #
+
+        confidence = (
+            100.0
+            -
+            (
+                active_escalations
+                *
+                15.0
+            )
+        )
+
+
+        return OperationsCenterDashboard(
+            system_confidence=max(
+                0.0,
+                confidence,
+            ),
+
+            metrics=OperationsMetrics(),
+
+            providers=tuple(
+                providers
+            ),
+
+            escalations=escalation_summary,
+
+            monitoring=monitoring,
+        )
+
+
+#
+# Backward compatibility exports
+#
+# Existing consumers import these read models from this module.
+#
+
+__all__ = [
+    "ActiveProvider",
+    "OperationsCenterDashboard",
+    "OperationsCenterDashboardService",
+]
+"""
+EasyChatBot AI Operations Center dashboard facade.
+
+Provides a stable application-facing contract for the
+Operations Center presentation/API layer.
+
+Architecture:
+
+Provider Health
+      |
+Escalations
+      |
+Workflow
+      |
+History Service
+      |
+Dashboard Service
+      |
+      v
+OperationsCenterDashboardFacade
+      |
+      v
+API / Frontend
+
+
+Responsibilities:
+
+- expose dashboard information to presentation layers;
+- convert domain/application read models into
+  presentation-safe dictionaries;
+- keep frontend/API code independent from internal
+  workflow objects;
+- provide stable field names for the Operations Center UI;
+- preserve compatibility with explicit provider input.
+
+Does NOT:
+
+- execute providers;
+- change Runtime routing;
+- approve escalations;
+- reject escalations;
+- send emails;
+- modify persistence;
+- perform autonomous operational actions.
+
+This is a read-only presentation boundary.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    ActiveProvider,
+    OperationsCenterDashboard,
+    OperationsCenterDashboardService,
+)
+
+
+_UNSET = object()
+
+
+class OperationsCenterDashboardFacade:
+    """
+    Presentation-facing facade for the AI Operations Center.
+
+    Provider resolution remains below this boundary.
+
+    Existing API contracts are intentionally preserved.
+    New intelligence capabilities must be introduced
+    through explicit new fields/endpoints.
+    """
+
+
+    def __init__(
+        self,
+        dashboard_service: OperationsCenterDashboardService,
+    ) -> None:
+        """
+        Initialise dashboard facade.
+        """
+
+        if dashboard_service is None:
+            raise ValueError(
+                "Operations Center dashboard service "
+                "cannot be None."
+            )
+
+        self._dashboard_service = (
+            dashboard_service
+        )
+
+
+    def get_dashboard(
+        self,
+        *,
+        active_providers= _UNSET,
+    ) -> dict[str, Any]:
+        """
+        Return frontend-safe dashboard representation.
+
+        Rules:
+
+        - omitted:
+            dashboard service resolves providers;
+
+        - explicit providers:
+            supplied providers are used;
+
+        - None:
+            rejected.
+        """
+
+        if active_providers is None:
+            raise ValueError(
+                "Active providers cannot be None."
+            )
+
+
+        if active_providers is _UNSET:
+
+            dashboard = (
+                self._dashboard_service
+                .build_dashboard()
+            )
+
+        else:
+
+            dashboard = (
+                self._dashboard_service
+                .build_dashboard(
+                    active_providers=(
+                        active_providers
+                    )
+                )
+            )
+
+
+        return self._serialize_dashboard(
+            dashboard
+        )
+
+
+    @staticmethod
+    def _serialize_dashboard(
+        dashboard: OperationsCenterDashboard,
+    ) -> dict[str, Any]:
+        """
+        Convert dashboard read model into stable
+        presentation contract.
+        """
+
+        return {
+
+            "system_confidence": (
+                dashboard.system_confidence
+            ),
+
+            "monitoring_status": (
+                dashboard.monitoring_status.value
+            ),
+
+            "active_providers": [
+                OperationsCenterDashboardFacade
+                ._serialize_provider(provider)
+
+                for provider
+                in dashboard.active_providers
+            ],
+
+            "active_escalations": (
+                dashboard.active_escalations
+            ),
+
+            "pending_approvals": (
+                dashboard.pending_approvals
+            ),
+
+            "approved_escalations": (
+                dashboard.approved_escalations
+            ),
+
+            "rejected_escalations": (
+                dashboard.rejected_escalations
+            ),
+
+            "pending_notifications": (
+                dashboard.pending_notifications
+            ),
+
+            "total_escalations": (
+                dashboard.total_escalations
+            ),
+        }
+
+
+    @staticmethod
+    def _serialize_provider(
+        provider: ActiveProvider,
+    ) -> dict[str, Any]:
+        """
+        Convert provider into the stable provider API model.
+
+        IMPORTANT:
+
+        Do not add health intelligence fields here.
+
+        This object is a public compatibility contract
+        consumed by existing dashboard clients/tests.
+
+        Provider intelligence belongs in a separate
+        dashboard capability.
+        """
+
+        return {
+
+            "provider": (
+                provider.provider
+            ),
+
+            "model": (
+                provider.model
+            ),
+
+            "capabilities": list(
+                provider.capabilities
+            ),
+
+            "active": (
+                provider.active
+            ),
+        }
+
+
+__all__ = [
+    "OperationsCenterDashboardFacade",
+]
+"""
+EasyChatBot AI Operations Center dashboard composition.
+
+Composition root for the read-only Operations Center
+dashboard, provider-health application stack, and
+operational-event read API.
+
+This module owns dependency construction for the
+Operations Center application boundary.
+
+It does not execute providers, agents, Runtime routing,
+or autonomous remediation.
+
+Live provider health refresh is optional and only composed
+when provider credentials are available.
+"""
+
+from __future__ import annotations
+
+import os
+
+from dataclasses import dataclass
+
+from app.application.provider_management.escalation_history_service import (
+    EscalationHistoryService,
+)
+
+from app.application.provider_management.escalation_workflow_repository import (
+    InMemoryEscalationWorkflowRepository,
+)
+
+from app.application.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+
+from app.application.provider_management.operations_center_dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+from app.application.provider_management.operations_center_dashboard_service import (
+    OperationsCenterDashboardService,
+)
+
+from app.application.provider_management.operations_center_operational_events_api import (
+    OperationsCenterOperationalEventsAPI,
+)
+
+from app.application.provider_management.operations_center_provider_service import (
+    OperationsCenterProviderService,
+)
+
+from app.application.provider_management.operations_center_provider_intelligence_service import (
+    OperationsCenterProviderIntelligenceService,
+)
+
+from app.application.provider_management.operational_event_repository import (
+    InMemoryOperationalEventRepository,
+)
+
+from app.application.provider_management.operational_event_service import (
+    OperationalEventService,
+)
+
+from app.application.provider_management.provider_health_application_service import (
+    ProviderHealthApplicationService,
+)
+
+from app.application.provider_management.provider_health_history_repository import (
+    ProviderHealthHistoryRepository,
+)
+
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+
+from app.application.provider_management.provider_health_probe_runner import (
+    ProviderHealthProbeRunner,
+)
+
+from app.application.provider_management.provider_health_refresh_service import (
+    ProviderHealthRefreshService,
+)
+
+from app.application.provider_management.provider_incident_service import (
+    InMemoryProviderIncidentRepository,
+    ProviderIncidentService,
+)
+
+from app.application.provider_management.provider_operational_event_service import (
+    ProviderOperationalEventService,
+)
+
+from backend.providers.health.ollama_cloud_health_probe import (
+    OllamaCloudHealthProbe,
+)
+
+
+@dataclass(frozen=True)
+class OperationsCenterComposition:
+    """
+    Composed Operations Center application graph.
+    """
+
+    dashboard_api: OperationsCenterDashboardAPI
+
+    health_application_service: (
+        ProviderHealthApplicationService
+    )
+
+    provider_intelligence_service: (
+        OperationsCenterProviderIntelligenceService
+    )
+
+    operational_event_service: (
+        OperationalEventService
+    )
+
+    operational_events_api: (
+        OperationsCenterOperationalEventsAPI
+    )
+
+    health_refresh_service: (
+        ProviderHealthRefreshService | None
+    )
+
+
+def create_operations_center_composition() -> (
+    OperationsCenterComposition
+):
+
+    """
+    Construct the complete Operations Center application graph.
+    """
+
+
+    #
+    # Provider health state
+    #
+
+    health_monitor = (
+        ProviderHealthMonitorService()
+    )
+
+
+    #
+    # Provider health history
+    #
+
+    health_history_repository = (
+        ProviderHealthHistoryRepository()
+    )
+
+
+    provider_intelligence_service = (
+        OperationsCenterProviderIntelligenceService(
+            repository=(
+                health_history_repository
+            )
+        )
+    )
+
+
+    #
+    # Operational events
+    #
+
+    operational_event_repository = (
+        InMemoryOperationalEventRepository()
+    )
+
+
+    operational_event_service = (
+        OperationalEventService(
+            repository=operational_event_repository
+        )
+    )
+
+
+    provider_operational_event_service = (
+        ProviderOperationalEventService(
+            operational_event_service=(
+                operational_event_service
+            )
+        )
+    )
+
+
+    operational_events_api = (
+        OperationsCenterOperationalEventsAPI(
+            operational_event_service=(
+                operational_event_service
+            )
+        )
+    )
+
+
+    #
+    # Provider incidents
+    #
+
+    incident_repository = (
+        InMemoryProviderIncidentRepository()
+    )
+
+
+    incident_service = (
+        ProviderIncidentService(
+            repository=incident_repository,
+            operational_event_service=(
+                provider_operational_event_service
+            ),
+        )
+    )
+
+
+    #
+    # Health application boundary
+    #
+
+    health_application_service = (
+        ProviderHealthApplicationService(
+            health_monitor=health_monitor,
+            incident_service=incident_service,
+        )
+    )
+
+
+    #
+    # Optional live provider refresh
+    #
+
+    health_refresh_service = None
+
+
+    ollama_api_key = os.getenv(
+        "OLLAMA_API_KEY"
+    )
+
+
+    if ollama_api_key:
+
+        ollama_probe = (
+            OllamaCloudHealthProbe()
+        )
+
+
+        probe_runner = (
+            ProviderHealthProbeRunner(
+                health_application_service=(
+                    health_application_service
+                ),
+                probes=[
+                    ollama_probe,
+                ],
+            )
+        )
+
+
+        health_refresh_service = (
+            ProviderHealthRefreshService(
+                probe_runner=probe_runner
+            )
+        )
+
+
+    #
+    # Escalation history
+    #
+
+    workflow_repository = (
+        InMemoryEscalationWorkflowRepository()
+    )
+
+
+    history_service = (
+        EscalationHistoryService(
+            repository=workflow_repository
+        )
+    )
+
+
+    #
+    # Provider dashboard service
+    #
+
+    provider_service = (
+        OperationsCenterProviderService(
+            health_monitor=health_monitor
+        )
+    )
+
+
+    dashboard_service = (
+        OperationsCenterDashboardService(
+            history_service=history_service,
+            provider_service=provider_service,
+        )
+    )
+
+
+    facade = (
+        OperationsCenterDashboardFacade(
+            dashboard_service=dashboard_service
+        )
+    )
+
+
+    dashboard_api = (
+        OperationsCenterDashboardAPI(
+            facade=facade
+        )
+    )
+
+
+    return OperationsCenterComposition(
+        dashboard_api=dashboard_api,
+
+        health_application_service=(
+            health_application_service
+        ),
+
+        provider_intelligence_service=(
+            provider_intelligence_service
+        ),
+
+        operational_event_service=(
+            operational_event_service
+        ),
+
+        operational_events_api=(
+            operational_events_api
+        ),
+
+        health_refresh_service=(
+            health_refresh_service
+        ),
+    )
+
+
+def create_operations_center_dashboard_api() -> (
+    OperationsCenterDashboardAPI
+):
+
+    composition = (
+        create_operations_center_composition()
+    )
+
+    return composition.dashboard_api

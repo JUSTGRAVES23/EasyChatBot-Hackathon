@@ -32,10 +32,22 @@ from backend.api.character_theme_routes import (
 from backend.api.character_routes import (
     router as character_router,
 )
-from backend.application.bootstrap import bootstrap_application
+
+from backend.application.bootstrap import (
+    bootstrap_application,
+)
+
+from backend.application.telegram_bootstrap import (
+    start_telegram_runtime,
+    stop_telegram_runtime,
+)
 
 from app.interfaces.provider_management.operations_center_dashboard_router import (
     router as operations_center_dashboard_router,
+)
+
+from backend.app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
 )
 
 
@@ -47,10 +59,11 @@ async def lifespan(
     Manage application startup and shutdown lifecycle.
 
     Startup:
-        bootstrap application dependencies.
+        - compose application dependencies;
+        - start Telegram transport runtime.
 
     Shutdown:
-        reserved for future controlled cleanup.
+        - stop Telegram transport runtime.
 
     This layer does not:
 
@@ -62,7 +75,13 @@ async def lifespan(
 
     bootstrap_application()
 
-    yield
+    await start_telegram_runtime()
+
+    try:
+        yield
+
+    finally:
+        await stop_telegram_runtime()
 
 
 def create_app() -> FastAPI:
@@ -74,9 +93,9 @@ def create_app() -> FastAPI:
 
     This function:
 
-    - creates the application object;
+    - creates the FastAPI application;
     - configures local frontend access;
-    - registers routes;
+    - registers API routes;
     - attaches lifecycle management.
 
     It does not:
@@ -139,20 +158,17 @@ def create_app() -> FastAPI:
     # =========================================================
     # AI Operations Center Routes
     # =========================================================
-    #
-    # Read-only Operations Center boundary.
-    #
-    # Exposes:
-    #
-    #     GET /api/operations-center/dashboard
-    #     GET /api/operations-center/operational-events
-    #
-    # The router delegates to the already-composed application
-    # services. The FastAPI bootstrap does not create providers,
-    # Runtime components, repositories, or operational events.
 
     application.include_router(
         operations_center_dashboard_router,
+    )
+
+    # =========================================================
+    # Cybersecurity Intelligence Routes
+    # =========================================================
+
+    application.include_router(
+        cybersecurity_intelligence_router,
     )
 
     return application
@@ -173,4 +189,3 @@ def health() -> dict[str, str]:
             "Runtime + Agents + Memory"
         ),
     }
-

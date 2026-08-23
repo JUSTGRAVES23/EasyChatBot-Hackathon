@@ -12,6 +12,9 @@ CapabilityRegistry
 PodcastDiscoveryExecutor
         |
         v
+PodcastRecommendationService
+        |
+        v
 ParallelPodcastProvider
 
 
@@ -21,11 +24,34 @@ Does not call:
 - external services
 - Gemini
 - Google Cloud
+
+The Runtime currently composes five supported capability
+executors, including Flashcard Generation.
 """
 
 from __future__ import annotations
 
 from unittest.mock import Mock
+
+from src.ai_runtime.capabilities.flashcard_generation_executor import (
+    FlashcardGenerationExecutor,
+)
+
+from src.ai_runtime.capabilities.listening_proposal_executor import (
+    ListeningProposalExecutor,
+)
+
+from src.ai_runtime.capabilities.live_intelligence_executor import (
+    LiveIntelligenceExecutor,
+)
+
+from src.ai_runtime.capabilities.podcast_discovery_executor import (
+    PodcastDiscoveryExecutor,
+)
+
+from src.ai_runtime.capabilities.podcast_learning_challenge_executor import (
+    PodcastLearningChallengeExecutor,
+)
 
 from src.ai_runtime.composition import (
     create_capability_executors,
@@ -70,6 +96,9 @@ def test_runtime_composition_accepts_parallel_provider():
     through the existing PodcastProvider boundary.
 
     It must not know Parallel implementation details.
+
+    The Runtime currently creates five supported capability
+    executors.
     """
 
     provider = ParallelPodcastProvider()
@@ -86,7 +115,47 @@ def test_runtime_composition_accepts_parallel_provider():
         ],
     )
 
-    assert len(executors) == 4
+    assert len(executors) == 5
+
+    assert any(
+        isinstance(
+            executor,
+            LiveIntelligenceExecutor,
+        )
+        for executor in executors
+    )
+
+    assert any(
+        isinstance(
+            executor,
+            PodcastDiscoveryExecutor,
+        )
+        for executor in executors
+    )
+
+    assert any(
+        isinstance(
+            executor,
+            PodcastLearningChallengeExecutor,
+        )
+        for executor in executors
+    )
+
+    assert any(
+        isinstance(
+            executor,
+            ListeningProposalExecutor,
+        )
+        for executor in executors
+    )
+
+    assert any(
+        isinstance(
+            executor,
+            FlashcardGenerationExecutor,
+        )
+        for executor in executors
+    )
 
 
 def test_parallel_provider_is_injected_without_runtime_changes():
@@ -95,6 +164,14 @@ def test_parallel_provider_is_injected_without_runtime_changes():
 
     Runtime composition receives providers;
     it does not create them.
+
+    The supplied Parallel provider must reach the existing
+    PodcastRecommendationService through the
+    PodcastDiscoveryExecutor.
+
+    The test intentionally verifies the existing ownership
+    boundary rather than requiring PodcastDiscoveryExecutor
+    to expose provider state directly.
     """
 
     provider = ParallelPodcastProvider(
@@ -113,6 +190,24 @@ def test_parallel_provider_is_injected_without_runtime_changes():
         ],
     )
 
-    podcast_executor = executors[1]
+    podcast_executor = next(
+        executor
+        for executor in executors
+        if isinstance(
+            executor,
+            PodcastDiscoveryExecutor,
+        )
+    )
 
     assert podcast_executor is not None
+
+    recommendation_service = (
+        podcast_executor._recommendation_service
+    )
+
+    assert recommendation_service is not None
+
+    assert (
+        provider
+        in recommendation_service._providers
+    )

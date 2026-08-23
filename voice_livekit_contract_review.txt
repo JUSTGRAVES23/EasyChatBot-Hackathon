@@ -1,0 +1,2112 @@
+﻿===== DOMAIN: VOICE CONNECTION TOKEN =====
+"""
+Voice Connection Token Domain Model.
+
+Represents provider-independent credentials
+required to connect to a voice room.
+
+Responsibilities:
+- Preserve connection token identity.
+- Preserve room and provider information.
+- Validate token expiration.
+- Support both legacy naive UTC datetimes
+  and timezone-aware UTC datetimes.
+
+Does NOT:
+- Generate provider tokens.
+- Connect to LiveKit.
+- Handle HTTP.
+- Persist credentials.
+"""
+
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from datetime import (
+    datetime,
+    timezone,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceConnectionToken:
+    """
+    Provider-independent voice connection token.
+    """
+
+    token: str
+
+    room_name: str
+
+    provider: str
+
+    expires_at: datetime
+
+
+
+    def __post_init__(
+        self,
+    ) -> None:
+        """
+        Validate token invariants.
+
+        The existing application supports legacy
+        naive UTC datetimes.
+
+        New infrastructure integrations such as
+        LiveKit may provide timezone-aware UTC
+        datetimes.
+
+        The domain therefore accepts both forms
+        while performing expiration validation
+        using UTC-aware values internally.
+        """
+
+
+
+        if not self.token.strip():
+
+            raise ValueError(
+                "token cannot be empty."
+            )
+
+
+
+        if not self.room_name.strip():
+
+            raise ValueError(
+                "room_name cannot be empty."
+            )
+
+
+
+        if not self.provider.strip():
+
+            raise ValueError(
+                "provider cannot be empty."
+            )
+
+
+
+        expiration_utc = (
+            self._to_utc(
+                self.expires_at
+            )
+        )
+
+
+
+        now_utc = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+
+
+        if expiration_utc <= now_utc:
+
+            raise ValueError(
+                "expires_at must be in the future."
+            )
+
+
+
+    @staticmethod
+    def _to_utc(
+        value: datetime,
+    ) -> datetime:
+        """
+        Convert a datetime to timezone-aware UTC
+        for internal validation.
+
+        Naive datetimes are treated as legacy UTC.
+
+        The original value is intentionally preserved
+        on the immutable domain object so existing
+        callers and contracts remain compatible.
+        """
+
+
+
+        if value.tzinfo is None:
+
+            return value.replace(
+                tzinfo=timezone.utc
+            )
+
+
+
+        return value.astimezone(
+            timezone.utc
+        )
+
+
+
+__all__ = [
+    "VoiceConnectionToken",
+]
+===== INFRASTRUCTURE: LIVEKIT TOKEN SERVICE =====
+"""
+LiveKit Token Service.
+
+Infrastructure service responsible for generating
+real LiveKit participant access tokens.
+
+Responsibilities:
+- Generate signed LiveKit JWT access tokens.
+- Grant participant access to a specific room.
+- Keep LiveKit credentials inside infrastructure.
+- Return provider-independent VoiceConnectionToken.
+
+Does NOT:
+- Handle HTTP.
+- Manage application workflows.
+- Decide business authorization.
+- Persist tokens.
+- Execute AI agents.
+"""
+
+from __future__ import annotations
+
+
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
+
+
+import os
+import uuid
+
+
+from dotenv import load_dotenv
+
+
+from livekit import api
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+load_dotenv()
+
+
+
+class LiveKitTokenService:
+    """
+    Real LiveKit access-token infrastructure adapter.
+    """
+
+
+
+    def create_token(
+        self,
+        *,
+        room_name: str,
+        identity: str | None = None,
+        expires_minutes: int = 30,
+    ) -> VoiceConnectionToken:
+        """
+        Create a signed LiveKit participant token.
+
+        Parameters
+        ----------
+        room_name:
+            LiveKit room the participant may join.
+
+        identity:
+            Unique LiveKit participant identity.
+
+        expires_minutes:
+            Token validity period.
+        """
+
+
+
+        if not room_name.strip():
+
+            raise ValueError(
+                "room_name cannot be empty."
+            )
+
+
+
+        if expires_minutes <= 0:
+
+            raise ValueError(
+                "expires_minutes must be positive."
+            )
+
+
+
+        participant_identity = (
+            identity.strip()
+            if identity is not None
+            else f"learner-{uuid.uuid4()}"
+        )
+
+
+
+        if not participant_identity:
+
+            raise ValueError(
+                "identity cannot be empty."
+            )
+
+
+
+        api_key = os.getenv(
+            "LIVEKIT_API_KEY"
+        )
+
+
+
+        api_secret = os.getenv(
+            "LIVEKIT_API_SECRET"
+        )
+
+
+
+        if not api_key:
+
+            raise RuntimeError(
+                "LIVEKIT_API_KEY is not configured."
+            )
+
+
+
+        if not api_secret:
+
+            raise RuntimeError(
+                "LIVEKIT_API_SECRET is not configured."
+            )
+
+
+
+        expires_at = (
+            datetime.now(
+                timezone.utc
+            )
+            + timedelta(
+                minutes=expires_minutes,
+            )
+        )
+
+
+
+        access_token = (
+            api.AccessToken(
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            .with_identity(
+                participant_identity,
+            )
+            .with_name(
+                participant_identity,
+            )
+            .with_ttl(
+                timedelta(
+                    minutes=expires_minutes,
+                )
+            )
+            .with_grants(
+                api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
+            )
+        )
+
+
+
+        token = (
+            access_token.to_jwt()
+        )
+
+
+
+        return VoiceConnectionToken(
+            token=token,
+            room_name=room_name,
+            provider="livekit",
+            expires_at=expires_at,
+        )
+
+
+
+__all__ = [
+    "LiveKitTokenService",
+]
+===== INFRASTRUCTURE: LIVEKIT ADAPTER =====
+"""
+LiveKit Infrastructure Adapter.
+
+Infrastructure boundary for LiveKit room configuration.
+
+Responsibilities:
+- Translate voice session information into
+  LiveKit provider configuration.
+- Keep LiveKit-specific details inside infrastructure.
+- Prepare provider connection metadata.
+
+Does NOT:
+- Decide when a call starts.
+- Manage learner business logic.
+- Execute AI agents.
+- Manage application lifecycle.
+- Persist data.
+- Generate participant tokens.
+"""
+
+from __future__ import annotations
+
+
+import logging
+
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+logger = logging.getLogger(
+    __name__
+)
+
+
+
+class LiveKitAdapter:
+    """
+    Infrastructure adapter for LiveKit.
+
+    Converts the provider-independent voice session
+    into LiveKit room configuration.
+
+    Token generation is deliberately handled by
+    LiveKitTokenService.
+    """
+
+
+
+    provider = "livekit"
+
+
+
+    def create_room_configuration(
+        self,
+        *,
+        session: VoiceSession,
+    ) -> dict[str, str]:
+        """
+        Prepare LiveKit room configuration.
+
+        Parameters
+        ----------
+        session:
+            Provider-independent voice session.
+
+        Returns
+        -------
+        dict[str, str]
+            LiveKit room metadata.
+        """
+
+
+
+        if not session.room_name.strip():
+
+            raise ValueError(
+                "Voice room name cannot be empty."
+            )
+
+
+
+        if not session.character_id.strip():
+
+            raise ValueError(
+                "Voice session character id "
+                "cannot be empty."
+            )
+
+
+
+        logger.info(
+            "Preparing LiveKit room configuration",
+            extra={
+                "session_id": (
+                    session.session_id
+                ),
+                "room_name": (
+                    session.room_name
+                ),
+                "character_id": (
+                    session.character_id
+                ),
+                "language_code": (
+                    session.language_code
+                ),
+            },
+        )
+
+
+
+        return {
+            "room_name": (
+                session.room_name
+            ),
+            "character_id": (
+                session.character_id
+            ),
+            "language_code": (
+                session.language_code
+            ),
+            "provider": self.provider,
+        }
+
+
+
+__all__ = [
+    "LiveKitAdapter",
+]
+===== APPLICATION: VOICE CONNECTION SERVICE =====
+"""
+Voice Connection Service.
+
+Application service responsible for
+creating voice connection credentials.
+
+Responsibilities:
+- Coordinate token creation.
+- Request infrastructure token generation.
+- Return domain connection token.
+
+Does NOT:
+- Handle HTTP.
+- Generate provider tokens.
+- Manage LiveKit directly.
+- Persist credentials.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceConnectionService:
+    """
+    Application boundary for voice connections.
+    """
+
+    token_service: LiveKitTokenService
+
+
+
+    def create_connection(
+        self,
+        *,
+        room_name: str,
+    ) -> VoiceConnectionToken:
+        """
+        Create voice connection credentials.
+        """
+
+
+        return (
+            self.token_service
+            .create_token(
+                room_name=room_name,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceConnectionService",
+]
+===== APPLICATION: VOICE ROOM SERVICE =====
+"""
+Voice Room Service.
+
+Application service responsible for
+preparing voice room configuration.
+
+Responsibilities:
+- Coordinate execution context.
+- Request room preparation.
+- Return provider-independent
+  room configuration.
+
+Does NOT:
+- Handle HTTP.
+- Execute AI.
+- Manage providers directly.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceRoomService:
+    """
+    Application boundary for
+    voice room preparation.
+    """
+
+    room_adapter: VoiceRoomAdapter
+
+
+
+    def prepare_room(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room configuration.
+        """
+
+
+        return (
+            self.room_adapter
+            .create_room_configuration(
+                context=context,
+            )
+        )
+===== COMPOSITION: VOICE CONNECTION =====
+"""
+Voice Connection Composition.
+
+Composition root for voice connection
+application services.
+
+Responsibilities:
+- Build token dependencies.
+- Wire infrastructure adapters.
+- Return ready application services.
+
+Does NOT:
+- Handle HTTP.
+- Generate tokens directly.
+- Execute voice calls.
+- Persist credentials.
+"""
+
+from __future__ import annotations
+
+
+from app.application.uai.voice.voice_connection_service import (
+    VoiceConnectionService,
+)
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+
+def create_voice_connection_service(
+) -> VoiceConnectionService:
+    """
+    Create configured voice connection service.
+    """
+
+
+    token_service = LiveKitTokenService()
+
+
+    return VoiceConnectionService(
+        token_service=token_service,
+    )
+
+
+
+def build_voice_connection_service(
+) -> VoiceConnectionService:
+    """
+    Dependency builder for application adapters.
+
+    Keeps dependency creation outside
+    HTTP and application workflows.
+    """
+
+
+    return (
+        create_voice_connection_service()
+    )
+
+
+
+__all__ = [
+    "create_voice_connection_service",
+    "build_voice_connection_service",
+]
+===== COMPOSITION: VOICE LIFECYCLE =====
+"""
+Voice Call Lifecycle Composition.
+
+Composition root for the complete
+voice call lifecycle application service.
+
+Responsibilities:
+- Build lifecycle dependencies.
+- Wire execution coordinator.
+- Wire connection services.
+- Wire persistent voice call services.
+- Wire voice event services.
+- Return ready application facade.
+
+Does NOT:
+- Handle HTTP.
+- Execute voice calls.
+- Manage providers.
+- Persist data directly.
+"""
+
+from __future__ import annotations
+
+
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+
+from app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+
+
+
+from app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+
+
+from app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+
+from app.application.composition.voice_connection_composition import (
+    create_voice_connection_service,
+)
+
+
+
+from app.application.composition.voice_event_composition import (
+    build_voice_call_event_service,
+)
+
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+
+from app.infrastructure.persistence.voice_call_repository import (
+    InMemoryVoiceCallRepository,
+)
+
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+
+def create_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Create configured voice lifecycle service.
+    """
+
+
+
+    room_service = VoiceRoomService(
+        room_adapter=(
+            VoiceRoomAdapter()
+        ),
+    )
+
+
+
+    execution_runtime = (
+        VoiceCallExecutionRuntime()
+    )
+
+
+
+    execution_coordinator = (
+        VoiceCallExecutionCoordinator(
+            room_service=room_service,
+            execution_runtime=execution_runtime,
+        )
+    )
+
+
+
+    connection_service = (
+        create_voice_connection_service()
+    )
+
+
+
+    voice_call_repository = (
+        InMemoryVoiceCallRepository()
+    )
+
+
+
+    voice_call_management_service = (
+        VoiceCallManagementService(
+            repository=(
+                voice_call_repository
+            ),
+        )
+    )
+
+
+
+    voice_call_session_service = (
+        VoiceCallSessionService()
+    )
+
+
+
+    voice_call_event_service = (
+        build_voice_call_event_service()
+    )
+
+
+
+    return VoiceCallLifecycleService(
+
+        execution_coordinator=(
+            execution_coordinator
+        ),
+
+
+        connection_service=(
+            connection_service
+        ),
+
+
+        voice_call_management_service=(
+            voice_call_management_service
+        ),
+
+
+        voice_call_session_service=(
+            voice_call_session_service
+        ),
+
+
+        voice_call_event_service=(
+            voice_call_event_service
+        ),
+    )
+
+
+
+def build_voice_call_lifecycle_service(
+) -> VoiceCallLifecycleService:
+    """
+    Dependency builder for application adapters.
+
+    Keeps API composition isolated from
+    internal dependency creation.
+    """
+
+
+    return (
+        create_voice_call_lifecycle_service()
+    )
+
+
+
+__all__ = [
+    "create_voice_call_lifecycle_service",
+    "build_voice_call_lifecycle_service",
+]
+===== APPLICATION: VOICE LIFECYCLE =====
+"""
+Voice Call Lifecycle Service.
+
+Application facade for the complete
+voice call lifecycle.
+
+Responsibilities:
+- Coordinate voice call execution.
+- Create persistent voice call identity.
+- Create execution sessions.
+- Generate voice connections.
+- Handle reconnect lifecycle.
+- Record lifecycle events.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers directly.
+- Connect LiveKit directly.
+- Persist directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_connection_service import (
+    VoiceConnectionService,
+)
+
+
+from app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+
+
+from app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+
+from app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallLifecycleService:
+    """
+    Application lifecycle facade.
+    """
+
+
+    execution_coordinator: (
+        VoiceCallExecutionCoordinator
+    )
+
+
+    connection_service: (
+        VoiceConnectionService | None
+    ) = None
+
+
+    voice_call_management_service: (
+        VoiceCallManagementService | None
+    ) = None
+
+
+    voice_call_session_service: (
+        VoiceCallSessionService | None
+    ) = None
+
+
+    voice_call_event_service: (
+        VoiceCallEventService | None
+    ) = None
+
+
+
+    def start_call(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room, execute call,
+        create connection and record event.
+        """
+
+
+        result = (
+            self.execution_coordinator
+            .start(
+                context=context,
+            )
+        )
+
+
+        session = result["session"]
+
+
+        if self.voice_call_event_service is not None:
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=(
+                    session.session_id
+                ),
+                learner_id=(
+                    session.learner_id
+                ),
+                character_id=(
+                    session.character_id
+                ),
+                event_type=(
+                    VoiceCallEventType.STARTED
+                ),
+            )
+
+
+        if self.connection_service is not None:
+
+            connection = (
+                self.connection_service
+                .create_connection(
+                    room_name=(
+                        result["room"]["room_name"]
+                    ),
+                )
+            )
+
+
+            result["connection"] = (
+                connection
+            )
+
+
+        return result
+
+
+
+    def create_voice_call(
+        self,
+        *,
+        learner_id: str,
+        character_id: str,
+        world_id: str,
+        language_code: str,
+    ) -> VoiceCall:
+        """
+        Create persistent voice identity.
+        """
+
+
+        if (
+            self.voice_call_management_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call management service "
+                "not configured."
+            )
+
+
+        return (
+            self.voice_call_management_service
+            .create_call(
+                learner_id=learner_id,
+                character_id=character_id,
+                world_id=world_id,
+                language_code=language_code,
+            )
+        )
+
+
+
+    def create_session(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Create execution session.
+        """
+
+
+        if (
+            self.voice_call_session_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call session service "
+                "not configured."
+            )
+
+
+        return (
+            self.voice_call_session_service
+            .create_session(
+                voice_call=voice_call,
+            )
+        )
+
+
+
+    def reconnect_call(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Reconnect existing voice call.
+        """
+
+
+        if (
+            self.voice_call_session_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call session service "
+                "not configured."
+            )
+
+
+        session = (
+            self.voice_call_session_service
+            .reconnect_session(
+                voice_call=voice_call,
+            )
+        )
+
+
+        if self.voice_call_event_service is not None:
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=(
+                    voice_call.id
+                ),
+                learner_id=(
+                    voice_call.learner_id
+                ),
+                character_id=(
+                    voice_call.character_id
+                ),
+                event_type=(
+                    VoiceCallEventType.RECONNECTED
+                ),
+            )
+
+
+        return session
+
+
+
+__all__ = [
+    "VoiceCallLifecycleService",
+]
+===== TEST: LIVEKIT TOKEN SERVICE =====
+"""
+Tests for LiveKit Token Service.
+
+Validates the real LiveKit infrastructure adapter.
+
+Responsibilities tested:
+- Real JWT generation.
+- Room binding.
+- Provider identity.
+- Participant identity.
+- Expiration handling.
+- Input validation.
+"""
+
+from __future__ import annotations
+
+
+from datetime import (
+    datetime,
+    timezone,
+)
+
+
+import base64
+import json
+
+
+import pytest
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+
+def decode_jwt_payload(
+    token: str,
+) -> dict:
+    """
+    Decode the JWT payload without verifying
+    the signature.
+
+    Signature verification belongs to LiveKit.
+    These tests only validate the claims generated
+    by our infrastructure adapter.
+    """
+
+    parts = token.split(".")
+
+    assert len(parts) == 3
+
+    payload = parts[1]
+
+    padding = (
+        "="
+        * (
+            4
+            - len(payload) % 4
+        )
+    )
+
+    decoded = base64.urlsafe_b64decode(
+        payload + padding
+    )
+
+    return json.loads(
+        decoded.decode("utf-8")
+    )
+
+
+
+def test_create_livekit_token():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    token = (
+        service.create_token(
+            room_name="yeti-room-001",
+        )
+    )
+
+
+    assert isinstance(
+        token,
+        VoiceConnectionToken,
+    )
+
+
+    assert token.room_name == (
+        "yeti-room-001"
+    )
+
+
+    assert token.provider == (
+        "livekit"
+    )
+
+
+    # A real LiveKit JWT is generated.
+    assert token.token.count(".") == 2
+
+
+    assert token.token.startswith(
+        "eyJ"
+    )
+
+
+    payload = (
+        decode_jwt_payload(
+            token.token
+        )
+    )
+
+
+    assert payload["sub"].startswith(
+        "learner-"
+    )
+
+
+    assert payload["video"]["roomJoin"] is True
+
+
+    assert payload["video"]["room"] == (
+        "yeti-room-001"
+    )
+
+
+
+def test_custom_expiration_time():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    token = (
+        service.create_token(
+            room_name="room-001",
+            expires_minutes=60,
+        )
+    )
+
+
+    now = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+
+    assert token.expires_at > (
+        now
+    )
+
+
+    remaining_seconds = (
+        token.expires_at - now
+    ).total_seconds()
+
+
+    # Allow a small execution-time tolerance.
+    assert 3500 < (
+        remaining_seconds
+    ) <= 3600
+
+
+    payload = (
+        decode_jwt_payload(
+            token.token
+        )
+    )
+
+
+    assert payload["exp"] > (
+        payload["nbf"]
+    )
+
+
+
+def test_empty_room_name_is_rejected():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    with pytest.raises(
+        ValueError,
+        match="room_name cannot be empty",
+    ):
+
+        service.create_token(
+            room_name="",
+        )
+
+
+
+def test_invalid_expiration_is_rejected():
+
+    service = (
+        LiveKitTokenService()
+    )
+
+
+    with pytest.raises(
+        ValueError,
+        match="expires_minutes must be positive",
+    ):
+
+        service.create_token(
+            room_name="room-001",
+            expires_minutes=0,
+        )
+===== TEST: LIVEKIT ADAPTER =====
+"""
+Tests for LiveKit Infrastructure Adapter.
+"""
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+from app.infrastructure.voice.livekit_adapter import (
+    LiveKitAdapter,
+)
+
+
+def test_create_room_configuration():
+
+    adapter = LiveKitAdapter()
+
+
+    session = VoiceSession(
+        session_id="session-001",
+        room_name="yeti-session-001",
+        character_id="yeti",
+        language_code="fr",
+    )
+
+
+    configuration = (
+        adapter.create_room_configuration(
+            session=session,
+        )
+    )
+
+
+    assert configuration["room_name"] == (
+        "yeti-session-001"
+    )
+
+
+    assert configuration["character_id"] == (
+        "yeti"
+    )
+
+
+    assert configuration["language_code"] == (
+        "fr"
+    )
+
+
+    assert configuration["provider"] == (
+        "livekit"
+    )
+===== TEST: VOICE CONNECTION SERVICE =====
+"""
+Tests for Voice Connection Service.
+
+Validates the application boundary
+for creating voice connection credentials.
+"""
+
+from app.application.uai.voice.voice_connection_service import (
+    VoiceConnectionService,
+)
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+
+def create_service() -> VoiceConnectionService:
+    """
+    Create application service.
+    """
+
+    return VoiceConnectionService(
+        token_service=(
+            LiveKitTokenService()
+        ),
+    )
+
+
+
+def test_create_connection_token():
+
+    service = create_service()
+
+
+    token = service.create_connection(
+        room_name="yeti-room-001",
+    )
+
+
+    assert isinstance(
+        token,
+        VoiceConnectionToken,
+    )
+
+
+    assert token.room_name == (
+        "yeti-room-001"
+    )
+
+
+    assert token.provider == (
+        "livekit"
+    )
+
+
+    assert token.token.startswith(
+        "livekit-"
+    )
+
+
+
+def test_connection_token_has_expiration():
+
+    service = create_service()
+
+
+    token = service.create_connection(
+        room_name="room-001",
+    )
+
+
+    assert token.expires_at is not None
+
+
+
+def test_empty_room_name_is_rejected():
+
+    service = create_service()
+
+
+    try:
+
+        service.create_connection(
+            room_name="",
+        )
+
+
+        assert False
+
+
+    except ValueError:
+
+        assert True
+===== TEST: LIFECYCLE CONNECTION =====
+"""
+Tests for Voice Call Lifecycle Connection Integration.
+
+Validates that the lifecycle service
+creates execution state together with
+voice connection credentials.
+"""
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+from app.application.composition.voice_lifecycle_composition import (
+    create_voice_call_lifecycle_service,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+def create_context() -> VoiceCallExecutionContext:
+    """
+    Create valid execution context.
+    """
+
+
+    session = VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=VoiceCallState.READY,
+    )
+
+
+    room = VoiceCallRoom(
+        room_id="room-001",
+        participants=(
+            VoiceCallParticipant(
+                participant_id="learner-001",
+                role=VoiceParticipantRole.LEARNER,
+                display_name="Learner",
+            ),
+            VoiceCallParticipant(
+                participant_id="yeti",
+                role=VoiceParticipantRole.CHARACTER,
+                display_name="Yeti",
+            ),
+        ),
+    )
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def test_lifecycle_service_has_connection_service():
+
+    service = (
+        create_voice_call_lifecycle_service()
+    )
+
+
+    assert isinstance(
+        service,
+        VoiceCallLifecycleService,
+    )
+
+
+    assert (
+        service.connection_service
+        is not None
+    )
+
+
+
+def test_start_call_creates_connection():
+
+    service = (
+        create_voice_call_lifecycle_service()
+    )
+
+
+    result = service.start_call(
+        context=create_context(),
+    )
+
+
+    assert "connection" in result
+
+
+    connection = result["connection"]
+
+
+    assert connection.provider == (
+        "livekit"
+    )
+
+
+    assert connection.room_name == (
+        "room-001"
+    )
+
+
+    assert connection.token.startswith(
+        "livekit-"
+    )
+
+
+
+def test_start_call_keeps_runtime_active():
+
+    service = (
+        create_voice_call_lifecycle_service()
+    )
+
+
+    result = service.start_call(
+        context=create_context(),
+    )
+
+
+    assert result["session"].state == (
+        VoiceCallState.ACTIVE
+    )
+===== TEST: VOICE ROOM SERVICE =====
+"""
+Tests for Voice Room Service.
+
+Validates application orchestration
+for preparing provider-independent
+voice room configuration.
+"""
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+def create_execution_context() -> VoiceCallExecutionContext:
+    """
+    Create test execution context.
+    """
+
+
+    session = VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+    )
+
+
+    room = VoiceCallRoom(
+        room_id="room-001",
+        participants=(
+            VoiceCallParticipant(
+                participant_id="learner-001",
+                role=VoiceParticipantRole.LEARNER,
+                display_name="Learner",
+            ),
+            VoiceCallParticipant(
+                participant_id="yeti",
+                role=VoiceParticipantRole.CHARACTER,
+                display_name="Yeti",
+            ),
+        ),
+    )
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def test_prepare_room_configuration():
+
+    service = VoiceRoomService(
+        room_adapter=VoiceRoomAdapter(),
+    )
+
+
+    configuration = (
+        service.prepare_room(
+            context=create_execution_context(),
+        )
+    )
+
+
+    assert configuration["room_name"] == (
+        "room-001"
+    )
+
+
+    assert configuration["provider"] == (
+        "livekit"
+    )
+
+
+
+def test_prepare_room_contains_participants():
+
+    service = VoiceRoomService(
+        room_adapter=VoiceRoomAdapter(),
+    )
+
+
+    configuration = (
+        service.prepare_room(
+            context=create_execution_context(),
+        )
+    )
+
+
+    assert configuration["participants"] == [
+        "learner-001",
+        "yeti",
+    ]
+
+
+
+def test_prepare_room_keeps_character_identity():
+
+    service = VoiceRoomService(
+        room_adapter=VoiceRoomAdapter(),
+    )
+
+
+    configuration = (
+        service.prepare_room(
+            context=create_execution_context(),
+        )
+    )
+
+
+    assert "yeti" in (
+        configuration["participants"]
+    )
+===== TEST: VOICE LIFECYCLE SERVICE =====
+"""
+Tests for Voice Call Lifecycle Service.
+
+Validates the application facade
+for complete voice call lifecycle.
+"""
+
+from app.application.uai.voice.voice_call_lifecycle_service import (
+    VoiceCallLifecycleService,
+)
+
+
+from app.application.uai.voice.voice_connection_service import (
+    VoiceConnectionService,
+)
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.infrastructure.voice.voice_room_adapter import (
+    VoiceRoomAdapter,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+from app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+from app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+def create_service() -> VoiceCallLifecycleService:
+    """
+    Create lifecycle service.
+    """
+
+
+    coordinator = (
+        VoiceCallExecutionCoordinator(
+            room_service=(
+                VoiceRoomService(
+                    room_adapter=(
+                        VoiceRoomAdapter()
+                    ),
+                )
+            ),
+            execution_runtime=(
+                VoiceCallExecutionRuntime()
+            ),
+        )
+    )
+
+
+    connection_service = (
+        VoiceConnectionService(
+            token_service=(
+                LiveKitTokenService()
+            ),
+        )
+    )
+
+
+    return VoiceCallLifecycleService(
+        execution_coordinator=coordinator,
+        connection_service=connection_service,
+    )
+
+
+
+def create_context() -> VoiceCallExecutionContext:
+    """
+    Create execution context.
+    """
+
+
+    session = VoiceCallSession(
+        session_id="call-001",
+        learner_id="learner-001",
+        character_id="yeti",
+        world_id="french_world",
+        language_code="fr",
+        state=VoiceCallState.READY,
+    )
+
+
+    room = VoiceCallRoom(
+        room_id="room-001",
+        participants=(
+            VoiceCallParticipant(
+                participant_id="learner-001",
+                role=VoiceParticipantRole.LEARNER,
+                display_name="Learner",
+            ),
+            VoiceCallParticipant(
+                participant_id="yeti",
+                role=VoiceParticipantRole.CHARACTER,
+                display_name="Yeti",
+            ),
+        ),
+    )
+
+
+    return VoiceCallExecutionContext(
+        session=session,
+        room=room,
+    )
+
+
+
+def test_start_call_lifecycle():
+
+    service = create_service()
+
+
+    result = service.start_call(
+        context=create_context(),
+    )
+
+
+    assert result["session"].state == (
+        VoiceCallState.ACTIVE
+    )
+
+
+    assert "connection" in result
+
+
+
+def test_lifecycle_preserves_character():
+
+    service = create_service()
+
+
+    result = service.start_call(
+        context=create_context(),
+    )
+
+
+    assert result["session"].character_id == (
+        "yeti"
+    )
+
+
+
+def test_lifecycle_preserves_learner():
+
+    service = create_service()
+
+
+    result = service.start_call(
+        context=create_context(),
+    )
+
+
+    assert result["session"].learner_id == (
+        "learner-001"
+    )
+===== ALL LIVEKIT TOKEN ASSUMPTIONS =====
+
+Path                                                                                                           LineNumber Line                                                  
+----                                                                                                           ---------- ----                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py                  154                 .create_connection(                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_connection_service.py                       31     VoiceConnectionToken,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_connection_service.py                       49     def create_connection(                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_connection_service.py                       53     ) -> VoiceConnectionToken:                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_connection_service.py                       61             .create_token(                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py                              39 class VoiceConnectionToken:                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py                             154     "VoiceConnectionToken",                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py                                  9 - Keep LiveKit-specific details inside infrastructure.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                           11 - Return provider-independent VoiceConnectionToken.   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                           42     VoiceConnectionToken,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                           57     def create_token(                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                           63     ) -> VoiceConnectionToken:                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                          187         return VoiceConnectionToken(                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_voice_calls.py                                               79         "livekit-"                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_lifecycle_connection.py        134     assert connection.token.startswith(               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_call_lifecycle_connection.py        135         "livekit-"                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                19     VoiceConnectionToken,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                37 def test_create_connection_token():                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                42     token = service.create_connection(                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                49         VoiceConnectionToken,                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                63     assert token.token.startswith(                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                64         "livekit-"                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                74     token = service.create_connection(                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\uai\voice\test_voice_connection_service.py                90         service.create_connection(                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_connection_token.py                       13     VoiceConnectionToken,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_connection_token.py                       18 def create_valid_token() -> VoiceConnectionToken:     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_connection_token.py                       23     return VoiceConnectionToken(                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_connection_token.py                       73         VoiceConnectionToken(                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_connection_token.py                       99         VoiceConnectionToken(                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\domain\uai\voice\test_voice_connection_token.py                      125         VoiceConnectionToken(                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                    32     VoiceConnectionToken,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                    86         service.create_token(                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                    94         VoiceConnectionToken,                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                   112     assert token.token.startswith(                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                   146         service.create_token(                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                   201         service.create_token(                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py                   219         service.create_token(                         
+
+
+
+===== ALL LIVEKIT FILES =====
+
+FullName                                                                                            Length
+--------                                                                                            ------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py                2567
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py          3686
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_adapter.py          879
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\voice\test_livekit_token_service.py   3415
+
+
+

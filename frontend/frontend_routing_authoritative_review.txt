@@ -1,0 +1,1210 @@
+﻿============================================================
+=== AUTHORITATIVE FRONTEND ENTRY ===========================
+============================================================
+
+=== frontend/main.tsx ===
+import React from "react";
+import ReactDOM from "react-dom/client";
+
+import {
+    BrowserRouter
+} from "react-router-dom";
+
+
+import AppRouter from "./src/router";
+
+
+import "./styles/operations-center.css";
+
+
+
+ReactDOM
+.createRoot(
+    document.getElementById("root")!
+)
+.render(
+
+    <React.StrictMode>
+
+        <BrowserRouter>
+
+            <AppRouter />
+
+        </BrowserRouter>
+
+    </React.StrictMode>
+
+);
+
+=== frontend/src/main.tsx ===
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+
+import AppRouter from "./router";
+
+const rootElement = document.getElementById("root");
+
+if (!rootElement) {
+  throw new Error(
+    "EasyChatBot React root element was not found.",
+  );
+}
+
+ReactDOM.createRoot(rootElement).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <AppRouter />
+    </BrowserRouter>
+  </React.StrictMode>,
+);
+
+=== frontend/src/router.tsx ===
+import {
+  Navigate,
+  Route,
+  Routes,
+} from "react-router-dom";
+
+import OperationsCenterGovernancePage from "../app/operations-center/governance/page";
+import PrivacyGovernancePage from "../app/privacy-governance/page";
+
+export default function AppRouter() {
+  return (
+    <Routes>
+      <Route
+        path="/operations-center/governance"
+        element={<OperationsCenterGovernancePage />}
+      />
+
+      {/* Privacy Governance dashboard */}
+      <Route
+        path="/privacy-governance"
+        element={<PrivacyGovernancePage />}
+      />
+
+      {/* Privacy Governance dashboard with a specific case opened */}
+      <Route
+        path="/privacy-governance/:caseId"
+        element={<PrivacyGovernancePage />}
+      />
+
+      <Route
+        path="/"
+        element={
+          <Navigate
+            to="/operations-center/governance"
+            replace
+          />
+        }
+      />
+
+      <Route
+        path="*"
+        element={
+          <Navigate
+            to="/operations-center/governance"
+            replace
+          />
+        }
+      />
+    </Routes>
+  );
+}
+
+=== PRIVACY GOVERNANCE PAGE ===
+"use client";
+
+import { useParams } from "react-router-dom";
+
+import PrivacyGovernanceDashboard from "../../components/privacy-governance/PrivacyGovernanceDashboard";
+
+export const metadata = {
+  title: "Privacy Governance Center | EasyChatBot",
+  description: "Read-only privacy governance oversight.",
+};
+
+export default function PrivacyGovernancePage() {
+  const { caseId } = useParams<{
+    caseId?: string;
+  }>();
+
+  return (
+    <PrivacyGovernanceDashboard
+      initialCaseId={caseId}
+    />
+  );
+}
+
+=== DASHBOARD ===
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  getPrivacyGovernanceCase,
+  loadPrivacyGovernanceDashboard,
+} from "../../lib/privacy-governance/api";
+import type {
+  GovernanceFilter,
+  PrivacyGovernanceCase,
+  PrivacyGovernanceStatusItem,
+  PrivacyGovernanceSummary,
+} from "../../lib/privacy-governance/types";
+import PrivacyGovernanceCaseDetail from "./PrivacyGovernanceCaseDetail";
+import styles from "./PrivacyGovernanceDashboard.module.css";
+
+const EMPTY_SUMMARY: PrivacyGovernanceSummary = {
+  total_cases: 0,
+  pending: 0,
+  approved: 0,
+  blocked: 0,
+  approval_records: 0,
+};
+
+interface Props {
+  initialLoad?: boolean;
+
+  /**
+   * Optional case ID supplied by the privacy-governance
+   * deep-link route:
+   *
+   * /privacy-governance/:caseId
+   *
+   * This is intentionally dynamic. No case ID is hard-coded.
+   */
+  initialCaseId?: string;
+}
+
+function normalizeStatus(status: string): GovernanceFilter {
+  const value = status.toUpperCase();
+
+  if (value.includes("PENDING")) {
+    return "PENDING_DPO_GRC";
+  }
+
+  if (value.includes("APPROVED")) {
+    return "APPROVED";
+  }
+
+  if (
+    value.includes("BLOCKED") ||
+    value.includes("REJECTED")
+  ) {
+    return "BLOCKED";
+  }
+
+  return "ALL";
+}
+
+function statusLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+export function PrivacyGovernanceDashboard({
+  initialLoad = true,
+  initialCaseId,
+}: Props) {
+  const [summary, setSummary] =
+    useState<PrivacyGovernanceSummary>(
+      EMPTY_SUMMARY,
+    );
+
+  const [statusChart, setStatusChart] =
+    useState<PrivacyGovernanceStatusItem[]>([]);
+
+  const [cases, setCases] =
+    useState<PrivacyGovernanceCase[]>([]);
+
+  const [filter, setFilter] =
+    useState<GovernanceFilter>("ALL");
+
+  const [loading, setLoading] =
+    useState(initialLoad);
+
+  const [refreshing, setRefreshing] =
+    useState(false);
+
+  const [error, setError] =
+    useState<string | null>(null);
+
+  const [selectedCaseId, setSelectedCaseId] =
+    useState<string | null>(null);
+
+  const [selectedCase, setSelectedCase] =
+    useState<PrivacyGovernanceCase | null>(null);
+
+  const [detailLoading, setDetailLoading] =
+    useState(false);
+
+  const [detailError, setDetailError] =
+    useState<string | null>(null);
+
+  /*
+   * ---------------------------------------------------------
+   * Dashboard data
+   * ---------------------------------------------------------
+   */
+
+  const loadDashboard = useCallback(
+    async (
+      mode: "initial" | "refresh" = "refresh",
+    ) => {
+      if (mode === "initial") {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
+
+      setError(null);
+
+      try {
+        const result =
+          await loadPrivacyGovernanceDashboard();
+
+        setSummary(result.summary);
+        setStatusChart(result.statusChart);
+        setCases(result.cases);
+      } catch (cause) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Unable to load privacy governance data.",
+        );
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (initialLoad) {
+      void loadDashboard("initial");
+    }
+  }, [initialLoad, loadDashboard]);
+
+  /*
+   * ---------------------------------------------------------
+   * Case filtering
+   * ---------------------------------------------------------
+   */
+
+  const visibleCases = useMemo(() => {
+    if (filter === "ALL") {
+      return cases;
+    }
+
+    return cases.filter(
+      (item) =>
+        normalizeStatus(
+          item.governance_status,
+        ) === filter,
+    );
+  }, [cases, filter]);
+
+  /*
+   * ---------------------------------------------------------
+   * Case detail
+   * ---------------------------------------------------------
+   */
+
+  const openCase = useCallback(
+    async (caseId: string) => {
+      const normalizedCaseId = caseId.trim();
+
+      if (!normalizedCaseId) {
+        setSelectedCaseId(null);
+        setSelectedCase(null);
+        setDetailError(
+          "A valid governance case ID is required.",
+        );
+        return;
+      }
+
+      setSelectedCaseId(normalizedCaseId);
+      setSelectedCase(null);
+      setDetailError(null);
+      setDetailLoading(true);
+
+      try {
+        const detail =
+          await getPrivacyGovernanceCase(
+            normalizedCaseId,
+          );
+
+        setSelectedCase(detail);
+      } catch (cause) {
+        setDetailError(
+          cause instanceof Error
+            ? cause.message
+            : "Unable to load this governance case.",
+        );
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [],
+  );
+
+  /*
+   * ---------------------------------------------------------
+   * Privacy Governance Email Deep Link
+   *
+   * Reminder email:
+   *
+   * /privacy-governance/CASE-E2E-001
+   *
+   * or dynamically:
+   *
+   * /privacy-governance/<actual-case-id>
+   *
+   * The route passes the case ID to this dashboard through
+   * initialCaseId.
+   *
+   * We then use the existing openCase() application flow.
+   *
+   * No case ID is hard-coded.
+   * ---------------------------------------------------------
+   */
+
+  useEffect(() => {
+    const caseId = initialCaseId?.trim();
+
+    if (!caseId) {
+      return;
+    }
+
+    void openCase(caseId);
+  }, [initialCaseId, openCase]);
+
+  const retryCase = useCallback(() => {
+    if (selectedCaseId) {
+      void openCase(selectedCaseId);
+    }
+  }, [openCase, selectedCaseId]);
+
+  /*
+   * ---------------------------------------------------------
+   * Phase 6I
+   *
+   * Decision completed inside the case drawer.
+   *
+   * The backend returns the authoritative refreshed case.
+   * We immediately update:
+   *
+   *   1. Selected case
+   *   2. Case register
+   *   3. Dashboard KPIs
+   *   4. Status chart
+   *   5. Approval record count
+   *
+   * The dashboard remains the same page.
+   * ---------------------------------------------------------
+   */
+
+  const handleDecisionComplete = useCallback(
+    (updatedCase: PrivacyGovernanceCase) => {
+      setSelectedCase(updatedCase);
+
+      setCases((current) =>
+        current.map((item) =>
+          item.case_id === updatedCase.case_id
+            ? updatedCase
+            : item,
+        ),
+      );
+
+      /*
+       * Re-read the authoritative dashboard state.
+       *
+       * This is important because approval_records,
+       * status counts and chart values are calculated
+       * from the backend registries.
+       */
+      void loadDashboard("refresh");
+    },
+    [loadDashboard],
+  );
+
+  /*
+   * ---------------------------------------------------------
+   * Status filtering
+   * ---------------------------------------------------------
+   */
+
+  const filterFromStatus = useCallback(
+    (status: string) => {
+      setFilter(normalizeStatus(status));
+    },
+    [],
+  );
+
+  /*
+   * ---------------------------------------------------------
+   * KPI configuration
+   * ---------------------------------------------------------
+   */
+
+  const kpis: Array<{
+    label: string;
+    value: number;
+    filter: GovernanceFilter;
+  }> = [
+    {
+      label: "Total cases",
+      value: summary.total_cases,
+      filter: "ALL",
+    },
+    {
+      label: "Pending DPO/GRC",
+      value: summary.pending,
+      filter: "PENDING_DPO_GRC",
+    },
+    {
+      label: "Approved",
+      value: summary.approved,
+      filter: "APPROVED",
+    },
+    {
+      label: "Rejected / blocked",
+      value: summary.blocked,
+      filter: "BLOCKED",
+    },
+  ];
+
+  /*
+   * ---------------------------------------------------------
+   * Render
+   * ---------------------------------------------------------
+   */
+
+  return (
+    <main className={styles.page}>
+      {/* =====================================================
+          HEADER
+      ====================================================== */}
+
+      <header className={styles.header}>
+        <div>
+          <p className={styles.brand}>
+            EASYCHATBOT Â· GOVERNANCE
+          </p>
+
+          <h1>
+            Privacy Governance Center
+          </h1>
+
+          <p className={styles.subtitle}>
+            Read-only oversight of privacy-impacting
+            changes, validation and human approval
+            evidence.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          className={styles.refresh}
+          onClick={() =>
+            void loadDashboard("refresh")
+          }
+          disabled={refreshing}
+        >
+          {refreshing
+            ? "Refreshingâ€¦"
+            : "Refresh"}
+        </button>
+      </header>
+
+      {/* =====================================================
+          ERROR BANNER
+      ====================================================== */}
+
+      {error && (
+        <section
+          className={styles.errorBanner}
+          role="alert"
+        >
+          <div>
+            <strong>
+              Unable to load governance data.
+            </strong>
+
+            <span>{error}</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() =>
+              void loadDashboard("refresh")
+            }
+          >
+            Retry
+          </button>
+        </section>
+      )}
+
+      {/* =====================================================
+          KPI CARDS
+      ====================================================== */}
+
+      <section
+        className={styles.kpis}
+        aria-label="Governance KPIs"
+      >
+        {kpis.map((kpi) => (
+          <button
+            type="button"
+            key={kpi.label}
+            className={`${styles.kpi} ${
+              filter === kpi.filter
+                ? styles.kpiActive
+                : ""
+            }`}
+            onClick={() =>
+              setFilter(kpi.filter)
+            }
+          >
+            <span>{kpi.label}</span>
+
+            <strong>
+              {loading
+                ? "â€¦"
+                : kpi.value}
+            </strong>
+          </button>
+        ))}
+      </section>
+
+      {/* =====================================================
+          GOVERNANCE STATUS
+      ====================================================== */}
+
+      <section className={styles.panel}>
+        <div className={styles.panelHeader}>
+          <div>
+            <p className={styles.eyebrow}>
+              OVERSIGHT
+            </p>
+
+            <h2>
+              Governance status
+            </h2>
+          </div>
+
+          <span>
+            {loading
+              ? "Loadingâ€¦"
+              : `${summary.approval_records} approval records`}
+          </span>
+        </div>
+
+        <div className={styles.statusList}>
+          {statusChart.length ? (
+            statusChart.map((item) => {
+              const maximum = Math.max(
+                1,
+                ...statusChart.map(
+                  (entry) => entry.count,
+                ),
+              );
+
+              return (
+                <button
+                  type="button"
+                  className={`${styles.statusRow} ${
+                    filter ===
+                    normalizeStatus(
+                      item.status,
+                    )
+                      ? styles.statusActive
+                      : ""
+                  }`}
+                  key={item.status}
+                  onClick={() =>
+                    filterFromStatus(
+                      item.status,
+                    )
+                  }
+                >
+                  <span>
+                    {statusLabel(
+                      item.status,
+                    )}
+                  </span>
+
+                  <span
+                    className={
+                      styles.barTrack
+                    }
+                  >
+                    <span
+                      className={styles.bar}
+                      style={{
+                        width: `${
+                          (item.count /
+                            maximum) *
+                          100
+                        }%`,
+                      }}
+                    />
+                  </span>
+
+                  <strong>
+                    {item.count}
+                  </strong>
+                </button>
+              );
+            })
+          ) : (
+            <div
+              className={
+                styles.emptyState
+              }
+            >
+              No governance status data.
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* =====================================================
+          CASE REGISTER
+      ====================================================== */}
+
+      <section className={styles.panel}>
+        <div className={styles.panelHeader}>
+          <div>
+            <p className={styles.eyebrow}>
+              CASE REGISTER
+            </p>
+
+            <h2>
+              Privacy governance cases
+            </h2>
+          </div>
+
+          <div
+            className={
+              styles.caseMeta
+            }
+          >
+            {filter !== "ALL" && (
+              <button
+                type="button"
+                className={
+                  styles.clearFilter
+                }
+                onClick={() =>
+                  setFilter("ALL")
+                }
+              >
+                {statusLabel(filter)} Ã—
+              </button>
+            )}
+
+            <span>
+              {loading
+                ? "Loadingâ€¦"
+                : `${visibleCases.length} cases`}
+            </span>
+          </div>
+        </div>
+
+        <div
+          className={styles.tableWrap}
+        >
+          <table>
+            <thead>
+              <tr>
+                <th>CASE</th>
+                <th>TRIGGER</th>
+                <th>TRIGGERED</th>
+                <th>RISK</th>
+                <th>VALIDATION</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {!loading &&
+                visibleCases.map(
+                  (item) => (
+                    <tr
+                      key={item.case_id}
+                    >
+                      <td>
+                        <button
+                          type="button"
+                          className={
+                            styles.caseLink
+                          }
+                          onClick={() =>
+                            void openCase(
+                              item.case_id,
+                            )
+                          }
+                          aria-label={`Open case ${item.case_id}`}
+                        >
+                          {item.case_id}
+                        </button>
+                      </td>
+
+                      <td>
+                        {statusLabel(
+                          item.trigger_type,
+                        )}
+                      </td>
+
+                      <td>
+                        {formatDate(
+                          item.triggered_at,
+                        )}
+                      </td>
+
+                      <td>
+                        {item.risk}
+                      </td>
+
+                      <td>
+                        {statusLabel(
+                          item.validation_status,
+                        )}
+                      </td>
+
+                      <td>
+                        <span
+                          className={
+                            styles.statusPill
+                          }
+                        >
+                          {statusLabel(
+                            item.governance_status,
+                          )}
+                        </span>
+                      </td>
+                    </tr>
+                  ),
+                )}
+            </tbody>
+          </table>
+
+          {loading && (
+            <div
+              className={
+                styles.emptyState
+              }
+              role="status"
+            >
+              Loading governance casesâ€¦
+            </div>
+          )}
+
+          {!loading &&
+            !visibleCases.length && (
+              <div
+                className={
+                  styles.emptyState
+                }
+              >
+                {filter === "ALL"
+                  ? "No governance cases are currently registered."
+                  : "No cases match the selected filter."}
+              </div>
+            )}
+        </div>
+      </section>
+
+      {/* =====================================================
+          CASE DETAIL DRAWER
+
+          Phase 6E:
+            Case detail
+
+          Phase 6F:
+            Live API/dashboard integration
+
+          Phase 6G:
+            Human governance decisions
+
+          Phase 6I:
+            Decision â†’ registry â†’ Excel â†’ refreshed UI
+
+          Deep-link support:
+            /privacy-governance/:caseId
+            â†’ initialCaseId
+            â†’ openCase(caseId)
+            â†’ case detail
+      ====================================================== */}
+
+      <PrivacyGovernanceCaseDetail
+        open={Boolean(
+          selectedCaseId,
+        )}
+        loading={detailLoading}
+        error={detailError}
+        caseData={selectedCase}
+        onClose={() => {
+          setSelectedCaseId(null);
+          setSelectedCase(null);
+          setDetailError(null);
+        }}
+        onRetry={retryCase}
+        onDecisionComplete={
+          handleDecisionComplete
+        }
+      />
+    </main>
+  );
+}
+
+export default PrivacyGovernanceDashboard;
+
+=== CASE DETAIL ===
+import type {
+  PrivacyGovernanceCaseDetail as PrivacyGovernanceCase,
+} from "../../lib/privacy-governance/types";
+import PrivacyGovernanceDecisionActions from "./PrivacyGovernanceDecisionActions";
+import styles from "./PrivacyGovernanceCaseDetail.module.css";
+
+interface Props {
+  open: boolean;
+  loading: boolean;
+  error: string | null;
+  caseData: PrivacyGovernanceCase | null;
+  onClose: () => void;
+  onRetry: () => void;
+  onDecisionComplete: (
+    updatedCase: PrivacyGovernanceCase,
+  ) => void;
+}
+
+function formatDate(value?: string | null): string {
+  if (!value) {
+    return "â€”";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function statusLabel(value?: string | null): string {
+  if (!value) {
+    return "Unknown";
+  }
+
+  return value.replaceAll("_", " ");
+}
+
+export function PrivacyGovernanceCaseDetail({
+  open,
+  loading,
+  error,
+  caseData,
+  onClose,
+  onRetry,
+  onDecisionComplete,
+}: Props) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      className={styles.backdrop}
+      role="presentation"
+      onMouseDown={onClose}
+    >
+      <aside
+        className={styles.drawer}
+        aria-label="Privacy governance case detail"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className={styles.header}>
+          <div>
+            <p className={styles.eyebrow}>
+              CASE DETAIL
+            </p>
+
+            <h2>
+              {caseData?.case_id ??
+                "Privacy governance case"}
+            </h2>
+          </div>
+
+          <button
+            type="button"
+            className={styles.closeButton}
+            onClick={onClose}
+            aria-label="Close case detail"
+          >
+            Ã—
+          </button>
+        </header>
+
+        {loading && (
+          <div
+            className={styles.state}
+            role="status"
+          >
+            Loading case detailsâ€¦
+          </div>
+        )}
+
+        {!loading && error && (
+          <div
+            className={styles.errorState}
+            role="alert"
+          >
+            <strong>
+              Unable to load this case.
+            </strong>
+
+            <span>{error}</span>
+
+            <button
+              type="button"
+              onClick={onRetry}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && caseData && (
+          <div className={styles.content}>
+            {/* -------------------------------------------------
+                Governance status
+            ------------------------------------------------- */}
+
+            <section className={styles.summaryCard}>
+              <span>
+                Governance status
+              </span>
+
+              <strong className={styles.status}>
+                {statusLabel(
+                  caseData.governance_status,
+                )}
+              </strong>
+            </section>
+
+            {/* -------------------------------------------------
+                Case / Change overview
+            ------------------------------------------------- */}
+
+            <section className={styles.section}>
+              <h3>Overview</h3>
+
+              <dl className={styles.details}>
+                <div>
+                  <dt>Case ID</dt>
+                  <dd>
+                    {caseData.case_id}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Change ID</dt>
+                  <dd>
+                    {caseData.change_id ?? "â€”"}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Title</dt>
+                  <dd>
+                    {caseData.title ?? "â€”"}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Summary</dt>
+                  <dd>
+                    {caseData.summary ?? "â€”"}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Trigger</dt>
+                  <dd>
+                    {statusLabel(
+                      caseData.trigger_type,
+                    )}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Trigger source</dt>
+                  <dd>
+                    {caseData.trigger_source ?? "â€”"}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Triggered</dt>
+                  <dd>
+                    {formatDate(
+                      caseData.triggered_at,
+                    )}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Risk</dt>
+                  <dd>
+                    {caseData.risk ?? "â€”"}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Validation</dt>
+                  <dd>
+                    {statusLabel(
+                      caseData.validation_status,
+                    )}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Email status</dt>
+                  <dd>
+                    {statusLabel(
+                      caseData.email_status,
+                    )}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Final decision</dt>
+                  <dd>
+                    {statusLabel(
+                      caseData.final_decision,
+                    )}
+                  </dd>
+                </div>
+
+                <div>
+                  <dt>Decision time</dt>
+                  <dd>
+                    {formatDate(
+                      caseData.final_decision_at,
+                    )}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+
+            {/* -------------------------------------------------
+                Approval evidence
+            ------------------------------------------------- */}
+
+            <section className={styles.section}>
+              <div className={styles.sectionHeading}>
+                <h3>Approval evidence</h3>
+
+                <span>
+                  {caseData.approval_records
+                    ?.length ?? 0}{" "}
+                  record
+                  {(caseData.approval_records
+                    ?.length ?? 0) === 1
+                    ? ""
+                    : "s"}
+                </span>
+              </div>
+
+              {caseData.approval_records
+                ?.length ? (
+                <div className={styles.approvals}>
+                  {caseData.approval_records.map(
+                    (record) => (
+                      <article
+                        className={styles.approval}
+                        key={record.approval_id}
+                      >
+                        <div
+                          className={
+                            styles.approvalTop
+                          }
+                        >
+                          <strong>
+                            {record.role}
+                          </strong>
+
+                          <span>
+                            {statusLabel(
+                              record.decision,
+                            )}
+                          </span>
+                        </div>
+
+                        <p>
+                          {record.reviewer}
+                        </p>
+
+                        {record.comment && (
+                          <blockquote>
+                            {record.comment}
+                          </blockquote>
+                        )}
+
+                        {record.decided_at && (
+                          <small>
+                            {formatDate(
+                              record.decided_at,
+                            )}
+                          </small>
+                        )}
+                      </article>
+                    ),
+                  )}
+                </div>
+              ) : (
+                <p className={styles.empty}>
+                  No approval evidence has been
+                  recorded for this case.
+                </p>
+              )}
+            </section>
+
+            {/* -------------------------------------------------
+                HUMAN GOVERNANCE DECISION
+                Existing Phase 6G decision component
+                is now explicitly integrated into
+                the Phase 6E/6F case-detail drawer.
+            ------------------------------------------------- */}
+
+            <PrivacyGovernanceDecisionActions
+              caseData={caseData}
+              onDecisionComplete={
+                onDecisionComplete
+              }
+            />
+          </div>
+        )}
+      </aside>
+    </div>
+  );
+}
+
+export default PrivacyGovernanceCaseDetail;

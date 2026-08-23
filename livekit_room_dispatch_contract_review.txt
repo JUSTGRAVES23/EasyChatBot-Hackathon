@@ -1,0 +1,441 @@
+﻿"""
+Voice Call Room Domain Model.
+
+Represents the logical room composition
+for a voice call.
+
+Responsibilities:
+- Define room identity.
+- Hold call participants.
+- Validate participant composition.
+
+Does NOT:
+- Connect to LiveKit.
+- Manage audio streams.
+- Execute AI.
+- Manage providers.
+- Handle networking.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallRoom:
+    """
+    Immutable voice call room.
+
+    Supports:
+
+    Beta:
+        Learner + Character
+
+    Future:
+        Learner + Learner + Character
+    """
+
+    room_id: str
+
+    participants: tuple[
+        VoiceCallParticipant,
+        ...
+
+    ]
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate room composition.
+        """
+
+        if not self.room_id.strip():
+            raise ValueError(
+                "room_id cannot be empty."
+            )
+
+
+        if not self.participants:
+            raise ValueError(
+                "Voice call room requires "
+                "at least one participant."
+            )
+
+
+        character_count = sum(
+            1
+            for participant in self.participants
+            if participant.role
+            ==
+            VoiceParticipantRole.CHARACTER
+        )
+
+
+        if character_count > 1:
+            raise ValueError(
+                "Voice call room supports "
+                "only one character participant."
+            )
+
+
+    def has_character(self) -> bool:
+        """
+        Check whether a character exists
+        in the room.
+        """
+
+        return any(
+            participant.role
+            ==
+            VoiceParticipantRole.CHARACTER
+            for participant in self.participants
+        )
+
+
+    def learner_count(self) -> int:
+        """
+        Return number of learners.
+        """
+
+        return sum(
+            1
+            for participant in self.participants
+            if participant.role
+            ==
+            VoiceParticipantRole.LEARNER
+        )
+"""
+LiveKit Infrastructure Adapter.
+
+Infrastructure boundary for LiveKit room configuration.
+
+Responsibilities:
+- Translate voice session information into
+  LiveKit provider configuration.
+- Keep LiveKit-specific details inside infrastructure.
+- Prepare provider connection metadata.
+
+Does NOT:
+- Decide when a call starts.
+- Manage learner business logic.
+- Execute AI agents.
+- Manage application lifecycle.
+- Persist data.
+- Generate participant tokens.
+"""
+
+from __future__ import annotations
+
+
+import logging
+
+
+from app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+logger = logging.getLogger(
+    __name__
+)
+
+
+
+class LiveKitAdapter:
+    """
+    Infrastructure adapter for LiveKit.
+
+    Converts the provider-independent voice session
+    into LiveKit room configuration.
+
+    Token generation is deliberately handled by
+    LiveKitTokenService.
+    """
+
+
+
+    provider = "livekit"
+
+
+
+    def create_room_configuration(
+        self,
+        *,
+        session: VoiceSession,
+    ) -> dict[str, str]:
+        """
+        Prepare LiveKit room configuration.
+
+        Parameters
+        ----------
+        session:
+            Provider-independent voice session.
+
+        Returns
+        -------
+        dict[str, str]
+            LiveKit room metadata.
+        """
+
+
+
+        if not session.room_name.strip():
+
+            raise ValueError(
+                "Voice room name cannot be empty."
+            )
+
+
+
+        if not session.character_id.strip():
+
+            raise ValueError(
+                "Voice session character id "
+                "cannot be empty."
+            )
+
+
+
+        logger.info(
+            "Preparing LiveKit room configuration",
+            extra={
+                "session_id": (
+                    session.session_id
+                ),
+                "room_name": (
+                    session.room_name
+                ),
+                "character_id": (
+                    session.character_id
+                ),
+                "language_code": (
+                    session.language_code
+                ),
+            },
+        )
+
+
+
+        return {
+            "room_name": (
+                session.room_name
+            ),
+            "character_id": (
+                session.character_id
+            ),
+            "language_code": (
+                session.language_code
+            ),
+            "provider": self.provider,
+        }
+
+
+
+__all__ = [
+    "LiveKitAdapter",
+]
+"""
+Voice Call Execution Coordinator.
+
+Application orchestration boundary
+for voice call execution.
+
+Responsibilities:
+- Prepare voice room.
+- Coordinate runtime execution.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers.
+- Persist data.
+- Connect LiveKit directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionCoordinator:
+    """
+    Coordinates voice call execution.
+
+    Keeps compatibility with the current
+    application contracts.
+
+    Future migration target:
+
+        Lifecycle
+            |
+            â†“
+        ExecutionService
+            |
+            â†“
+        Runtime
+    """
+
+
+    room_service: VoiceRoomService
+
+    execution_runtime: VoiceCallExecutionRuntime
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room and execute runtime.
+        """
+
+
+        room = (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+        session = (
+            self.execution_runtime
+            .start(
+                context=context,
+            )
+        )
+
+
+        return {
+            "room": room,
+            "session": session,
+        }
+
+
+
+    def prepare(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room only.
+        """
+
+
+        return (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceCallExecutionCoordinator",
+]
+"""
+Voice Connection Service.
+
+Application service responsible for
+creating voice connection credentials.
+
+Responsibilities:
+- Coordinate token creation.
+- Request infrastructure token generation.
+- Return domain connection token.
+
+Does NOT:
+- Handle HTTP.
+- Generate provider tokens.
+- Manage LiveKit directly.
+- Persist credentials.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.infrastructure.voice.livekit_token_service import (
+    LiveKitTokenService,
+)
+
+
+from app.domain.uai.voice.voice_connection_token import (
+    VoiceConnectionToken,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceConnectionService:
+    """
+    Application boundary for voice connections.
+    """
+
+    token_service: LiveKitTokenService
+
+
+
+    def create_connection(
+        self,
+        *,
+        room_name: str,
+    ) -> VoiceConnectionToken:
+        """
+        Create voice connection credentials.
+        """
+
+
+        return (
+            self.token_service
+            .create_token(
+                room_name=room_name,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceConnectionService",
+]
