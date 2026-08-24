@@ -21,6 +21,8 @@ class PrivacyGovernanceEmailSender(Protocol):
         body: str,
         html_body: str,
         attachments: list[dict[str, Any]] | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> Any:
         ...
 
@@ -53,13 +55,8 @@ def _assessment_type(case: Any) -> str:
 
     if isinstance(trigger, dict):
         trigger_type = trigger.get("type")
-
     elif trigger is not None:
-        trigger_type = getattr(
-            trigger,
-            "type",
-            None,
-        )
+        trigger_type = getattr(trigger, "type", None)
 
     trigger_type = _text(
         trigger_type,
@@ -81,9 +78,7 @@ def _assessment_type(case: Any) -> str:
     )
 
 
-def _normalise_ids(
-    values: Any,
-) -> list[str]:
+def _normalise_ids(values: Any) -> list[str]:
     """Return clean identifiers without inventing missing data."""
 
     if not values:
@@ -101,14 +96,12 @@ def _normalise_ids(
 
 @dataclass(slots=True)
 class PrivacyGovernanceReminderEmailService:
-    """Build and deliver a concise DPO/GRC governance email.
+    """Build and deliver a concise DPO/GRC governance reminder email.
 
-    Authoritative source:
-        PrivacyGovernanceCase
+    The reminder is part of the same governance email conversation as the
+    initial notification whenever threading metadata is supplied.
 
-    The service creates a controlled presentation snapshot of the case.
-
-    It does NOT:
+    This service does NOT:
     - create governance data;
     - query the frontend;
     - query the dashboard;
@@ -129,31 +122,17 @@ class PrivacyGovernanceReminderEmailService:
     ) -> dict[str, Any]:
         """Extract only information supported by the authoritative case."""
 
-        case_id = getattr(
-            case,
-            "case_id",
-            None,
-        )
+        case_id = getattr(case, "case_id", None)
 
         if not isinstance(case_id, str) or not case_id.strip():
-            raise ValueError(
-                "case.case_id is required."
-            )
+            raise ValueError("case.case_id is required.")
 
         processing_ids = _normalise_ids(
-            getattr(
-                case,
-                "processing_ids",
-                None,
-            )
+            getattr(case, "processing_ids", None)
         )
 
         data_map_ids = _normalise_ids(
-            getattr(
-                case,
-                "data_map_ids",
-                None,
-            )
+            getattr(case, "data_map_ids", None)
         )
 
         return {
@@ -177,15 +156,9 @@ class PrivacyGovernanceReminderEmailService:
                 ),
                 "A privacy-impacting change requires governance review.",
             ),
-            "assessment_type": _assessment_type(
-                case,
-            ),
+            "assessment_type": _assessment_type(case),
             "risk": _status_label(
-                getattr(
-                    case,
-                    "risk",
-                    None,
-                ),
+                getattr(case, "risk", None),
             ),
             "validation_status": _status_label(
                 getattr(
@@ -211,7 +184,7 @@ class PrivacyGovernanceReminderEmailService:
         case: Any,
         case_url: str,
     ) -> str:
-        """Render the concise responsive DPO/GRC email."""
+        """Render the concise responsive DPO/GRC reminder email."""
 
         data = self._extract_case_data(case)
 
@@ -219,20 +192,11 @@ class PrivacyGovernanceReminderEmailService:
         change_id = escape(data["change_id"])
         title = escape(data["title"])
         summary = escape(data["summary"])
-        assessment_type = escape(
-            data["assessment_type"]
-        )
+        assessment_type = escape(data["assessment_type"])
         risk = escape(data["risk"])
-        validation = escape(
-            data["validation_status"]
-        )
-        governance_status = escape(
-            data["governance_status"]
-        )
-        safe_case_url = escape(
-            case_url,
-            quote=True,
-        )
+        validation = escape(data["validation_status"])
+        governance_status = escape(data["governance_status"])
+        safe_case_url = escape(case_url, quote=True)
 
         processing_html = ""
 
@@ -284,7 +248,7 @@ class PrivacyGovernanceReminderEmailService:
     name="viewport"
     content="width=device-width,initial-scale=1"
   >
-  <title>EasyChatBot Privacy Governance Review</title>
+  <title>EasyChatBot Privacy Governance Reminder</title>
 </head>
 
 <body style="
@@ -321,8 +285,6 @@ class PrivacyGovernanceReminderEmailService:
   "
 >
 
-<!-- HEADER -->
-
 <tr>
 <td style="padding:28px 30px 18px;">
 
@@ -352,8 +314,6 @@ class PrivacyGovernanceReminderEmailService:
 </td>
 </tr>
 
-<!-- ACTION BANNER -->
-
 <tr>
 <td style="padding:0 30px 22px;">
 
@@ -367,13 +327,11 @@ class PrivacyGovernanceReminderEmailService:
     font-weight:700;
     letter-spacing:.4px;
   ">
-    ACTION REQUIRED — DPO/GRC REVIEW
+    REMINDER — DPO/GRC REVIEW STILL REQUIRED
   </div>
 
 </td>
 </tr>
-
-<!-- INTRO -->
 
 <tr>
 <td style="padding:0 30px 24px;">
@@ -384,7 +342,7 @@ class PrivacyGovernanceReminderEmailService:
     line-height:1.25;
     color:#17233c;
   ">
-    Privacy Governance Review
+    Your review is still required
   </h1>
 
   <p style="
@@ -393,15 +351,118 @@ class PrivacyGovernanceReminderEmailService:
     line-height:1.65;
     color:#52627a;
   ">
-    A privacy-impacting change has passed automated
-    privacy validation and requires explicit human
-    governance review before it may proceed.
+    This privacy governance case is still waiting for
+    human review.
   </p>
 
 </td>
 </tr>
 
-<!-- ASSESSMENT -->
+<tr>
+<td style="padding:0 30px 24px;">
+
+  <div style="
+    font-size:12px;
+    letter-spacing:1.3px;
+    font-weight:700;
+    color:#68778d;
+    margin-bottom:10px;
+  ">
+    CASE DETAILS
+  </div>
+
+  <table
+    role="presentation"
+    width="100%"
+    cellspacing="0"
+    cellpadding="0"
+    border="0"
+    style="
+      border-collapse:collapse;
+      background:#f7f9fc;
+      border:1px solid #e1e7f0;
+    "
+  >
+
+    <tr>
+      <td style="padding:11px 14px;color:#68778d;">
+        Change ID
+      </td>
+
+      <td style="
+        padding:11px 14px;
+        text-align:right;
+        font-weight:700;
+        color:#17233c;
+      ">
+        {change_id}
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:11px 14px;color:#68778d;">
+        Risk
+      </td>
+
+      <td style="
+        padding:11px 14px;
+        text-align:right;
+        font-weight:700;
+        color:#17233c;
+      ">
+        {risk}
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:11px 14px;color:#68778d;">
+        Validation
+      </td>
+
+      <td style="
+        padding:11px 14px;
+        text-align:right;
+        font-weight:700;
+        color:#17233c;
+      ">
+        {validation}
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:11px 14px;color:#68778d;">
+        Governance status
+      </td>
+
+      <td style="
+        padding:11px 14px;
+        text-align:right;
+        font-weight:700;
+        color:#17233c;
+      ">
+        {governance_status}
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:11px 14px;color:#68778d;">
+        Case ID
+      </td>
+
+      <td style="
+        padding:11px 14px;
+        text-align:right;
+        font-weight:700;
+        color:#17233c;
+      ">
+        {case_id}
+      </td>
+    </tr>
+
+  </table>
+
+</td>
+</tr>
 
 <tr>
 <td style="padding:0 30px 24px;">
@@ -416,134 +477,18 @@ class PrivacyGovernanceReminderEmailService:
     ASSESSMENT
   </div>
 
-  <table
-    role="presentation"
-    width="100%"
-    cellspacing="0"
-    cellpadding="0"
-    border="0"
-    style="
-      border-collapse:collapse;
-      background:#f7f9fc;
-      border:1px solid #e1e7f0;
-      border-radius:10px;
-    "
-  >
-
-    <tr>
-      <td style="
-        padding:11px 14px;
-        color:#68778d;
-        width:42%;
-      ">
-        Assessment type
-      </td>
-
-      <td style="
-        padding:11px 14px;
-        text-align:right;
-        font-weight:600;
-        color:#17233c;
-      ">
-        {assessment_type}
-      </td>
-    </tr>
-
-    <tr>
-      <td style="
-        padding:11px 14px;
-        color:#68778d;
-      ">
-        Case ID
-      </td>
-
-      <td style="
-        padding:11px 14px;
-        text-align:right;
-        font-weight:700;
-        color:#17233c;
-      ">
-        {case_id}
-      </td>
-    </tr>
-
-    <tr>
-      <td style="
-        padding:11px 14px;
-        color:#68778d;
-      ">
-        Change ID
-      </td>
-
-      <td style="
-        padding:11px 14px;
-        text-align:right;
-        font-weight:600;
-        color:#17233c;
-      ">
-        {change_id}
-      </td>
-    </tr>
-
-    <tr>
-      <td style="
-        padding:11px 14px;
-        color:#68778d;
-      ">
-        Title
-      </td>
-
-      <td style="
-        padding:11px 14px;
-        text-align:right;
-        font-weight:600;
-        color:#17233c;
-      ">
-        {title}
-      </td>
-    </tr>
-
-    <tr>
-      <td style="
-        padding:11px 14px;
-        color:#68778d;
-      ">
-        Risk
-      </td>
-
-      <td style="
-        padding:11px 14px;
-        text-align:right;
-        font-weight:700;
-        color:#17233c;
-      ">
-        {risk}
-      </td>
-    </tr>
-
-  </table>
-
-</td>
-</tr>
-
-<!-- WHAT IS BEING ASSESSED -->
-
-<tr>
-<td style="padding:0 30px 24px;">
-
   <div style="
-    font-size:12px;
-    letter-spacing:1.3px;
+    font-size:16px;
     font-weight:700;
-    color:#68778d;
-    margin-bottom:10px;
+    color:#17233c;
+    margin-bottom:8px;
   ">
-    WHAT IS BEING ASSESSED?
+    {title}
   </div>
 
   <p style="
     margin:0;
-    font-size:15px;
+    font-size:14px;
     line-height:1.65;
     color:#52627a;
   ">
@@ -553,20 +498,8 @@ class PrivacyGovernanceReminderEmailService:
 </td>
 </tr>
 
-<!-- PRIVACY SCOPE -->
-
 <tr>
 <td style="padding:0 30px 24px;">
-
-  <div style="
-    font-size:12px;
-    letter-spacing:1.3px;
-    font-weight:700;
-    color:#68778d;
-    margin-bottom:10px;
-  ">
-    PRIVACY SCOPE
-  </div>
 
   <table
     role="presentation"
@@ -580,84 +513,16 @@ class PrivacyGovernanceReminderEmailService:
     {processing_html}
     {data_map_html}
 
-    <tr>
-      <td style="
-        padding:9px 0;
-        color:#68778d;
-      ">
-        Automated validation
-      </td>
-
-      <td style="
-        padding:9px 0;
-        text-align:right;
-        font-weight:700;
-        color:#17233c;
-      ">
-        {validation}
-      </td>
-    </tr>
-
   </table>
 
 </td>
 </tr>
 
-<!-- GOVERNANCE -->
-
-<tr>
-<td style="padding:0 30px 26px;">
-
-  <div style="
-    font-size:12px;
-    letter-spacing:1.3px;
-    font-weight:700;
-    color:#68778d;
-    margin-bottom:10px;
-  ">
-    GOVERNANCE
-  </div>
-
-  <div style="
-    background:#f7f9fc;
-    border:1px solid #e1e7f0;
-    border-radius:10px;
-    padding:16px;
-  ">
-
-    <div style="
-      font-size:14px;
-      line-height:1.7;
-      color:#52627a;
-    ">
-      <strong style="color:#17233c;">
-        Required reviewers:
-      </strong>
-      DPO, GRC
-    </div>
-
-    <div style="
-      font-size:14px;
-      line-height:1.7;
-      color:#52627a;
-    ">
-      <strong style="color:#17233c;">
-        Current status:
-      </strong>
-      {governance_status}
-    </div>
-
-  </div>
-
-</td>
-</tr>
-
-<!-- CTA -->
-
 <tr>
 <td align="center" style="padding:0 30px 30px;">
 
   <a
+    ses:no-track
     href="{safe_case_url}"
     style="
       display:inline-block;
@@ -670,7 +535,7 @@ class PrivacyGovernanceReminderEmailService:
       border-radius:9px;
     "
   >
-    REVIEW THIS CASE
+    REVIEW THIS CASE →
   </a>
 
   <p style="
@@ -679,14 +544,12 @@ class PrivacyGovernanceReminderEmailService:
     line-height:1.5;
     color:#8793a5;
   ">
-    Review the complete assessment and record the
-    applicable governance decision.
+    Open the Privacy Governance Center to review
+    the case and record the applicable decision.
   </p>
 
 </td>
 </tr>
-
-<!-- GOVERNANCE CONTROL -->
 
 <tr>
 <td style="
@@ -711,16 +574,14 @@ class PrivacyGovernanceReminderEmailService:
     line-height:1.65;
     color:#68778d;
   ">
-    This notification is an escalation and approval request
-    only. It does not itself constitute DPO or GRC approval.
-    The governance decision must be explicitly recorded in
-    the controlled governance system.
+    This email is a notification and escalation mechanism only.
+    It does not constitute DPO approval, GRC approval,
+    rejection, or legal advice. The controlled governance
+    system remains the authoritative record of the decision.
   </p>
 
 </td>
 </tr>
-
-<!-- FOOTER -->
 
 <tr>
 <td align="center" style="padding:24px 24px 30px;">
@@ -731,18 +592,6 @@ class PrivacyGovernanceReminderEmailService:
     color:#183b73;
   ">
     EasyChatBot Privacy &amp; Governance
-  </div>
-
-  <div style="
-    max-width:480px;
-    margin:8px auto 0;
-    font-size:11px;
-    line-height:1.6;
-    color:#8793a5;
-  ">
-    Automated validation provides decision-support evidence.
-    It does not replace DPO, GRC, Legal, or other authorised
-    human judgement.
   </div>
 
 </td>
@@ -771,67 +620,36 @@ class PrivacyGovernanceReminderEmailService:
         lines = [
             "EASYCHATBOT · PRIVACY GOVERNANCE",
             "",
-            "ACTION REQUIRED — DPO/GRC REVIEW",
+            "REMINDER — DPO/GRC REVIEW STILL REQUIRED",
             "",
-            "A privacy-impacting change has passed automated "
-            "privacy validation and requires explicit human "
-            "governance review before it may proceed.",
+            "Your review is still required.",
+            "",
+            "This privacy governance case is still waiting "
+            "for human review.",
+            "",
+            "CASE DETAILS",
+            f"Change ID: {data['change_id']}",
+            f"Risk: {data['risk']}",
+            f"Validation: {data['validation_status']}",
+            f"Governance status: {data['governance_status']}",
+            f"Case ID: {data['case_id']}",
             "",
             "ASSESSMENT",
-            f"Assessment type: {data['assessment_type']}",
-            f"Case ID: {data['case_id']}",
-            f"Change ID: {data['change_id']}",
-            f"Title: {data['title']}",
-            f"Risk: {data['risk']}",
-            "",
-            "WHAT IS BEING ASSESSED?",
+            data["title"],
             data["summary"],
             "",
-            "PRIVACY SCOPE",
+            "REVIEW THIS CASE",
+            case_url,
+            "",
+            "IMPORTANT GOVERNANCE CONTROL",
+            "This email is a notification and escalation "
+            "mechanism only. It does not constitute DPO "
+            "approval, GRC approval, rejection, or legal advice.",
+            "The controlled governance system remains the "
+            "authoritative record of the decision.",
+            "",
+            "EasyChatBot Privacy & Governance",
         ]
-
-        if data["processing_ids"]:
-            lines.append(
-                "Affected processing: "
-                + ", ".join(
-                    data["processing_ids"]
-                )
-            )
-
-        if data["data_map_ids"]:
-            lines.append(
-                "Data mapping: "
-                + ", ".join(
-                    data["data_map_ids"]
-                )
-            )
-
-        lines.extend(
-            [
-                f"Automated validation: "
-                f"{data['validation_status']}",
-                "",
-                "GOVERNANCE",
-                "Required reviewers: DPO, GRC",
-                f"Current status: "
-                f"{data['governance_status']}",
-                "",
-                "REVIEW THIS CASE",
-                case_url,
-                "",
-                "IMPORTANT GOVERNANCE CONTROL",
-                "This notification is an escalation and approval "
-                "request only. It does not itself constitute DPO "
-                "or GRC approval. The governance decision must be "
-                "explicitly recorded in the controlled governance "
-                "system.",
-                "",
-                "EasyChatBot Privacy & Governance",
-                "Automated validation provides decision-support "
-                "evidence. It does not replace DPO, GRC, Legal, "
-                "or other authorised human judgement.",
-            ]
-        )
 
         return "\n".join(lines)
 
@@ -841,26 +659,28 @@ class PrivacyGovernanceReminderEmailService:
         case: Any,
         recipient_role: str = "DPO/GRC",
         reason: str = "pending_case_reminder",
+        in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> dict[str, object]:
-        """Build and send one controlled governance email."""
+        """Build and send one controlled governance reminder.
+
+        ``in_reply_to`` and ``references`` are optional because the initial
+        notification has no parent message. When supplied, the provider
+        should send the reminder as a reply to the existing governance
+        conversation.
+        """
 
         del recipient_role
         del reason
 
         if self.sender is None:
-            raise ValueError(
-                "sender cannot be None."
-            )
+            raise ValueError("sender cannot be None.")
 
         if not isinstance(self.recipient, str):
-            raise ValueError(
-                "recipient is required."
-            )
+            raise ValueError("recipient is required.")
 
         if not self.recipient.strip():
-            raise ValueError(
-                "recipient is required."
-            )
+            raise ValueError("recipient is required.")
 
         if self.case_url_builder is None:
             raise ValueError(
@@ -868,9 +688,7 @@ class PrivacyGovernanceReminderEmailService:
             )
 
         if self.logo_path is None:
-            raise ValueError(
-                "logo_path cannot be None."
-            )
+            raise ValueError("logo_path cannot be None.")
 
         if not self.logo_path.exists():
             raise FileNotFoundError(
@@ -882,16 +700,13 @@ class PrivacyGovernanceReminderEmailService:
 
         case_id = data["case_id"]
 
-        case_url = self.case_url_builder.build(
-            case_id
-        )
+        case_url = self.case_url_builder.build(case_id)
 
         subject = (
-    "[EasyChatBot Privacy Governance] "
-    "Approval Required — "
-    f"{data['change_id']} — "
-    f"{data['case_id']}"
-)
+            "[EasyChatBot Privacy Governance] "
+            "Reminder — Decision Required for "
+            f"{case_id}"
+        )
 
         html_body = self._render_html(
             case=case,
@@ -903,22 +718,28 @@ class PrivacyGovernanceReminderEmailService:
             case_url=case_url,
         )
 
-        response = await self.sender.send(
-            recipient=self.recipient.strip(),
-            subject=subject,
-            body=text_body,
-            html_body=html_body,
-            attachments=[
+        send_kwargs: dict[str, Any] = {
+            "recipient": self.recipient.strip(),
+            "subject": subject,
+            "body": text_body,
+            "html_body": html_body,
+            "attachments": [
                 {
                     "path": str(self.logo_path),
                     "filename": "easychatbot_logo.png",
-                    "content_id": (
-                        "easychatbot-governance-logo"
-                    ),
+                    "content_id": "easychatbot-governance-logo",
                     "inline": True,
                 }
             ],
-        )
+        }
+
+        if in_reply_to:
+            send_kwargs["in_reply_to"] = in_reply_to.strip()
+
+        if references:
+            send_kwargs["references"] = references.strip()
+
+        response = await self.sender.send(**send_kwargs)
 
         status = "sent"
         reference: str | None = None

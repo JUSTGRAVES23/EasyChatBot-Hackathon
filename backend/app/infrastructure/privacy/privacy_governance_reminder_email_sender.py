@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
+
+from dotenv import dotenv_values
 
 from backend.app.application.privacy.email.privacy_governance_reminder_email_service import (
     PrivacyGovernanceEmailSender,
@@ -14,8 +17,59 @@ from backend.cybersecurity.email.resend_email_provider import (
 )
 
 
+# ============================================================
+# Project environment
+# ============================================================
+
+PROJECT_ROOT = Path(
+    r"C:\AI Folder\EasyChatBot-Hackathon"
+)
+
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def _load_local_env() -> dict[str, Any]:
+    """Load the repository-level .env file."""
+
+    if not ENV_FILE.exists():
+        return {}
+
+    return dict(
+        dotenv_values(ENV_FILE)
+    )
+
+
+_LOCAL_ENV = _load_local_env()
+
+
+def _get_config(
+    name: str,
+    default: str = "",
+) -> str:
+    """Resolve configuration.
+
+    Priority:
+
+        1. Process environment variable.
+        2. Repository-level .env value.
+        3. Supplied default.
+    """
+
+    environment_value = os.getenv(name)
+
+    if environment_value is not None:
+        return environment_value
+
+    dotenv_value = _LOCAL_ENV.get(name)
+
+    if dotenv_value is not None:
+        return str(dotenv_value)
+
+    return default
+
+
 class ResendGovernanceReminderEmailSender:
-    """Infrastructure adapter for privacy governance reminder emails.
+    """Infrastructure adapter for Privacy Governance reminder emails.
 
     Delivery path:
 
@@ -36,23 +90,30 @@ class ResendGovernanceReminderEmailSender:
     Privacy Governance uses its own sender identity:
 
         PRIVACY_APPROVAL_EMAIL_FROM
-            -> easychabotdataprotection@resend.dev
 
-    This is deliberately different from the Cybersecurity sender:
+    This remains separate from:
 
         CYBERSECURITY_EMAIL_FROM
-            -> onboarding@resend.dev
 
-    The shared email provider infrastructure is therefore preserved
-    without allowing the Privacy Governance reminder to inherit the
-    Cybersecurity sender identity.
+    The shared email provider infrastructure is reused without
+    coupling Privacy Governance to the Cybersecurity sender identity.
 
-    Does NOT:
+    This adapter does not:
     - approve or reject governance cases;
     - modify governance state;
-    - bypass the reminder scheduler;
-    - access provider credentials directly;
-    - make autonomous governance decisions.
+    - bypass governance controls;
+    - make governance decisions.
+
+    Email threading metadata is optional.
+
+    For the first reminder, the governance service may supply the
+    initial notification's Resend message ID through:
+
+        in_reply_to
+        references
+
+    These values are passed to the provider layer without this
+    adapter making any threading decision itself.
     """
 
     def __init__(
@@ -64,9 +125,8 @@ class ResendGovernanceReminderEmailSender:
             self._provider_manager = provider_manager
             return
 
-        privacy_sender = os.getenv(
+        privacy_sender = _get_config(
             "PRIVACY_APPROVAL_EMAIL_FROM",
-            "",
         ).strip()
 
         if not privacy_sender:
@@ -88,14 +148,22 @@ class ResendGovernanceReminderEmailSender:
         body: str,
         html_body: str,
         attachments: list[dict[str, Any]] | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> Any:
-        """Deliver a Privacy Governance reminder.
+        """Deliver a Privacy Governance reminder email.
 
-        The reminder remains part of the Privacy Governance domain and
-        therefore uses the Privacy Governance sender identity.
+        The shared EmailProviderManager contract is:
 
-        Delivery does not modify governance state and does not constitute
-        approval.
+            send(subject, content)
+
+        The recipient, body, HTML body, attachments and optional
+        threading metadata are therefore passed inside the provider
+        content dictionary.
+
+        Threading metadata is intentionally optional so existing
+        reminder emails continue to work while the governance email
+        thread persistence is introduced.
         """
 
         if not recipient or not recipient.strip():
@@ -128,8 +196,32 @@ class ResendGovernanceReminderEmailSender:
         if attachments:
             content["attachments"] = attachments
 
+        # --------------------------------------------------------
+        # Optional email-threading metadata
+        # --------------------------------------------------------
+
+        if in_reply_to is not None:
+            normalized_in_reply_to = (
+                str(in_reply_to).strip()
+            )
+
+            if normalized_in_reply_to:
+                content["in_reply_to"] = (
+                    normalized_in_reply_to
+                )
+
+        if references is not None:
+            normalized_references = (
+                str(references).strip()
+            )
+
+            if normalized_references:
+                content["references"] = (
+                    normalized_references
+                )
+
         return await self._provider_manager.send(
-            subject,
+            subject.strip(),
             content,
         )
 

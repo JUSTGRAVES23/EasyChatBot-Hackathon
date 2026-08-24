@@ -53,6 +53,12 @@ def make_case() -> PrivacyGovernanceCase:
         trigger_type=PrivacyTriggerType.NEW_PROCESSING,
         triggered_at=datetime.now(timezone.utc),
         trigger_source="Processing Registry",
+
+        # Authoritative case → privacy change relationship.
+        # This is required by PrivacyGovernanceDecisionService
+        # before any DPO/GRC decision can be recorded.
+        change_id="PCR-CASE-001",
+
         risk="MEDIUM",
         validation_status="PASS",
         email_status="SENT",
@@ -98,6 +104,7 @@ def test_get_case_returns_case_by_identifier():
 
     assert case.case_id == "CASE-001"
     assert case.title == "Controlled privacy case"
+    assert case.change_id == "PCR-CASE-001"
 
 
 def test_list_cases_returns_registered_cases():
@@ -107,6 +114,7 @@ def test_list_cases_returns_registered_cases():
 
     assert len(cases) == 1
     assert cases[0].case_id == "CASE-001"
+    assert cases[0].change_id == "PCR-CASE-001"
 
 
 def test_list_pending_cases_returns_pending_cases():

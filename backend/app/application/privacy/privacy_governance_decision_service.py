@@ -26,6 +26,7 @@ class PrivacyGovernanceDecisionService:
             raise ValueError("change_registry cannot be None.")
         if case_registry is None:
             raise ValueError("case_registry cannot be None.")
+
         self._approvals = approval_registry
         self._changes = change_registry
         self._cases = case_registry
@@ -44,6 +45,40 @@ class PrivacyGovernanceDecisionService:
         change = self._changes.get(change_id)
         case = self._cases.get(case_id)
 
+        # ------------------------------------------------------------------
+        # GOVERNANCE INTEGRITY CONTROL 1
+        #
+        # The change submitted for a decision MUST belong to the governance
+        # case being decided.
+        #
+        # Without this check a caller could theoretically submit:
+        #
+        #   case_id   = CASE-A
+        #   change_id = CHANGE-B
+        #
+        # and create approval evidence connecting unrelated governance
+        # objects.
+        # ------------------------------------------------------------------
+        if case.change_id != change_id:
+            raise ValueError(
+                f"Change {change_id} does not belong to governance case "
+                f"{case_id}."
+            )
+
+        # ------------------------------------------------------------------
+        # GOVERNANCE INTEGRITY CONTROL 2
+        #
+        # APPROVED and BLOCKED are terminal governance states.
+        #
+        # Normal decision endpoints must not silently reopen or overwrite a
+        # finalized governance case. A future reopen workflow, if required,
+        # must be explicit and separately controlled.
+        # ------------------------------------------------------------------
+        if case.governance_status in {"APPROVED", "BLOCKED"}:
+            raise ValueError(
+                f"Governance case {case_id} already has a final decision."
+            )
+
         record = PrivacyApprovalRecord(
             approval_id=approval_id,
             case_id=case_id,
@@ -54,36 +89,55 @@ class PrivacyGovernanceDecisionService:
             comment=comment,
             decided_at=datetime.now(timezone.utc),
         )
+
         self._approvals.register(record)
 
         records = self._approvals.for_case(case_id)
+
         dpo_ok = any(
-            r.role == "DPO" and r.decision == ApprovalDecision.APPROVED
+            r.role == "DPO"
+            and r.decision == ApprovalDecision.APPROVED
             for r in records
         )
+
         grc_ok = any(
-            r.role == "GRC" and r.decision == ApprovalDecision.APPROVED
+            r.role == "GRC"
+            and r.decision == ApprovalDecision.APPROVED
             for r in records
         )
-        rejected = any(r.decision == ApprovalDecision.REJECTED for r in records)
+
+        rejected = any(
+            r.decision == ApprovalDecision.REJECTED
+            for r in records
+        )
+
         changes_requested = any(
-            r.decision == ApprovalDecision.REQUEST_CHANGES for r in records
+            r.decision == ApprovalDecision.REQUEST_CHANGES
+            for r in records
         )
 
         if rejected or changes_requested:
             status = PrivacyChangeStatus.BLOCKED
             governance_status = "BLOCKED"
+
         elif (
             (not change.dpo_required or dpo_ok)
             and (not change.grc_required or grc_ok)
         ):
             status = PrivacyChangeStatus.APPROVED
             governance_status = "APPROVED"
+
         else:
             status = PrivacyChangeStatus.PENDING_DPO_GRC
             governance_status = "PENDING_DPO_GRC"
 
-        self._changes.update(replace(change, status=status))
+        self._changes.update(
+            replace(
+                change,
+                status=status,
+            )
+        )
+
         self._cases.update(
             replace(
                 case,
@@ -100,4 +154,5 @@ class PrivacyGovernanceDecisionService:
                 ),
             )
         )
+
         return record
