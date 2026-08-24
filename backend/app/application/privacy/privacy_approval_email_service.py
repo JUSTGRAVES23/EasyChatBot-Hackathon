@@ -1,25 +1,40 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+import inspect
+from dataclasses import dataclass, replace
+from typing import Any, Protocol
 
 from .privacy_change import PrivacyChange
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalEmailRequest:
-    """Immutable request to escalate a privacy change for human approval."""
+    """Immutable request to escalate a privacy change for human approval.
 
+    ``case_id`` identifies the authoritative Privacy Governance case.
+
+    ``delivery`` is an internal transport-boundary value. It is intentionally
+    excluded from the governance meaning of this object. When an asynchronous
+    email sender is used, it contains the awaitable returned by that sender so
+    the asynchronous governance orchestration boundary can await delivery.
+
+    Email delivery never represents governance approval.
+    """
+
+    case_id: str
     change_id: str
     recipient: str
     subject: str
     body: str
     requires_dpo_approval: bool
     requires_grc_approval: bool
+    delivery: Any | None = None
 
 
 class ApprovalEmailSender(Protocol):
     """Application-level email delivery boundary.
+
+    Implementations may be synchronous or asynchronous.
 
     The application layer does not know whether delivery uses
     Resend, SMTP, or another provider.
@@ -28,7 +43,7 @@ class ApprovalEmailSender(Protocol):
     def send(
         self,
         request: ApprovalEmailRequest,
-    ) -> None:
+    ) -> object:
         ...
 
 
@@ -36,9 +51,10 @@ class PrivacyApprovalEmailService:
     """Creates privacy governance approval requests.
 
     Responsibilities:
-    - validate that automated privacy validation has passed;
+    - validate automated privacy validation;
     - determine whether DPO/GRC review is required;
     - construct the approval request;
+    - carry the authoritative case identity;
     - delegate email delivery to the injected sender.
 
     Does NOT:
@@ -47,6 +63,13 @@ class PrivacyApprovalEmailService:
     - modify governance status;
     - call an email provider directly;
     - interpret email delivery as approval.
+
+    The public ``escalate()`` contract remains synchronous for Beta
+    compatibility.
+
+    If the injected sender is asynchronous, its awaitable is carried by the
+    returned request and must be awaited by the asynchronous orchestration
+    boundary.
     """
 
     def __init__(
@@ -56,10 +79,19 @@ class PrivacyApprovalEmailService:
         approval_recipient: str,
     ) -> None:
         if sender is None:
-            raise ValueError("sender cannot be None.")
+            raise ValueError(
+                "sender cannot be None."
+            )
+
+        if not isinstance(approval_recipient, str):
+            raise ValueError(
+                "approval_recipient is required."
+            )
 
         if not approval_recipient.strip():
-            raise ValueError("approval_recipient is required.")
+            raise ValueError(
+                "approval_recipient is required."
+            )
 
         self._sender = sender
         self._recipient = approval_recipient.strip()
@@ -70,16 +102,18 @@ class PrivacyApprovalEmailService:
         *,
         validation_passed: bool,
     ) -> ApprovalEmailRequest:
-        """Create and send a governance approval request.
+        """Create and initiate a governance approval request.
 
-        A request can only be escalated after automated privacy
-        validation has passed.
+        Automated privacy validation must have passed.
 
-        Sending the email never constitutes DPO/GRC approval.
+        The method deliberately remains synchronous so existing application
+        callers and tests retain their established contract.
         """
 
         if change is None:
-            raise ValueError("change cannot be None.")
+            raise ValueError(
+                "change cannot be None."
+            )
 
         if not validation_passed:
             raise ValueError(
@@ -157,7 +191,26 @@ class PrivacyApprovalEmailService:
             "Legal judgement."
         )
 
+        # PrivacyChange currently exposes change_id as the stable
+        # identifier. If an explicit case_id is available, use it.
+        case_id = getattr(
+            change,
+            "case_id",
+            change.change_id,
+        )
+
+        if not isinstance(case_id, str):
+            case_id = str(case_id)
+
+        case_id = case_id.strip()
+
+        if not case_id:
+            raise ValueError(
+                "case_id cannot be empty."
+            )
+
         request = ApprovalEmailRequest(
+            case_id=case_id,
             change_id=change.change_id,
             recipient=self._recipient,
             subject=subject,
@@ -166,7 +219,26 @@ class PrivacyApprovalEmailService:
             requires_grc_approval=change.grc_required,
         )
 
-        self._sender.send(request)
+        # Delegate delivery immediately.
+        #
+        # Synchronous sender:
+        #     result is returned immediately.
+        #
+        # Asynchronous sender:
+        #     result is a coroutine/awaitable.
+        #
+        # We deliberately do NOT await here because this method's public
+        # contract is synchronous.
+        delivery = self._sender.send(request)
+
+        # Keep synchronous application compatibility while safely carrying
+        # an asynchronous infrastructure operation to the async orchestration
+        # boundary.
+        if inspect.isawaitable(delivery):
+            return replace(
+                request,
+                delivery=delivery,
+            )
 
         return request
 

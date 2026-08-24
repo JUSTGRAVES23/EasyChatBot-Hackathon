@@ -13,12 +13,18 @@ The provider supports multiple controlled email contracts:
   plain-text content. The provider delivers that content without
   replacing it with the cybersecurity template.
 
+- Privacy Governance email threading:
+  optional In-Reply-To and References headers may be supplied
+  by the application layer when a notification is replying to
+  an existing governance email thread.
+
 The provider does not:
 - make governance decisions;
 - modify governance state;
 - execute remediation;
 - generate application decisions;
-- access provider credentials outside configuration.
+- access provider credentials outside configuration;
+- decide which governance emails belong to a thread.
 """
 
 from __future__ import annotations
@@ -46,6 +52,18 @@ class ResendEmailProvider:
 
         all other email types
             -> existing cybersecurity renderer
+
+    Email threading rule:
+
+        in_reply_to
+            -> In-Reply-To header
+
+        references
+            -> References header
+
+    Threading metadata is supplied by the application workflow.
+    This provider only translates that metadata into the provider
+    request.
     """
 
     provider_id = "resend"
@@ -102,6 +120,10 @@ class ResendEmailProvider:
             "",
         )
 
+        # --------------------------------------------------------
+        # Presentation
+        # --------------------------------------------------------
+
         # Privacy Governance owns its complete presentation.
         #
         # Do not replace the supplied HTML with the
@@ -125,15 +147,72 @@ class ResendEmailProvider:
                     "body cannot be empty when provided."
                 )
 
+        # --------------------------------------------------------
+        # Base Resend request
+        # --------------------------------------------------------
+
         params: dict[str, Any] = {
             "from": self.sender,
             "to": [recipient],
-            "subject": subject,
+            "subject": subject.strip(),
             "html": html,
         }
 
         if isinstance(text_body, str) and text_body.strip():
             params["text"] = text_body
+
+        # --------------------------------------------------------
+        # Optional email threading
+        # --------------------------------------------------------
+        #
+        # These values are intentionally supplied by the
+        # application layer.
+        #
+        # The provider does not decide:
+        #
+        #     which case belongs to which thread
+        #
+        # or:
+        #
+        #     whether an email should be a reply.
+        #
+        # It simply translates the approved metadata into
+        # standard email headers.
+        #
+        # Example:
+        #
+        #     In-Reply-To: <previous-message-id>
+        #     References:  <previous-message-id>
+        #
+        # This allows clients such as Gmail to group the initial
+        # governance notification and subsequent reminders into
+        # the same conversation.
+        # --------------------------------------------------------
+
+        in_reply_to = self._normalize_header_value(
+            content.get("in_reply_to"),
+            field_name="in_reply_to",
+        )
+
+        references = self._normalize_header_value(
+            content.get("references"),
+            field_name="references",
+        )
+
+        headers: dict[str, str] = {}
+
+        if in_reply_to:
+            headers["In-Reply-To"] = in_reply_to
+
+        if references:
+            headers["References"] = references
+
+        if headers:
+            params["headers"] = headers
+
+        # --------------------------------------------------------
+        # Attachments
+        # --------------------------------------------------------
 
         attachments = content.get("attachments")
 
@@ -141,6 +220,10 @@ class ResendEmailProvider:
             params["attachments"] = self._build_attachments(
                 attachments
             )
+
+        # --------------------------------------------------------
+        # Provider delivery
+        # --------------------------------------------------------
 
         response = await resend.Emails.send_async(
             params
@@ -160,6 +243,39 @@ class ResendEmailProvider:
             "status": "accepted",
             "message_id": message_id,
         }
+
+    @staticmethod
+    def _normalize_header_value(
+        value: Any,
+        *,
+        field_name: str,
+    ) -> str | None:
+        """
+        Validate and normalize optional email-header metadata.
+
+        Header values must be strings when supplied.
+
+        Empty values are treated as absent.
+
+        This method intentionally does not generate or transform
+        message IDs. The application/provider integration must
+        supply the correct message identifier.
+        """
+
+        if value is None:
+            return None
+
+        if not isinstance(value, str):
+            raise TypeError(
+                f"{field_name} must be a string when provided."
+            )
+
+        normalized = value.strip()
+
+        if not normalized:
+            return None
+
+        return normalized
 
     @staticmethod
     def _get_supplied_html_body(

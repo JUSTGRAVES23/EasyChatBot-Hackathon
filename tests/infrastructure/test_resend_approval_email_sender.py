@@ -14,9 +14,13 @@ from backend.app.infrastructure.email.resend_approval_email_sender import (
 
 def make_request() -> ApprovalEmailRequest:
     return ApprovalEmailRequest(
+        case_id="CASE-TEST-001",
         change_id="PCR-TEST-001",
         recipient="davdbarbero1999@gmail.com",
-        subject="[EasyChatBot Privacy Governance] Approval Required",
+        subject=(
+            "[EasyChatBot Privacy Governance] "
+            "Approval Required"
+        ),
         body=(
             "EasyChatBot Beta 1 Privacy Governance Review\n"
             "\n"
@@ -27,7 +31,8 @@ def make_request() -> ApprovalEmailRequest:
     )
 
 
-def test_resend_sender_sends_expected_payload() -> None:
+@pytest.mark.asyncio
+async def test_resend_sender_sends_expected_payload() -> None:
     sender = ResendApprovalEmailSender(
         api_key="re_test_key",
         sender_email="privacy@example.com",
@@ -35,16 +40,23 @@ def test_resend_sender_sends_expected_payload() -> None:
 
     request = make_request()
 
+    mock_response = {
+        "id": "MSG-TEST-001",
+    }
+
     with patch(
         "backend.app.infrastructure.email."
-        "resend_approval_email_sender.resend.Emails.send"
+        "resend_approval_email_sender.resend.Emails.send",
+        return_value=mock_response,
     ) as mock_send:
-        sender.send(request)
+        result = await sender.send(request)
 
     mock_send.assert_called_once_with(
         {
             "from": "privacy@example.com",
-            "to": ["davdbarbero1999@gmail.com"],
+            "to": [
+                "davdbarbero1999@gmail.com"
+            ],
             "subject": (
                 "[EasyChatBot Privacy Governance] "
                 "Approval Required"
@@ -57,8 +69,15 @@ def test_resend_sender_sends_expected_payload() -> None:
         }
     )
 
+    assert result["status"] == "accepted"
+    assert result["reference"] == "MSG-TEST-001"
+    assert result["message_id"] == "MSG-TEST-001"
+    assert result["case_id"] == "CASE-TEST-001"
+    assert result["change_id"] == "PCR-TEST-001"
 
-def test_resend_sender_requires_api_key() -> None:
+
+@pytest.mark.asyncio
+async def test_resend_sender_requires_api_key() -> None:
     sender = ResendApprovalEmailSender(
         api_key="",
         sender_email="privacy@example.com",
@@ -68,10 +87,11 @@ def test_resend_sender_requires_api_key() -> None:
         RuntimeError,
         match="RESEND_API_KEY",
     ):
-        sender.send(make_request())
+        await sender.send(make_request())
 
 
-def test_resend_sender_requires_sender_email() -> None:
+@pytest.mark.asyncio
+async def test_resend_sender_requires_sender_email() -> None:
     sender = ResendApprovalEmailSender(
         api_key="re_test_key",
         sender_email="",
@@ -81,10 +101,11 @@ def test_resend_sender_requires_sender_email() -> None:
         RuntimeError,
         match="PRIVACY_APPROVAL_EMAIL_FROM",
     ):
-        sender.send(make_request())
+        await sender.send(make_request())
 
 
-def test_resend_sender_rejects_none_request() -> None:
+@pytest.mark.asyncio
+async def test_resend_sender_rejects_none_request() -> None:
     sender = ResendApprovalEmailSender(
         api_key="re_test_key",
         sender_email="privacy@example.com",
@@ -94,10 +115,11 @@ def test_resend_sender_rejects_none_request() -> None:
         ValueError,
         match="request cannot be None",
     ):
-        sender.send(None)  # type: ignore[arg-type]
+        await sender.send(None)  # type: ignore[arg-type]
 
 
-def test_resend_sender_surfaces_provider_failure() -> None:
+@pytest.mark.asyncio
+async def test_resend_sender_surfaces_provider_failure() -> None:
     sender = ResendApprovalEmailSender(
         api_key="re_test_key",
         sender_email="privacy@example.com",
@@ -106,19 +128,26 @@ def test_resend_sender_surfaces_provider_failure() -> None:
     with patch(
         "backend.app.infrastructure.email."
         "resend_approval_email_sender.resend.Emails.send",
-        side_effect=Exception("provider unavailable"),
+        side_effect=Exception(
+            "provider unavailable"
+        ),
     ):
         with pytest.raises(
             RuntimeError,
-            match="Resend privacy approval email delivery failed",
+            match=(
+                "Resend privacy approval email "
+                "delivery failed"
+            ),
         ):
-            sender.send(make_request())
+            await sender.send(make_request())
 
 
-def test_resend_sender_does_not_change_governance_state() -> None:
+@pytest.mark.asyncio
+async def test_resend_sender_does_not_change_governance_state() -> None:
     """Infrastructure adapter only delivers email.
 
-    Governance decisions remain owned by PrivacyGovernanceGate.
+    Governance decisions remain owned by the governance
+    decision service / gate.
     """
 
     sender = ResendApprovalEmailSender(
@@ -130,11 +159,17 @@ def test_resend_sender_does_not_change_governance_state() -> None:
 
     with patch(
         "backend.app.infrastructure.email."
-        "resend_approval_email_sender.resend.Emails.send"
+        "resend_approval_email_sender.resend.Emails.send",
+        return_value={
+            "id": "MSG-TEST-002",
+        },
     ) as mock_send:
-        sender.send(request)
+        result = await sender.send(request)
 
     assert request.requires_dpo_approval is True
     assert request.requires_grc_approval is True
+
+    assert result["case_id"] == "CASE-TEST-001"
+    assert result["change_id"] == "PCR-TEST-001"
 
     mock_send.assert_called_once()

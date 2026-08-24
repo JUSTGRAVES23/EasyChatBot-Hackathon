@@ -46,6 +46,9 @@ def make_case() -> PrivacyGovernanceCase:
         trigger_type=PrivacyTriggerType.NEW_PROCESSING,
         triggered_at=datetime.now(timezone.utc),
         trigger_source="Processing Registry",
+        # Governance integrity link:
+        # this case explicitly owns PCR-001.
+        change_id="PCR-001",
     )
 
 
@@ -58,7 +61,13 @@ def make_change_registry() -> PrivacyChangeRegistry:
     return registry
 
 
-def test_two_explicit_approvals_move_case_to_approved():
+def make_service() -> tuple[
+    PrivacyGovernanceDecisionService,
+    PrivacyGovernanceCaseRegistry,
+    PrivacyChangeRegistry,
+]:
+    """Build the governance decision service with linked test fixtures."""
+
     changes = make_change_registry()
 
     cases = PrivacyGovernanceCaseRegistry(
@@ -72,6 +81,12 @@ def test_two_explicit_approvals_move_case_to_approved():
         change_registry=changes,
         case_registry=cases,
     )
+
+    return service, cases, changes
+
+
+def test_two_explicit_approvals_move_case_to_approved() -> None:
+    service, cases, changes = make_service()
 
     # ---------------------------------------------------------
     # DPO approval
@@ -93,6 +108,13 @@ def test_two_explicit_approvals_move_case_to_approved():
             "CASE-001"
         ).governance_status
         == "PENDING_DPO_GRC"
+    )
+
+    assert (
+        changes.get(
+            "PCR-001"
+        ).status
+        == PrivacyChangeStatus.PENDING_DPO_GRC
     )
 
     # ---------------------------------------------------------
@@ -139,20 +161,8 @@ def test_two_explicit_approvals_move_case_to_approved():
     )
 
 
-def test_rejection_blocks_case():
-    changes = make_change_registry()
-
-    cases = PrivacyGovernanceCaseRegistry(
-        [make_case()]
-    )
-
-    approvals = PrivacyApprovalRegistry()
-
-    service = PrivacyGovernanceDecisionService(
-        approval_registry=approvals,
-        change_registry=changes,
-        case_registry=cases,
-    )
+def test_rejection_blocks_case() -> None:
+    service, cases, changes = make_service()
 
     service.record_decision(
         case_id="CASE-001",
