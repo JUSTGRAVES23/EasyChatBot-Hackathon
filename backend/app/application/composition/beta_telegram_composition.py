@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -12,11 +13,13 @@ from backend.app.application.beta_access.beta_access_service import (
 from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
     BetaTelegramConversationBoundary,
 )
+from backend.app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
 from backend.app.application.beta_access.telegram_conversation_service import (
     TelegramConversationService,
-)
-from backend.app.infrastructure.telegram.telegram_bot_runtime import (
-    TelegramBotRuntime,
 )
 from backend.app.interfaces.telegram.beta_private_chat_gate import (
     BetaPrivateChatGate,
@@ -27,6 +30,9 @@ from backend.app.interfaces.telegram.beta_start_handler import (
 from backend.app.interfaces.telegram.beta_telegram_adapter import (
     BetaTelegramAdapter,
 )
+from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+    TelegramBotRuntime,
+)
 from backend.app.providers.llm.llm_provider_factory import (
     LLMProviderFactory,
 )
@@ -34,12 +40,7 @@ from backend.app.providers.llm.llm_provider_factory import (
 
 @dataclass(frozen=True)
 class BetaTelegramComposition:
-    """
-    Fully composed Beta Telegram classroom application graph.
-
-    This class composes the application graph only.
-    It does not start Telegram polling.
-    """
+    """Fully composed Beta Telegram classroom application graph."""
 
     beta_access_service: BetaAccessService
     conversation_runtime: ConversationRuntime
@@ -49,6 +50,43 @@ class BetaTelegramComposition:
     start_handler: BetaTelegramStartHandler
     adapter: BetaTelegramAdapter
     runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        )
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive number."
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive number."
+        )
+    return value
 
 
 def create_beta_telegram_composition(
@@ -64,24 +102,14 @@ def create_beta_telegram_composition(
     conversation_runtime_factory: (
         Callable[[], ConversationRuntime] | None
     ) = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
 ) -> BetaTelegramComposition:
-    """
-    Compose the complete Beta Telegram classroom graph.
+    """Compose the production Beta Telegram classroom graph.
 
-    Runtime resolution order:
-
-        explicit conversation_runtime
-                    |
-                    v
-        conversation_runtime_factory
-                    |
-                    v
-        production ConversationRuntime
-
-    The default production runtime uses the platform LLM provider
-    abstraction.
-
-    Tests may inject a controlled ConversationRuntime or factory.
+    Policy components are injected at the application boundary and never
+    placed inside TelegramConversationService.
     """
 
     if expiration_minutes <= 0:
@@ -98,10 +126,6 @@ def create_beta_telegram_composition(
             "conversation_runtime_factory, not both."
         )
 
-    # =========================================================
-    # BETA ACCESS
-    # =========================================================
-
     beta_access_service = BetaAccessService(
         user_repository=user_repository,
         token_repository=token_repository,
@@ -109,80 +133,78 @@ def create_beta_telegram_composition(
         expiration_minutes=expiration_minutes,
     )
 
-    # =========================================================
-    # CONVERSATION RUNTIME
-    # =========================================================
-
     if conversation_runtime is not None:
         resolved_conversation_runtime = conversation_runtime
-
     elif conversation_runtime_factory is not None:
-        resolved_conversation_runtime = (
-            conversation_runtime_factory()
-        )
-
+        resolved_conversation_runtime = conversation_runtime_factory()
     else:
         resolved_conversation_runtime = ConversationRuntime(
             llm_provider=LLMProviderFactory.create(),
         )
 
-    # =========================================================
-    # CONVERSATION SERVICE
-    # =========================================================
-
     conversation_service = TelegramConversationService(
         conversation_runtime=resolved_conversation_runtime,
-        conversation_event_repository=(
-            conversation_event_repository
-        ),
-        privacy_identifier_service=(
-            privacy_identifier_service
-        ),
-        conversation_event_validator=(
-            conversation_event_validator
-        ),
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
     )
 
-    # =========================================================
-    # CONVERSATION BOUNDARY
-    # =========================================================
+    resolved_rate_limiter = rate_limiter
+    resolved_abuse_protector = abuse_protector
+    resolved_observability = observability
 
-    conversation_boundary = (
-        BetaTelegramConversationBoundary(
-            conversation_service=conversation_service,
-            beta_access_service=beta_access_service,
+    # Defaults are created here, at the composition boundary, so unit tests
+    # can inject controlled doubles without changing application policy.
+    if resolved_rate_limiter is None:
+        resolved_rate_limiter = InMemoryTelegramRateLimiter(
+            max_messages=_env_positive_int(
+                "TELEGRAM_RATE_LIMIT_MAX_MESSAGES",
+                100,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS",
+                86400.0,
+            ),
         )
-    )
 
-    # =========================================================
-    # PRIVATE CHAT GATE
-    # =========================================================
+    if resolved_abuse_protector is None:
+        resolved_abuse_protector = InMemoryTelegramAbuseProtector(
+            max_messages=_env_positive_int(
+                "TELEGRAM_ABUSE_MAX_MESSAGES",
+                10,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_ABUSE_WINDOW_SECONDS",
+                60.0,
+            ),
+        )
+
+    if resolved_observability is None:
+        resolved_observability = LoggingTelegramObservability(
+            privacy_identifier_service=privacy_identifier_service,
+        )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+    )
 
     private_chat_gate = BetaPrivateChatGate(
         beta_access_service=beta_access_service,
     )
 
-    # =========================================================
-    # START HANDLER
-    # =========================================================
-
     start_handler = BetaTelegramStartHandler(
         beta_access_service=beta_access_service,
     )
-
-    # =========================================================
-    # TELEGRAM ADAPTER
-    # =========================================================
 
     adapter = BetaTelegramAdapter(
         start_handler=start_handler,
         private_chat_gate=private_chat_gate,
         conversation_boundary=conversation_boundary,
     )
-
-    # =========================================================
-    # TELEGRAM RUNTIME
-    # =========================================================
 
     runtime = TelegramBotRuntime(
         adapter=adapter,
@@ -191,15 +213,16 @@ def create_beta_telegram_composition(
 
     return BetaTelegramComposition(
         beta_access_service=beta_access_service,
-        conversation_runtime=(
-            resolved_conversation_runtime
-        ),
+        conversation_runtime=resolved_conversation_runtime,
         conversation_service=conversation_service,
         conversation_boundary=conversation_boundary,
         private_chat_gate=private_chat_gate,
         start_handler=start_handler,
         adapter=adapter,
         runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
     )
 
 

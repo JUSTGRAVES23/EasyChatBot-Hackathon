@@ -1,19 +1,52 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Protocol
 
 from backend.app.application.beta_access.beta_access_service import (
     BetaAccessService,
+)
+from backend.app.application.beta_access.policies.telegram_policy_messages import (
+    TelegramPolicyMessageService,
 )
 
 
 logger = logging.getLogger(__name__)
 
 
+class TelegramPolicy(Protocol):
+    async def allow(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> bool:
+        ...
+
+
+class TelegramRetryPolicy(TelegramPolicy, Protocol):
+    async def retry_after_seconds(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> float:
+        ...
+
+
+class TelegramObservability(Protocol):
+    async def record(
+        self,
+        *,
+        event_type: str,
+        telegram_user_id: int,
+        outcome: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        ...
+
+
 class BetaTelegramConversationBoundary:
     """
-    Application boundary for Telegram Beta conversations.
+    Application policy boundary for Beta Telegram conversations.
 
     Security order:
 
@@ -23,11 +56,22 @@ class BetaTelegramConversationBoundary:
               ↓
         Beta authorization
               ↓
-        Authoritative learner context
+        Rate limit
+              ↓
+        Abuse protection
               ↓
         Conversation service
               ↓
+        Observability
+              ↓
         Safe response
+
+    Rate limiting and abuse protection deliberately remain
+    outside TelegramConversationService and outside Telegram
+    transport.
+
+    Learner-facing policy messages are generated from the
+    active Learning World language.
     """
 
     MAX_TELEGRAM_MESSAGE_LENGTH = 4096
@@ -47,6 +91,12 @@ class BetaTelegramConversationBoundary:
         *,
         conversation_service: Any,
         beta_access_service: BetaAccessService,
+        rate_limiter: TelegramPolicy | None = None,
+        abuse_protector: TelegramPolicy | None = None,
+        observability: TelegramObservability | None = None,
+        policy_message_service: (
+            TelegramPolicyMessageService | None
+        ) = None,
     ) -> None:
         if conversation_service is None:
             raise ValueError(
@@ -58,8 +108,83 @@ class BetaTelegramConversationBoundary:
                 "beta_access_service cannot be None."
             )
 
-        self._conversation_service = conversation_service
-        self._beta_access_service = beta_access_service
+        self._conversation_service = (
+            conversation_service
+        )
+
+        self._beta_access_service = (
+            beta_access_service
+        )
+
+        self._rate_limiter = rate_limiter
+
+        self._abuse_protector = abuse_protector
+
+        self._observability = observability
+
+        self._policy_message_service = (
+            policy_message_service
+            or TelegramPolicyMessageService()
+        )
+
+    async def _record(
+        self,
+        *,
+        event_type: str,
+        telegram_user_id: int,
+        outcome: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self._observability is None:
+            return
+
+        try:
+            await self._observability.record(
+                event_type=event_type,
+                telegram_user_id=telegram_user_id,
+                outcome=outcome,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception(
+                "Telegram observability failure "
+                "for event_type=%s.",
+                event_type,
+            )
+
+    async def _retry_after_seconds(
+        self,
+        policy: TelegramPolicy | None,
+        *,
+        telegram_user_id: int,
+    ) -> float | None:
+        if policy is None:
+            return None
+
+        method = getattr(
+            policy,
+            "retry_after_seconds",
+            None,
+        )
+
+        if method is None:
+            return None
+
+        try:
+            return await method(
+                telegram_user_id=telegram_user_id,
+            )
+        except Exception as exc:
+            await self._record(
+                event_type="telegram_classroom_policy",
+                telegram_user_id=telegram_user_id,
+                outcome="retry_after_error",
+                metadata={
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            return None
 
     async def handle_message(
         self,
@@ -84,32 +209,138 @@ class BetaTelegramConversationBoundary:
             )
 
         except PermissionError:
-            logger.warning(
-                "Unauthorized Telegram user=%s",
-                telegram_user_id,
+            await self._record(
+                event_type=(
+                    "telegram_classroom_authorization"
+                ),
+                telegram_user_id=telegram_user_id,
+                outcome="denied",
             )
 
             return self.UNAUTHORIZED_RESPONSE
 
-        logger.info(
-            (
-                "Beta Telegram context resolved "
-                "user=%s world=%s character=%s level=%s"
-            ),
-            telegram_user_id,
-            context.world_id,
-            context.character,
-            context.level,
+        if self._rate_limiter is not None:
+            try:
+                allowed = await (
+                    self._rate_limiter.allow(
+                        telegram_user_id=(
+                            telegram_user_id
+                        ),
+                    )
+                )
+
+            except Exception as exc:
+                await self._record(
+                    event_type=(
+                        "telegram_classroom_rate_limit"
+                    ),
+                    telegram_user_id=telegram_user_id,
+                    outcome="error",
+                    metadata={
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+                return self.SAFE_ERROR_RESPONSE
+
+            if not allowed:
+                retry_after = (
+                    await self._retry_after_seconds(
+                        self._rate_limiter,
+                        telegram_user_id=(
+                            telegram_user_id
+                        ),
+                    )
+                )
+
+                await self._record(
+                    event_type=(
+                        "telegram_classroom_rate_limit"
+                    ),
+                    telegram_user_id=telegram_user_id,
+                    outcome="blocked",
+                    metadata={
+                        "world_id": context.world_id,
+                    },
+                )
+
+                return (
+                    self._policy_message_service
+                    .rate_limit_message(
+                        context=context,
+                        retry_after_seconds=(
+                            retry_after
+                        ),
+                    )
+                )
+
+        if self._abuse_protector is not None:
+            try:
+                allowed = await (
+                    self._abuse_protector.allow(
+                        telegram_user_id=(
+                            telegram_user_id
+                        ),
+                    )
+                )
+
+            except Exception as exc:
+                await self._record(
+                    event_type=(
+                        "telegram_classroom_abuse_protection"
+                    ),
+                    telegram_user_id=telegram_user_id,
+                    outcome="error",
+                    metadata={
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+                return self.SAFE_ERROR_RESPONSE
+
+            if not allowed:
+                retry_after = (
+                    await self._retry_after_seconds(
+                        self._abuse_protector,
+                        telegram_user_id=(
+                            telegram_user_id
+                        ),
+                    )
+                )
+
+                await self._record(
+                    event_type=(
+                        "telegram_classroom_abuse_protection"
+                    ),
+                    telegram_user_id=telegram_user_id,
+                    outcome="blocked",
+                    metadata={
+                        "world_id": context.world_id,
+                    },
+                )
+
+                return (
+                    self._policy_message_service
+                    .abuse_limit_message(
+                        context=context,
+                        retry_after_seconds=(
+                            retry_after
+                        ),
+                    )
+                )
+
+        await self._record(
+            event_type="telegram_classroom_message",
+            telegram_user_id=telegram_user_id,
+            outcome="accepted",
+            metadata={
+                "world_id": context.world_id,
+                "character": context.character,
+                "level": context.level,
+            },
         )
 
         try:
-            # Production TelegramConversationService exposes the
-            # context-aware method.
-            #
-            # Existing WS test doubles expose only the original
-            # handle_telegram_message() contract. Keeping the
-            # compatibility branch prevents validated regression
-            # tests from being broken during migration.
             context_handler = getattr(
                 self._conversation_service,
                 "handle_telegram_message_with_context",
@@ -117,28 +348,53 @@ class BetaTelegramConversationBoundary:
             )
 
             if context_handler is not None:
-                return await context_handler(
+                response = await context_handler(
                     telegram_user_id=telegram_user_id,
                     message=clean_message,
                     context=context,
                 )
 
-            return await (
-                self._conversation_service
-                .handle_telegram_message(
-                    telegram_user_id=telegram_user_id,
-                    message=clean_message,
+            else:
+                response = await (
+                    self._conversation_service
+                    .handle_telegram_message(
+                        telegram_user_id=telegram_user_id,
+                        message=clean_message,
+                    )
                 )
+
+        except Exception as exc:
+            await self._record(
+                event_type=(
+                    "telegram_classroom_conversation"
+                ),
+                telegram_user_id=telegram_user_id,
+                outcome="error",
+                metadata={
+                    "error_type": type(exc).__name__,
+                },
             )
 
-        except Exception:
             logger.exception(
-                "Telegram conversation processing failed "
-                "for user=%s.",
-                telegram_user_id,
+                "Telegram conversation processing failed."
             )
 
             return self.SAFE_ERROR_RESPONSE
+
+        await self._record(
+            event_type=(
+                "telegram_classroom_conversation"
+            ),
+            telegram_user_id=telegram_user_id,
+            outcome="success",
+            metadata={
+                "world_id": context.world_id,
+                "character": context.character,
+                "level": context.level,
+            },
+        )
+
+        return response
 
     @classmethod
     def _validate_telegram_user_id(
@@ -171,8 +427,6 @@ class BetaTelegramConversationBoundary:
         cls,
         message: str,
     ) -> str:
-        # None is semantically an empty Telegram message and has a
-        # dedicated validation contract in WS-10.
         if message is None:
             raise ValueError(
                 "Telegram message cannot be empty."
@@ -193,11 +447,14 @@ class BetaTelegramConversationBoundary:
 
         clean_message = message.strip()
 
-        if len(clean_message) > cls.MAX_TELEGRAM_MESSAGE_LENGTH:
+        if len(clean_message) > (
+            cls.MAX_TELEGRAM_MESSAGE_LENGTH
+        ):
             raise ValueError(
                 "Telegram message is too long. "
                 "Maximum length is "
-                f"{cls.MAX_TELEGRAM_MESSAGE_LENGTH} characters."
+                f"{cls.MAX_TELEGRAM_MESSAGE_LENGTH} "
+                "characters."
             )
 
         return clean_message
