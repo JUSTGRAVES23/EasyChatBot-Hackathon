@@ -1,40 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+from .beta_private_chat_gate import BetaPrivateChatGate
 
 
-class BetaTelegramPrivateChatGate:
-    """
-    Transport-level gate for Beta Telegram classroom access.
+class BetaTelegramPrivateChatGate(BetaPrivateChatGate):
+    """Backward-compatible alias for the Beta private-chat gate.
 
-    The gate enforces two conditions:
-
-    1. The Telegram interaction must originate from a private chat.
-    2. The associated Beta user must be active.
-
-    This preserves the existing synchronous transport contract used by
-    the legacy Telegram integration.
+    New code should depend on BetaPrivateChatGate. The alias is retained
+    so existing imports do not break during the Beta 1 migration.
     """
 
-    def __init__(self, *, beta_access_service) -> None:
-        self._beta_access_service = beta_access_service
 
-    def authorize(
-        self,
-        *,
-        user_id: str,
-        chat_type: str,
-    ) -> bool:
-        """
-        Return True only when the Telegram chat is private and the
-        Beta user is active.
-
-        The Beta access service is expected to expose the existing
-        synchronous is_active(user_id=...) contract.
-        """
-        if chat_type != "private":
-            return False
-
-        return bool(
-            self._beta_access_service.is_active(
-                user_id=user_id,
-            )
-        )
+__all__ = ["BetaTelegramPrivateChatGate"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from telegram import Update
 from telegram.ext import (
@@ -10,11 +11,6 @@ from telegram.ext import (
     ContextTypes,
     MessageHandler,
     filters,
-)
-
-
-from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
-    BetaTelegramConversationBoundary,
 )
 
 from backend.app.interfaces.telegram.beta_telegram_adapter import (
@@ -30,36 +26,63 @@ class TelegramBotRuntime:
     Infrastructure adapter for python-telegram-bot.
 
     Responsibilities:
-    - create Telegram Application
-    - register Telegram handlers
-    - start Telegram polling
-    - route Telegram transport events
+    - Telegram application lifecycle;
+    - Telegram handler registration;
+    - delegation to BetaTelegramAdapter.
 
-    Does NOT:
-    - contain Beta business rules
-    - validate users directly
-    - create LLM providers
-    - execute AI directly
+    The runtime MUST NOT:
+    - perform Beta authorization;
+    - execute conversation logic;
+    - deliver classroom responses returned by the adapter.
+
+    IMPORTANT RESPONSE OWNERSHIP:
+
+        Telegram update
+              |
+              v
+        TelegramBotRuntime
+              |
+              v
+        BetaTelegramAdapter
+              |
+              +----> reply_text()
+              |
+              v
+          response
+
+    The adapter owns Telegram classroom response delivery.
+
+    Therefore the runtime MUST NOT call reply_text() with the
+    response returned by the adapter.
+
+    This prevents duplicate Telegram messages.
     """
-
 
     def __init__(
         self,
         *,
         adapter: BetaTelegramAdapter,
-        conversation_boundary: BetaTelegramConversationBoundary,
+        conversation_boundary: Any = None,
     ) -> None:
+        if adapter is None:
+            raise ValueError(
+                "adapter cannot be None."
+            )
 
         self._adapter = adapter
+
+        # Retained for constructor compatibility with existing
+        # composition. Runtime does not execute the boundary.
         self._conversation_boundary = conversation_boundary
 
         self._application: Application | None = None
         self._running = False
 
-
+    # =========================================================
+    # Application construction
+    # =========================================================
 
     def build(self) -> Application:
-
         token = os.getenv(
             "TELEGRAM_BOT_TOKEN"
         )
@@ -69,13 +92,12 @@ class TelegramBotRuntime:
                 "TELEGRAM_BOT_TOKEN is missing."
             )
 
-
         application = (
-            Application.builder()
+            Application
+            .builder()
             .token(token)
             .build()
         )
-
 
         application.add_handler(
             CommandHandler(
@@ -83,7 +105,6 @@ class TelegramBotRuntime:
                 self._handle_start,
             )
         )
-
 
         application.add_handler(
             MessageHandler(
@@ -94,201 +115,126 @@ class TelegramBotRuntime:
             )
         )
 
-
         self._application = application
-
 
         logger.info(
             "Telegram bot runtime created."
         )
 
-
         return application
 
-
+    # =========================================================
+    # Lifecycle
+    # =========================================================
 
     async def start(self) -> None:
-
         if self._running:
-
             logger.warning(
                 "Telegram runtime already running."
             )
-
             return
 
-
         if self._application is None:
-
             self.build()
-
 
         assert self._application is not None
 
-
         await self._application.initialize()
-
-
         await self._application.start()
 
-
         if self._application.updater is not None:
-
             await self._application.updater.start_polling(
-                drop_pending_updates=False
+                drop_pending_updates=False,
             )
 
-
         self._running = True
-
 
         logger.info(
             "Telegram bot polling started."
         )
 
-
-        logger.info(
-            "Telegram bot runtime started."
-        )
-
-
-
     async def stop(self) -> None:
-
         if self._application is None:
-
             return
-
 
         if (
             self._application.updater is not None
             and self._running
         ):
-
             await self._application.updater.stop()
 
-
         await self._application.stop()
-
-
         await self._application.shutdown()
 
-
         self._running = False
-
 
         logger.info(
             "Telegram bot runtime stopped."
         )
 
-
+    # =========================================================
+    # Telegram handlers
+    # =========================================================
 
     async def _handle_start(
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-
-
-        logger.info(
-            "START command received."
-        )
-
-
         await self._adapter.handle_start(
             update,
             context,
         )
-
-
 
     async def _handle_private_message(
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-
-
-        logger.warning(
-            "PRIVATE MESSAGE HANDLER TRIGGERED"
-        )
-
-
         if (
             update.effective_user is None
             or update.effective_chat is None
             or update.effective_message is None
         ):
-
-            logger.warning(
-                "Telegram update missing required fields."
-            )
-
             return
-
-
-
-        if update.effective_chat.type != "private":
-
-            logger.info(
-                "Ignoring non-private chat type=%s",
-                update.effective_chat.type,
-            )
-
-            return
-
-
-
-        message = (
-            update.effective_message.text
-        )
-
-
-        if not message:
-
-            return
-
-
-
-        telegram_user_id = (
-            update.effective_user.id
-        )
-
-
-        logger.info(
-            "Private Telegram message received user=%s message=%s",
-            telegram_user_id,
-            message,
-        )
-
-
 
         try:
+            # =================================================
+            # SINGLE DELEGATION POINT
+            # =================================================
+            #
+            # BetaTelegramAdapter:
+            #
+            #   1. validates transport
+            #   2. authorizes access
+            #   3. invokes conversation boundary
+            #   4. sends Telegram response
+            #   5. returns response for observation/testing
+            #
+            # The returned value MUST NOT be sent again.
+            #
 
-            response = await (
-                self._conversation_boundary.handle_message(
-                    telegram_user_id=telegram_user_id,
-                    message=message,
-                )
+            await self._adapter.handle_message(
+                update,
+                context,
             )
-
 
         except Exception:
-
             logger.exception(
-                "Telegram conversation processing failed."
+                "Unexpected Telegram adapter failure."
             )
 
-
+            # This is ONLY an infrastructure-level fallback for
+            # failures escaping the adapter itself.
+            #
+            # Normal conversation failures are already contained
+            # by BetaTelegramAdapter.
             await update.effective_message.reply_text(
-                "⚠️ EasyChatBot is temporarily unavailable. Please try again."
+                "EasyChatBot is temporarily unavailable. "
+                "Please try again."
             )
 
 
-            return
-
-
-
-        await update.effective_message.reply_text(
-            str(response)
-        )
+__all__ = [
+    "TelegramBotRuntime",
+]
