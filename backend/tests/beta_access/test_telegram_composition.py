@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 from backend.application.telegram_bootstrap import (
     create_telegram_runtime,
     reset_telegram_runtime,
@@ -26,6 +25,15 @@ class FakeConversationRuntime:
 def test_telegram_runtime_composition_creates_runtime(
     monkeypatch,
 ):
+    #
+    # Test-only privacy configuration.
+    #
+    # Never use this value as a production secret.
+    #
+    monkeypatch.setenv(
+        "PRIVACY_HASH_SECRET",
+        "test-only-telegram-composition-secret",
+    )
 
     #
     # Database dependency isolation.
@@ -61,3 +69,5 @@ def test_telegram_runtime_composition_creates_runtime(
     runtime = create_telegram_runtime()
 
     assert runtime is not None
+
+    reset_telegram_runtime()

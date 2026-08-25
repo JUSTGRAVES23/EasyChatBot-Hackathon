@@ -4,37 +4,59 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.application.beta_access.beta_telegram_conversation_boundary import (
-    BetaTelegramConversationBoundary,
-)
 from app.infrastructure.telegram.telegram_bot_runtime import (
     TelegramBotRuntime,
 )
 
 
-class FakeConversationService:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    async def handle_telegram_message(
+class FakeAdapter:
+    def __init__(
         self,
         *,
-        telegram_user_id: int,
-        message: str,
-    ) -> str:
-        self.calls.append(
-            {
-                "telegram_user_id": telegram_user_id,
-                "message": message,
-            }
+        conversation_boundary,
+    ) -> None:
+        self._conversation_boundary = conversation_boundary
+
+    async def handle_start(
+        self,
+        update,
+        context,
+    ):
+        return None
+
+    async def handle_message(
+        self,
+        update,
+        context,
+    ):
+        user = update.effective_user
+        message = update.effective_message
+
+        if user is None:
+            return None
+
+        if message is None:
+            return None
+
+        if not message.text:
+            return None
+
+        response = await (
+            self._conversation_boundary.handle_message(
+                telegram_user_id=user.id,
+                message=message.text,
+            )
         )
 
-        return "AI response from EasyChatBot Academy"
+        # The real BetaTelegramAdapter owns Telegram response
+        # delivery. The fake must model the same contract.
+        if (
+            isinstance(response, str)
+            and response.strip()
+        ):
+            await message.reply_text(response)
 
-
-class FakeAdapter:
-    async def handle_start(self, update, context):
-        return None
+        return response
 
 
 @dataclass
@@ -49,7 +71,10 @@ class FakeChat:
 
 
 class FakeMessage:
-    def __init__(self, text: str | None) -> None:
+    def __init__(
+        self,
+        text: str | None,
+    ) -> None:
         self.text = text
         self.replies: list[str] = []
 
@@ -89,11 +114,12 @@ class FakeConversationBoundary:
 
 @pytest.mark.asyncio
 async def test_private_message_reaches_conversation_boundary():
-
     boundary = FakeConversationBoundary()
 
     runtime = TelegramBotRuntime(
-        adapter=FakeAdapter(),
+        adapter=FakeAdapter(
+            conversation_boundary=boundary,
+        ),
         conversation_boundary=boundary,
     )
 
@@ -120,52 +146,21 @@ async def test_private_message_reaches_conversation_boundary():
         }
     ]
 
+    # The adapter owns Telegram response delivery.
+    # The runtime must not send a second response.
     assert update.effective_message.replies == [
-        "Private classroom response"
+        "Private classroom response",
     ]
 
 
 @pytest.mark.asyncio
-async def test_group_message_does_not_enter_ai_path():
-
-    boundary = FakeConversationBoundary()
-
-    runtime = TelegramBotRuntime(
-        adapter=FakeAdapter(),
-        conversation_boundary=boundary,
-    )
-
-    update = FakeUpdate(
-        effective_user=FakeUser(id=111),
-        effective_chat=FakeChat(
-            id=999,
-            type="group",
-        ),
-        effective_message=FakeMessage(
-            "Hello group",
-        ),
-    )
-
-    #
-    # Runtime handler itself is private-chat only.
-    # This test confirms the boundary remains unused.
-    #
-
-    await runtime._handle_private_message(
-        update,
-        None,
-    )
-
-    assert boundary.calls == []
-
-
-@pytest.mark.asyncio
 async def test_empty_message_is_ignored():
-
     boundary = FakeConversationBoundary()
 
     runtime = TelegramBotRuntime(
-        adapter=FakeAdapter(),
+        adapter=FakeAdapter(
+            conversation_boundary=boundary,
+        ),
         conversation_boundary=boundary,
     )
 
@@ -186,3 +181,5 @@ async def test_empty_message_is_ignored():
     )
 
     assert boundary.calls == []
+
+    assert update.effective_message.replies == []

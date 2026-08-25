@@ -4,14 +4,20 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.application.beta_access.beta_access_service import BetaAccessService
-from app.application.beta_access.models import BetaUserState
+from app.application.beta_access.beta_access_service import (
+    BetaAccessService,
+)
+from app.application.beta_access.models import (
+    BetaUserState,
+)
 from app.infrastructure.persistence.in_memory_beta_access_repository import (
     InMemoryBetaTokenRepository,
     InMemoryBetaUserRepository,
     InMemoryTelegramBindingRepository,
 )
-from app.interfaces.telegram.private_chat_gate import BetaPrivateChatGate
+from app.interfaces.telegram.private_chat_gate import (
+    BetaPrivateChatGate,
+)
 
 
 @pytest.fixture
@@ -29,10 +35,13 @@ async def test_group_chat_is_rejected(access):
         beta_access_service=access,
     )
 
-    assert await gate.authorize(
-        telegram_user_id=111,
-        chat_type="group",
-    ) is False
+    assert (
+        await gate.authorize(
+            telegram_user_id=111,
+            chat_type="group",
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -41,10 +50,13 @@ async def test_unconnected_private_user_is_rejected(access):
         beta_access_service=access,
     )
 
-    assert await gate.authorize(
-        telegram_user_id=111,
-        chat_type="private",
-    ) is False
+    assert (
+        await gate.authorize(
+            telegram_user_id=111,
+            chat_type="private",
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -66,10 +78,13 @@ async def test_active_bound_user_is_allowed(access):
         beta_access_service=access,
     )
 
-    assert await gate.authorize(
-        telegram_user_id=111,
-        chat_type="private",
-    ) is True
+    assert (
+        await gate.authorize(
+            telegram_user_id=111,
+            chat_type="private",
+        )
+        is True
+    )
 
 
 @dataclass
@@ -134,11 +149,17 @@ async def test_adapter_start_passes_correct_contract():
         FakeContext(),
     )
 
-    assert calls == [
-        {
-            "token": None,
-            "telegram_user_id": 111,
-            "chat_id": 111,
-            "chat_type": "private",
-        }
-    ]
+    assert len(calls) == 1
+
+    call = calls[0]
+
+    assert call["token"] is None
+    assert call["telegram_user_id"] == 111
+    assert call["chat_id"] == 111
+    assert call["chat_type"] == "private"
+
+    # Telegram transport owns reply delivery.
+    # The adapter passes an explicit reply callback
+    # into the start-handler boundary.
+    assert "reply" in call
+    assert callable(call["reply"])
