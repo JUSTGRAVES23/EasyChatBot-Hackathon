@@ -31,6 +31,8 @@ class ConversationEventRecord(Base):
         - learning context
         - message content
         - metadata
+        - privacy hash version
+        - retention policy identifier
 
     NOT stored:
         - Telegram user id
@@ -53,12 +55,10 @@ class ConversationEventRecord(Base):
 
     __tablename__ = "conversation_events"
 
-
     id: Mapped[str] = mapped_column(
         String(64),
         primary_key=True,
     )
-
 
     conversation_id: Mapped[str] = mapped_column(
         String(128),
@@ -66,13 +66,11 @@ class ConversationEventRecord(Base):
         index=True,
     )
 
-
     telegram_user_hash: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
         index=True,
     )
-
 
     world_id: Mapped[str] = mapped_column(
         String(128),
@@ -80,30 +78,35 @@ class ConversationEventRecord(Base):
         index=True,
     )
 
-
     channel: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
     )
-
 
     role: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
     )
 
-
     content: Mapped[str] = mapped_column(
         Text(),
         nullable=False,
     )
-
 
     metadata_json: Mapped[dict | None] = mapped_column(
         JSON,
         nullable=True,
     )
 
+    privacy_hash_version: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+
+    retention_policy_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

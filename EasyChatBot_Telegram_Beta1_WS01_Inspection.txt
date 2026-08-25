@@ -1,0 +1,1103 @@
+﻿===== WS-01 TELEGRAM FOUNDATION INSPECTION =====
+Generated: 08/25/2026 08:41:10
+
+===== 1. BETA TELEGRAM ADAPTER =====
+from __future__ import annotations
+
+from typing import Any
+
+
+class BetaTelegramAdapter:
+    """
+    Thin Telegram transport adapter for Beta 1.
+
+    Flow:
+        Telegram Update
+            -> BetaTelegramStartHandler / BetaPrivateChatGate
+            -> application boundary
+
+    This adapter contains no Beta business rules and no LLM/provider logic.
+    """
+
+    def __init__(
+        self,
+        *,
+        start_handler: Any,
+        private_chat_gate: Any,
+        conversation_boundary: Any | None = None,
+    ) -> None:
+        self._start_handler = start_handler
+        self._private_chat_gate = private_chat_gate
+        self._conversation_boundary = conversation_boundary
+
+    async def handle_start(self, update: Any, context: Any) -> None:
+        user = update.effective_user
+        chat = update.effective_chat
+        message = update.effective_message
+
+        if user is None or chat is None or message is None:
+            return
+
+        token_args = getattr(context, "args", None) or []
+        token = token_args[0] if token_args else None
+
+        reply = self._build_reply(message)
+
+        await self._start_handler.handle(
+            token=token,
+            telegram_user_id=int(user.id),
+            chat_id=int(chat.id),
+            chat_type=str(chat.type),
+        )
+
+    async def authorize_message(self, update: Any) -> bool:
+        """
+        Gate a normal Telegram message.
+
+        Group/channel traffic is rejected before reaching the
+        conversation application boundary.
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+
+        if user is None or chat is None:
+            return False
+
+        return await self._private_chat_gate.authorize(
+            telegram_user_id=int(user.id),
+            chat_type=str(chat.type),
+        )
+
+    async def handle_message(self, update: Any, context: Any) -> Any:
+        """
+        Authorize first, then delegate to the application boundary.
+
+        The adapter does not call an LLM/provider directly.
+        """
+        allowed = await self.authorize_message(update)
+
+        if not allowed:
+            return None
+
+        if self._conversation_boundary is None:
+            raise RuntimeError(
+                "Conversation application boundary is not configured."
+            )
+
+        user = update.effective_user
+        message = update.effective_message
+
+        if user is None or message is None:
+            return None
+
+        text = getattr(message, "text", None)
+        if not text:
+            return None
+
+        return await self._conversation_boundary.handle_message(
+            telegram_user_id=int(user.id),
+            message=text,
+        )
+
+    @staticmethod
+    def _build_reply(message: Any) -> Any:
+        return message
+
+
+===== 2. BETA START HANDLER =====
+from __future__ import annotations
+
+import logging
+from typing import Awaitable, Callable
+
+from backend.app.application.beta_access.beta_access_service import BetaAccessService
+
+logger = logging.getLogger(__name__)
+
+
+class BetaTelegramStartHandler:
+    """Application-facing handler for /start <token>."""
+
+    def __init__(
+        self,
+        *,
+        beta_access_service: BetaAccessService,
+        reply: Callable[[str, object], Awaitable[None]],
+    ) -> None:
+        self._access = beta_access_service
+        self._reply = reply
+
+    async def handle(
+        self,
+        *,
+        token: str | None,
+        telegram_user_id: int,
+        chat_id: int,
+        chat_type: str,
+    ) -> None:
+        if chat_type != "private":
+            await self._reply(
+                "Please open a private chat with the Academy bot to connect your classroom.",
+                None,
+            )
+            return
+
+        if not token:
+            await self._reply(
+                "Your classroom connection link is missing or invalid.",
+                None,
+            )
+            return
+
+        try:
+            user = await self._access.validate_and_bind(
+                token=token,
+                telegram_id=telegram_user_id,
+                chat_id=chat_id,
+            )
+        except (ValueError, PermissionError) as exc:
+            logger.warning(
+                "Telegram Beta binding rejected telegram_id=%s reason=%s",
+                telegram_user_id,
+                exc,
+            )
+            await self._reply(str(exc), None)
+            return
+
+        await self._reply(
+            (
+                "Welcome to EasyChatBot Academy. "
+                f"Your classroom is connected to World '{user.active_world_id}'."
+            ),
+            user,
+        )
+
+
+===== 3. BETA TELEGRAM PRIVATE CHAT GATE =====
+from __future__ import annotations
+
+
+class BetaTelegramPrivateChatGate:
+    """
+    Transport-level gate for Beta Telegram classroom access.
+
+    The gate enforces two conditions:
+
+    1. The Telegram interaction must originate from a private chat.
+    2. The associated Beta user must be active.
+
+    This preserves the existing synchronous transport contract used by
+    the legacy Telegram integration.
+    """
+
+    def __init__(self, *, beta_access_service) -> None:
+        self._beta_access_service = beta_access_service
+
+    def authorize(
+        self,
+        *,
+        user_id: str,
+        chat_type: str,
+    ) -> bool:
+        """
+        Return True only when the Telegram chat is private and the
+        Beta user is active.
+
+        The Beta access service is expected to expose the existing
+        synchronous is_active(user_id=...) contract.
+        """
+        if chat_type != "private":
+            return False
+
+        return bool(
+            self._beta_access_service.is_active(
+                user_id=user_id,
+            )
+        )
+
+===== 4. PRIVATE CHAT GATE =====
+from __future__ import annotations
+
+from backend.app.application.beta_access.beta_access_service import BetaAccessService
+
+
+class BetaPrivateChatGate:
+    """Authorization gate for all Beta classroom interactions."""
+
+    def __init__(self, *, beta_access_service: BetaAccessService) -> None:
+        self._access = beta_access_service
+
+    async def authorize(
+        self,
+        *,
+        telegram_user_id: int,
+        chat_type: str = "private",
+    ) -> bool:
+        if chat_type != "private":
+            return False
+
+        try:
+            await self._access.authorize_private_chat(
+                telegram_user_id,
+            )
+        except (ValueError, PermissionError):
+            return False
+
+        return True
+
+    async def require(
+        self,
+        *,
+        telegram_user_id: int,
+        chat_type: str = "private",
+    ):
+        if chat_type != "private":
+            raise PermissionError(
+                "Beta classroom access is only available in a private Telegram chat."
+            )
+
+        return await self._access.authorize_private_chat(
+            telegram_user_id,
+        )
+
+
+===== 5. TELEGRAM BOT RUNTIME =====
+from __future__ import annotations
+
+import logging
+import os
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+
+from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+
+from backend.app.interfaces.telegram.beta_telegram_adapter import (
+    BetaTelegramAdapter,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramBotRuntime:
+    """
+    Infrastructure adapter for python-telegram-bot.
+
+    Responsibilities:
+    - create Telegram Application
+    - register Telegram handlers
+    - start Telegram polling
+    - route Telegram transport events
+
+    Does NOT:
+    - contain Beta business rules
+    - validate users directly
+    - create LLM providers
+    - execute AI directly
+    """
+
+
+    def __init__(
+        self,
+        *,
+        adapter: BetaTelegramAdapter,
+        conversation_boundary: BetaTelegramConversationBoundary,
+    ) -> None:
+
+        self._adapter = adapter
+        self._conversation_boundary = conversation_boundary
+
+        self._application: Application | None = None
+        self._running = False
+
+
+
+    def build(self) -> Application:
+
+        token = os.getenv(
+            "TELEGRAM_BOT_TOKEN"
+        )
+
+        if not token:
+            raise RuntimeError(
+                "TELEGRAM_BOT_TOKEN is missing."
+            )
+
+
+        application = (
+            Application.builder()
+            .token(token)
+            .build()
+        )
+
+
+        application.add_handler(
+            CommandHandler(
+                "start",
+                self._handle_start,
+            )
+        )
+
+
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.PRIVATE
+                & filters.TEXT
+                & ~filters.COMMAND,
+                self._handle_private_message,
+            )
+        )
+
+
+        self._application = application
+
+
+        logger.info(
+            "Telegram bot runtime created."
+        )
+
+
+        return application
+
+
+
+    async def start(self) -> None:
+
+        if self._running:
+
+            logger.warning(
+                "Telegram runtime already running."
+            )
+
+            return
+
+
+        if self._application is None:
+
+            self.build()
+
+
+        assert self._application is not None
+
+
+        await self._application.initialize()
+
+
+        await self._application.start()
+
+
+        if self._application.updater is not None:
+
+            await self._application.updater.start_polling(
+                drop_pending_updates=False
+            )
+
+
+        self._running = True
+
+
+        logger.info(
+            "Telegram bot polling started."
+        )
+
+
+        logger.info(
+            "Telegram bot runtime started."
+        )
+
+
+
+    async def stop(self) -> None:
+
+        if self._application is None:
+
+            return
+
+
+        if (
+            self._application.updater is not None
+            and self._running
+        ):
+
+            await self._application.updater.stop()
+
+
+        await self._application.stop()
+
+
+        await self._application.shutdown()
+
+
+        self._running = False
+
+
+        logger.info(
+            "Telegram bot runtime stopped."
+        )
+
+
+
+    async def _handle_start(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+
+
+        logger.info(
+            "START command received."
+        )
+
+
+        await self._adapter.handle_start(
+            update,
+            context,
+        )
+
+
+
+    async def _handle_private_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+
+
+        logger.warning(
+            "PRIVATE MESSAGE HANDLER TRIGGERED"
+        )
+
+
+        if (
+            update.effective_user is None
+            or update.effective_chat is None
+            or update.effective_message is None
+        ):
+
+            logger.warning(
+                "Telegram update missing required fields."
+            )
+
+            return
+
+
+
+        if update.effective_chat.type != "private":
+
+            logger.info(
+                "Ignoring non-private chat type=%s",
+                update.effective_chat.type,
+            )
+
+            return
+
+
+
+        message = (
+            update.effective_message.text
+        )
+
+
+        if not message:
+
+            return
+
+
+
+        telegram_user_id = (
+            update.effective_user.id
+        )
+
+
+        logger.info(
+            "Private Telegram message received user=%s message=%s",
+            telegram_user_id,
+            message,
+        )
+
+
+
+        try:
+
+            response = await (
+                self._conversation_boundary.handle_message(
+                    telegram_user_id=telegram_user_id,
+                    message=message,
+                )
+            )
+
+
+        except Exception:
+
+            logger.exception(
+                "Telegram conversation processing failed."
+            )
+
+
+            await update.effective_message.reply_text(
+                "âš ï¸ EasyChatBot is temporarily unavailable. Please try again."
+            )
+
+
+            return
+
+
+
+        await update.effective_message.reply_text(
+            str(response)
+        )
+
+===== 6. BETA TELEGRAM CONVERSATION BOUNDARY =====
+from __future__ import annotations
+
+from typing import Any
+import logging
+
+
+from backend.app.application.beta_access.beta_access_service import (
+    BetaAccessService,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class BetaTelegramConversationBoundary:
+    """
+    Application boundary for Telegram Beta conversations.
+
+    Responsibilities:
+    - validate Telegram Beta access
+    - resolve learner context
+    - delegate clean learner messages
+
+    Does NOT:
+    - create LLM providers
+    - call Telegram APIs
+    - persist conversations
+    - inject personal data into messages
+
+
+    Privacy design:
+
+        Telegram ID
+             |
+             v
+        Authorization
+             |
+             v
+        Clean message
+             |
+             v
+        Conversation Service
+             |
+             v
+        Privacy Event Storage
+
+
+    Context is NOT inserted into message content.
+
+    Example:
+
+    BEFORE:
+
+        User:
+        david@example.com
+
+        World:
+        world-fr
+
+        Character:
+        Alix
+
+        Message:
+        Hello
+
+
+    AFTER:
+
+        content:
+        Hello
+
+
+        metadata:
+        {
+            world_id:"world-fr",
+            character:"Alix",
+            level:"B1"
+        }
+    """
+
+
+    def __init__(
+        self,
+        *,
+        conversation_service: Any,
+        beta_access_service: BetaAccessService,
+    ) -> None:
+
+        if conversation_service is None:
+            raise ValueError(
+                "conversation_service cannot be None."
+            )
+
+        if beta_access_service is None:
+            raise ValueError(
+                "beta_access_service cannot be None."
+            )
+
+
+        self._conversation_service = (
+            conversation_service
+        )
+
+        self._beta_access_service = (
+            beta_access_service
+        )
+
+
+
+    async def handle_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> Any:
+
+
+        if not message or not message.strip():
+
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+
+
+        #
+        # 1. Authorize Telegram user
+        #
+        # Telegram ID is used ONLY for access control.
+        #
+        # It is NOT stored in conversation events.
+        #
+
+        try:
+
+            context = await (
+                self._beta_access_service
+                .get_conversation_context(
+                    telegram_user_id
+                )
+            )
+
+
+        except PermissionError:
+
+            logger.warning(
+                "Unauthorized Telegram user=%s",
+                telegram_user_id,
+            )
+
+            return (
+                "Sorry, this Telegram account "
+                "is not approved for Beta access."
+            )
+
+
+
+        #
+        # 2. Keep context internal
+        #
+        # IMPORTANT:
+        #
+        # Do NOT modify learner message.
+        #
+        # The Conversation Service will:
+        #
+        # telegram_user_id
+        #        |
+        #        v
+        # PrivacyIdentifierService
+        #        |
+        #        v
+        # telegram_user_hash
+        #
+        # and create metadata.
+        #
+
+        clean_message = message.strip()
+
+
+
+        logger.info(
+            (
+                "Beta Telegram context resolved "
+                "user=%s world=%s character=%s level=%s"
+            ),
+            telegram_user_id,
+            context.world_id,
+            context.character,
+            context.level,
+        )
+
+
+
+        #
+        # 3. Delegate clean message
+        #
+        return await (
+            self._conversation_service
+            .handle_telegram_message(
+                telegram_user_id=telegram_user_id,
+                message=clean_message,
+            )
+        )
+
+===== 7. TELEGRAM CONVERSATION SERVICE =====
+from __future__ import annotations
+
+
+import secrets
+
+
+from datetime import datetime, timezone
+from typing import Any
+
+
+from backend.app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+
+
+from backend.app.application.conversation.conversation_event_models import (
+    ConversationEvent,
+)
+
+
+from backend.app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+
+
+from backend.app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+
+
+
+
+
+class TelegramConversationService:
+    """
+    Telegram conversation application service.
+
+
+    Responsibilities:
+
+    - receive Telegram messages
+    - create conversation events
+    - validate privacy controls
+    - pseudonymise identity
+    - delegate execution to ConversationRuntime
+
+
+    Does NOT:
+
+    - manage Telegram transport
+    - manage authorization
+    - create memories
+    - analyse learning behaviour
+
+
+    Future:
+
+        conversation_events
+                |
+                v
+          Memory Engine
+                |
+                v
+        Learning Personalisation
+    """
+
+
+
+    def __init__(
+        self,
+        *,
+        conversation_runtime: ConversationRuntime,
+        conversation_event_repository: Any,
+        privacy_identifier_service: PrivacyIdentifierService,
+        conversation_event_validator: ConversationEventValidator,
+    ) -> None:
+
+
+        if conversation_runtime is None:
+
+            raise ValueError(
+                "conversation_runtime cannot be None."
+            )
+
+
+        if conversation_event_repository is None:
+
+            raise ValueError(
+                "conversation_event_repository cannot be None."
+            )
+
+
+        if privacy_identifier_service is None:
+
+            raise ValueError(
+                "privacy_identifier_service cannot be None."
+            )
+
+
+        if conversation_event_validator is None:
+
+            raise ValueError(
+                "conversation_event_validator cannot be None."
+            )
+
+
+
+        self._runtime = conversation_runtime
+
+        self._events = conversation_event_repository
+
+        self._privacy = privacy_identifier_service
+
+        self._validator = conversation_event_validator
+
+
+
+
+
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+
+
+
+        if not message or not message.strip():
+
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+
+
+        world_id = "world-fr"
+
+        character = "Alix"
+
+        level = "B1"
+
+
+
+        telegram_user_hash = (
+
+            self._privacy.pseudonymize_identifier(
+
+                str(telegram_user_id)
+
+            )
+
+        )
+
+
+
+        conversation_id = (
+
+            f"telegram-{telegram_user_hash[:16]}"
+
+        )
+
+
+
+
+        metadata = {
+
+            "world_id": world_id,
+
+            "character": character,
+
+            "level": level,
+
+            "source": "telegram_beta",
+
+            "privacy_hash_version": "v1",
+
+            "retention_policy_id":
+                "conversation_learning_default",
+
+        }
+
+
+
+
+        #
+        # Validate BEFORE persistence
+        #
+
+        self._validator.validate(
+
+            content=message,
+
+            metadata=metadata,
+
+            telegram_user_hash=telegram_user_hash,
+
+        )
+
+
+
+
+
+        await self._events.save(
+
+            ConversationEvent(
+
+                event_id=secrets.token_hex(16),
+
+
+                conversation_id=conversation_id,
+
+
+                telegram_user_hash=telegram_user_hash,
+
+
+                world_id=world_id,
+
+
+                channel="telegram",
+
+
+                role="user",
+
+
+                content=message,
+
+
+                metadata=metadata,
+
+
+                created_at=datetime.now(
+                    timezone.utc
+                ),
+
+            )
+
+        )
+
+
+
+
+
+
+        response = await self._runtime.respond(
+
+            character_instruction=(
+
+                "You are EasyChatBot Academy, "
+
+                "a friendly French learning assistant. "
+
+                "Help the learner practise naturally."
+
+            ),
+
+
+            learner_message=message,
+
+        )
+
+
+
+
+
+        self._validator.validate(
+
+            content=response,
+
+            metadata=metadata,
+
+            telegram_user_hash=telegram_user_hash,
+
+        )
+
+
+
+
+
+        await self._events.save(
+
+            ConversationEvent(
+
+                event_id=secrets.token_hex(16),
+
+
+                conversation_id=conversation_id,
+
+
+                telegram_user_hash=telegram_user_hash,
+
+
+                world_id=world_id,
+
+
+                channel="telegram",
+
+
+                role="assistant",
+
+
+                content=response,
+
+
+                metadata=metadata,
+
+
+                created_at=datetime.now(
+                    timezone.utc
+                ),
+
+            )
+
+        )
+
+
+
+        return response
+
+===== 8. EXISTING TELEGRAM TEST REFERENCES =====
+
+
+===== 9. EXISTING TELEGRAM FILE INVENTORY =====
+
+FullName                                                                                             
+--------                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_private_chat_gate.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\private_chat_gate.py              
+
+
+
+
+===== END OF INSPECTION =====

@@ -1,76 +1,196 @@
-import { useMemo, useState } from "react";
+import {
+  useMemo,
+  useState,
+} from "react";
+
 import {
   submitGovernanceDecision,
   type GovernanceDecision,
   type GovernanceDecisionRequest,
   type GovernanceRole,
 } from "../../lib/privacy-governance/decision-api";
+
 import type {
   PrivacyGovernanceCaseDetail,
 } from "../../lib/privacy-governance/types";
+
 import styles from "./PrivacyGovernanceDecisionActions.module.css";
 
 interface Props {
-  caseData: PrivacyGovernanceCaseDetail;
-  onDecisionComplete: (updatedCase: PrivacyGovernanceCaseDetail) => void;
+  /**
+   * Preferred public prop name.
+   */
+  caseDetail?: PrivacyGovernanceCaseDetail;
+
+  /**
+   * Backward-compatible prop used by the
+   * existing case-detail component.
+   */
+  caseData?: PrivacyGovernanceCaseDetail;
+
+  /**
+   * Preferred callback name.
+   */
+  onDecisionCompleted?: (
+    updatedCase: PrivacyGovernanceCaseDetail,
+  ) => void;
+
+  /**
+   * Backward-compatible callback name.
+   */
+  onDecisionComplete?: (
+    updatedCase: PrivacyGovernanceCaseDetail,
+  ) => void;
 }
 
 function createApprovalId(
   caseId: string,
   role: GovernanceRole,
 ): string {
-  const suffix =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
+  const randomUuid =
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      : `${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2, 10)}`;
 
-  return `APR-UI-${role}-${caseId}-${suffix}`;
+  return `APR-UI-${role}-${caseId}-${randomUuid}`;
 }
 
-function statusLabel(value?: string | null): string {
-  if (!value) return "Unknown";
+function statusLabel(
+  value?: string | null,
+): string {
+  if (!value) {
+    return "Unknown";
+  }
+
   return value.replaceAll("_", " ");
 }
 
-function decisionLabel(decision: GovernanceDecision): string {
+function decisionLabel(
+  decision: GovernanceDecision,
+): string {
   switch (decision) {
     case "approve":
       return "Approve";
+
     case "reject":
       return "Reject";
+
     case "request-changes":
       return "Request changes";
+
+    default:
+      return "Decision";
   }
 }
 
 export function PrivacyGovernanceDecisionActions({
+  caseDetail,
   caseData,
+  onDecisionCompleted,
   onDecisionComplete,
 }: Props) {
-  const [role, setRole] = useState<GovernanceRole>("DPO");
-  const [reviewer, setReviewer] = useState("");
-  const [comment, setComment] = useState("");
+  /*
+   * Resolve the case from the preferred or
+   * backward-compatible prop.
+   */
+  const resolvedCase =
+    caseDetail ?? caseData ?? null;
+
+  /*
+   * Resolve the preferred or backward-compatible
+   * completion callback.
+   */
+  const handleDecisionCompleted =
+    onDecisionCompleted ??
+    onDecisionComplete;
+
+  /*
+   * Hooks must always execute in the same order.
+   */
+  const [role, setRole] =
+    useState<GovernanceRole>("DPO");
+
+  const [reviewer, setReviewer] =
+    useState("");
+
+  const [comment, setComment] =
+    useState("");
 
   const [pendingDecision, setPendingDecision] =
-    useState<GovernanceDecision | null>(null);
+    useState<GovernanceDecision | null>(
+      null,
+    );
 
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] =
+    useState(false);
+
+  const [error, setError] =
+    useState<string | null>(null);
+
+  /*
+   * Generate the approval evidence identifier
+   * for the current case and governance role.
+   */
+  const approvalId = useMemo(() => {
+    if (!resolvedCase) {
+      return "";
+    }
+
+    return createApprovalId(
+      resolvedCase.case_id,
+      role,
+    );
+  }, [
+    resolvedCase?.case_id,
+    role,
+  ]);
+
+  /*
+   * Defensive integration state.
+   */
+  if (!resolvedCase) {
+    return (
+      <section className={styles.section}>
+        <div
+          className={styles.error}
+          role="alert"
+        >
+          Privacy governance case data is unavailable.
+        </div>
+      </section>
+    );
+  }
+
+  /*
+   * From this point onward TypeScript knows that
+   * resolvedCase exists.
+   *
+   * Create a stable local reference so nested
+   * callbacks/functions also retain the narrowing.
+   */
+  const currentCase =
+    resolvedCase;
 
   const isPending =
-    caseData.governance_status === "PENDING_DPO_GRC";
+    currentCase.governance_status ===
+    "PENDING_DPO_GRC";
 
-  const approvalId = useMemo(
-    () => createApprovalId(caseData.case_id, role),
-    [caseData.case_id, role],
-  );
-
+  /*
+   * Completed cases are read-only.
+   */
   if (!isPending) {
     return (
       <section className={styles.section}>
-        <div className={styles.completedCard}>
+        <div
+          className={styles.completedCard}
+        >
           <div>
-            <span className={styles.eyebrow}>
+            <span
+              className={styles.eyebrow}
+            >
               HUMAN GOVERNANCE DECISION
             </span>
 
@@ -80,9 +200,15 @@ export function PrivacyGovernanceDecisionActions({
 
             <p>
               This case is currently{" "}
-              <b>{statusLabel(caseData.governance_status)}</b>.
-              No additional decision is available while the
-              case is outside the pending governance state.
+              <b>
+                {statusLabel(
+                  currentCase.governance_status,
+                )}
+              </b>
+              . No additional decision is
+              available while the case is
+              outside the pending governance
+              state.
             </p>
           </div>
         </div>
@@ -93,52 +219,100 @@ export function PrivacyGovernanceDecisionActions({
   const canSubmit =
     reviewer.trim().length > 0 &&
     comment.trim().length > 0 &&
-    Boolean(caseData.change_id) &&
+    currentCase.change_id.trim().length > 0 &&
+    Boolean(approvalId) &&
     !submitting;
 
   async function executeDecision(
     decision: GovernanceDecision,
   ): Promise<void> {
-    if (!caseData.change_id) {
+    /*
+     * Prevent duplicate submissions.
+     */
+    if (submitting) {
+      return;
+    }
+
+    /*
+     * Validate the authoritative Change ID.
+     */
+    if (!currentCase.change_id.trim()) {
       setError(
-        "This governance case has no linked privacy change. "
-        + "The decision cannot be submitted.",
+        "This governance case has no linked privacy change. The decision cannot be submitted.",
       );
       return;
     }
 
     if (!reviewer.trim()) {
-      setError("Reviewer identity is required.");
+      setError(
+        "Reviewer identity is required.",
+      );
       return;
     }
 
     if (!comment.trim()) {
-      setError("A decision comment is required.");
+      setError(
+        "A decision comment is required.",
+      );
+      return;
+    }
+
+    if (!approvalId) {
+      setError(
+        "Unable to create governance approval evidence identifier.",
+      );
       return;
     }
 
     setSubmitting(true);
     setError(null);
 
-    const request: GovernanceDecisionRequest = {
-      change_id: caseData.change_id,
-      approval_id: approvalId,
-      reviewer: reviewer.trim(),
-      role,
-      comment: comment.trim(),
-    };
+    const request: GovernanceDecisionRequest =
+      {
+        change_id:
+          currentCase.change_id.trim(),
+
+        approval_id:
+          approvalId,
+
+        reviewer:
+          reviewer.trim(),
+
+        role,
+
+        comment:
+          comment.trim(),
+      };
 
     try {
-      const result = await submitGovernanceDecision(
-        caseData.case_id,
-        decision,
-        request,
+      /*
+       * The backend is authoritative.
+       */
+      const result =
+        await submitGovernanceDecision(
+          currentCase.case_id,
+          decision,
+          request,
+        );
+
+      /*
+       * Only update the parent after successful
+       * backend confirmation.
+       */
+      handleDecisionCompleted?.(
+        result.case,
       );
 
-      onDecisionComplete(result.case);
-
+      /*
+       * Close confirmation only after success.
+       */
       setPendingDecision(null);
+      setError(null);
     } catch (cause) {
+      /*
+       * Keep confirmation workflow open after
+       * API failure so the reviewer can retry.
+       */
       setError(
         cause instanceof Error
           ? cause.message
@@ -149,23 +323,42 @@ export function PrivacyGovernanceDecisionActions({
     }
   }
 
+  function requestDecision(
+    decision: GovernanceDecision,
+  ): void {
+    if (!canSubmit) {
+      return;
+    }
+
+    setError(null);
+    setPendingDecision(decision);
+  }
+
   return (
     <section className={styles.section}>
       <div className={styles.heading}>
         <div>
-          <span className={styles.eyebrow}>
+          <span
+            className={styles.eyebrow}
+          >
             HUMAN GOVERNANCE DECISION
           </span>
 
-          <h3>Decision required</h3>
+          <h3>
+            Decision required
+          </h3>
 
           <p>
-            This case passed automated validation and is awaiting
-            explicit human governance approval.
+            This case passed automated
+            validation and is awaiting
+            explicit human governance
+            approval.
           </p>
         </div>
 
-        <span className={styles.pendingBadge}>
+        <span
+          className={styles.pendingBadge}
+        >
           PENDING DPO/GRC
         </span>
       </div>
@@ -179,9 +372,15 @@ export function PrivacyGovernanceDecisionActions({
           <select
             id="governance-role"
             value={role}
-            onChange={(event) =>
-              setRole(event.target.value as GovernanceRole)
-            }
+            onChange={(event) => {
+              setRole(
+                event.target
+                  .value as GovernanceRole,
+              );
+
+              setPendingDecision(null);
+              setError(null);
+            }}
             disabled={submitting}
           >
             <option value="DPO">
@@ -203,10 +402,16 @@ export function PrivacyGovernanceDecisionActions({
             id="governance-reviewer"
             type="text"
             value={reviewer}
-            onChange={(event) =>
-              setReviewer(event.target.value)
-            }
-            placeholder="Enter human reviewer name"
+            onChange={(event) => {
+              setReviewer(
+                event.target.value,
+              );
+
+              if (error) {
+                setError(null);
+              }
+            }}
+            placeholder="Enter reviewer name"
             disabled={submitting}
             autoComplete="off"
           />
@@ -220,22 +425,30 @@ export function PrivacyGovernanceDecisionActions({
           <textarea
             id="governance-comment"
             value={comment}
-            onChange={(event) =>
-              setComment(event.target.value)
-            }
-            placeholder="Record the reason for the governance decision."
+            onChange={(event) => {
+              setComment(
+                event.target.value,
+              );
+
+              if (error) {
+                setError(null);
+              }
+            }}
+            placeholder="Record the rationale for this decision"
             rows={4}
             disabled={submitting}
           />
         </div>
 
-        {!caseData.change_id && (
+        {!currentCase.change_id.trim() && (
           <div
             className={styles.warning}
             role="alert"
           >
-            This case is missing its Change ID relationship.
-            A governance decision is therefore blocked.
+            This case is missing its
+            Change ID relationship. A
+            governance decision is
+            therefore blocked.
           </div>
         )}
 
@@ -254,7 +467,7 @@ export function PrivacyGovernanceDecisionActions({
             className={`${styles.actionButton} ${styles.approve}`}
             disabled={!canSubmit}
             onClick={() =>
-              setPendingDecision("approve")
+              requestDecision("approve")
             }
           >
             Approve as {role}
@@ -265,7 +478,7 @@ export function PrivacyGovernanceDecisionActions({
             className={`${styles.actionButton} ${styles.reject}`}
             disabled={!canSubmit}
             onClick={() =>
-              setPendingDecision("reject")
+              requestDecision("reject")
             }
           >
             Reject
@@ -276,7 +489,9 @@ export function PrivacyGovernanceDecisionActions({
             className={`${styles.actionButton} ${styles.changes}`}
             disabled={!canSubmit}
             onClick={() =>
-              setPendingDecision("request-changes")
+              requestDecision(
+                "request-changes",
+              )
             }
           >
             Request changes
@@ -295,54 +510,90 @@ export function PrivacyGovernanceDecisionActions({
             aria-modal="true"
             aria-labelledby="governance-confirm-title"
           >
-            <span className={styles.eyebrow}>
+            <span
+              className={styles.eyebrow}
+            >
               CONFIRM GOVERNANCE DECISION
             </span>
 
-            <h3 id="governance-confirm-title">
-              {decisionLabel(pendingDecision)}
+            <h3
+              id="governance-confirm-title"
+            >
+              {decisionLabel(
+                pendingDecision,
+              )}
             </h3>
 
             <p>
-              You are about to record a formal human governance
+              You are about to record a
+              formal human governance
               decision for:
             </p>
 
-            <dl className={styles.confirmDetails}>
+            <dl
+              className={
+                styles.confirmDetails
+              }
+            >
               <div>
                 <dt>Case</dt>
-                <dd>{caseData.case_id}</dd>
+
+                <dd>
+                  {currentCase.case_id}
+                </dd>
               </div>
 
               <div>
                 <dt>Change</dt>
-                <dd>{caseData.change_id}</dd>
+
+                <dd>
+                  {currentCase.change_id}
+                </dd>
               </div>
 
               <div>
                 <dt>Role</dt>
-                <dd>{role}</dd>
+
+                <dd>
+                  {role}
+                </dd>
               </div>
 
               <div>
                 <dt>Reviewer</dt>
-                <dd>{reviewer}</dd>
+
+                <dd>
+                  {reviewer}
+                </dd>
               </div>
             </dl>
 
-            <p className={styles.confirmWarning}>
-              This action will be recorded as governance evidence
-              and may change the governance state of the case.
+            <p
+              className={
+                styles.confirmWarning
+              }
+            >
+              This action will be recorded
+              as governance evidence and
+              may change the governance
+              state of the case.
             </p>
 
-            <div className={styles.confirmActions}>
+            <div
+              className={
+                styles.confirmActions
+              }
+            >
               <button
                 type="button"
-                className={styles.cancelButton}
-                disabled={submitting}
-                onClick={() =>
-                  setPendingDecision(null)
+                className={
+                  styles.cancelButton
                 }
+                disabled={submitting}
+                onClick={() => {
+                  setPendingDecision(null);
+                  setError(null);
+                }}
               >
                 Cancel
               </button>
@@ -350,20 +601,24 @@ export function PrivacyGovernanceDecisionActions({
               <button
                 type="button"
                 className={`${styles.confirmButton} ${
-                  pendingDecision === "approve"
+                  pendingDecision ===
+                  "approve"
                     ? styles.approve
-                    : pendingDecision === "reject"
+                    : pendingDecision ===
+                        "reject"
                       ? styles.reject
                       : styles.changes
                 }`}
                 disabled={submitting}
                 onClick={() =>
-                  void executeDecision(pendingDecision)
+                  void executeDecision(
+                    pendingDecision,
+                  )
                 }
               >
                 {submitting
                   ? "Recording..."
-                  : `Confirm ${decisionLabel(pendingDecision)}`}
+                  : "Confirm decision"}
               </button>
             </div>
           </div>

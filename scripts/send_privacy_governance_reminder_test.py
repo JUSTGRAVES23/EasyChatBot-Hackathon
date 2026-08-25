@@ -2,9 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from dotenv import dotenv_values
+
+# Make repository imports work when this file is executed directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+ENV_FILE = REPO_ROOT / ".env"
+_LOCAL_ENV = (
+    dict(dotenv_values(ENV_FILE))
+    if ENV_FILE.exists()
+    else {}
+)
+
+
+def get_config(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    value = _LOCAL_ENV.get(name)
+    if value is not None:
+        return str(value)
+    return default
+
 
 from backend.app.application.privacy.email.privacy_governance_reminder_email_service import (
     PrivacyGovernanceReminderEmailService,
@@ -15,20 +43,30 @@ from backend.app.application.privacy.privacy_governance_case_url import (
 from backend.app.infrastructure.privacy.privacy_governance_reminder_email_sender import (
     ResendGovernanceReminderEmailSender,
 )
-from backend.cybersecurity.email.email_configuration import (
-    EMAIL_RECIPIENT,
-)
+from backend.cybersecurity.email.email_configuration import EMAIL_RECIPIENT
 
+
+BACKEND_BASE_URL = get_config(
+    "NEXT_PUBLIC_API_URL",
+    "http://127.0.0.1:8000",
+).rstrip("/")
+
+FRONTEND_BASE_URL = get_config(
+    "PRIVACY_GOVERNANCE_APP_BASE_URL",
+    "http://127.0.0.1:5173",
+).rstrip("/")
+
+CASE_ID = get_config(
+    "PRIVACY_E2E_CASE_ID",
+    "CASE-E2E-003",
+)
 
 BACKEND_CASE_URL = (
-    "http://127.0.0.1:8000"
-    "/api/privacy/governance/cases/CASE-E2E-003"
+    f"{BACKEND_BASE_URL}/api/privacy/governance/cases/{CASE_ID}"
 )
 
-FRONTEND_BASE_URL = "http://127.0.0.1:5173"
-
 LOGO_PATH = (
-    Path(__file__).resolve().parents[1]
+    REPO_ROOT
     / "backend"
     / "app"
     / "application"
@@ -36,6 +74,14 @@ LOGO_PATH = (
     / "email"
     / "assets"
     / "easychatbot_logo.png"
+)
+
+SEND_EMAIL = (
+    get_config(
+        "PRIVACY_E2E_SEND_EMAIL",
+        "false",
+    ).strip().lower()
+    == "true"
 )
 
 SUCCESS_STATUSES = {
@@ -53,15 +99,25 @@ def load_case() -> SimpleNamespace:
         method="GET",
     )
 
-    with urlopen(request, timeout=10) as response:
-        if response.status != 200:
-            raise RuntimeError(
-                f"Case API returned HTTP {response.status}."
+    try:
+        with urlopen(request, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Case API returned HTTP {response.status}."
+                )
+
+            payload = json.loads(
+                response.read().decode("utf-8")
             )
 
-        payload = json.loads(
-            response.read().decode("utf-8")
-        )
+    except HTTPError as exc:
+        raise RuntimeError(
+            f"Case API returned HTTP {exc.code}: {BACKEND_CASE_URL}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Could not connect to the FastAPI backend: {BACKEND_CASE_URL}"
+        ) from exc
 
     return SimpleNamespace(
         case_id=payload["case_id"],
@@ -87,8 +143,28 @@ def load_case() -> SimpleNamespace:
 
 async def main() -> None:
     print("=" * 70)
-    print("EASYCHATBOT PRIVACY GOVERNANCE REAL EMAIL TEST")
+    print("EASYCHATBOT PRIVACY GOVERNANCE REMINDER E2E TEST")
     print("=" * 70)
+
+    print()
+    print("Repository:")
+    print(REPO_ROOT)
+
+    print()
+    print("Backend:")
+    print(BACKEND_BASE_URL)
+
+    print()
+    print("Frontend:")
+    print(FRONTEND_BASE_URL)
+
+    print()
+    print("Case:")
+    print(CASE_ID)
+
+    print()
+    print("PRIVACY_E2E_SEND_EMAIL:")
+    print(SEND_EMAIL)
 
     if not EMAIL_RECIPIENT.strip():
         raise RuntimeError(
@@ -99,10 +175,6 @@ async def main() -> None:
         raise FileNotFoundError(
             f"Governance logo not found: {LOGO_PATH}"
         )
-
-    print()
-    print("Recipient:")
-    print(EMAIL_RECIPIENT)
 
     print()
     print("Loading authoritative case from:")
@@ -129,8 +201,41 @@ async def main() -> None:
     )
 
     print()
-    print("Generated case URL:")
+    print("Expected REVIEW THIS CASE destination:")
     print(expected_case_url)
+
+    if "awstrack.me" in expected_case_url.lower():
+        raise RuntimeError(
+            "Expected case URL must be the application URL, "
+            "not an AWS tracking URL."
+        )
+
+    if not expected_case_url.startswith(
+        f"{FRONTEND_BASE_URL}/privacy-governance/"
+    ):
+        raise RuntimeError(
+            "Generated case URL is outside the expected "
+            "Privacy Governance route."
+        )
+
+    print()
+    print("URL preflight:")
+    print("PASS - direct application URL generated.")
+    print("PASS - no awstrack.me wrapper in application URL.")
+
+    if not SEND_EMAIL:
+        print()
+        print("EMAIL NOT SENT")
+        print("-" * 70)
+        print(
+            "Set PRIVACY_E2E_SEND_EMAIL=true in the repository .env "
+            "to perform the real Resend delivery test."
+        )
+        print()
+        print("Expected destination:")
+        print(expected_case_url)
+        print("=" * 70)
+        return
 
     sender = ResendGovernanceReminderEmailSender()
 
@@ -179,6 +284,11 @@ async def main() -> None:
             f"returned={returned_url!r}"
         )
 
+    if returned_url and "awstrack.me" in returned_url.lower():
+        raise RuntimeError(
+            "The returned case URL is unexpectedly wrapped by AWS tracking."
+        )
+
     print()
     print("SUCCESS")
     print("-" * 70)
@@ -189,8 +299,14 @@ async def main() -> None:
     print()
     print("Provider accepted the email for delivery.")
     print()
-    print("Open the email and click:")
-    print("REVIEW THIS CASE")
+    print("MANUAL EMAIL TEST")
+    print("1. Open the NEW email.")
+    print("2. Click REVIEW THIS CASE.")
+    print("3. Confirm the browser opens:")
+    print(f"   {expected_case_url}")
+    print("4. Confirm the URL does NOT remain on awstrack.me.")
+    print("5. Confirm the case page loads.")
+    print("6. Confirm the case data matches CASE ID:", case.case_id)
     print()
     print("Expected destination:")
     print(expected_case_url)

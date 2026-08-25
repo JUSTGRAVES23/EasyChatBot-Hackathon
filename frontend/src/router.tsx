@@ -10,6 +10,7 @@ import PrivacyGovernancePage from "../app/privacy-governance/page";
 export default function AppRouter() {
   return (
     <Routes>
+      {/* Operations Center Governance */}
       <Route
         path="/operations-center/governance"
         element={<OperationsCenterGovernancePage />}
@@ -21,12 +22,13 @@ export default function AppRouter() {
         element={<PrivacyGovernancePage />}
       />
 
-      {/* Privacy Governance dashboard with a specific case opened */}
+      {/* Privacy Governance specific case */}
       <Route
         path="/privacy-governance/:caseId"
         element={<PrivacyGovernancePage />}
       />
 
+      {/* Application root */}
       <Route
         path="/"
         element={
@@ -37,6 +39,7 @@ export default function AppRouter() {
         }
       />
 
+      {/* Unknown routes */}
       <Route
         path="*"
         element={

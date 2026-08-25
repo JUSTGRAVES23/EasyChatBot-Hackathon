@@ -1,0 +1,1023 @@
+============================================================
+WS-17 PERSISTENCE / SESSION INTEGRITY INSPECTION
+============================================================
+
+============================================================
+2. PERSISTENCE / SESSION TEST INVENTORY
+============================================================
+
+
+============================================================
+3A. CONVERSATION EVENT REPOSITORY
+============================================================
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from backend.app.application.conversation.conversation_event_models import (
+    ConversationEvent,
+)
+
+from backend.app.application.conversation.conversation_event_repository import (
+    ConversationEventRepository,
+)
+
+from .conversation_event_records import (
+    ConversationEventRecord,
+)
+
+
+class PostgreSQLConversationEventRepository(
+    ConversationEventRepository
+):
+    """
+    PostgreSQL implementation of conversation event storage.
+
+    Privacy isolation:
+
+        telegram_user_hash
+                +
+          conversation_id
+                +
+             world_id
+
+    Governance:
+
+        privacy_hash_version
+                +
+        retention_policy_id
+
+    Responsibility:
+
+    - persist conversation events
+    - retrieve conversation history
+
+    Does NOT:
+
+    - validate business rules
+    - create memories
+    - analyse learning behaviour
+    - create RAG knowledge
+    """
+
+    def __init__(
+        self,
+        session_factory,
+    ) -> None:
+        if session_factory is None:
+            raise ValueError(
+                "session_factory cannot be None."
+            )
+
+        self._session_factory = session_factory
+
+    async def save(
+        self,
+        event: ConversationEvent,
+    ) -> ConversationEvent:
+        """
+        Persist an anonymised conversation event.
+
+        Privacy and retention governance values are taken
+        from the validated event metadata and persisted into
+        their dedicated database columns.
+        """
+
+        metadata = event.metadata or {}
+
+        privacy_hash_version = metadata.get(
+            "privacy_hash_version",
+        )
+
+        retention_policy_id = metadata.get(
+            "retention_policy_id",
+        )
+
+        if not privacy_hash_version:
+            raise ValueError(
+                "Conversation event is missing "
+                "privacy_hash_version."
+            )
+
+        if not retention_policy_id:
+            raise ValueError(
+                "Conversation event is missing "
+                "retention_policy_id."
+            )
+
+        with self._session_factory() as session:
+            record = ConversationEventRecord(
+                id=event.event_id,
+                conversation_id=event.conversation_id,
+                telegram_user_hash=(
+                    event.telegram_user_hash
+                ),
+                world_id=event.world_id,
+                channel=event.channel,
+                role=event.role,
+                content=event.content,
+                metadata_json=metadata,
+                privacy_hash_version=(
+                    privacy_hash_version
+                ),
+                retention_policy_id=(
+                    retention_policy_id
+                ),
+                created_at=event.created_at,
+            )
+
+            session.add(record)
+            session.commit()
+
+        return event
+
+    async def get_recent(
+        self,
+        *,
+        telegram_user_hash: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[ConversationEvent]:
+        """
+        Retrieve recent conversation events for a
+        pseudonymised Telegram identity and learning world.
+        """
+
+        if limit <= 0:
+            return []
+
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(
+                    ConversationEventRecord
+                )
+                .where(
+                    ConversationEventRecord.telegram_user_hash
+                    == telegram_user_hash
+                )
+                .where(
+                    ConversationEventRecord.world_id
+                    == world_id
+                )
+                .order_by(
+                    ConversationEventRecord.created_at.desc()
+                )
+                .limit(limit)
+            ).all()
+
+        return [
+            _event_from_record(row)
+            for row in reversed(rows)
+        ]
+
+
+def _event_from_record(
+    row: ConversationEventRecord,
+) -> ConversationEvent:
+    """
+    Convert the persistence record back into the
+    application-domain conversation event.
+
+    Governance fields remain available through metadata
+    so the domain event retains its original contract.
+    """
+
+    metadata = dict(
+        row.metadata_json or {}
+    )
+
+    metadata.setdefault(
+        "privacy_hash_version",
+        row.privacy_hash_version,
+    )
+
+    metadata.setdefault(
+        "retention_policy_id",
+        row.retention_policy_id,
+    )
+
+    return ConversationEvent(
+        event_id=row.id,
+        conversation_id=row.conversation_id,
+        telegram_user_hash=(
+            row.telegram_user_hash
+        ),
+        world_id=row.world_id,
+        channel=row.channel,
+        role=row.role,
+        content=row.content,
+        metadata=metadata,
+        created_at=row.created_at,
+    )
+
+============================================================
+3B. BETA ACCESS REPOSITORY
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from backend.app.application.beta_access.models import (
+    BetaConnectionToken,
+    BetaUserState,
+    TelegramBinding,
+)
+
+from backend.app.application.beta_access.repositories import (
+    BetaTokenRepository,
+    BetaUserRepository,
+    TelegramBindingRepository,
+)
+
+from .beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PostgreSQLBetaUserRepository(BetaUserRepository):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get(
+        self,
+        user_id: str,
+    ) -> BetaUserState | None:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaUserRecord,
+                user_id,
+            )
+
+            return (
+                None
+                if row is None
+                else _user_from_record(row)
+            )
+
+
+    async def get_by_telegram_id(
+        self,
+        telegram_id: int,
+    ) -> BetaUserState | None:
+        """
+        Resolve Telegram identity.
+
+        Source of truth:
+
+            telegram_bindings
+                    |
+                    v
+                beta_users
+        """
+
+        with self._session_factory() as session:
+
+            binding = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id
+                    == str(telegram_id)
+                )
+            )
+
+
+            if binding is None:
+                return None
+
+
+            row = session.get(
+                BetaUserRecord,
+                binding.user_id,
+            )
+
+
+            if row is None:
+                return None
+
+
+            user = _user_from_record(row)
+
+
+            #
+            # Telegram binding is authoritative.
+            #
+            # Do not depend on beta_users.telegram_id.
+            #
+            return BetaUserState(
+                user_id=user.user_id,
+                email=user.email,
+                email_verified=user.email_verified,
+                beta_approved=user.beta_approved,
+                telegram_id=int(
+                    binding.telegram_user_id
+                ),
+                active_world_id=user.active_world_id,
+            )
+
+
+    async def save(
+        self,
+        user: BetaUserState,
+    ) -> BetaUserState:
+
+        now = _utcnow()
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaUserRecord,
+                user.user_id,
+            )
+
+
+            if row is None:
+
+                row = BetaUserRecord(
+                    id=user.user_id,
+                    email=user.email,
+                    email_verified=user.email_verified,
+                    approved=user.beta_approved,
+                    active_world_id=user.active_world_id,
+                    telegram_id=(
+                        None
+                        if user.telegram_id is None
+                        else str(user.telegram_id)
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                )
+
+                session.add(row)
+
+
+            else:
+
+                row.email = user.email
+                row.email_verified = user.email_verified
+                row.approved = user.beta_approved
+                row.active_world_id = user.active_world_id
+
+                row.telegram_id = (
+                    None
+                    if user.telegram_id is None
+                    else str(user.telegram_id)
+                )
+
+                row.updated_at = now
+
+
+            session.commit()
+
+
+        return user
+
+
+
+class PostgreSQLBetaTokenRepository(
+    BetaTokenRepository
+):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get_by_hash(
+        self,
+        token_hash: str,
+    ) -> BetaConnectionToken | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(BetaConnectionTokenRecord).where(
+                    BetaConnectionTokenRecord.token_hash
+                    == token_hash
+                )
+            )
+
+            return (
+                None
+                if row is None
+                else _token_from_record(row)
+            )
+
+
+    async def save(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+
+        now = _utcnow()
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaConnectionTokenRecord,
+                token.token_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    BetaConnectionTokenRecord(
+                        id=token.token_id,
+                        token_hash=token.token_hash,
+                        user_id=token.user_id,
+                        expires_at=token.expires_at,
+                        used_at=token.used_at,
+                        created_at=now,
+                    )
+                )
+
+            else:
+
+                row.used_at = token.used_at
+
+
+            session.commit()
+
+
+        return token
+
+
+    async def mark_used(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+
+        return await self.save(token)
+
+
+
+class PostgreSQLTelegramBindingRepository(
+    TelegramBindingRepository
+):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get_by_telegram_user_id(
+        self,
+        telegram_user_id: str,
+    ) -> TelegramBinding | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id
+                    == telegram_user_id
+                )
+            )
+
+
+            return (
+                None
+                if row is None
+                else _binding_from_record(row)
+            )
+
+
+    async def get_by_user_id(
+        self,
+        user_id: str,
+    ) -> TelegramBinding | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.user_id
+                    == user_id
+                )
+            )
+
+
+            return (
+                None
+                if row is None
+                else _binding_from_record(row)
+            )
+
+
+    async def save(
+        self,
+        binding: TelegramBinding,
+    ) -> TelegramBinding:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                TelegramBindingRecord,
+                binding.binding_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    TelegramBindingRecord(
+                        id=binding.binding_id,
+                        user_id=binding.user_id,
+                        telegram_user_id=binding.telegram_user_id,
+                        chat_id=binding.chat_id,
+                        connected_at=binding.connected_at,
+                    )
+                )
+
+
+            else:
+
+                row.telegram_user_id = (
+                    binding.telegram_user_id
+                )
+
+                row.chat_id = (
+                    binding.chat_id
+                )
+
+                row.connected_at = (
+                    binding.connected_at
+                )
+
+
+            session.commit()
+
+
+        return binding
+
+
+
+def _user_from_record(
+    row: BetaUserRecord,
+) -> BetaUserState:
+
+    return BetaUserState(
+        user_id=row.id,
+        email=row.email,
+        email_verified=row.email_verified,
+        beta_approved=row.approved,
+        telegram_id=(
+            None
+            if row.telegram_id is None
+            else int(row.telegram_id)
+        ),
+        active_world_id=row.active_world_id,
+    )
+
+
+
+def _token_from_record(
+    row: BetaConnectionTokenRecord,
+) -> BetaConnectionToken:
+
+    return BetaConnectionToken(
+        token_id=row.id,
+        user_id=row.user_id,
+        token_hash=row.token_hash,
+        expires_at=row.expires_at,
+        used_at=row.used_at,
+    )
+
+
+
+def _binding_from_record(
+    row: TelegramBindingRecord,
+) -> TelegramBinding:
+
+    return TelegramBinding(
+        binding_id=row.id,
+        user_id=row.user_id,
+        telegram_user_id=row.telegram_user_id,
+        chat_id=row.chat_id,
+        connected_at=row.connected_at,
+    )
+
+============================================================
+3C. BETA CONNECTION TOKEN REPOSITORY
+============================================================
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+
+from app.domain.beta_access.beta_access_repository import BetaConnectionTokenRepository
+from app.domain.beta_access.beta_connection_token import BetaConnectionToken
+from app.infrastructure.persistence.beta_connection_token_models import BetaConnectionTokenModel
+
+
+class PostgreSQLBetaConnectionTokenRepository(BetaConnectionTokenRepository):
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add(self, token: BetaConnectionToken) -> None:
+        self._session.add(BetaConnectionTokenModel(
+            id=token.id, user_id=token.user_id, token_hash=token.token_hash,
+            expires_at=token.expires_at, used_at=token.used_at, created_at=token.created_at,
+        ))
+        self._session.flush()
+
+    def get_by_hash(self, token_hash: str) -> BetaConnectionToken | None:
+        row = self._session.scalar(select(BetaConnectionTokenModel).where(
+            BetaConnectionTokenModel.token_hash == token_hash
+        ))
+        if row is None:
+            return None
+        return BetaConnectionToken(
+            id=row.id, user_id=row.user_id, token_hash=row.token_hash,
+            expires_at=row.expires_at, created_at=row.created_at, used_at=row.used_at,
+        )
+
+    def mark_used(self, token_id: str, used_at: datetime) -> None:
+        self._session.execute(
+            update(BetaConnectionTokenModel)
+            .where(BetaConnectionTokenModel.id == token_id)
+            .where(BetaConnectionTokenModel.used_at.is_(None))
+            .values(used_at=used_at)
+        )
+        self._session.flush()
+
+============================================================
+3D. TELEGRAM BINDING REPOSITORY INVENTORY
+============================================================
+
+
+============================================================
+4. DOMAIN EVENT CONTRACT
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationEvent:
+    """
+    Domain model for conversation events.
+
+    Privacy model:
+
+    Stores:
+        - pseudonymous learner identity
+        - conversation session
+        - learning context
+        - message content
+
+    Does NOT store:
+        - Telegram ID
+        - email
+        - direct identity
+
+
+    Future consumers:
+
+        Conversation Events
+              |
+              v
+        Memory Engine
+              |
+              v
+        Learning Intelligence
+    """
+
+    event_id: str
+
+    conversation_id: str
+
+    telegram_user_hash: str
+
+    world_id: str
+
+    channel: str
+
+    role: str
+
+    content: str
+
+    metadata: dict[str, Any] | None
+
+    created_at: datetime
+
+============================================================
+5A. ALEMBIC CONFIGURATION LOCATION
+============================================================
+
+FullName                                      
+--------                                      
+C:\AI Folder\EasyChatBot-Hackathon\alembic.ini
+
+
+
+
+============================================================
+5B. CONVERSATION EVENT DATABASE MIGRATIONS
+============================================================
+
+  backend\alembic\versions\20260822_create_conversation_events.py:14:Memory extraction will be implemented separately.
+  backend\alembic\versions\20260822_create_conversation_events.py:15:
+> backend\alembic\versions\20260822_create_conversation_events.py:16:Revision ID: 20260822_create_conversation_events
+  backend\alembic\versions\20260822_create_conversation_events.py:17:Revises: 20260822_fix_beta_token_user_id
+  backend\alembic\versions\20260822_create_conversation_events.py:18:Create Date: 2026-08-22
+  backend\alembic\versions\20260822_create_conversation_events.py:19:"""
+  backend\alembic\versions\20260822_create_conversation_events.py:20:
+  backend\alembic\versions\20260822_create_conversation_events.py:21:from __future__ import annotations
+  backend\alembic\versions\20260822_create_conversation_events.py:22:
+  backend\alembic\versions\20260822_create_conversation_events.py:26:
+  backend\alembic\versions\20260822_create_conversation_events.py:27:# Revision identifiers, used by Alembic.
+> backend\alembic\versions\20260822_create_conversation_events.py:28:revision = "20260822_create_conversation_events"
+  backend\alembic\versions\20260822_create_conversation_events.py:29:
+  backend\alembic\versions\20260822_create_conversation_events.py:30:down_revision = "20260822_create_conversation_memory"
+  backend\alembic\versions\20260822_create_conversation_events.py:31:
+  backend\alembic\versions\20260822_create_conversation_events.py:32:branch_labels = None
+  backend\alembic\versions\20260822_create_conversation_events.py:33:
+  backend\alembic\versions\20260822_create_conversation_events.py:34:depends_on = None
+  backend\alembic\versions\20260822_create_conversation_events.py:39:
+  backend\alembic\versions\20260822_create_conversation_events.py:40:    op.create_table(
+> backend\alembic\versions\20260822_create_conversation_events.py:41:        "conversation_events",
+  backend\alembic\versions\20260822_create_conversation_events.py:42:
+  backend\alembic\versions\20260822_create_conversation_events.py:43:        sa.Column(
+  backend\alembic\versions\20260822_create_conversation_events.py:44:            "id",
+  backend\alembic\versions\20260822_create_conversation_events.py:45:            sa.String(length=64),
+  backend\alembic\versions\20260822_create_conversation_events.py:46:            primary_key=True,
+  backend\alembic\versions\20260822_create_conversation_events.py:47:        ),
+  backend\alembic\versions\20260822_create_conversation_events.py:92:
+  backend\alembic\versions\20260822_create_conversation_events.py:93:    op.create_index(
+> backend\alembic\versions\20260822_create_conversation_events.py:94:        "ix_conversation_events_user_world",
+> backend\alembic\versions\20260822_create_conversation_events.py:95:        "conversation_events",
+  backend\alembic\versions\20260822_create_conversation_events.py:96:        [
+  backend\alembic\versions\20260822_create_conversation_events.py:97:            "telegram_user_id",
+  backend\alembic\versions\20260822_create_conversation_events.py:98:            "world_id",
+  backend\alembic\versions\20260822_create_conversation_events.py:99:        ],
+  backend\alembic\versions\20260822_create_conversation_events.py:100:    )
+  backend\alembic\versions\20260822_create_conversation_events.py:101:
+  backend\alembic\versions\20260822_create_conversation_events.py:105:
+  backend\alembic\versions\20260822_create_conversation_events.py:106:    op.drop_index(
+> backend\alembic\versions\20260822_create_conversation_events.py:107:        "ix_conversation_events_user_world",
+> backend\alembic\versions\20260822_create_conversation_events.py:108:        table_name="conversation_events",
+  backend\alembic\versions\20260822_create_conversation_events.py:109:    )
+  backend\alembic\versions\20260822_create_conversation_events.py:110:
+  backend\alembic\versions\20260822_create_conversation_events.py:111:    op.drop_table(
+> backend\alembic\versions\20260822_create_conversation_events.py:112:        "conversation_events",
+  backend\alembic\versions\20260822_create_conversation_events.py:113:    )
+  backend\alembic\versions\20260822_create_conversation_memory.py:3:
+  backend\alembic\versions\20260822_create_conversation_memory.py:4:Previous migration created conversation_memory.
+> backend\alembic\versions\20260822_create_conversation_memory.py:5:Replaced by conversation_events.
+  backend\alembic\versions\20260822_create_conversation_memory.py:6:
+  backend\alembic\versions\20260822_create_conversation_memory.py:7:Revision ID: 20260822_create_conversation_memory
+  backend\alembic\versions\20260822_create_conversation_memory.py:8:"""
+  backend\alembic\versions\20260822_create_conversation_memory.py:9:
+  backend\alembic\versions\20260822_create_conversation_memory.py:10:from __future__ import annotations
+  backend\alembic\versions\20260822_create_conversation_memory.py:11:
+  backend\alembic\versions\20260822_privacy_event_governance.py:9:Creates:
+  backend\alembic\versions\20260822_privacy_event_governance.py:10:
+> backend\alembic\versions\20260822_privacy_event_governance.py:11:conversation_events
+  backend\alembic\versions\20260822_privacy_event_governance.py:12:    +
+> backend\alembic\versions\20260822_privacy_event_governance.py:13:privacy_hash_version
+  backend\alembic\versions\20260822_privacy_event_governance.py:14:    +
+> backend\alembic\versions\20260822_privacy_event_governance.py:15:retention_policy_id
+  backend\alembic\versions\20260822_privacy_event_governance.py:16:
+  backend\alembic\versions\20260822_privacy_event_governance.py:17:"""
+  backend\alembic\versions\20260822_privacy_event_governance.py:18:
+  backend\alembic\versions\20260822_privacy_event_governance.py:19:from alembic import op
+  backend\alembic\versions\20260822_privacy_event_governance.py:20:import sqlalchemy as sa
+  backend\alembic\versions\20260822_privacy_event_governance.py:21:
+  backend\alembic\versions\20260822_privacy_event_governance.py:49:        column["name"]
+  backend\alembic\versions\20260822_privacy_event_governance.py:50:        for column in inspector.get_columns(
+> backend\alembic\versions\20260822_privacy_event_governance.py:51:            "conversation_events"
+  backend\alembic\versions\20260822_privacy_event_governance.py:52:        )
+  backend\alembic\versions\20260822_privacy_event_governance.py:53:    }
+  backend\alembic\versions\20260822_privacy_event_governance.py:54:
+  backend\alembic\versions\20260822_privacy_event_governance.py:55:
+  backend\alembic\versions\20260822_privacy_event_governance.py:56:    #
+  backend\alembic\versions\20260822_privacy_event_governance.py:57:    # Add privacy hash version
+  backend\alembic\versions\20260822_privacy_event_governance.py:66:    #
+  backend\alembic\versions\20260822_privacy_event_governance.py:67:
+> backend\alembic\versions\20260822_privacy_event_governance.py:68:    if "privacy_hash_version" not in columns:
+  backend\alembic\versions\20260822_privacy_event_governance.py:69:
+  backend\alembic\versions\20260822_privacy_event_governance.py:70:        op.add_column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:71:            "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_governance.py:72:            sa.Column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:73:                "privacy_hash_version",
+  backend\alembic\versions\20260822_privacy_event_governance.py:74:                sa.String(
+  backend\alembic\versions\20260822_privacy_event_governance.py:75:                    length=32
+  backend\alembic\versions\20260822_privacy_event_governance.py:76:                ),
+  backend\alembic\versions\20260822_privacy_event_governance.py:77:                nullable=True,
+  backend\alembic\versions\20260822_privacy_event_governance.py:78:            ),
+  backend\alembic\versions\20260822_privacy_event_governance.py:79:        )
+  backend\alembic\versions\20260822_privacy_event_governance.py:90:    #
+  backend\alembic\versions\20260822_privacy_event_governance.py:91:
+> backend\alembic\versions\20260822_privacy_event_governance.py:92:    if "retention_policy_id" not in columns:
+  backend\alembic\versions\20260822_privacy_event_governance.py:93:
+  backend\alembic\versions\20260822_privacy_event_governance.py:94:        op.add_column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:95:            "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_governance.py:96:            sa.Column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:97:                "retention_policy_id",
+  backend\alembic\versions\20260822_privacy_event_governance.py:98:                sa.String(
+  backend\alembic\versions\20260822_privacy_event_governance.py:99:                    length=128
+  backend\alembic\versions\20260822_privacy_event_governance.py:100:                ),
+  backend\alembic\versions\20260822_privacy_event_governance.py:101:                nullable=True,
+  backend\alembic\versions\20260822_privacy_event_governance.py:102:            ),
+  backend\alembic\versions\20260822_privacy_event_governance.py:103:        )
+  backend\alembic\versions\20260822_privacy_event_governance.py:110:    op.execute(
+  backend\alembic\versions\20260822_privacy_event_governance.py:111:        """
+> backend\alembic\versions\20260822_privacy_event_governance.py:112:        UPDATE conversation_events
+  backend\alembic\versions\20260822_privacy_event_governance.py:113:        SET
+> backend\alembic\versions\20260822_privacy_event_governance.py:114:            privacy_hash_version = 'v1'
+  backend\alembic\versions\20260822_privacy_event_governance.py:115:        WHERE
+> backend\alembic\versions\20260822_privacy_event_governance.py:116:            privacy_hash_version IS NULL
+  backend\alembic\versions\20260822_privacy_event_governance.py:117:        """
+  backend\alembic\versions\20260822_privacy_event_governance.py:118:    )
+  backend\alembic\versions\20260822_privacy_event_governance.py:119:
+  backend\alembic\versions\20260822_privacy_event_governance.py:120:
+  backend\alembic\versions\20260822_privacy_event_governance.py:121:    op.execute(
+  backend\alembic\versions\20260822_privacy_event_governance.py:122:        """
+> backend\alembic\versions\20260822_privacy_event_governance.py:123:        UPDATE conversation_events
+  backend\alembic\versions\20260822_privacy_event_governance.py:124:        SET
+> backend\alembic\versions\20260822_privacy_event_governance.py:125:            retention_policy_id =
+  backend\alembic\versions\20260822_privacy_event_governance.py:126:                'conversation_learning_default'
+  backend\alembic\versions\20260822_privacy_event_governance.py:127:        WHERE
+> backend\alembic\versions\20260822_privacy_event_governance.py:128:            retention_policy_id IS NULL
+  backend\alembic\versions\20260822_privacy_event_governance.py:129:        """
+  backend\alembic\versions\20260822_privacy_event_governance.py:130:    )
+  backend\alembic\versions\20260822_privacy_event_governance.py:131:
+  backend\alembic\versions\20260822_privacy_event_governance.py:132:
+  backend\alembic\versions\20260822_privacy_event_governance.py:133:    #
+  backend\alembic\versions\20260822_privacy_event_governance.py:134:    # Enforce governance requirements
+  backend\alembic\versions\20260822_privacy_event_governance.py:141:
+  backend\alembic\versions\20260822_privacy_event_governance.py:142:    op.alter_column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:143:        "conversation_events",
+> backend\alembic\versions\20260822_privacy_event_governance.py:144:        "privacy_hash_version",
+  backend\alembic\versions\20260822_privacy_event_governance.py:145:        nullable=False,
+  backend\alembic\versions\20260822_privacy_event_governance.py:146:    )
+  backend\alembic\versions\20260822_privacy_event_governance.py:147:
+  backend\alembic\versions\20260822_privacy_event_governance.py:148:
+  backend\alembic\versions\20260822_privacy_event_governance.py:149:    op.alter_column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:150:        "conversation_events",
+> backend\alembic\versions\20260822_privacy_event_governance.py:151:        "retention_policy_id",
+  backend\alembic\versions\20260822_privacy_event_governance.py:152:        nullable=False,
+  backend\alembic\versions\20260822_privacy_event_governance.py:153:    )
+  backend\alembic\versions\20260822_privacy_event_governance.py:154:
+  backend\alembic\versions\20260822_privacy_event_governance.py:155:
+  backend\alembic\versions\20260822_privacy_event_governance.py:156:
+  backend\alembic\versions\20260822_privacy_event_governance.py:157:# =====================================================
+  backend\alembic\versions\20260822_privacy_event_governance.py:163:
+  backend\alembic\versions\20260822_privacy_event_governance.py:164:    op.drop_column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:165:        "conversation_events",
+> backend\alembic\versions\20260822_privacy_event_governance.py:166:        "retention_policy_id",
+  backend\alembic\versions\20260822_privacy_event_governance.py:167:    )
+  backend\alembic\versions\20260822_privacy_event_governance.py:168:
+  backend\alembic\versions\20260822_privacy_event_governance.py:169:
+  backend\alembic\versions\20260822_privacy_event_governance.py:170:    op.drop_column(
+> backend\alembic\versions\20260822_privacy_event_governance.py:171:        "conversation_events",
+> backend\alembic\versions\20260822_privacy_event_governance.py:172:        "privacy_hash_version",
+  backend\alembic\versions\20260822_privacy_event_governance.py:173:    )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:2:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:3:Revision ID: 20260822_privacy_event_model_update
+> backend\alembic\versions\20260822_privacy_event_model_update.py:4:Revises: 20260822_create_conversation_events
+  backend\alembic\versions\20260822_privacy_event_model_update.py:5:"""
+  backend\alembic\versions\20260822_privacy_event_model_update.py:6:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:7:from alembic import op
+  backend\alembic\versions\20260822_privacy_event_model_update.py:8:import sqlalchemy as sa
+  backend\alembic\versions\20260822_privacy_event_model_update.py:9:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:10:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:11:revision = "20260822_privacy_event_model_update"
+  backend\alembic\versions\20260822_privacy_event_model_update.py:12:
+> backend\alembic\versions\20260822_privacy_event_model_update.py:13:down_revision = "20260822_create_conversation_events"
+  backend\alembic\versions\20260822_privacy_event_model_update.py:14:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:15:branch_labels = None
+  backend\alembic\versions\20260822_privacy_event_model_update.py:16:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:17:depends_on = None
+  backend\alembic\versions\20260822_privacy_event_model_update.py:18:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:19:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:27:        column["name"]
+  backend\alembic\versions\20260822_privacy_event_model_update.py:28:        for column in inspector.get_columns(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:29:            "conversation_events"
+  backend\alembic\versions\20260822_privacy_event_model_update.py:30:        )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:31:    }
+  backend\alembic\versions\20260822_privacy_event_model_update.py:32:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:33:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:34:    #
+  backend\alembic\versions\20260822_privacy_event_model_update.py:35:    # Add conversation isolation identifier
+  backend\alembic\versions\20260822_privacy_event_model_update.py:47:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:48:        op.add_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:49:            "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:50:            sa.Column(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:51:                "conversation_id",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:52:                sa.String(length=128),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:53:                nullable=True,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:54:            ),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:55:        )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:71:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:72:        op.add_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:73:            "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:74:            sa.Column(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:75:                "telegram_user_hash",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:76:                sa.String(length=128),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:77:                nullable=True,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:78:            ),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:79:        )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:96:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:97:        op.add_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:98:            "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:99:            sa.Column(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:100:                "metadata_json",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:101:                sa.JSON(),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:102:                nullable=True,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:103:            ),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:104:        )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:111:    op.execute(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:112:        """
+> backend\alembic\versions\20260822_privacy_event_model_update.py:113:        UPDATE conversation_events
+  backend\alembic\versions\20260822_privacy_event_model_update.py:114:        SET conversation_id =
+  backend\alembic\versions\20260822_privacy_event_model_update.py:115:            COALESCE(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:116:                conversation_id,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:117:                'legacy-' || id
+  backend\alembic\versions\20260822_privacy_event_model_update.py:118:            )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:119:        WHERE conversation_id IS NULL
+  backend\alembic\versions\20260822_privacy_event_model_update.py:141:        op.execute(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:142:            """
+> backend\alembic\versions\20260822_privacy_event_model_update.py:143:            UPDATE conversation_events
+  backend\alembic\versions\20260822_privacy_event_model_update.py:144:            SET telegram_user_hash =
+  backend\alembic\versions\20260822_privacy_event_model_update.py:145:                'legacy-' || id
+  backend\alembic\versions\20260822_privacy_event_model_update.py:146:            WHERE telegram_user_hash IS NULL
+  backend\alembic\versions\20260822_privacy_event_model_update.py:147:            """
+  backend\alembic\versions\20260822_privacy_event_model_update.py:148:        )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:149:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:150:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:151:        op.drop_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:152:            "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:153:            "telegram_user_id",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:154:        )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:155:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:156:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:157:    #
+  backend\alembic\versions\20260822_privacy_event_model_update.py:158:    # Enforce privacy model
+  backend\alembic\versions\20260822_privacy_event_model_update.py:160:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:161:    op.alter_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:162:        "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:163:        "conversation_id",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:164:        nullable=False,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:165:    )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:166:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:167:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:168:    op.alter_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:169:        "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:170:        "telegram_user_hash",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:171:        nullable=False,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:172:    )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:173:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:174:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:175:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:177:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:178:    op.add_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:179:        "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:180:        sa.Column(
+  backend\alembic\versions\20260822_privacy_event_model_update.py:181:            "telegram_user_id",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:182:            sa.String(length=128),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:183:            nullable=True,
+  backend\alembic\versions\20260822_privacy_event_model_update.py:184:        ),
+  backend\alembic\versions\20260822_privacy_event_model_update.py:185:    )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:187:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:188:    op.drop_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:189:        "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:190:        "conversation_id",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:191:    )
+  backend\alembic\versions\20260822_privacy_event_model_update.py:192:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:193:
+  backend\alembic\versions\20260822_privacy_event_model_update.py:194:    op.drop_column(
+> backend\alembic\versions\20260822_privacy_event_model_update.py:195:        "conversation_events",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:196:        "telegram_user_hash",
+  backend\alembic\versions\20260822_privacy_event_model_update.py:197:    )
+
+
+
+
+============================================================
+INSPECTION COMPLETE
+============================================================

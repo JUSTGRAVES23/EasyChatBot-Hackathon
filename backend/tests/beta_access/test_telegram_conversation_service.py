@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from app.application.beta_access.telegram_conversation_service import (
@@ -32,14 +34,60 @@ class FakeConversationRuntime:
 
 
 class FakeConversationEventRepository:
-    """In-memory repository test double."""
+    """
+    In-memory repository test double.
+
+    Implements the production repository contract:
+
+        telegram_user_hash
+                +
+        conversation_id
+                +
+            world_id
+    """
 
     def __init__(self) -> None:
         self.events: list[object] = []
+        self.get_recent_calls: list[dict] = []
 
     async def save(self, event):
         self.events.append(event)
         return event
+
+    async def get_recent(
+        self,
+        *,
+        telegram_user_hash: str,
+        conversation_id: str,
+        world_id: str,
+        limit: int = 20,
+    ):
+        self.get_recent_calls.append(
+            {
+                "telegram_user_hash": telegram_user_hash,
+                "conversation_id": conversation_id,
+                "world_id": world_id,
+                "limit": limit,
+            }
+        )
+
+        if limit <= 0:
+            return []
+
+        matching_events = [
+            event
+            for event in self.events
+            if (
+                event.telegram_user_hash
+                == telegram_user_hash
+                and event.conversation_id
+                == conversation_id
+                and event.world_id
+                == world_id
+            )
+        ]
+
+        return matching_events[-limit:]
 
 
 class FakePrivacyIdentifierService:
@@ -173,6 +221,157 @@ async def test_telegram_conversation_service_delegates_to_runtime():
 
 
 @pytest.mark.asyncio
+async def test_telegram_conversation_service_retrieves_recent_history():
+    (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    ) = make_service()
+
+    await service.handle_telegram_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    await service.handle_telegram_message(
+        telegram_user_id=12345,
+        message="Comment allez-vous ?",
+    )
+
+    assert len(repository.get_recent_calls) >= 1
+
+    latest_call = repository.get_recent_calls[-1]
+
+    assert latest_call["telegram_user_hash"] == (
+        "hash-12345"
+    )
+
+    assert latest_call["world_id"] == "world-fr"
+
+    assert latest_call["conversation_id"].startswith(
+        "telegram-"
+    )
+
+    assert latest_call["limit"] > 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_conversation_service_history_isolated_by_identity():
+    (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    ) = make_service()
+
+    await service.handle_telegram_message(
+        telegram_user_id=12345,
+        message="David message",
+    )
+
+    await service.handle_telegram_message(
+        telegram_user_id=67890,
+        message="Brother message",
+    )
+
+    david_events = await repository.get_recent(
+        telegram_user_hash="hash-12345",
+        conversation_id=(
+            repository.events[0].conversation_id
+        ),
+        world_id="world-fr",
+    )
+
+    brother_events = await repository.get_recent(
+        telegram_user_hash="hash-67890",
+        conversation_id=(
+            repository.events[2].conversation_id
+        ),
+        world_id="world-fr",
+    )
+
+    assert david_events
+    assert brother_events
+
+    assert all(
+        event.telegram_user_hash == "hash-12345"
+        for event in david_events
+    )
+
+    assert all(
+        event.telegram_user_hash == "hash-67890"
+        for event in brother_events
+    )
+
+    assert not any(
+        event.content == "Brother message"
+        for event in david_events
+    )
+
+    assert not any(
+        event.content == "David message"
+        for event in brother_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_conversation_service_history_isolated_by_conversation():
+    (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    ) = make_service()
+
+    await service.handle_telegram_message(
+        telegram_user_id=12345,
+        message="First conversation",
+    )
+
+    first_conversation_id = (
+        repository.events[0].conversation_id
+    )
+
+    await service.handle_telegram_message(
+        telegram_user_id=12345,
+        message="Second message",
+    )
+
+    second_conversation_id = (
+        repository.events[2].conversation_id
+    )
+
+    first_history = await repository.get_recent(
+        telegram_user_hash="hash-12345",
+        conversation_id=first_conversation_id,
+        world_id="world-fr",
+    )
+
+    second_history = await repository.get_recent(
+        telegram_user_hash="hash-12345",
+        conversation_id=second_conversation_id,
+        world_id="world-fr",
+    )
+
+    assert first_history
+    assert second_history
+
+    assert all(
+        event.conversation_id == first_conversation_id
+        for event in first_history
+    )
+
+    assert all(
+        event.conversation_id == second_conversation_id
+        for event in second_history
+    )
+
+
+@pytest.mark.asyncio
 async def test_telegram_conversation_service_rejects_empty_message():
     (
         service,
@@ -193,6 +392,7 @@ async def test_telegram_conversation_service_rejects_empty_message():
 
     assert runtime.calls == []
     assert repository.events == []
+    assert repository.get_recent_calls == []
     assert privacy.calls == []
     assert validator.calls == []
 
@@ -218,6 +418,7 @@ async def test_telegram_conversation_service_rejects_whitespace_message():
 
     assert runtime.calls == []
     assert repository.events == []
+    assert repository.get_recent_calls == []
     assert privacy.calls == []
     assert validator.calls == []
 

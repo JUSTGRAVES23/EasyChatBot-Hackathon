@@ -13,15 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 class BetaTelegramStartHandler:
-    """Application-facing handler for ``/start <token>``.
+    """
+    Application-facing handler for /start <token>.
 
-    Beta 1 rules:
-
-    - /start is only valid in a private Telegram chat.
-    - A valid Beta access token is required.
+    Rules:
+    - /start is valid only in private Telegram chats.
+    - A valid Beta connection token is required.
     - Telegram identity binding is delegated to BetaAccessService.
-    - World onboarding/selection is never performed by Telegram.
-    - The reply boundary accepts the established ``reply(text)`` contract.
+    - Telegram does not select or change Learning Worlds.
     """
 
     def __init__(
@@ -45,11 +44,6 @@ class BetaTelegramStartHandler:
         chat_type: str,
         reply: Callable[[str], Any],
     ) -> None:
-        """Handle a Telegram /start request.
-
-        The reply callable may be synchronous or asynchronous.
-        """
-
         if reply is None:
             raise ValueError(
                 "reply callback is required."
@@ -97,15 +91,8 @@ class BetaTelegramStartHandler:
             )
             return
 
-        # --------------------------------------------------------------
-        # Important Beta 1 boundary
-        # --------------------------------------------------------------
-        #
-        # Telegram does NOT onboard, select, change, or switch Worlds.
-        #
-        # World assignment is authoritative in the EasyChatBot
-        # application.
-        #
+        # World assignment is authoritative in the Academy
+        # application and is never changed from Telegram.
         del user
 
         await self._send_reply(
@@ -124,8 +111,6 @@ class BetaTelegramStartHandler:
         reply: Callable[[str], Any],
         message: str,
     ) -> None:
-        """Execute synchronous or asynchronous reply callbacks."""
-
         result = reply(message)
 
         if inspect.isawaitable(result):

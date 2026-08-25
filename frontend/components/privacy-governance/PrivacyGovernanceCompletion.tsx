@@ -12,6 +12,8 @@ interface PrivacyGovernanceCompletionProps {
   caseId: string;
   changeId: string;
   status: PrivacyGovernanceTerminalStatus;
+  title?: string;
+  summary?: string;
   onReturnToCases?: () => void;
 }
 
@@ -43,8 +45,6 @@ function getHeadline(
       return "Congratulations!";
 
     case "BLOCKED":
-      return "Assessment completed";
-
     case "REJECTED":
       return "Assessment completed";
 
@@ -85,6 +85,8 @@ export default function PrivacyGovernanceCompletion({
   caseId,
   changeId,
   status,
+  title,
+  summary,
   onReturnToCases,
 }: PrivacyGovernanceCompletionProps) {
   const statusLabel = getStatusLabel(status);
@@ -93,9 +95,15 @@ export default function PrivacyGovernanceCompletion({
 
   return (
     <main className="privacy-completion-page">
-      <section className="privacy-completion-card">
+      <section
+        className="privacy-completion-card"
+        aria-labelledby="privacy-completion-title"
+      >
         <div className="privacy-completion-hero">
-          <div className="privacy-completion-confetti" aria-hidden="true">
+          <div
+            className="privacy-completion-confetti"
+            aria-hidden="true"
+          >
             <span>✦</span>
             <span>◆</span>
             <span>✦</span>
@@ -117,16 +125,14 @@ export default function PrivacyGovernanceCompletion({
             }`}
             aria-hidden="true"
           >
-            {statusLabel === "COMPLETED" ? "✓" : "✓"}
+            ✓
           </div>
 
-          <h1>{headline}</h1>
+          <h1 id="privacy-completion-title">
+            {headline}
+          </h1>
 
-          <h2>
-            {statusLabel === "COMPLETED"
-              ? "Case completed"
-              : "Case completed"}
-          </h2>
+          <h2>Case completed</h2>
 
           <p className="privacy-completion-message">
             {message}
@@ -134,9 +140,46 @@ export default function PrivacyGovernanceCompletion({
         </div>
 
         <div className="privacy-completion-details">
+          {title && (
+            <div className="privacy-completion-detail-row">
+              <div className="privacy-detail-label">
+                <span
+                  className="privacy-detail-icon blue"
+                  aria-hidden="true"
+                >
+                  □
+                </span>
+
+                <span>Assessment</span>
+              </div>
+
+              <strong>{title}</strong>
+            </div>
+          )}
+
+          {summary && (
+            <div className="privacy-completion-detail-row">
+              <div className="privacy-detail-label">
+                <span
+                  className="privacy-detail-icon purple"
+                  aria-hidden="true"
+                >
+                  ◉
+                </span>
+
+                <span>Summary</span>
+              </div>
+
+              <span>{summary}</span>
+            </div>
+          )}
+
           <div className="privacy-completion-detail-row">
             <div className="privacy-detail-label">
-              <span className="privacy-detail-icon blue">
+              <span
+                className="privacy-detail-icon blue"
+                aria-hidden="true"
+              >
                 □
               </span>
 
@@ -148,7 +191,10 @@ export default function PrivacyGovernanceCompletion({
 
           <div className="privacy-completion-detail-row">
             <div className="privacy-detail-label">
-              <span className="privacy-detail-icon green">
+              <span
+                className="privacy-detail-icon green"
+                aria-hidden="true"
+              >
                 ♢
               </span>
 
@@ -160,7 +206,10 @@ export default function PrivacyGovernanceCompletion({
 
           <div className="privacy-completion-detail-row">
             <div className="privacy-detail-label">
-              <span className="privacy-detail-icon purple">
+              <span
+                className="privacy-detail-icon purple"
+                aria-hidden="true"
+              >
                 ◉
               </span>
 
