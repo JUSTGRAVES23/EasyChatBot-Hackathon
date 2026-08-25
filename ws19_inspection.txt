@@ -1,0 +1,2522 @@
+============================================================
+WS-09 — Telegram Classroom Security
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+
+
+@dataclass(frozen=True)
+class FakeConversationContext:
+    world_id: str = "world-fr"
+    character: str = "Alix"
+    level: str = "B1"
+
+
+class FakeBetaAccessService:
+    """Deterministic Beta authorization boundary."""
+
+    def __init__(
+        self,
+        *,
+        approved_users: set[int] | None = None,
+    ) -> None:
+        self.approved_users = (
+            approved_users
+            if approved_users is not None
+            else {111, 222}
+        )
+
+        self.calls: list[int] = []
+
+    async def get_conversation_context(
+        self,
+        telegram_user_id: int,
+    ) -> FakeConversationContext:
+        self.calls.append(
+            telegram_user_id,
+        )
+
+        if telegram_user_id not in self.approved_users:
+            raise PermissionError(
+                "Telegram user is not approved."
+            )
+
+        return FakeConversationContext()
+
+
+class FakeConversationService:
+    """
+    Security-focused conversation-service double.
+
+    State is explicitly scoped by Telegram identity so
+    accidental cross-user mixing becomes observable.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.sessions: dict[int, list[str]] = {}
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "message": message,
+            }
+        )
+
+        history = self.sessions.setdefault(
+            telegram_user_id,
+            [],
+        )
+
+        history.append(message)
+
+        return (
+            f"response:{telegram_user_id}:"
+            f"{len(history)}"
+        )
+
+    async def get_recent_history(
+        self,
+        *,
+        telegram_user_id: int,
+        limit: int = 20,
+    ) -> list[str]:
+        history = self.sessions.get(
+            telegram_user_id,
+            [],
+        )
+
+        return history[-limit:]
+
+
+def make_boundary(
+    *,
+    approved_users: set[int] | None = None,
+):
+    access = FakeBetaAccessService(
+        approved_users=approved_users,
+    )
+
+    conversation_service = FakeConversationService()
+
+    boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=access,
+    )
+
+    return (
+        boundary,
+        access,
+        conversation_service,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws09_unauthorized_identity_cannot_enter_conversation():
+    (
+        boundary,
+        access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=999,
+        message="Bonjour",
+    )
+
+    assert response
+
+    assert (
+        "not authorized" in response.lower()
+        or "not approved" in response.lower()
+    )
+
+    assert access.calls == [
+        999,
+    ]
+
+    assert conversation_service.calls == []
+
+    assert 999 not in conversation_service.sessions
+
+
+@pytest.mark.asyncio
+async def test_ws09_authorized_identity_can_enter_conversation():
+    (
+        boundary,
+        access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+
+    assert response == "response:111:1"
+
+    assert access.calls == [
+        111,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "Bonjour",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws09_different_telegram_identities_never_share_session_state():
+    (
+        boundary,
+        _access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111, 222},
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Message for learner 111",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=222,
+        message="Message for learner 222",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Second message for 111",
+    )
+
+    assert conversation_service.sessions[111] == [
+        "Message for learner 111",
+        "Second message for 111",
+    ]
+
+    assert conversation_service.sessions[222] == [
+        "Message for learner 222",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws09_history_cannot_cross_telegram_identity_boundary():
+    (
+        boundary,
+        _access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111, 222},
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Private message 111",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=222,
+        message="Private message 222",
+    )
+
+    history_111 = (
+        await conversation_service.get_recent_history(
+            telegram_user_id=111,
+        )
+    )
+
+    history_222 = (
+        await conversation_service.get_recent_history(
+            telegram_user_id=222,
+        )
+    )
+
+    assert history_111 == [
+        "Private message 111",
+    ]
+
+    assert history_222 == [
+        "Private message 222",
+    ]
+
+    assert "Private message 222" not in history_111
+
+    assert "Private message 111" not in history_222
+
+
+@pytest.mark.asyncio
+async def test_ws09_learner_message_contains_no_telegram_identity():
+    (
+        boundary,
+        _access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    learner_message = (
+        "Bonjour, pouvez-vous m'aider ?"
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message=learner_message,
+    )
+
+    recorded = conversation_service.calls[0]
+
+    assert recorded["message"] == learner_message
+
+    assert "111" not in recorded["message"]
+
+    assert "telegram_user_id" not in recorded["message"]
+
+    assert "world-fr" not in recorded["message"]
+
+    assert "Alix" not in recorded["message"]
+
+    assert "B1" not in recorded["message"]
+
+
+@pytest.mark.asyncio
+async def test_ws09_context_metadata_never_becomes_learner_content():
+    (
+        boundary,
+        _access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+
+    recorded = conversation_service.calls[0]
+
+    assert recorded["message"] == "Bonjour"
+
+    assert recorded["message"] != (
+        "world-fr Alix B1 Bonjour"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws09_empty_message_is_rejected_before_authorization():
+    (
+        boundary,
+        access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=111,
+            message="   ",
+        )
+
+    assert access.calls == []
+
+    assert conversation_service.calls == []
+
+    assert conversation_service.sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_ws09_unauthorized_identity_cannot_create_history():
+    (
+        boundary,
+        access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=999,
+        message="Attempted private message",
+    )
+
+    assert response
+
+    assert access.calls == [
+        999,
+    ]
+
+    assert conversation_service.calls == []
+
+    assert conversation_service.sessions == {}
+
+    history = (
+        await conversation_service.get_recent_history(
+            telegram_user_id=999,
+        )
+    )
+
+    assert history == []
+
+
+@pytest.mark.asyncio
+async def test_ws09_same_identity_preserves_message_order():
+    (
+        boundary,
+        _access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    messages = [
+        "First",
+        "Second",
+        "Third",
+    ]
+
+    for message in messages:
+        await boundary.handle_message(
+            telegram_user_id=111,
+            message=message,
+        )
+
+    assert conversation_service.sessions[111] == messages
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "First",
+        },
+        {
+            "telegram_user_id": 111,
+            "message": "Second",
+        },
+        {
+            "telegram_user_id": 111,
+            "message": "Third",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws09_user_scope_remains_stable_across_repeated_messages():
+    (
+        boundary,
+        access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111, 222},
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Hello",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="How are you?",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=222,
+        message="Hello",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Continue",
+    )
+
+    assert access.calls == [
+        111,
+        111,
+        222,
+        111,
+    ]
+
+    assert conversation_service.sessions[111] == [
+        "Hello",
+        "How are you?",
+        "Continue",
+    ]
+
+    assert conversation_service.sessions[222] == [
+        "Hello",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws09_history_limit_is_applied_within_user_scope():
+    (
+        boundary,
+        _access,
+        conversation_service,
+    ) = make_boundary(
+        approved_users={111},
+    )
+
+    for message in [
+        "one",
+        "two",
+        "three",
+        "four",
+    ]:
+        await boundary.handle_message(
+            telegram_user_id=111,
+            message=message,
+        )
+
+    history = (
+        await conversation_service.get_recent_history(
+            telegram_user_id=111,
+            limit=2,
+        )
+    )
+
+    assert history == [
+        "three",
+        "four",
+    ]
+
+============================================================
+WS-10 — Telegram Classroom Input Controls
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+
+
+@dataclass(frozen=True)
+class FakeConversationContext:
+    world_id: str = "world-fr"
+    character: str = "Alix"
+    level: str = "B1"
+
+
+class FakeBetaAccessService:
+    """Deterministic authorization/context test double."""
+
+    def __init__(self, *, approved: bool = True) -> None:
+        self.approved = approved
+        self.calls: list[int] = []
+
+    async def get_conversation_context(
+        self,
+        telegram_user_id: int,
+    ) -> FakeConversationContext:
+        self.calls.append(telegram_user_id)
+
+        if not self.approved:
+            raise PermissionError(
+                "Telegram user is not approved."
+            )
+
+        return FakeConversationContext()
+
+
+class FakeConversationService:
+    """Deterministic downstream conversation-service double."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "message": message,
+            }
+        )
+        return "Bonjour !"
+
+
+def make_boundary(*, approved: bool = True):
+    access = FakeBetaAccessService(approved=approved)
+    conversation_service = FakeConversationService()
+
+    boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=access,
+    )
+
+    return boundary, access, conversation_service
+
+
+@pytest.mark.asyncio
+async def test_ws10_empty_message_is_rejected_before_authorization():
+    boundary, access, conversation_service = make_boundary()
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message="   ",
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws10_none_message_is_rejected_before_authorization():
+    boundary, access, conversation_service = make_boundary()
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message=None,  # type: ignore[arg-type]
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws10_whitespace_is_normalized_before_downstream_processing():
+    boundary, access, conversation_service = make_boundary()
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="  Bonjour   ",
+    )
+
+    assert response == "Bonjour !"
+    assert access.calls == [12345]
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws10_internal_whitespace_is_preserved():
+    boundary, _access, conversation_service = make_boundary()
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour   comment allez-vous ?",
+    )
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour   comment allez-vous ?",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws10_unauthorized_input_never_reaches_conversation_service():
+    boundary, access, conversation_service = make_boundary(
+        approved=False,
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=99999,
+        message="Bonjour",
+    )
+
+    assert response
+    assert "authorized" in response.lower()
+    assert access.calls == [99999]
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws10_invalid_telegram_identity_is_rejected():
+    boundary, access, conversation_service = make_boundary()
+
+    with pytest.raises(
+        (ValueError, TypeError),
+    ):
+        await boundary.handle_message(
+            telegram_user_id=0,
+            message="Bonjour",
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws10_negative_telegram_identity_is_rejected():
+    boundary, access, conversation_service = make_boundary()
+
+    with pytest.raises(
+        (ValueError, TypeError),
+    ):
+        await boundary.handle_message(
+            telegram_user_id=-12345,
+            message="Bonjour",
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws10_oversized_message_does_not_reach_conversation_service():
+    boundary, access, conversation_service = make_boundary()
+
+    oversized_message = "A" * 4097
+
+    with pytest.raises(
+        ValueError,
+        match="too long",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message=oversized_message,
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws10_maximum_allowed_message_reaches_conversation_service():
+    boundary, access, conversation_service = make_boundary()
+
+    message = "A" * 4096
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message=message,
+    )
+
+    assert response == "Bonjour !"
+    assert access.calls == [12345]
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": message,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws10_rejected_input_does_not_create_cross_user_side_effect():
+    boundary, access, conversation_service = make_boundary()
+
+    with pytest.raises(
+        ValueError,
+        match="too long",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=111,
+            message="X" * 4097,
+        )
+
+    await boundary.handle_message(
+        telegram_user_id=222,
+        message="Bonjour",
+    )
+
+    assert access.calls == [222]
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 222,
+            "message": "Bonjour",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws10_valid_users_remain_isolated():
+    boundary, access, conversation_service = make_boundary()
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=222,
+        message="Bonsoir",
+    )
+
+    assert access.calls == [111, 222]
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 222,
+            "message": "Bonsoir",
+        },
+    ]
+
+============================================================
+WS-11 — Telegram Classroom Rate Limiting
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+
+
+@dataclass(frozen=True)
+class FakeConversationContext:
+    world_id: str = "world-fr"
+    character: str = "Alix"
+    level: str = "B1"
+
+
+class FakeBetaAccessService:
+    """Deterministic Beta authorization/context test double."""
+
+    def __init__(self, *, approved: bool = True) -> None:
+        self.approved = approved
+        self.calls: list[int] = []
+
+    async def get_conversation_context(
+        self,
+        telegram_user_id: int,
+    ) -> FakeConversationContext:
+        self.calls.append(telegram_user_id)
+
+        if not self.approved:
+            raise PermissionError(
+                "Telegram user is not approved."
+            )
+
+        return FakeConversationContext()
+
+
+class FakeConversationService:
+    """Deterministic downstream conversation-service double."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "message": message,
+            }
+        )
+        return "Bonjour !"
+
+
+class FakeRateLimiter:
+    """
+    Deterministic WS-11 rate-limit policy double.
+
+    The limiter is intentionally placed at the application boundary
+    in these integration tests. Production wiring may provide a
+    different implementation.
+    """
+
+    def __init__(
+        self,
+        *,
+        limit: int = 3,
+    ) -> None:
+        self.limit = limit
+        self.calls: list[int] = []
+        self._counts: dict[int, int] = {}
+
+    async def allow(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> bool:
+        self.calls.append(telegram_user_id)
+
+        count = self._counts.get(
+            telegram_user_id,
+            0,
+        )
+
+        if count >= self.limit:
+            return False
+
+        self._counts[telegram_user_id] = count + 1
+        return True
+
+
+class RateLimitedBoundary:
+    """
+    Minimal WS-11 integration composition.
+
+    This test composition intentionally keeps rate limiting separate
+    from the conversation service and from Telegram transport.
+    """
+
+    RATE_LIMIT_RESPONSE = (
+        "You have reached the classroom message limit. "
+        "Please try again later."
+    )
+
+    def __init__(
+        self,
+        *,
+        conversation_service: FakeConversationService,
+        beta_access_service: FakeBetaAccessService,
+        rate_limiter: FakeRateLimiter,
+    ) -> None:
+        self._conversation_service = conversation_service
+        self._beta_access_service = beta_access_service
+        self._rate_limiter = rate_limiter
+
+        self._conversation_boundary = BetaTelegramConversationBoundary(
+            conversation_service=conversation_service,
+            beta_access_service=beta_access_service,
+        )
+
+    async def handle_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        # Input validation remains owned by the existing boundary.
+        # Rate limiting is applied before downstream conversation
+        # processing.
+        if not await self._rate_limiter.allow(
+            telegram_user_id=telegram_user_id,
+        ):
+            return self.RATE_LIMIT_RESPONSE
+
+        return await self._conversation_boundary.handle_message(
+            telegram_user_id=telegram_user_id,
+            message=message,
+        )
+
+
+def make_boundary(
+    *,
+    approved: bool = True,
+    limit: int = 3,
+):
+    access = FakeBetaAccessService(
+        approved=approved,
+    )
+    conversation_service = FakeConversationService()
+    rate_limiter = FakeRateLimiter(
+        limit=limit,
+    )
+
+    boundary = RateLimitedBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=access,
+        rate_limiter=rate_limiter,
+    )
+
+    return (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws11_messages_within_limit_reach_conversation_service():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary(limit=3)
+
+    for message in (
+        "Bonjour",
+        "Comment allez-vous ?",
+        "Merci !",
+    ):
+        response = await boundary.handle_message(
+            telegram_user_id=12345,
+            message=message,
+        )
+
+        assert response == "Bonjour !"
+
+    assert rate_limiter.calls == [
+        12345,
+        12345,
+        12345,
+    ]
+
+    assert access.calls == [
+        12345,
+        12345,
+        12345,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 12345,
+            "message": "Comment allez-vous ?",
+        },
+        {
+            "telegram_user_id": 12345,
+            "message": "Merci !",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws11_limit_is_enforced_per_telegram_identity():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary(limit=2)
+
+    first = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+    second = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonsoir",
+    )
+    third = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Encore",
+    )
+
+    assert first == "Bonjour !"
+    assert second == "Bonjour !"
+
+    assert "message limit" in third.lower()
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 111,
+            "message": "Bonsoir",
+        },
+    ]
+
+    assert access.calls == [
+        111,
+        111,
+    ]
+
+    assert rate_limiter.calls == [
+        111,
+        111,
+        111,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws11_one_user_cannot_consume_another_users_limit():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary(limit=1)
+
+    first = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+
+    blocked = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Encore",
+    )
+
+    second_user = await boundary.handle_message(
+        telegram_user_id=222,
+        message="Bonjour",
+    )
+
+    assert first == "Bonjour !"
+    assert "message limit" in blocked.lower()
+    assert second_user == "Bonjour !"
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 222,
+            "message": "Bonjour",
+        },
+    ]
+
+    assert access.calls == [
+        111,
+        222,
+    ]
+
+    assert rate_limiter.calls == [
+        111,
+        111,
+        222,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws11_rate_limited_message_never_reaches_conversation_service():
+    (
+        boundary,
+        access,
+        conversation_service,
+        _rate_limiter,
+    ) = make_boundary(limit=1)
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="This must be blocked.",
+    )
+
+    assert "message limit" in response.lower()
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+    # A rate-limited request must not trigger another authorization
+    # or conversation-service operation.
+    assert access.calls == [12345]
+
+
+@pytest.mark.asyncio
+async def test_ws11_rate_limit_response_does_not_expose_internal_details():
+    (
+        boundary,
+        _access,
+        conversation_service,
+        _rate_limiter,
+    ) = make_boundary(limit=1)
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Second message",
+    )
+
+    assert response
+    assert "traceback" not in response.lower()
+    assert "password" not in response.lower()
+    assert "token" not in response.lower()
+    assert "database" not in response.lower()
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws11_unauthorized_user_does_not_reach_conversation_service():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary(
+        approved=False,
+        limit=3,
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=99999,
+        message="Bonjour",
+    )
+
+    assert response
+    assert "authorized" in response.lower()
+
+    assert rate_limiter.calls == [99999]
+    assert access.calls == [99999]
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws11_empty_message_does_not_consume_rate_limit():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary(limit=1)
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message="   ",
+        )
+
+    assert rate_limiter.calls == [12345]
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws11_invalid_identity_does_not_reach_conversation_service():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary()
+
+    with pytest.raises(
+        (ValueError, TypeError),
+    ):
+        await boundary.handle_message(
+            telegram_user_id=0,
+            message="Bonjour",
+        )
+
+    assert rate_limiter.calls == [0]
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws11_oversized_message_does_not_reach_conversation_service():
+    (
+        boundary,
+        access,
+        conversation_service,
+        rate_limiter,
+    ) = make_boundary()
+
+    with pytest.raises(
+        ValueError,
+        match="too long",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message="A" * 4097,
+        )
+
+    assert rate_limiter.calls == [12345]
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws11_rate_limit_state_is_not_shared_between_boundary_instances():
+    first_boundary, _, first_service, first_limiter = make_boundary(
+        limit=1,
+    )
+    second_boundary, _, second_service, second_limiter = make_boundary(
+        limit=1,
+    )
+
+    first_response = await first_boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    second_response = await second_boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert first_response == "Bonjour !"
+    assert second_response == "Bonjour !"
+
+    assert first_limiter.calls == [12345]
+    assert second_limiter.calls == [12345]
+
+    assert first_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+    assert second_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+============================================================
+WS-12 — Telegram Classroom Abuse Protection
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+
+
+@dataclass(frozen=True)
+class FakeConversationContext:
+    world_id: str = "world-fr"
+    character: str = "Alix"
+    level: str = "B1"
+
+
+class FakeBetaAccessService:
+    """Deterministic Beta authorization/context test double."""
+
+    def __init__(self, *, approved: bool = True) -> None:
+        self.approved = approved
+        self.calls: list[int] = []
+
+    async def get_conversation_context(
+        self,
+        telegram_user_id: int,
+    ) -> FakeConversationContext:
+        self.calls.append(telegram_user_id)
+
+        if not self.approved:
+            raise PermissionError(
+                "Telegram user is not approved."
+            )
+
+        return FakeConversationContext()
+
+
+class FakeConversationService:
+    """Deterministic downstream conversation-service double."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "message": message,
+            }
+        )
+        return "Bonjour !"
+
+
+class FakeAbuseProtector:
+    """
+    Deterministic WS-12 abuse-protection policy double.
+
+    The policy counts accepted requests per Telegram identity and
+    blocks requests after the configured burst threshold.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_messages: int = 3,
+    ) -> None:
+        self.max_messages = max_messages
+        self.calls: list[int] = []
+        self._counts: dict[int, int] = {}
+
+    async def allow(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> bool:
+        self.calls.append(telegram_user_id)
+
+        count = self._counts.get(
+            telegram_user_id,
+            0,
+        )
+
+        if count >= self.max_messages:
+            return False
+
+        self._counts[telegram_user_id] = count + 1
+        return True
+
+
+class AbuseProtectedBoundary:
+    """
+    Minimal WS-12 integration composition.
+
+    Abuse protection remains a separate application policy and does
+    not belong inside the Telegram transport adapter or conversation
+    service.
+    """
+
+    ABUSE_LIMIT_RESPONSE = (
+        "Sorry, you are sending messages too quickly. "
+        "Please wait a moment and try again."
+    )
+
+    def __init__(
+        self,
+        *,
+        conversation_service: FakeConversationService,
+        beta_access_service: FakeBetaAccessService,
+        abuse_protector: FakeAbuseProtector,
+    ) -> None:
+        self._conversation_service = conversation_service
+        self._beta_access_service = beta_access_service
+        self._abuse_protector = abuse_protector
+
+        self._conversation_boundary = BetaTelegramConversationBoundary(
+            conversation_service=conversation_service,
+            beta_access_service=beta_access_service,
+        )
+
+    async def handle_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        # Input validation remains owned by the established
+        # conversation boundary.
+        self._conversation_boundary._validate_telegram_user_id(
+            telegram_user_id,
+        )
+        self._conversation_boundary._validate_message(
+            message,
+        )
+
+        if not await self._abuse_protector.allow(
+            telegram_user_id=telegram_user_id,
+        ):
+            return self.ABUSE_LIMIT_RESPONSE
+
+        return await self._conversation_boundary.handle_message(
+            telegram_user_id=telegram_user_id,
+            message=message,
+        )
+
+
+def make_boundary(
+    *,
+    approved: bool = True,
+    max_messages: int = 3,
+):
+    access = FakeBetaAccessService(
+        approved=approved,
+    )
+    conversation_service = FakeConversationService()
+    abuse_protector = FakeAbuseProtector(
+        max_messages=max_messages,
+    )
+
+    boundary = AbuseProtectedBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=access,
+        abuse_protector=abuse_protector,
+    )
+
+    return (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws12_messages_within_burst_limit_are_processed():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary(max_messages=3)
+
+    responses = []
+
+    for message in (
+        "Bonjour",
+        "Comment allez-vous ?",
+        "Merci !",
+    ):
+        responses.append(
+            await boundary.handle_message(
+                telegram_user_id=12345,
+                message=message,
+            )
+        )
+
+    assert responses == [
+        "Bonjour !",
+        "Bonjour !",
+        "Bonjour !",
+    ]
+
+    assert abuse_protector.calls == [
+        12345,
+        12345,
+        12345,
+    ]
+
+    assert access.calls == [
+        12345,
+        12345,
+        12345,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 12345,
+            "message": "Comment allez-vous ?",
+        },
+        {
+            "telegram_user_id": 12345,
+            "message": "Merci !",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws12_flooded_user_is_blocked_after_burst_limit():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary(max_messages=2)
+
+    first = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    second = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonsoir",
+    )
+
+    blocked = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Encore",
+    )
+
+    assert first == "Bonjour !"
+    assert second == "Bonjour !"
+
+    assert "too quickly" in blocked.lower()
+    assert "wait" in blocked.lower()
+
+    assert abuse_protector.calls == [
+        12345,
+        12345,
+        12345,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonsoir",
+        },
+    ]
+
+    assert access.calls == [
+        12345,
+        12345,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws12_abuse_protection_is_scoped_per_telegram_identity():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary(max_messages=1)
+
+    first_user = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+
+    blocked_first_user = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Encore",
+    )
+
+    second_user = await boundary.handle_message(
+        telegram_user_id=222,
+        message="Bonjour",
+    )
+
+    assert first_user == "Bonjour !"
+    assert "too quickly" in blocked_first_user.lower()
+    assert second_user == "Bonjour !"
+
+    assert abuse_protector.calls == [
+        111,
+        111,
+        222,
+    ]
+
+    assert access.calls == [
+        111,
+        222,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 222,
+            "message": "Bonjour",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws12_blocked_flood_message_never_reaches_conversation_service():
+    (
+        boundary,
+        _access,
+        conversation_service,
+        _abuse_protector,
+    ) = make_boundary(max_messages=1)
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Blocked flood message",
+    )
+
+    assert "too quickly" in response.lower()
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws12_blocked_flood_message_does_not_trigger_authorization():
+    (
+        boundary,
+        access,
+        _conversation_service,
+        _abuse_protector,
+    ) = make_boundary(max_messages=1)
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Flooded message",
+    )
+
+    assert access.calls == [12345]
+
+
+@pytest.mark.asyncio
+async def test_ws12_abuse_response_does_not_expose_internal_details():
+    (
+        boundary,
+        _access,
+        conversation_service,
+        _abuse_protector,
+    ) = make_boundary(max_messages=1)
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Second message",
+    )
+
+    assert response
+    assert "traceback" not in response.lower()
+    assert "password" not in response.lower()
+    assert "token" not in response.lower()
+    assert "database" not in response.lower()
+    assert "exception" not in response.lower()
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws12_unauthorized_user_does_not_reach_conversation_service():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary(
+        approved=False,
+        max_messages=3,
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=99999,
+        message="Bonjour",
+    )
+
+    assert response
+    assert "authorized" in response.lower()
+
+    assert abuse_protector.calls == [99999]
+    assert access.calls == [99999]
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws12_empty_message_does_not_consume_abuse_allowance():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary(max_messages=1)
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message="   ",
+        )
+
+    assert abuse_protector.calls == []
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws12_invalid_identity_does_not_reach_abuse_protection():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary()
+
+    with pytest.raises(
+        (ValueError, TypeError),
+    ):
+        await boundary.handle_message(
+            telegram_user_id=0,
+            message="Bonjour",
+        )
+
+    assert abuse_protector.calls == []
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws12_oversized_message_does_not_consume_abuse_allowance():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary()
+
+    with pytest.raises(
+        ValueError,
+        match="too long",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message="A" * 4097,
+        )
+
+    assert abuse_protector.calls == []
+    assert access.calls == []
+    assert conversation_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ws12_users_remain_isolated_after_one_user_is_flooded():
+    (
+        boundary,
+        access,
+        conversation_service,
+        abuse_protector,
+    ) = make_boundary(max_messages=1)
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="First user",
+    )
+
+    blocked = await boundary.handle_message(
+        telegram_user_id=111,
+        message="Flood attempt",
+    )
+
+    other_user = await boundary.handle_message(
+        telegram_user_id=222,
+        message="Second user",
+    )
+
+    assert "too quickly" in blocked.lower()
+    assert other_user == "Bonjour !"
+
+    assert abuse_protector.calls == [
+        111,
+        111,
+        222,
+    ]
+
+    assert access.calls == [
+        111,
+        222,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "First user",
+        },
+        {
+            "telegram_user_id": 222,
+            "message": "Second user",
+        },
+    ]
+
+============================================================
+WS-13 — Telegram Classroom Observability
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+
+
+@dataclass(frozen=True)
+class FakeConversationContext:
+    world_id: str = "world-fr"
+    character: str = "Alix"
+    level: str = "B1"
+
+
+class FakeBetaAccessService:
+    """Deterministic Beta authorization/context test double."""
+
+    def __init__(self, *, approved: bool = True) -> None:
+        self.approved = approved
+        self.calls: list[int] = []
+
+    async def get_conversation_context(
+        self,
+        telegram_user_id: int,
+    ) -> FakeConversationContext:
+        self.calls.append(telegram_user_id)
+
+        if not self.approved:
+            raise PermissionError(
+                "Telegram user is not approved."
+            )
+
+        return FakeConversationContext()
+
+
+class FakeConversationService:
+    """Deterministic conversation-service test double."""
+
+    def __init__(
+        self,
+        *,
+        response: str = "Bonjour !",
+        error: Exception | None = None,
+    ) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "message": message,
+            }
+        )
+
+        if self.error is not None:
+            raise self.error
+
+        return self.response
+
+
+class FakeObservability:
+    """
+    Deterministic WS-13 observability/audit event sink.
+
+    Events intentionally contain only operational metadata. Raw
+    learner message content is not accepted by the event contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.error = error
+        self.events: list[dict] = []
+
+    async def record(
+        self,
+        *,
+        event_type: str,
+        telegram_user_id: int,
+        outcome: str,
+    ) -> None:
+        if self.error is not None:
+            raise self.error
+
+        self.events.append(
+            {
+                "event_type": event_type,
+                "telegram_user_id": telegram_user_id,
+                "outcome": outcome,
+            }
+        )
+
+
+class ObservableBoundary:
+    """
+    Minimal WS-13 integration composition.
+
+    Observability is deliberately separated from the conversation
+    service. An observability failure must not become a classroom
+    application failure.
+    """
+
+    SAFE_ERROR_RESPONSE = (
+        "Sorry, something went wrong while processing your message. "
+        "Please try again later."
+    )
+
+    UNAUTHORIZED_RESPONSE = (
+        "Sorry, this Telegram account is not authorized "
+        "for Beta access."
+    )
+
+    def __init__(
+        self,
+        *,
+        conversation_service: FakeConversationService,
+        beta_access_service: FakeBetaAccessService,
+        observability: FakeObservability,
+    ) -> None:
+        self._conversation_service = conversation_service
+        self._beta_access_service = beta_access_service
+        self._observability = observability
+
+    async def _record(
+        self,
+        *,
+        event_type: str,
+        telegram_user_id: int,
+        outcome: str,
+    ) -> None:
+        try:
+            await self._observability.record(
+                event_type=event_type,
+                telegram_user_id=telegram_user_id,
+                outcome=outcome,
+            )
+        except Exception:
+            # Observability is non-blocking infrastructure. Failure
+            # must never break the classroom flow.
+            return
+
+    async def handle_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+        if isinstance(telegram_user_id, bool):
+            raise ValueError(
+                "Telegram user ID must be a positive integer."
+            )
+
+        if not isinstance(telegram_user_id, int):
+            raise TypeError(
+                "Telegram user ID must be a positive integer."
+            )
+
+        if telegram_user_id <= 0:
+            raise ValueError(
+                "Telegram user ID must be a positive integer."
+            )
+
+        if message is None:
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+        if not isinstance(message, str):
+            raise TypeError(
+                "Telegram message must be a string."
+            )
+
+        if not message.strip():
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+        clean_message = message.strip()
+
+        if len(clean_message) > 4096:
+            raise ValueError(
+                "Telegram message is too long. "
+                "Maximum length is 4096 characters."
+            )
+
+        try:
+            context = await (
+                self._beta_access_service
+                .get_conversation_context(
+                    telegram_user_id
+                )
+            )
+        except PermissionError:
+            await self._record(
+                event_type="telegram_classroom_authorization",
+                telegram_user_id=telegram_user_id,
+                outcome="denied",
+            )
+
+            return self.UNAUTHORIZED_RESPONSE
+
+        # Context is operational metadata and is never injected into
+        # the learner message or observability event content.
+        _ = context
+
+        try:
+            response = await (
+                self._conversation_service
+                .handle_telegram_message(
+                    telegram_user_id=telegram_user_id,
+                    message=clean_message,
+                )
+            )
+        except Exception:
+            await self._record(
+                event_type="telegram_classroom_conversation",
+                telegram_user_id=telegram_user_id,
+                outcome="error",
+            )
+
+            return self.SAFE_ERROR_RESPONSE
+
+        await self._record(
+            event_type="telegram_classroom_conversation",
+            telegram_user_id=telegram_user_id,
+            outcome="success",
+        )
+
+        return response
+
+
+def make_boundary(
+    *,
+    approved: bool = True,
+    conversation_error: Exception | None = None,
+    observability_error: Exception | None = None,
+):
+    access = FakeBetaAccessService(
+        approved=approved,
+    )
+
+    conversation_service = FakeConversationService(
+        error=conversation_error,
+    )
+
+    observability = FakeObservability(
+        error=observability_error,
+    )
+
+    boundary = ObservableBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=access,
+        observability=observability,
+    )
+
+    return (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws13_successful_message_creates_observability_event():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary()
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert response == "Bonjour !"
+
+    assert access.calls == [12345]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+    assert observability.events == [
+        {
+            "event_type": "telegram_classroom_conversation",
+            "telegram_user_id": 12345,
+            "outcome": "success",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws13_observability_does_not_store_raw_learner_message():
+    (
+        boundary,
+        _access,
+        _conversation_service,
+        observability,
+    ) = make_boundary()
+
+    sensitive_message = (
+        "Bonjour david@example.com secret-password=abc123"
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message=sensitive_message,
+    )
+
+    assert response == "Bonjour !"
+
+    assert observability.events == [
+        {
+            "event_type": "telegram_classroom_conversation",
+            "telegram_user_id": 12345,
+            "outcome": "success",
+        }
+    ]
+
+    serialized_events = repr(observability.events).lower()
+
+    assert "david@example.com" not in serialized_events
+    assert "secret-password" not in serialized_events
+    assert "abc123" not in serialized_events
+
+
+@pytest.mark.asyncio
+async def test_ws13_message_normalization_is_preserved_without_event_content_mutation():
+    (
+        boundary,
+        _access,
+        conversation_service,
+        observability,
+    ) = make_boundary()
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="  Bonjour, comment allez-vous ?  ",
+    )
+
+    assert response == "Bonjour !"
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour, comment allez-vous ?",
+        }
+    ]
+
+    assert observability.events == [
+        {
+            "event_type": "telegram_classroom_conversation",
+            "telegram_user_id": 12345,
+            "outcome": "success",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws13_unauthorized_message_creates_denied_event():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary(
+        approved=False,
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=99999,
+        message="Bonjour",
+    )
+
+    assert response
+    assert "authorized" in response.lower()
+
+    assert access.calls == [99999]
+    assert conversation_service.calls == []
+
+    assert observability.events == [
+        {
+            "event_type": "telegram_classroom_authorization",
+            "telegram_user_id": 99999,
+            "outcome": "denied",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws13_conversation_failure_creates_error_event():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary(
+        conversation_error=RuntimeError(
+            "database password=super-secret token=abc123"
+        ),
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert response
+    assert "super-secret" not in response
+    assert "abc123" not in response
+    assert "password" not in response.lower()
+
+    assert access.calls == [12345]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+    assert observability.events == [
+        {
+            "event_type": "telegram_classroom_conversation",
+            "telegram_user_id": 12345,
+            "outcome": "error",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws13_observability_failure_does_not_break_successful_classroom_response():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary(
+        observability_error=RuntimeError(
+            "observability backend unavailable"
+        ),
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert response == "Bonjour !"
+
+    assert access.calls == [12345]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+    assert observability.events == []
+
+
+@pytest.mark.asyncio
+async def test_ws13_observability_failure_does_not_replace_conversation_error_response():
+    (
+        boundary,
+        _access,
+        conversation_service,
+        observability,
+    ) = make_boundary(
+        conversation_error=RuntimeError(
+            "internal failure"
+        ),
+        observability_error=RuntimeError(
+            "observability failure"
+        ),
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert response
+    assert "internal failure" not in response.lower()
+    assert "observability failure" not in response.lower()
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 12345,
+            "message": "Bonjour",
+        }
+    ]
+
+    assert observability.events == []
+
+
+@pytest.mark.asyncio
+async def test_ws13_invalid_input_creates_no_observability_event():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary()
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await boundary.handle_message(
+            telegram_user_id=12345,
+            message="   ",
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+    assert observability.events == []
+
+
+@pytest.mark.asyncio
+async def test_ws13_invalid_identity_creates_no_observability_event():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary()
+
+    with pytest.raises(
+        (ValueError, TypeError),
+    ):
+        await boundary.handle_message(
+            telegram_user_id=0,
+            message="Bonjour",
+        )
+
+    assert access.calls == []
+    assert conversation_service.calls == []
+    assert observability.events == []
+
+
+@pytest.mark.asyncio
+async def test_ws13_different_users_remain_observably_isolated():
+    (
+        boundary,
+        access,
+        conversation_service,
+        observability,
+    ) = make_boundary()
+
+    await boundary.handle_message(
+        telegram_user_id=111,
+        message="Bonjour",
+    )
+
+    await boundary.handle_message(
+        telegram_user_id=222,
+        message="Bonjour",
+    )
+
+    assert access.calls == [
+        111,
+        222,
+    ]
+
+    assert conversation_service.calls == [
+        {
+            "telegram_user_id": 111,
+            "message": "Bonjour",
+        },
+        {
+            "telegram_user_id": 222,
+            "message": "Bonjour",
+        },
+    ]
+
+    assert observability.events == [
+        {
+            "event_type": "telegram_classroom_conversation",
+            "telegram_user_id": 111,
+            "outcome": "success",
+        },
+        {
+            "event_type": "telegram_classroom_conversation",
+            "telegram_user_id": 222,
+            "outcome": "success",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws13_observability_event_does_not_modify_conversation_response():
+    (
+        boundary,
+        _access,
+        _conversation_service,
+        observability,
+    ) = make_boundary(
+        observability_error=None,
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert response == "Bonjour !"
+    assert observability.events[0]["outcome"] == "success"
