@@ -64,14 +64,27 @@ class FakeConversationRuntime:
             }
         )
 
-        return "Bonjour ! Continuons notre pratique du français."
+        return (
+            "Bonjour ! Continuons notre pratique du français."
+        )
 
 
 class FakeConversationEventRepository:
-    """In-memory conversation-event repository."""
+    """
+    In-memory conversation-event repository.
+
+    Implements the production repository isolation contract:
+
+        telegram_user_hash
+                +
+        conversation_id
+                +
+            world_id
+    """
 
     def __init__(self) -> None:
         self.events: list[Any] = []
+        self.get_recent_calls: list[dict[str, Any]] = []
 
     async def save(self, event):
         self.events.append(event)
@@ -81,15 +94,36 @@ class FakeConversationEventRepository:
         self,
         *,
         telegram_user_hash: str,
+        conversation_id: str,
         world_id: str,
         limit: int = 20,
     ):
-        return [
+        self.get_recent_calls.append(
+            {
+                "telegram_user_hash": telegram_user_hash,
+                "conversation_id": conversation_id,
+                "world_id": world_id,
+                "limit": limit,
+            }
+        )
+
+        if limit <= 0:
+            return []
+
+        events = [
             event
             for event in self.events
-            if event.telegram_user_hash == telegram_user_hash
-            and event.world_id == world_id
-        ][-limit:]
+            if (
+                event.telegram_user_hash
+                == telegram_user_hash
+                and event.conversation_id
+                == conversation_id
+                and event.world_id
+                == world_id
+            )
+        ]
+
+        return events[-limit:]
 
 
 class FakePrivacyIdentifierService:
@@ -270,6 +304,28 @@ async def test_ws04_private_classroom_message_completes_full_application_flow():
     )
 
     # ---------------------------------------------------------
+    # Conversation retrieval
+    # ---------------------------------------------------------
+
+    assert len(repository.get_recent_calls) == 1
+
+    retrieval = repository.get_recent_calls[0]
+
+    assert retrieval["telegram_user_hash"] == (
+        "pseudonymous-12345"
+    )
+
+    assert retrieval["conversation_id"] == (
+        user_event.conversation_id
+    )
+
+    assert retrieval["world_id"] == "world-fr"
+
+    assert retrieval["limit"] == (
+        _conversation_service.HISTORY_LIMIT
+    )
+
+    # ---------------------------------------------------------
     # Governance validation
     # ---------------------------------------------------------
 
@@ -328,6 +384,7 @@ async def test_ws04_unauthorized_telegram_user_never_reaches_runtime():
     # Authorization must stop the conversation flow.
     assert runtime.calls == []
     assert repository.events == []
+    assert repository.get_recent_calls == []
     assert privacy.calls == []
     assert validator.calls == []
 
@@ -356,6 +413,7 @@ async def test_ws04_empty_message_stops_before_authorization():
     assert access.calls == []
     assert runtime.calls == []
     assert repository.events == []
+    assert repository.get_recent_calls == []
     assert privacy.calls == []
     assert validator.calls == []
 
@@ -381,26 +439,12 @@ async def test_ws04_context_does_not_modify_learner_message():
 
     assert response
 
-    # ---------------------------------------------------------
-    # Input normalization contract
-    # ---------------------------------------------------------
-    #
-    # The boundary removes transport-level surrounding
-    # whitespace before the message enters the application
-    # conversation flow.
-    #
-    # Context remains metadata/application context and does
-    # not alter the semantic learner message.
-    # ---------------------------------------------------------
-
     normalized_message = "Bonjour, comment allez-vous ?"
 
     assert runtime.calls[0]["learner_message"] == (
         normalized_message
     )
 
-    # Persisted learner content follows the same normalized
-    # application message contract.
     assert repository.events[0].content == (
         normalized_message
     )
@@ -448,4 +492,49 @@ async def test_ws04_user_and_assistant_events_share_conversation():
 
     assert user_event.telegram_user_hash == (
         "pseudonymous-12345"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws04_history_isolation_uses_conversation_identity():
+    (
+        boundary,
+        _access,
+        _conversation_service,
+        _runtime,
+        repository,
+        _privacy,
+        _validator,
+    ) = make_boundary()
+
+    await boundary.handle_message(
+        telegram_user_id=12345,
+        message="David message",
+    )
+
+    david_conversation_id = (
+        repository.events[0].conversation_id
+    )
+
+    david_history = await repository.get_recent(
+        telegram_user_hash="pseudonymous-12345",
+        conversation_id=david_conversation_id,
+        world_id="world-fr",
+    )
+
+    assert all(
+        event.telegram_user_hash
+        == "pseudonymous-12345"
+        for event in david_history
+    )
+
+    assert all(
+        event.conversation_id
+        == david_conversation_id
+        for event in david_history
+    )
+
+    assert all(
+        event.world_id == "world-fr"
+        for event in david_history
     )

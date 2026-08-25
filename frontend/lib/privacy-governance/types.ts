@@ -16,99 +16,30 @@ export interface PrivacyGovernanceCaseTrigger {
 }
 
 export interface PrivacyGovernanceCaseDetail {
-  /**
-   * Stable governance-case identifier.
-   *
-   * Example:
-   * CASE-E2E-003
-   */
   case_id: string;
-
-  /**
-   * Authoritative Privacy Change Registry identifier.
-   *
-   * Example:
-   * PCR-E2E-001
-   */
   change_id: string;
-
-  /**
-   * Human-readable assessment title.
-   */
   title: string;
-
-  /**
-   * Concise authoritative assessment summary.
-   */
   summary: string;
-
-  /**
-   * Authoritative trigger information.
-   *
-   * The backend exposes this as a nested object rather
-   * than flattened trigger_type / trigger_source /
-   * triggered_at properties.
-   */
   trigger: PrivacyGovernanceCaseTrigger;
-
-  /**
-   * Governance risk classification.
-   */
   risk: string;
-
-  /**
-   * Authoritative processing identifiers associated
-   * with the governance case.
-   */
   processing_ids: string[];
-
-  /**
-   * Authoritative data-mapping identifiers associated
-   * with the governance case.
-   */
   data_map_ids: string[];
-
-  /**
-   * Result of automated privacy validation.
-   */
   validation_status: string;
-
-  /**
-   * Email delivery status.
-   */
   email_status: string;
-
-  /**
-   * Current governance lifecycle status.
-   *
-   * Pending:
-   *   PENDING_DPO_GRC
-   *
-   * Completed states:
-   *   APPROVED
-   *   REJECTED
-   *   BLOCKED
-   */
   governance_status: string;
-
-  /**
-   * Final governance decision.
-   *
-   * Null while the case remains pending.
-   */
   final_decision: string | null;
-
-  /**
-   * Timestamp of the final governance decision.
-   *
-   * Null while the case remains pending.
-   */
   final_decision_at: string | null;
 
   /**
-   * Authoritative governance approval/decision evidence.
+   * Canonical approval evidence collection.
    */
   approval_history: PrivacyGovernanceApprovalRecord[];
+
+  /**
+   * Backward-compatible alias used by earlier frontend/API
+   * fixtures. Runtime normalization maps it to approval_history.
+   */
+  approval_records?: PrivacyGovernanceApprovalRecord[];
 }
 
 export type PrivacyGovernanceCase =

@@ -15,45 +15,19 @@ class BetaTelegramConversationBoundary:
     """
     Application boundary for Telegram Beta conversations.
 
-    Responsibilities:
-    - validate Telegram identity
-    - validate Telegram classroom message input
-    - validate Telegram Beta access
-    - resolve learner context
-    - delegate clean learner messages
-    - contain unexpected conversation-service failures
+    Security order:
 
-    Does NOT:
-    - create LLM providers
-    - call Telegram APIs
-    - persist conversations
-    - inject personal data into messages
-
-    Security boundary:
-
-        Telegram update
-             |
-             v
-        Identity validation
-             |
-             v
+        Telegram identity
+              ↓
         Message validation
-             |
-             v
+              ↓
         Beta authorization
-             |
-             v
-        Clean message
-             |
-             v
-        Conversation Service
-
-    WS-10 controls:
-    - Telegram user ID must be a positive integer.
-    - Telegram classroom messages must contain non-whitespace content.
-    - Telegram classroom messages must not exceed 4096 characters.
-    - Rejected input must not reach authorization or conversation
-      processing.
+              ↓
+        Authoritative learner context
+              ↓
+        Conversation service
+              ↓
+        Safe response
     """
 
     MAX_TELEGRAM_MESSAGE_LENGTH = 4096
@@ -63,9 +37,6 @@ class BetaTelegramConversationBoundary:
         "Please try again later."
     )
 
-    # Stable authorization contract shared by WS-04/05/06/10.
-    # Contains both "authorized" and "not approved" so the existing
-    # regression contracts remain compatible.
     UNAUTHORIZED_RESPONSE = (
         "Sorry, this Telegram account is not authorized "
         "and is not approved for Beta access."
@@ -96,45 +67,13 @@ class BetaTelegramConversationBoundary:
         telegram_user_id: int,
         message: str,
     ) -> Any:
-        """
-        Process one validated Telegram classroom message.
-
-        Validation order is intentional:
-
-            identity
-                |
-                v
-            message
-                |
-                v
-            authorization
-                |
-                v
-            conversation service
-
-        This ensures rejected transport/input data cannot create
-        authorization or conversation side effects.
-        """
-
-        # =========================================================
-        # 1. Telegram identity validation
-        # =========================================================
-
         self._validate_telegram_user_id(
             telegram_user_id,
         )
 
-        # =========================================================
-        # 2. Message validation and normalization
-        # =========================================================
-
         clean_message = self._validate_message(
             message,
         )
-
-        # =========================================================
-        # 3. Beta authorization
-        # =========================================================
 
         try:
             context = await (
@@ -152,14 +91,6 @@ class BetaTelegramConversationBoundary:
 
             return self.UNAUTHORIZED_RESPONSE
 
-        # =========================================================
-        # 4. Context remains application metadata
-        # =========================================================
-        #
-        # World, character and level are deliberately NOT injected
-        # into the learner's message content.
-        #
-
         logger.info(
             (
                 "Beta Telegram context resolved "
@@ -171,11 +102,27 @@ class BetaTelegramConversationBoundary:
             context.level,
         )
 
-        # =========================================================
-        # 5. Conversation service
-        # =========================================================
-
         try:
+            # Production TelegramConversationService exposes the
+            # context-aware method.
+            #
+            # Existing WS test doubles expose only the original
+            # handle_telegram_message() contract. Keeping the
+            # compatibility branch prevents validated regression
+            # tests from being broken during migration.
+            context_handler = getattr(
+                self._conversation_service,
+                "handle_telegram_message_with_context",
+                None,
+            )
+
+            if context_handler is not None:
+                return await context_handler(
+                    telegram_user_id=telegram_user_id,
+                    message=clean_message,
+                    context=context,
+                )
+
             return await (
                 self._conversation_service
                 .handle_telegram_message(
@@ -185,8 +132,6 @@ class BetaTelegramConversationBoundary:
             )
 
         except Exception:
-            # Internal exception details remain in controlled logs
-            # and are never returned to the Telegram learner.
             logger.exception(
                 "Telegram conversation processing failed "
                 "for user=%s.",
@@ -200,15 +145,6 @@ class BetaTelegramConversationBoundary:
         cls,
         telegram_user_id: int,
     ) -> None:
-        """
-        Validate the Telegram identity before application processing.
-
-        Telegram user IDs must be positive integers.
-
-        bool is explicitly rejected because bool is a subclass of int
-        in Python.
-        """
-
         if isinstance(
             telegram_user_id,
             bool,
@@ -235,21 +171,8 @@ class BetaTelegramConversationBoundary:
         cls,
         message: str,
     ) -> str:
-        """
-        Validate and normalize a Telegram classroom message.
-
-        Leading and trailing whitespace is removed.
-
-        Internal whitespace is preserved.
-
-        Validation occurs before authorization and conversation
-        processing so rejected messages create no downstream
-        side effects.
-        """
-
-        # None is treated as an empty Telegram message.
-        # This preserves the WS-10 contract requiring ValueError
-        # with "Telegram message cannot be empty".
+        # None is semantically an empty Telegram message and has a
+        # dedicated validation contract in WS-10.
         if message is None:
             raise ValueError(
                 "Telegram message cannot be empty."
@@ -263,7 +186,7 @@ class BetaTelegramConversationBoundary:
                 "Telegram message must be a string."
             )
 
-        if not message.strip():
+        if not message or not message.strip():
             raise ValueError(
                 "Telegram message cannot be empty."
             )

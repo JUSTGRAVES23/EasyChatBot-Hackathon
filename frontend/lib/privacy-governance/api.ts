@@ -1,13 +1,16 @@
 import {
   privacyGovernanceEndpoints,
 } from "./config";
+
 import type {
   PrivacyGovernanceCase,
   PrivacyGovernanceStatusItem,
   PrivacyGovernanceSummary,
 } from "./types";
 
-async function requestJson<T>(url: string): Promise<T> {
+async function requestJson<T>(
+  url: string,
+): Promise<T> {
   const response = await fetch(url, {
     headers: {
       Accept: "application/json",
@@ -29,9 +32,7 @@ export function getPrivacyGovernanceSummary(): Promise<PrivacyGovernanceSummary>
   );
 }
 
-export function getPrivacyGovernanceStatusChart(): Promise<
-  PrivacyGovernanceStatusItem[]
-> {
+export function getPrivacyGovernanceStatusChart(): Promise<PrivacyGovernanceStatusItem[]> {
   return requestJson<PrivacyGovernanceStatusItem[]>(
     privacyGovernanceEndpoints.statusChart,
   );
@@ -51,12 +52,24 @@ export function getPrivacyGovernanceCase(
   );
 }
 
-export async function loadPrivacyGovernanceDashboard() {
-  const [summary, statusChart, cases] = await Promise.all([
+export async function loadPrivacyGovernanceDashboard(): Promise<{
+  summary: PrivacyGovernanceSummary;
+  statusChart: PrivacyGovernanceStatusItem[];
+  cases: PrivacyGovernanceCase[];
+}> {
+  const [
+    summary,
+    statusChart,
+    cases,
+  ] = await Promise.all([
     getPrivacyGovernanceSummary(),
     getPrivacyGovernanceStatusChart(),
     getPrivacyGovernanceCases(),
   ]);
 
-  return { summary, statusChart, cases };
+  return {
+    summary,
+    statusChart,
+    cases,
+  };
 }

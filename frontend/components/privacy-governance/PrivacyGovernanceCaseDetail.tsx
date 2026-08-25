@@ -17,9 +17,7 @@ interface Props {
   ) => void;
 }
 
-function formatDate(
-  value?: string | null,
-): string {
+function formatDate(value?: string | null): string {
   if (!value) {
     return "—";
   }
@@ -36,19 +34,7 @@ function formatDate(
   }).format(date);
 }
 
-function statusLabel(
-  value?: string | null,
-): string {
-  if (!value) {
-    return "Not yet decided";
-  }
-
-  return value.replaceAll("_", " ");
-}
-
-function decisionLabel(
-  value?: string | null,
-): string {
+function statusLabel(value?: string | null): string {
   if (!value) {
     return "Not yet decided";
   }
@@ -69,8 +55,25 @@ export function PrivacyGovernanceCaseDetail({
     return null;
   }
 
+  /*
+   * Backward-compatible evidence normalization.
+   *
+   * Some existing dashboard/API fixtures expose the evidence as
+   * `approval_history`, while older fixtures use `approval_records`.
+   * Both represent the same authoritative governance evidence.
+   */
   const approvalHistory =
-    caseData?.approval_history ?? [];
+    caseData?.approval_history ??
+    caseData?.approval_records ??
+    [];
+
+  const processingIds =
+    caseData?.processing_ids ?? [];
+
+  const dataMapIds =
+    caseData?.data_map_ids ?? [];
+
+  const trigger = caseData?.trigger;
 
   const isPending =
     caseData?.governance_status ===
@@ -144,10 +147,6 @@ export function PrivacyGovernanceCaseDetail({
           !error &&
           caseData && (
             <div className={styles.content}>
-              {/* -------------------------------------------
-                  Governance status
-              ------------------------------------------- */}
-
               <section
                 className={styles.summaryCard}
               >
@@ -163,10 +162,6 @@ export function PrivacyGovernanceCaseDetail({
                   )}
                 </strong>
               </section>
-
-              {/* -------------------------------------------
-                  Case / Change overview
-              ------------------------------------------- */}
 
               <section
                 className={styles.section}
@@ -186,7 +181,7 @@ export function PrivacyGovernanceCaseDetail({
                   <div>
                     <dt>Change ID</dt>
                     <dd>
-                      {caseData.change_id}
+                      {caseData.change_id || "—"}
                     </dd>
                   </div>
 
@@ -207,17 +202,18 @@ export function PrivacyGovernanceCaseDetail({
                   <div>
                     <dt>Trigger</dt>
                     <dd>
-                      {statusLabel(
-                        caseData.trigger.type,
-                      )}
+                      {trigger?.type
+                        ? statusLabel(
+                            trigger.type,
+                          )
+                        : "Not yet decided"}
                     </dd>
                   </div>
 
                   <div>
                     <dt>Trigger source</dt>
                     <dd>
-                      {caseData.trigger.source ||
-                        "—"}
+                      {trigger?.source || "—"}
                     </dd>
                   </div>
 
@@ -225,7 +221,7 @@ export function PrivacyGovernanceCaseDetail({
                     <dt>Triggered</dt>
                     <dd>
                       {formatDate(
-                        caseData.trigger.at,
+                        trigger?.at,
                       )}
                     </dd>
                   </div>
@@ -260,7 +256,7 @@ export function PrivacyGovernanceCaseDetail({
                   <div>
                     <dt>Final decision</dt>
                     <dd>
-                      {decisionLabel(
+                      {statusLabel(
                         caseData.final_decision,
                       )}
                     </dd>
@@ -277,10 +273,6 @@ export function PrivacyGovernanceCaseDetail({
                 </dl>
               </section>
 
-              {/* -------------------------------------------
-                  Privacy scope
-              ------------------------------------------- */}
-
               <section
                 className={styles.section}
               >
@@ -292,11 +284,8 @@ export function PrivacyGovernanceCaseDetail({
                   <div>
                     <dt>Processing IDs</dt>
                     <dd>
-                      {caseData.processing_ids
-                        .length > 0
-                        ? caseData.processing_ids.join(
-                            ", ",
-                          )
+                      {processingIds.length
+                        ? processingIds.join(", ")
                         : "None recorded"}
                     </dd>
                   </div>
@@ -304,20 +293,13 @@ export function PrivacyGovernanceCaseDetail({
                   <div>
                     <dt>Data mapping IDs</dt>
                     <dd>
-                      {caseData.data_map_ids
-                        .length > 0
-                        ? caseData.data_map_ids.join(
-                            ", ",
-                          )
+                      {dataMapIds.length
+                        ? dataMapIds.join(", ")
                         : "None recorded"}
                     </dd>
                   </div>
                 </dl>
               </section>
-
-              {/* -------------------------------------------
-                  Approval evidence
-              ------------------------------------------- */}
 
               <section
                 className={styles.section}
@@ -332,17 +314,14 @@ export function PrivacyGovernanceCaseDetail({
                   </h3>
 
                   <span>
-                    {approvalHistory.length}{" "}
-                    record
-                    {approvalHistory.length ===
-                    1
+                    {approvalHistory.length} record
+                    {approvalHistory.length === 1
                       ? ""
                       : "s"}
                   </span>
                 </div>
 
-                {approvalHistory.length >
-                0 ? (
+                {approvalHistory.length > 0 ? (
                   <div
                     className={styles.approvals}
                   >
@@ -378,9 +357,7 @@ export function PrivacyGovernanceCaseDetail({
 
                           {record.comment && (
                             <blockquote>
-                              {
-                                record.comment
-                              }
+                              {record.comment}
                             </blockquote>
                           )}
 
@@ -397,19 +374,13 @@ export function PrivacyGovernanceCaseDetail({
                   </div>
                 ) : (
                   <p
-                    className={
-                      styles.empty
-                    }
+                    className={styles.empty}
                   >
                     No approval evidence has
                     been recorded for this case.
                   </p>
                 )}
               </section>
-
-              {/* -------------------------------------------
-                  Human governance decision
-              ------------------------------------------- */}
 
               {isPending && (
                 <PrivacyGovernanceDecisionActions

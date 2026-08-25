@@ -1,0 +1,286 @@
+
+============================================================
+FILE: .\backend\app\application\announcement\models.py
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+
+class AnnouncementType(StrEnum):
+    NEW_FEATURE = "new_feature"
+    MAINTENANCE = "maintenance"
+    KNOWN_ISSUE = "known_issue"
+    INCIDENT = "incident"
+    PLANNED_DOWNTIME = "planned_downtime"
+    IMPORTANT = "important"
+    BETA_TEST = "beta_test"
+    FEEDBACK = "feedback"
+    PRIVACY = "privacy"
+    POLICY = "policy"
+    BETA_UPDATE = "beta_update"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class Announcement:
+    announcement_type: AnnouncementType
+    title: str
+    body: str
+    footer: str | None = None
+
+
+@dataclass(frozen=True)
+class ComposedAnnouncement:
+    announcement: Announcement
+    rendered_text: str
+
+
+
+============================================================
+FILE: .\backend\app\application\announcement\announcement_policy.py
+============================================================
+
+from __future__ import annotations
+
+from .models import Announcement
+
+
+class AnnouncementPolicyError(ValueError):
+    """Raised when an announcement violates publication policy."""
+
+
+class AnnouncementPolicy:
+    """Beta 1 validation boundary for administrator-controlled announcements."""
+
+    MAX_TITLE_LENGTH = 120
+    MAX_BODY_LENGTH = 1800
+    MAX_FOOTER_LENGTH = 300
+
+    def validate(self, announcement: Announcement) -> None:
+        if not announcement.title.strip():
+            raise AnnouncementPolicyError("Announcement title is required.")
+
+        if not announcement.body.strip():
+            raise AnnouncementPolicyError("Announcement body is required.")
+
+        if len(announcement.title) > self.MAX_TITLE_LENGTH:
+            raise AnnouncementPolicyError(
+                "Announcement title exceeds the Beta 1 limit."
+            )
+
+        if len(announcement.body) > self.MAX_BODY_LENGTH:
+            raise AnnouncementPolicyError(
+                "Announcement body exceeds the Beta 1 limit."
+            )
+
+        if (
+            announcement.footer is not None
+            and len(announcement.footer) > self.MAX_FOOTER_LENGTH
+        ):
+            raise AnnouncementPolicyError(
+                "Announcement footer exceeds the Beta 1 limit."
+            )
+
+
+
+============================================================
+FILE: .\backend\app\application\announcement\announcement_composer.py
+============================================================
+
+from __future__ import annotations
+
+from .announcement_policy import AnnouncementPolicy
+from .models import Announcement, AnnouncementType, ComposedAnnouncement
+
+
+_TYPE_LABELS: dict[AnnouncementType, str] = {
+    AnnouncementType.NEW_FEATURE: "🚀 NEW FEATURE",
+    AnnouncementType.MAINTENANCE: "🛠️ MAINTENANCE",
+    AnnouncementType.KNOWN_ISSUE: "🐛 KNOWN ISSUE",
+    AnnouncementType.INCIDENT: "🚨 INCIDENT",
+    AnnouncementType.PLANNED_DOWNTIME: "🕐 PLANNED DOWNTIME",
+    AnnouncementType.IMPORTANT: "📢 IMPORTANT",
+    AnnouncementType.BETA_TEST: "🧪 BETA TEST",
+    AnnouncementType.FEEDBACK: "💬 FEEDBACK",
+    AnnouncementType.PRIVACY: "🔐 PRIVACY",
+    AnnouncementType.POLICY: "📜 POLICY",
+    AnnouncementType.BETA_UPDATE: "🎓 BETA UPDATE",
+    AnnouncementType.OTHER: "📌 UPDATE",
+}
+
+
+class AnnouncementComposer:
+    """Creates validated, consistent EasyWorld announcement messages."""
+
+    def __init__(
+        self,
+        *,
+        policy: AnnouncementPolicy | None = None,
+    ) -> None:
+        self._policy = policy or AnnouncementPolicy()
+
+    def compose(
+        self,
+        *,
+        announcement_type: AnnouncementType,
+        title: str,
+        body: str,
+        footer: str | None = None,
+    ) -> ComposedAnnouncement:
+        announcement = Announcement(
+            announcement_type=announcement_type,
+            title=title,
+            body=body,
+            footer=footer,
+        )
+
+        self._policy.validate(announcement)
+
+        parts = [
+            _TYPE_LABELS[announcement_type],
+            "",
+            f"**{announcement.title.strip()}**",
+            "",
+            announcement.body.strip(),
+        ]
+
+        if announcement.footer:
+            parts.extend(["", announcement.footer.strip()])
+
+        parts.extend(["", "🌱 *EasyWorld — Growing with You*"])
+
+        return ComposedAnnouncement(
+            announcement=announcement,
+            rendered_text="\n".join(parts),
+        )
+
+
+
+============================================================
+FILE: .\backend\app\application\announcement\announcement_publisher.py
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Protocol
+
+
+class AnnouncementPublisher(Protocol):
+    async def publish(
+        self,
+        *,
+        channel_id: str,
+        text: str,
+    ) -> str:
+        """Publish an announcement and return its external message ID."""
+
+
+class PublicationDisabledError(RuntimeError):
+    """Raised when controlled announcement publishing is disabled."""
+
+
+@dataclass(frozen=True)
+class PublicationRecord:
+    channel_id: str
+    message_id: str
+    announcement_type: str
+    published_at: datetime
+
+
+class ControlledAnnouncementPublisher:
+    """Application boundary enforcing the explicit Beta 1 publication switch."""
+
+    def __init__(
+        self,
+        *,
+        publisher: AnnouncementPublisher,
+        publishing_enabled: bool,
+    ) -> None:
+        if publisher is None:
+            raise ValueError("publisher cannot be None.")
+
+        self._publisher = publisher
+        self._publishing_enabled = publishing_enabled
+
+    async def publish(
+        self,
+        *,
+        channel_id: str,
+        text: str,
+        announcement_type: str,
+    ) -> PublicationRecord:
+        if not self._publishing_enabled:
+            raise PublicationDisabledError(
+                "Telegram announcement publishing is disabled."
+            )
+
+        message_id = await self._publisher.publish(
+            channel_id=channel_id,
+            text=text,
+        )
+
+        return PublicationRecord(
+            channel_id=channel_id,
+            message_id=message_id,
+            announcement_type=announcement_type,
+            published_at=datetime.now(timezone.utc),
+        )
+
+
+
+============================================================
+FILE: .\backend\app\infrastructure\telegram\telegram_announcement_publisher.py
+============================================================
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class TelegramAnnouncementPublisher:
+    """Thin infrastructure adapter for the Telegram announcement channel."""
+
+    def __init__(self, *, telegram_client: Any) -> None:
+        if telegram_client is None:
+            raise ValueError("telegram_client cannot be None.")
+
+        self._telegram_client = telegram_client
+
+    async def publish(
+        self,
+        *,
+        channel_id: str,
+        text: str,
+    ) -> str:
+        if not channel_id.strip():
+            raise ValueError("channel_id is required.")
+
+        if not text.strip():
+            raise ValueError("text is required.")
+
+        result = await self._telegram_client.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode="Markdown",
+        )
+
+        message_id = getattr(result, "message_id", None)
+        if message_id is None:
+            raise RuntimeError(
+                "Telegram publisher did not receive a message identifier."
+            )
+
+        return str(message_id)
+
+
+
+============================================================
+FILE: .\backend\app\api\main.py
+============================================================
+
+

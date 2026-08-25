@@ -1,0 +1,1088 @@
+﻿================================================================================
+FILE: .\backend\app\application\beta_access\beta_telegram_conversation_boundary.py
+================================================================================
+
+from __future__ import annotations
+
+from typing import Any
+import logging
+
+
+from backend.app.application.beta_access.beta_access_service import (
+    BetaAccessService,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class BetaTelegramConversationBoundary:
+    """
+    Application boundary for Telegram Beta conversations.
+
+    Responsibilities:
+    - validate Telegram Beta access
+    - resolve learner context
+    - delegate clean learner messages
+
+    Does NOT:
+    - create LLM providers
+    - call Telegram APIs
+    - persist conversations
+    - inject personal data into messages
+
+
+    Privacy design:
+
+        Telegram ID
+             |
+             v
+        Authorization
+             |
+             v
+        Clean message
+             |
+             v
+        Conversation Service
+             |
+             v
+        Privacy Event Storage
+
+
+    Context is NOT inserted into message content.
+
+    Example:
+
+    BEFORE:
+
+        User:
+        david@example.com
+
+        World:
+        world-fr
+
+        Character:
+        Alix
+
+        Message:
+        Hello
+
+
+    AFTER:
+
+        content:
+        Hello
+
+
+        metadata:
+        {
+            world_id:"world-fr",
+            character:"Alix",
+            level:"B1"
+        }
+    """
+
+
+    def __init__(
+        self,
+        *,
+        conversation_service: Any,
+        beta_access_service: BetaAccessService,
+    ) -> None:
+
+        if conversation_service is None:
+            raise ValueError(
+                "conversation_service cannot be None."
+            )
+
+        if beta_access_service is None:
+            raise ValueError(
+                "beta_access_service cannot be None."
+            )
+
+
+        self._conversation_service = (
+            conversation_service
+        )
+
+        self._beta_access_service = (
+            beta_access_service
+        )
+
+
+
+    async def handle_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> Any:
+
+
+        if not message or not message.strip():
+
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+
+
+        #
+        # 1. Authorize Telegram user
+        #
+        # Telegram ID is used ONLY for access control.
+        #
+        # It is NOT stored in conversation events.
+        #
+
+        try:
+
+            context = await (
+                self._beta_access_service
+                .get_conversation_context(
+                    telegram_user_id
+                )
+            )
+
+
+        except PermissionError:
+
+            logger.warning(
+                "Unauthorized Telegram user=%s",
+                telegram_user_id,
+            )
+
+            return (
+                "Sorry, this Telegram account "
+                "is not approved for Beta access."
+            )
+
+
+
+        #
+        # 2. Keep context internal
+        #
+        # IMPORTANT:
+        #
+        # Do NOT modify learner message.
+        #
+        # The Conversation Service will:
+        #
+        # telegram_user_id
+        #        |
+        #        v
+        # PrivacyIdentifierService
+        #        |
+        #        v
+        # telegram_user_hash
+        #
+        # and create metadata.
+        #
+
+        clean_message = message.strip()
+
+
+
+        logger.info(
+            (
+                "Beta Telegram context resolved "
+                "user=%s world=%s character=%s level=%s"
+            ),
+            telegram_user_id,
+            context.world_id,
+            context.character,
+            context.level,
+        )
+
+
+
+        #
+        # 3. Delegate clean message
+        #
+        return await (
+            self._conversation_service
+            .handle_telegram_message(
+                telegram_user_id=telegram_user_id,
+                message=clean_message,
+            )
+        )
+
+================================================================================
+FILE: .\backend\app\application\beta_access\telegram_conversation_service.py
+================================================================================
+
+from __future__ import annotations
+
+
+import secrets
+
+
+from datetime import datetime, timezone
+from typing import Any
+
+
+from backend.app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+
+
+from backend.app.application.conversation.conversation_event_models import (
+    ConversationEvent,
+)
+
+
+from backend.app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+
+
+from backend.app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+
+
+
+
+
+class TelegramConversationService:
+    """
+    Telegram conversation application service.
+
+
+    Responsibilities:
+
+    - receive Telegram messages
+    - create conversation events
+    - validate privacy controls
+    - pseudonymise identity
+    - delegate execution to ConversationRuntime
+
+
+    Does NOT:
+
+    - manage Telegram transport
+    - manage authorization
+    - create memories
+    - analyse learning behaviour
+
+
+    Future:
+
+        conversation_events
+                |
+                v
+          Memory Engine
+                |
+                v
+        Learning Personalisation
+    """
+
+
+
+    def __init__(
+        self,
+        *,
+        conversation_runtime: ConversationRuntime,
+        conversation_event_repository: Any,
+        privacy_identifier_service: PrivacyIdentifierService,
+        conversation_event_validator: ConversationEventValidator,
+    ) -> None:
+
+
+        if conversation_runtime is None:
+
+            raise ValueError(
+                "conversation_runtime cannot be None."
+            )
+
+
+        if conversation_event_repository is None:
+
+            raise ValueError(
+                "conversation_event_repository cannot be None."
+            )
+
+
+        if privacy_identifier_service is None:
+
+            raise ValueError(
+                "privacy_identifier_service cannot be None."
+            )
+
+
+        if conversation_event_validator is None:
+
+            raise ValueError(
+                "conversation_event_validator cannot be None."
+            )
+
+
+
+        self._runtime = conversation_runtime
+
+        self._events = conversation_event_repository
+
+        self._privacy = privacy_identifier_service
+
+        self._validator = conversation_event_validator
+
+
+
+
+
+
+    async def handle_telegram_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> str:
+
+
+
+        if not message or not message.strip():
+
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+
+
+        world_id = "world-fr"
+
+        character = "Alix"
+
+        level = "B1"
+
+
+
+        telegram_user_hash = (
+
+            self._privacy.pseudonymize_identifier(
+
+                str(telegram_user_id)
+
+            )
+
+        )
+
+
+
+        conversation_id = (
+
+            f"telegram-{telegram_user_hash[:16]}"
+
+        )
+
+
+
+
+        metadata = {
+
+            "world_id": world_id,
+
+            "character": character,
+
+            "level": level,
+
+            "source": "telegram_beta",
+
+            "privacy_hash_version": "v1",
+
+            "retention_policy_id":
+                "conversation_learning_default",
+
+        }
+
+
+
+
+        #
+        # Validate BEFORE persistence
+        #
+
+        self._validator.validate(
+
+            content=message,
+
+            metadata=metadata,
+
+            telegram_user_hash=telegram_user_hash,
+
+        )
+
+
+
+
+
+        await self._events.save(
+
+            ConversationEvent(
+
+                event_id=secrets.token_hex(16),
+
+
+                conversation_id=conversation_id,
+
+
+                telegram_user_hash=telegram_user_hash,
+
+
+                world_id=world_id,
+
+
+                channel="telegram",
+
+
+                role="user",
+
+
+                content=message,
+
+
+                metadata=metadata,
+
+
+                created_at=datetime.now(
+                    timezone.utc
+                ),
+
+            )
+
+        )
+
+
+
+
+
+
+        response = await self._runtime.respond(
+
+            character_instruction=(
+
+                "You are EasyChatBot Academy, "
+
+                "a friendly French learning assistant. "
+
+                "Help the learner practise naturally."
+
+            ),
+
+
+            learner_message=message,
+
+        )
+
+
+
+
+
+        self._validator.validate(
+
+            content=response,
+
+            metadata=metadata,
+
+            telegram_user_hash=telegram_user_hash,
+
+        )
+
+
+
+
+
+        await self._events.save(
+
+            ConversationEvent(
+
+                event_id=secrets.token_hex(16),
+
+
+                conversation_id=conversation_id,
+
+
+                telegram_user_hash=telegram_user_hash,
+
+
+                world_id=world_id,
+
+
+                channel="telegram",
+
+
+                role="assistant",
+
+
+                content=response,
+
+
+                metadata=metadata,
+
+
+                created_at=datetime.now(
+                    timezone.utc
+                ),
+
+            )
+
+        )
+
+
+
+        return response
+
+================================================================================
+FILE: .\backend\app\application\conversation\conversation_event_models.py
+================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationEvent:
+    """
+    Domain model for conversation events.
+
+    Privacy model:
+
+    Stores:
+        - pseudonymous learner identity
+        - conversation session
+        - learning context
+        - message content
+
+    Does NOT store:
+        - Telegram ID
+        - email
+        - direct identity
+
+
+    Future consumers:
+
+        Conversation Events
+              |
+              v
+        Memory Engine
+              |
+              v
+        Learning Intelligence
+    """
+
+    event_id: str
+
+    conversation_id: str
+
+    telegram_user_hash: str
+
+    world_id: str
+
+    channel: str
+
+    role: str
+
+    content: str
+
+    metadata: dict[str, Any] | None
+
+    created_at: datetime
+
+================================================================================
+FILE: .\backend\app\application\conversation\conversation_event_repository.py
+================================================================================
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+
+from .conversation_event_models import (
+    ConversationEvent,
+)
+
+
+
+class ConversationEventRepository(ABC):
+    """
+    Repository contract for conversation event storage.
+
+    Privacy model:
+
+        conversation_event
+                |
+                v
+        pseudonymised learner identity
+
+
+    Implementations:
+
+        PostgreSQL
+        Future:
+        - event streams
+        - analytics storage
+        - data lake
+    """
+
+
+
+    @abstractmethod
+    async def save(
+        self,
+        event: ConversationEvent,
+    ) -> ConversationEvent:
+        """
+        Persist one conversation event.
+        """
+        ...
+
+
+
+    @abstractmethod
+    async def get_recent(
+        self,
+        *,
+        telegram_user_hash: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[ConversationEvent]:
+        """
+        Retrieve recent events.
+
+        Isolation key:
+
+            telegram_user_hash
+                    +
+                 world_id
+
+        No direct Telegram identity is used.
+        """
+        ...
+
+================================================================================
+FILE: .\backend\app\application\privacy\privacy_identifier_service.py
+================================================================================
+
+from __future__ import annotations
+
+
+import hashlib
+import hmac
+import os
+
+
+
+class PrivacyIdentifierService:
+    """
+    Privacy identity pseudonymisation service.
+
+    Converts sensitive identifiers into
+    stable pseudonymous identifiers.
+
+    Example:
+
+        Telegram ID
+             |
+             v
+        HMAC SHA256
+             |
+             v
+        anonymous hash
+
+
+    Security:
+
+    - raw identifiers never stored
+    - deterministic output
+    - secret protected
+    - suitable for analytics correlation
+
+    Does NOT:
+    - authenticate users
+    - authorize users
+    - store mappings
+    """
+
+
+    def __init__(
+        self,
+        *,
+        secret: str | None = None,
+    ) -> None:
+
+
+        self._secret = (
+            secret
+            or os.getenv(
+                "PRIVACY_HASH_SECRET"
+            )
+        )
+
+
+        if not self._secret:
+            raise RuntimeError(
+                "PRIVACY_HASH_SECRET is required."
+            )
+
+
+
+    def pseudonymize_identifier(
+        self,
+        identifier: str,
+    ) -> str:
+        """
+        Generate stable pseudonymous identifier.
+        """
+
+
+        if not identifier:
+            raise ValueError(
+                "identifier cannot be empty."
+            )
+
+
+        digest = hmac.new(
+            self._secret.encode("utf-8"),
+            identifier.encode("utf-8"),
+            hashlib.sha256,
+        )
+
+
+        return digest.hexdigest()
+
+================================================================================
+FILE: .\backend\app\application\composition\conversation_composition.py
+================================================================================
+
+from __future__ import annotations
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.providers.llm.llm_provider_factory import (
+    LLMProviderFactory,
+)
+
+
+def create_conversation_runtime() -> ConversationRuntime:
+    """
+    Create shared ConversationRuntime.
+
+    Composition layer responsibility.
+
+    Channels:
+    - Telegram
+    - Voice
+    - Future channels
+
+    This function does not:
+    - execute conversations
+    - store memory
+    - manage transport
+    """
+
+    return ConversationRuntime(
+        llm_provider=(
+            LLMProviderFactory.create()
+        )
+    )
+
+================================================================================
+FILE: .\backend\tests\beta_access\test_telegram_conversation_service.py
+================================================================================
+
+from __future__ import annotations
+
+import pytest
+
+from app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+
+
+class FakeConversationRuntime:
+    """Test double for the AI conversation runtime."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def respond(
+        self,
+        *,
+        character_instruction: str,
+        learner_message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "character_instruction": character_instruction,
+                "learner_message": learner_message,
+            }
+        )
+
+        return (
+            "Bonjour, bienvenue à l'Académie EasyChatBot."
+        )
+
+
+class FakeConversationEventRepository:
+    """In-memory repository test double."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def save(self, event):
+        self.events.append(event)
+        return event
+
+
+class FakePrivacyIdentifierService:
+    """Deterministic pseudonymisation test double."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def pseudonymize_identifier(
+        self,
+        identifier: str,
+    ) -> str:
+        self.calls.append(identifier)
+
+        return f"hash-{identifier}"
+
+
+class FakeConversationEventValidator:
+    """Test double for conversation governance validation."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def validate(
+        self,
+        *,
+        content: str,
+        metadata: dict,
+        telegram_user_hash: str,
+    ) -> dict:
+        self.calls.append(
+            {
+                "content": content,
+                "metadata": metadata,
+                "telegram_user_hash": telegram_user_hash,
+            }
+        )
+
+        if not telegram_user_hash:
+            raise ValueError(
+                "Conversation event requires pseudonymous identity."
+            )
+
+        if not content:
+            raise ValueError(
+                "Conversation content cannot be empty."
+            )
+
+        if metadata is None:
+            raise ValueError(
+                "Conversation metadata missing."
+            )
+
+        return {
+            "valid": True,
+        }
+
+
+def make_service():
+    runtime = FakeConversationRuntime()
+    repository = FakeConversationEventRepository()
+    privacy = FakePrivacyIdentifierService()
+    validator = FakeConversationEventValidator()
+
+    service = TelegramConversationService(
+        conversation_runtime=runtime,
+        conversation_event_repository=repository,
+        privacy_identifier_service=privacy,
+        conversation_event_validator=validator,
+    )
+
+    return (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_conversation_service_delegates_to_runtime():
+    (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    ) = make_service()
+
+    response = await service.handle_telegram_message(
+        telegram_user_id=12345,
+        message="Bonjour",
+    )
+
+    assert response == (
+        "Bonjour, bienvenue à l'Académie EasyChatBot."
+    )
+
+    assert len(runtime.calls) == 1
+
+    assert runtime.calls[0]["learner_message"] == (
+        "Bonjour"
+    )
+
+    assert "EasyChatBot Academy" in (
+        runtime.calls[0]["character_instruction"]
+    )
+
+    assert privacy.calls == [
+        "12345",
+    ]
+
+    assert len(repository.events) == 2
+
+    assert repository.events[0].role == "user"
+    assert repository.events[0].content == "Bonjour"
+
+    assert repository.events[1].role == "assistant"
+    assert repository.events[1].content == response
+
+    assert len(validator.calls) == 2
+
+    assert validator.calls[0]["content"] == "Bonjour"
+    assert validator.calls[1]["content"] == response
+
+    assert (
+        validator.calls[0]["telegram_user_hash"]
+        == "hash-12345"
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_conversation_service_rejects_empty_message():
+    (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    ) = make_service()
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await service.handle_telegram_message(
+            telegram_user_id=12345,
+            message="",
+        )
+
+    assert runtime.calls == []
+    assert repository.events == []
+    assert privacy.calls == []
+    assert validator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_conversation_service_rejects_whitespace_message():
+    (
+        service,
+        runtime,
+        repository,
+        privacy,
+        validator,
+    ) = make_service()
+
+    with pytest.raises(
+        ValueError,
+        match="Telegram message cannot be empty",
+    ):
+        await service.handle_telegram_message(
+            telegram_user_id=12345,
+            message="   ",
+        )
+
+    assert runtime.calls == []
+    assert repository.events == []
+    assert privacy.calls == []
+    assert validator.calls == []
+
+
+def test_telegram_conversation_service_requires_runtime():
+    with pytest.raises(
+        ValueError,
+        match="conversation_runtime cannot be None",
+    ):
+        TelegramConversationService(
+            conversation_runtime=None,
+            conversation_event_repository=(
+                FakeConversationEventRepository()
+            ),
+            privacy_identifier_service=(
+                FakePrivacyIdentifierService()
+            ),
+            conversation_event_validator=(
+                FakeConversationEventValidator()
+            ),
+        )
+
+
+def test_telegram_conversation_service_requires_repository():
+    with pytest.raises(
+        ValueError,
+        match="conversation_event_repository cannot be None",
+    ):
+        TelegramConversationService(
+            conversation_runtime=FakeConversationRuntime(),
+            conversation_event_repository=None,
+            privacy_identifier_service=(
+                FakePrivacyIdentifierService()
+            ),
+            conversation_event_validator=(
+                FakeConversationEventValidator()
+            ),
+        )
+
+
+def test_telegram_conversation_service_requires_privacy_service():
+    with pytest.raises(
+        ValueError,
+        match="privacy_identifier_service cannot be None",
+    ):
+        TelegramConversationService(
+            conversation_runtime=FakeConversationRuntime(),
+            conversation_event_repository=(
+                FakeConversationEventRepository()
+            ),
+            privacy_identifier_service=None,
+            conversation_event_validator=(
+                FakeConversationEventValidator()
+            ),
+        )
+
+
+def test_telegram_conversation_service_requires_validator():
+    with pytest.raises(
+        ValueError,
+        match="conversation_event_validator cannot be None",
+    ):
+        TelegramConversationService(
+            conversation_runtime=FakeConversationRuntime(),
+            conversation_event_repository=(
+                FakeConversationEventRepository()
+            ),
+            privacy_identifier_service=(
+                FakePrivacyIdentifierService()
+            ),
+            conversation_event_validator=None,
+        )
+

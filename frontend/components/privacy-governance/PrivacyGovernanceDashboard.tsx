@@ -1,61 +1,40 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+import PrivacyGovernanceCaseDetail from "./PrivacyGovernanceCaseDetail";
+import styles from "./PrivacyGovernanceDashboard.module.css";
+
 import {
   getPrivacyGovernanceCase,
-  loadPrivacyGovernanceDashboard,
+  getPrivacyGovernanceCases,
+  getPrivacyGovernanceStatusChart,
+  getPrivacyGovernanceSummary,
 } from "../../lib/privacy-governance/api";
+
 import type {
-  GovernanceFilter,
   PrivacyGovernanceCase,
   PrivacyGovernanceStatusItem,
   PrivacyGovernanceSummary,
 } from "../../lib/privacy-governance/types";
-import PrivacyGovernanceCaseDetail from "./PrivacyGovernanceCaseDetail";
-import styles from "./PrivacyGovernanceDashboard.module.css";
-
-const EMPTY_SUMMARY: PrivacyGovernanceSummary = {
-  total_cases: 0,
-  pending: 0,
-  approved: 0,
-  blocked: 0,
-  approval_records: 0,
-};
 
 interface Props {
-  initialLoad?: boolean;
-
-  /**
-   * Optional case ID supplied by the privacy-governance
-   * deep-link route:
-   *
-   * /privacy-governance/:caseId
-   *
-   * This is intentionally dynamic. No case ID is hard-coded.
-   */
-  initialCaseId?: string;
+  initialCaseId?: string | null;
 }
 
-function normalizeStatus(status: string): GovernanceFilter {
-  const value = status.toUpperCase();
+type CaseFilter =
+  | "ALL"
+  | "PENDING_DPO_GRC"
+  | "APPROVED"
+  | "REJECTED"
+  | "BLOCKED";
 
-  if (value.includes("PENDING")) {
-    return "PENDING_DPO_GRC";
-  }
-
-  if (value.includes("APPROVED")) {
-    return "APPROVED";
-  }
-
-  if (
-    value.includes("BLOCKED") ||
-    value.includes("REJECTED")
-  ) {
-    return "BLOCKED";
-  }
-
-  return "ALL";
-}
-
-function statusLabel(value?: string | null): string {
+function statusLabel(
+  value?: string | null,
+): string {
   if (!value) {
     return "Unknown";
   }
@@ -63,7 +42,9 @@ function statusLabel(value?: string | null): string {
   return value.replaceAll("_", " ");
 }
 
-function formatDate(value?: string | null): string {
+function formatDate(
+  value?: string | null,
+): string {
   if (!value) {
     return "—";
   }
@@ -80,38 +61,62 @@ function formatDate(value?: string | null): string {
   }).format(date);
 }
 
-export function PrivacyGovernanceDashboard({
-  initialLoad = true,
-  initialCaseId,
+function matchesFilter(
+  caseItem: PrivacyGovernanceCase,
+  filter: CaseFilter,
+): boolean {
+  if (filter === "ALL") {
+    return true;
+  }
+
+  return (
+    caseItem.governance_status ===
+    filter
+  );
+}
+
+function normalizeStatusChart(
+  value: PrivacyGovernanceStatusItem[] | null,
+): PrivacyGovernanceStatusItem[] {
+  if (!value) {
+    return [];
+  }
+
+  return value.map((item) => ({
+    status: item.status,
+    count: Number(item.count ?? 0),
+  }));
+}
+
+export default function PrivacyGovernanceDashboard({
+  initialCaseId = null,
 }: Props) {
   const [summary, setSummary] =
-    useState<PrivacyGovernanceSummary>(
-      EMPTY_SUMMARY,
+    useState<PrivacyGovernanceSummary | null>(
+      null,
     );
 
   const [statusChart, setStatusChart] =
-    useState<PrivacyGovernanceStatusItem[]>([]);
+    useState<PrivacyGovernanceStatusItem[]>(
+      [],
+    );
 
-  const [cases, setCases] =
-    useState<PrivacyGovernanceCase[]>([]);
+  const [cases, setCases] = useState<
+    PrivacyGovernanceCase[]
+  >([]);
 
   const [filter, setFilter] =
-    useState<GovernanceFilter>("ALL");
-
-  const [loading, setLoading] =
-    useState(initialLoad);
-
-  const [refreshing, setRefreshing] =
-    useState(false);
-
-  const [error, setError] =
-    useState<string | null>(null);
+    useState<CaseFilter>("ALL");
 
   const [selectedCaseId, setSelectedCaseId] =
-    useState<string | null>(null);
+    useState<string | null>(
+      initialCaseId,
+    );
 
   const [selectedCase, setSelectedCase] =
-    useState<PrivacyGovernanceCase | null>(null);
+    useState<PrivacyGovernanceCase | null>(
+      null,
+    );
 
   const [detailLoading, setDetailLoading] =
     useState(false);
@@ -119,36 +124,52 @@ export function PrivacyGovernanceDashboard({
   const [detailError, setDetailError] =
     useState<string | null>(null);
 
-  /*
-   * ---------------------------------------------------------
-   * Dashboard data
-   * ---------------------------------------------------------
-   */
+  const [loading, setLoading] =
+    useState(true);
+
+  const [refreshing, setRefreshing] =
+    useState(false);
+
+  const [error, setError] =
+    useState<string | null>(null);
 
   const loadDashboard = useCallback(
     async (
-      mode: "initial" | "refresh" = "refresh",
-    ) => {
-      if (mode === "initial") {
-        setLoading(true);
-      } else {
+      refresh = false,
+    ): Promise<void> => {
+      if (refresh) {
         setRefreshing(true);
+      } else {
+        setLoading(true);
       }
 
       setError(null);
 
       try {
-        const result =
-          await loadPrivacyGovernanceDashboard();
+        const [
+          summaryResult,
+          statusResult,
+          casesResult,
+        ] = await Promise.all([
+          getPrivacyGovernanceSummary(),
+          getPrivacyGovernanceStatusChart(),
+          getPrivacyGovernanceCases(),
+        ]);
 
-        setSummary(result.summary);
-        setStatusChart(result.statusChart);
-        setCases(result.cases);
+        setSummary(summaryResult);
+
+        setStatusChart(
+          normalizeStatusChart(
+            statusResult,
+          ),
+        );
+
+        setCases(casesResult);
       } catch (cause) {
         setError(
           cause instanceof Error
             ? cause.message
-            : "Unable to load privacy governance data.",
+            : "Backend unavailable.",
         );
       } finally {
         setLoading(false);
@@ -159,510 +180,816 @@ export function PrivacyGovernanceDashboard({
   );
 
   useEffect(() => {
-    if (initialLoad) {
-      void loadDashboard("initial");
-    }
-  }, [initialLoad, loadDashboard]);
+    void loadDashboard();
+  }, [loadDashboard]);
 
-  /*
-   * ---------------------------------------------------------
-   * Case filtering
-   * ---------------------------------------------------------
-   */
-
-  const visibleCases = useMemo(() => {
-    if (filter === "ALL") {
-      return cases;
-    }
-
-    return cases.filter(
-      (item) =>
-        normalizeStatus(
-          item.governance_status,
-        ) === filter,
+  useEffect(() => {
+    setSelectedCaseId(
+      initialCaseId ?? null,
     );
-  }, [cases, filter]);
+  }, [initialCaseId]);
 
-  /*
-   * ---------------------------------------------------------
-   * Case detail
-   * ---------------------------------------------------------
-   */
-
-  const openCase = useCallback(
-    async (caseId: string) => {
-      const normalizedCaseId = caseId.trim();
-
-      if (!normalizedCaseId) {
-        setSelectedCaseId(null);
-        setSelectedCase(null);
-        setDetailError(
-          "A valid governance case ID is required.",
-        );
-        return;
-      }
-
-      setSelectedCaseId(normalizedCaseId);
-      setSelectedCase(null);
-      setDetailError(null);
+  const loadCaseDetail = useCallback(
+    async (
+      caseId: string,
+    ): Promise<void> => {
       setDetailLoading(true);
+      setDetailError(null);
 
       try {
         const detail =
           await getPrivacyGovernanceCase(
-            normalizedCaseId,
+            caseId,
           );
 
         setSelectedCase(detail);
       } catch (cause) {
+        /*
+         * Keep the dashboard usable if the
+         * detail endpoint fails. The list
+         * representation is still useful
+         * fallback context.
+         */
+        const fallback =
+          cases.find(
+            (caseItem) =>
+              caseItem.case_id ===
+              caseId,
+          ) ?? null;
+
+        setSelectedCase(fallback);
+
         setDetailError(
           cause instanceof Error
             ? cause.message
-            : "Unable to load this governance case.",
+            : "Unable to load case detail.",
         );
       } finally {
         setDetailLoading(false);
       }
     },
-    [],
+    [cases],
   );
 
-  /*
-   * ---------------------------------------------------------
-   * Privacy Governance Email Deep Link
-   *
-   * /privacy-governance/<actual-case-id>
-   *
-   * No case ID is hard-coded.
-   * ---------------------------------------------------------
-   */
-
   useEffect(() => {
-    const caseId = initialCaseId?.trim();
-
-    if (!caseId) {
+    if (!selectedCaseId) {
+      setSelectedCase(null);
+      setDetailError(null);
       return;
     }
 
-    void openCase(caseId);
-  }, [initialCaseId, openCase]);
+    void loadCaseDetail(
+      selectedCaseId,
+    );
+  }, [
+    selectedCaseId,
+    loadCaseDetail,
+  ]);
 
-  const retryCase = useCallback(() => {
-    if (selectedCaseId) {
-      void openCase(selectedCaseId);
-    }
-  }, [openCase, selectedCaseId]);
-
-  /*
-   * ---------------------------------------------------------
-   * Decision completed
-   * ---------------------------------------------------------
-   */
-
-  const handleDecisionComplete = useCallback(
-    (updatedCase: PrivacyGovernanceCase) => {
-      setSelectedCase(updatedCase);
-
-      setCases((current) =>
-        current.map((item) =>
-          item.case_id === updatedCase.case_id
-            ? updatedCase
-            : item,
+  const filteredCases = useMemo(
+    () =>
+      cases.filter((caseItem) =>
+        matchesFilter(
+          caseItem,
+          filter,
         ),
-      );
-
-      void loadDashboard("refresh");
-    },
-    [loadDashboard],
+      ),
+    [cases, filter],
   );
 
-  /*
-   * ---------------------------------------------------------
-   * Status filtering
-   * ---------------------------------------------------------
-   */
+  const totalCases =
+    summary?.total_cases ??
+    cases.length;
 
-  const filterFromStatus = useCallback(
-    (status: string) => {
-      setFilter(normalizeStatus(status));
+  const pendingCount =
+    summary?.pending ??
+    cases.filter(
+      (caseItem) =>
+        caseItem.governance_status ===
+        "PENDING_DPO_GRC",
+    ).length;
+
+  const approvedCount =
+    summary?.approved ??
+    cases.filter(
+      (caseItem) =>
+        caseItem.governance_status ===
+        "APPROVED",
+    ).length;
+
+  const blockedCount =
+    summary?.blocked ??
+    cases.filter(
+      (caseItem) =>
+        caseItem.governance_status ===
+        "BLOCKED",
+    ).length;
+
+  const rejectedCount =
+    cases.filter(
+      (caseItem) =>
+        caseItem.governance_status ===
+        "REJECTED",
+    ).length;
+
+  const rejectedOrBlockedCount =
+    rejectedCount +
+    blockedCount;
+
+  const approvalRecordCount =
+    summary?.approval_records ??
+    cases.reduce(
+      (total, caseItem) =>
+        total +
+        (
+          caseItem.approval_history ??
+          []
+        ).length,
+      0,
+    );
+
+  const applyFilter = useCallback(
+    (nextFilter: CaseFilter): void => {
+      setFilter((current) =>
+        current === nextFilter
+          ? "ALL"
+          : nextFilter,
+      );
     },
     [],
   );
 
-  /*
-   * ---------------------------------------------------------
-   * KPI configuration
-   * ---------------------------------------------------------
-   */
+  const filterFromStatus =
+    useCallback(
+      (status: string): void => {
+        const normalized =
+          status.toUpperCase();
 
-  const kpis: Array<{
-    label: string;
-    value: number;
-    filter: GovernanceFilter;
-  }> = [
-    {
-      label: "Total cases",
-      value: summary.total_cases,
-      filter: "ALL",
-    },
-    {
-      label: "Pending DPO/GRC",
-      value: summary.pending,
-      filter: "PENDING_DPO_GRC",
-    },
-    {
-      label: "Approved",
-      value: summary.approved,
-      filter: "APPROVED",
-    },
-    {
-      label: "Rejected / blocked",
-      value: summary.blocked,
-      filter: "BLOCKED",
-    },
-  ];
+        if (
+          normalized ===
+          "PENDING_DPO_GRC"
+        ) {
+          applyFilter(
+            "PENDING_DPO_GRC",
+          );
+          return;
+        }
 
-  /*
-   * ---------------------------------------------------------
-   * Render
-   * ---------------------------------------------------------
-   */
+        if (
+          normalized ===
+          "APPROVED"
+        ) {
+          applyFilter("APPROVED");
+          return;
+        }
+
+        if (
+          normalized ===
+          "REJECTED"
+        ) {
+          applyFilter("REJECTED");
+          return;
+        }
+
+        if (
+          normalized ===
+          "BLOCKED"
+        ) {
+          applyFilter("BLOCKED");
+        }
+      },
+      [applyFilter],
+    );
+
+  const openCase = useCallback(
+    (caseId: string): void => {
+      setSelectedCaseId(caseId);
+    },
+    [],
+  );
+
+  const closeCase = useCallback(
+    (): void => {
+      setSelectedCaseId(null);
+      setSelectedCase(null);
+      setDetailError(null);
+    },
+    [],
+  );
+
+  const handleDecisionComplete =
+    useCallback(
+      (
+        updatedCase: PrivacyGovernanceCase,
+      ): void => {
+        setCases((current) =>
+          current.map(
+            (caseItem) =>
+              caseItem.case_id ===
+                updatedCase.case_id
+                ? updatedCase
+                : caseItem,
+          ),
+        );
+
+        setSelectedCase(
+          updatedCase,
+        );
+      },
+      [],
+    );
+
+  if (
+    loading &&
+    !summary &&
+    !error
+  ) {
+    return (
+      <main
+        className={styles.page}
+        aria-label="Privacy governance dashboard"
+      >
+        <div
+          className={styles.emptyState}
+          role="status"
+        >
+          Loading privacy governance dashboard…
+        </div>
+      </main>
+    );
+  }
 
   return (
-    <main className={styles.page}>
-      <header className={styles.header}>
-        <div>
-          <p className={styles.brand}>
-            EASYCHATBOT · GOVERNANCE
-          </p>
+    <>
+      <main
+        className={styles.page}
+        aria-label="Privacy governance dashboard"
+      >
+        {/* HEADER */}
 
-          <h1>
-            Privacy Governance Center
-          </h1>
-
-          <p className={styles.subtitle}>
-            Read-only oversight of privacy-impacting
-            changes, validation and human approval
-            evidence.
-          </p>
-        </div>
-
-        <button
-          type="button"
-          className={styles.refresh}
-          onClick={() =>
-            void loadDashboard("refresh")
-          }
-          disabled={refreshing}
-        >
-          {refreshing
-            ? "Refreshing…"
-            : "Refresh"}
-        </button>
-      </header>
-
-      {error && (
-        <section
-          className={styles.errorBanner}
-          role="alert"
+        <header
+          className={styles.header}
         >
           <div>
+            <p
+              className={styles.brand}
+            >
+              EASYCHATBOT · GOVERNANCE
+            </p>
+
+            <h1>
+              Privacy Governance Center
+            </h1>
+
+            <p
+              className={styles.subtitle}
+            >
+              Read-only oversight of
+              privacy-impacting changes,
+              validation and human
+              approval evidence.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            className={styles.refresh}
+            onClick={() =>
+              void loadDashboard(true)
+            }
+            disabled={refreshing}
+          >
+            {refreshing
+              ? "Refreshing…"
+              : "Refresh"}
+          </button>
+        </header>
+
+        {/* ERROR */}
+
+        {error && (
+          <div
+            className={
+              styles.errorBanner
+            }
+            role="alert"
+          >
             <strong>
               Unable to load governance data.
             </strong>
 
-            <span>{error}</span>
-          </div>
+            <span>
+              {error}
+            </span>
 
-          <button
-            type="button"
-            onClick={() =>
-              void loadDashboard("refresh")
-            }
-          >
-            Retry
-          </button>
-        </section>
-      )}
-
-      <section
-        className={styles.kpis}
-        aria-label="Governance KPIs"
-      >
-        {kpis.map((kpi) => (
-          <button
-            type="button"
-            key={kpi.label}
-            className={`${styles.kpi} ${
-              filter === kpi.filter
-                ? styles.kpiActive
-                : ""
-            }`}
-            onClick={() =>
-              setFilter(kpi.filter)
-            }
-          >
-            <span>{kpi.label}</span>
-
-            <strong>
-              {loading
-                ? "…"
-                : kpi.value}
-            </strong>
-          </button>
-        ))}
-      </section>
-
-      <section className={styles.panel}>
-        <div className={styles.panelHeader}>
-          <div>
-            <p className={styles.eyebrow}>
-              OVERSIGHT
-            </p>
-
-            <h2>
-              Governance status
-            </h2>
-          </div>
-
-          <span>
-            {loading
-              ? "Loading…"
-              : `${summary.approval_records} approval records`}
-          </span>
-        </div>
-
-        <div className={styles.statusList}>
-          {statusChart.length ? (
-            statusChart.map((item) => {
-              const maximum = Math.max(
-                1,
-                ...statusChart.map(
-                  (entry) => entry.count,
-                ),
-              );
-
-              return (
-                <button
-                  type="button"
-                  className={`${styles.statusRow} ${
-                    filter ===
-                    normalizeStatus(
-                      item.status,
-                    )
-                      ? styles.statusActive
-                      : ""
-                  }`}
-                  key={item.status}
-                  onClick={() =>
-                    filterFromStatus(
-                      item.status,
-                    )
-                  }
-                >
-                  <span>
-                    {statusLabel(
-                      item.status,
-                    )}
-                  </span>
-
-                  <span
-                    className={
-                      styles.barTrack
-                    }
-                  >
-                    <span
-                      className={styles.bar}
-                      style={{
-                        width: `${
-                          (item.count /
-                            maximum) *
-                          100
-                        }%`,
-                      }}
-                    />
-                  </span>
-
-                  <strong>
-                    {item.count}
-                  </strong>
-                </button>
-              );
-            })
-          ) : (
-            <div
-              className={
-                styles.emptyState
+            <button
+              type="button"
+              onClick={() =>
+                void loadDashboard()
               }
             >
-              No governance status data.
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* KPI CARDS */}
+
+        <section
+          className={styles.kpis}
+          aria-label="Governance KPIs"
+        >
+          <button
+            type="button"
+            aria-label="Total cases KPI"
+            className={`${styles.kpi} ${filter === "ALL"
+                ? styles.kpiActive
+                : ""
+              }`}
+            onClick={() =>
+              applyFilter("ALL")
+            }
+          >
+            <span>
+              Total cases
+            </span>
+
+            <strong>
+              {totalCases}
+            </strong>
+          </button>
+
+          <button
+            type="button"
+            aria-label="Pending DPO/GRC KPI"
+            className={`${styles.kpi} ${filter ===
+                "PENDING_DPO_GRC"
+                ? styles.kpiActive
+                : ""
+              }`}
+            onClick={() =>
+              applyFilter(
+                "PENDING_DPO_GRC",
+              )
+            }
+          >
+            <span>
+              Pending DPO/GRC
+            </span>
+
+            <strong>
+              {pendingCount}
+            </strong>
+          </button>
+
+          <button
+            type="button"
+            aria-label="Approved governance KPI"
+            className={`${styles.kpi} ${filter === "APPROVED"
+                ? styles.kpiActive
+                : ""
+              }`}
+            onClick={() =>
+              applyFilter("APPROVED")
+            }
+          >
+            <span>
+              Approved
+            </span>
+
+            <strong>
+              {approvedCount}
+            </strong>
+          </button>
+
+          <button
+            type="button"
+            aria-label="Rejected / blocked KPI"
+            className={`${styles.kpi} ${filter === "REJECTED" ||
+                filter === "BLOCKED"
+                ? styles.kpiActive
+                : ""
+              }`}
+            onClick={() => {
+              if (
+                rejectedCount >
+                0
+              ) {
+                applyFilter(
+                  "REJECTED",
+                );
+              } else {
+                applyFilter(
+                  "BLOCKED",
+                );
+              }
+            }}
+          >
+            <span>
+              Rejected / blocked
+            </span>
+
+            <strong>
+              {
+                rejectedOrBlockedCount
+              }
+            </strong>
+          </button>
+        </section>
+
+        {/* STATUS */}
+
+        <section
+          className={styles.panel}
+          aria-label="Governance status"
+        >
+          <div
+            className={
+              styles.panelHeader
+            }
+          >
+            <div>
+              <p
+                className={
+                  styles.eyebrow
+                }
+              >
+                OVERSIGHT
+              </p>
+
+              <h2>
+                Governance status
+              </h2>
             </div>
-          )}
-        </div>
-      </section>
 
-      <section className={styles.panel}>
-        <div className={styles.panelHeader}>
-          <div>
-            <p className={styles.eyebrow}>
-              CASE REGISTER
-            </p>
-
-            <h2>
-              Privacy governance cases
-            </h2>
+            <span>
+              {approvalRecordCount}{" "}
+              approval record
+              {approvalRecordCount ===
+                1
+                ? ""
+                : "s"}
+            </span>
           </div>
 
           <div
             className={
-              styles.caseMeta
+              styles.statusList
             }
           >
-            {filter !== "ALL" && (
-              <button
-                type="button"
-                className={
-                  styles.clearFilter
-                }
-                onClick={() =>
-                  setFilter("ALL")
-                }
-              >
-                {statusLabel(filter)} ×
-              </button>
-            )}
+            {statusChart.map(
+              (item) => {
+                const count =
+                  Number(
+                    item.count ??
+                    0,
+                  );
 
-            <span>
-              {loading
-                ? "Loading…"
-                : `${visibleCases.length} cases`}
-            </span>
-          </div>
-        </div>
+                const percentage =
+                  totalCases > 0
+                    ? Math.min(
+                      100,
+                      Math.max(
+                        0,
+                        (count /
+                          totalCases) *
+                        100,
+                      ),
+                    )
+                    : 0;
 
-        <div
-          className={styles.tableWrap}
-        >
-          <table>
-            <thead>
-              <tr>
-                <th>CASE</th>
-                <th>TRIGGER</th>
-                <th>TRIGGERED</th>
-                <th>RISK</th>
-                <th>VALIDATION</th>
-                <th>STATUS</th>
-              </tr>
-            </thead>
+                const label =
+                  statusLabel(
+                    item.status,
+                  );
 
-            <tbody>
-              {!loading &&
-                visibleCases.map(
-                  (item) => (
-                    <tr
-                      key={item.case_id}
+                /*
+                 * IMPORTANT:
+                 *
+                 * The test contract expects
+                 * the status and count to be
+                 * present in the accessible
+                 * name.
+                 *
+                 * Example:
+                 * "APPROVED 1"
+                 *
+                 * This does not collide with
+                 * the Approved KPI because its
+                 * accessible name is
+                 * "Approved governance KPI".
+                 */
+                return (
+                  <button
+                    type="button"
+                    key={
+                      item.status
+                    }
+                    className={
+                      styles.statusRow
+                    }
+                    aria-label={`${label} ${count}`}
+                    onClick={() =>
+                      filterFromStatus(
+                        item.status,
+                      )
+                    }
+                  >
+                    <span>
+                      {label}
+                    </span>
+
+                    <span
+                      className={
+                        styles.barTrack
+                      }
                     >
-                      <td>
-                        <button
-                          type="button"
-                          className={
-                            styles.caseLink
-                          }
-                          onClick={() =>
-                            void openCase(
-                              item.case_id,
-                            )
-                          }
-                          aria-label={`Open case ${item.case_id}`}
-                        >
-                          {item.case_id}
-                        </button>
-                      </td>
+                      <span
+                        className={
+                          styles.bar
+                        }
+                        style={{
+                          width: `${percentage}%`,
+                        }}
+                      />
+                    </span>
 
-                      <td>
-                        {statusLabel(
-                          item.trigger?.type,
-                        )}
-                      </td>
+                    <strong>
+                      {count}
+                    </strong>
+                  </button>
+                );
+              },
+            )}
+          </div>
+        </section>
 
-                      <td>
-                        {formatDate(
-                          item.trigger?.at,
-                        )}
-                      </td>
+        {/* CASE REGISTER */}
 
-                      <td>
-                        {item.risk ?? "—"}
-                      </td>
+        <section
+          className={styles.panel}
+          aria-label="Privacy governance cases"
+        >
+          <div
+            className={
+              styles.panelHeader
+            }
+          >
+            <h2>
+              Governance cases
+            </h2>
 
-                      <td>
-                        {statusLabel(
-                          item.validation_status,
-                        )}
-                      </td>
+            <div
+              className={
+                styles.caseMeta
+              }
+            >
+              <span>
+                {
+                  filteredCases.length
+                }{" "}
+                case
+                {filteredCases.length ===
+                  1
+                  ? ""
+                  : "s"}
+              </span>
 
-                      <td>
-                        <span
-                          className={
-                            styles.statusPill
-                          }
-                        >
-                          {statusLabel(
-                            item.governance_status,
-                          )}
-                        </span>
-                      </td>
-                    </tr>
-                  ),
-                )}
-            </tbody>
-          </table>
+              {filter !== "ALL" && (
+                <button
+                  type="button"
+                  className={
+                    styles.clearFilter
+                  }
+                  onClick={() =>
+                    applyFilter(
+                      "ALL",
+                    )
+                  }
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
+          </div>
 
-          {loading && (
+          {filteredCases.length ===
+            0 ? (
             <div
               className={
                 styles.emptyState
               }
-              role="status"
             >
-              Loading governance cases…
+              No governance cases
+              match the selected
+              filter.
             </div>
-          )}
-
-          {!loading &&
-            !visibleCases.length && (
-              <div
+          ) : (
+            <div
+              className={
+                styles.tableWrap
+              }
+            >
+              <table
                 className={
-                  styles.emptyState
+                  styles.table
                 }
               >
-                {filter === "ALL"
-                  ? "No governance cases are currently registered."
-                  : "No cases match the selected filter."}
-              </div>
-            )}
-        </div>
-      </section>
+                <thead>
+                  <tr>
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      CASE ID
+                    </th>
+
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      TITLE
+                    </th>
+
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      STATUS
+                    </th>
+
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      RISK
+                    </th>
+
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      VALIDATION
+                    </th>
+
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      TRIGGER
+                    </th>
+
+                    <th
+                      className={
+                        styles.headerCell
+                      }
+                    >
+                      TRIGGERED
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {filteredCases.map(
+                    (caseItem) => (
+                      <tr
+                        key={
+                          caseItem.case_id
+                        }
+                        className={
+                          styles.row
+                        }
+                      >
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          <button
+                            type="button"
+                            className={
+                              styles.caseLink
+                            }
+                            aria-label={caseItem.case_id}
+                            title={`Open case ${caseItem.case_id}`}
+                            onClick={() =>
+                              openCase(
+                                caseItem.case_id,
+                              )
+                            }
+                          >
+                            {
+                              caseItem.case_id
+                            }
+                          </button>
+                        </td>
+
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          {
+                            caseItem.title
+                          }
+                        </td>
+
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          <span
+                            className={
+                              styles.statusPill
+                            }
+                          >
+                            {statusLabel(
+                              caseItem.governance_status,
+                            )}
+                          </span>
+                        </td>
+
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          {statusLabel(
+                            caseItem.risk,
+                          )}
+                        </td>
+
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          {statusLabel(
+                            caseItem.validation_status,
+                          )}
+                        </td>
+
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          {statusLabel(
+                            caseItem.trigger
+                              ?.type,
+                          )}
+                        </td>
+
+                        <td
+                          className={
+                            styles.cell
+                          }
+                        >
+                          {formatDate(
+                            caseItem.trigger
+                              ?.at,
+                          )}
+                        </td>
+                      </tr>
+                    ),
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </main>
+
+      {/* CASE DETAIL */}
 
       <PrivacyGovernanceCaseDetail
-        open={Boolean(
-          selectedCaseId,
-        )}
+        open={
+          selectedCaseId !== null
+        }
         loading={detailLoading}
         error={detailError}
         caseData={selectedCase}
-        onClose={() => {
-          setSelectedCaseId(null);
-          setSelectedCase(null);
-          setDetailError(null);
+        onClose={closeCase}
+        onRetry={() => {
+          if (
+            selectedCaseId
+          ) {
+            void loadCaseDetail(
+              selectedCaseId,
+            );
+          }
         }}
-        onRetry={retryCase}
         onDecisionComplete={
           handleDecisionComplete
         }
       />
-    </main>
+    </>
   );
 }
-
-export default PrivacyGovernanceDashboard;
