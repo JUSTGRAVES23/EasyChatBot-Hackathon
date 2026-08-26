@@ -1,0 +1,476 @@
+﻿==============================
+WS-23.1.3 CONTRACT / WS-22 COMPOSITION REVIEW
+==============================
+
+===== PUBLICATION SERVICE =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping
+
+from backend.app.application.announcements.repositories import PublicationRepository
+from backend.app.application.announcements.template_registry import AnnouncementTemplateRegistry
+from backend.app.domain.announcements.publication import Publication
+from backend.app.domain.announcements.template_models import PublicationStatus
+
+
+@dataclass(frozen=True)
+class PublicationPreview:
+    publication_type: str
+    template_id: str
+    template_version: int
+    content: str
+
+
+class AnnouncementPublicationService:
+    def __init__(
+        self,
+        *,
+        templates: AnnouncementTemplateRegistry,
+        publications: PublicationRepository,
+    ) -> None:
+        if templates is None or publications is None:
+            raise ValueError("templates and publications are required.")
+        self._templates = templates
+        self._publications = publications
+
+    def preview(
+        self,
+        *,
+        template_id: str,
+        values: Mapping[str, str],
+        version: int | None = None,
+    ) -> PublicationPreview:
+        template = self._templates.get_version(template_id, version)
+        content = self._templates.preview(
+            template_id=template_id,
+            values=dict(values),
+            version=template.version,
+        )
+        return PublicationPreview(
+            publication_type=template.publication_type.value,
+            template_id=template.template_id,
+            template_version=template.version,
+            content=content,
+        )
+
+    def create(
+        self,
+        *,
+        publication_id: str,
+        template_id: str,
+        title: str,
+        values: Mapping[str, str],
+        version: int | None = None,
+    ) -> Publication:
+        template = self._templates.get_version(template_id, version)
+        content = self._templates.preview(
+            template_id=template_id,
+            values=dict(values),
+            version=template.version,
+        )
+        publication = Publication(
+            publication_id=publication_id,
+            template_id=template.template_id,
+            template_version=template.version,
+            publication_type=template.publication_type,
+            title=title,
+            content=content,
+            status=PublicationStatus.DRAFT,
+        )
+        self._publications.save(publication)
+        return publication
+
+    def _get(self, publication_id: str) -> Publication:
+        publication = self._publications.get(publication_id)
+        if publication is None:
+            raise LookupError(f"Unknown publication '{publication_id}'.")
+        return publication
+
+    def request_approval(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.request_approval()
+        self._publications.save(publication)
+        return publication
+
+    def approve(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.approve()
+        self._publications.save(publication)
+        return publication
+
+    def begin_publish(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.begin_publish()
+        self._publications.save(publication)
+        return publication
+
+    def mark_publish_failure(self, publication_id: str, reason: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.mark_failure(reason)
+        self._publications.save(publication)
+        return publication
+
+    def mark_publish_success(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.publish_success()
+        self._publications.save(publication)
+        return publication
+
+
+===== REPOSITORY CONTRACT =====
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from backend.app.domain.announcements.publication import Publication
+from backend.app.domain.announcements.template_models import AnnouncementTemplate
+
+
+class AnnouncementTemplateRepository(ABC):
+    @abstractmethod
+    def save(self, template: AnnouncementTemplate) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, template_id: str) -> AnnouncementTemplate | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_all(self) -> tuple[AnnouncementTemplate, ...]:
+        raise NotImplementedError
+
+
+class PublicationRepository(ABC):
+    @abstractmethod
+    def save(self, publication: Publication) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, publication_id: str) -> Publication | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_all(self) -> tuple[Publication, ...]:
+        raise NotImplementedError
+
+
+===== DURABLE EXECUTION COMPOSITION =====
+
+"""WS-22.3.5.3 canonical durable publication execution composition.
+
+This module is the composition boundary for the WS-22 durable execution
+vertical slice.
+
+It deliberately does not create a new persistence architecture. The
+canonical PostgreSQL engine and async session factory are supplied by the
+platform persistence boundary in:
+
+    backend.app.infrastructure.persistence.database
+
+The resulting object graph is:
+
+    PostgreSQL
+        |
+        v
+    canonical async session factory
+        |
+        +--> execution repository
+        |
+        +--> audit repository
+                  |
+                  v
+        DurablePublicationExecutionAudit
+                  |
+                  v
+        DurablePublicationExecutionService
+
+Provider selection remains outside this module.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from backend.app.application.announcements.execution.audit_adapter import (
+    DurablePublicationExecutionAudit,
+)
+from backend.app.application.announcements.execution.durable_execution_service import (
+    DurablePublicationExecutionService,
+)
+from backend.app.infrastructure.announcements.publication_audit_repository import (
+    SqlAlchemyPublicationAuditRepository,
+)
+from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+    SqlAlchemyPublicationExecutionRepository,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DurablePublicationExecutionComposition:
+    """Fully composed WS-22 durable execution boundary."""
+
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+    execution_repository: SqlAlchemyPublicationExecutionRepository
+    audit_repository: SqlAlchemyPublicationAuditRepository
+    audit: DurablePublicationExecutionAudit
+    service: DurablePublicationExecutionService
+
+    async def dispose(self) -> None:
+        """Release the shared PostgreSQL async engine."""
+
+        await self.engine.dispose()
+
+
+def create_durable_publication_execution_composition(
+    *,
+    publisher,
+) -> DurablePublicationExecutionComposition:
+    """Create the canonical WS-22 durable execution graph.
+
+    The publisher is deliberately injected because provider selection belongs
+    outside the durable execution composition.
+
+    This function creates exactly one PostgreSQL engine and exactly one async
+    session factory. Both durable repositories receive that same factory.
+    """
+
+    if publisher is None:
+        raise ValueError("publisher cannot be None.")
+
+    engine = create_async_database_engine()
+    session_factory = create_async_session_factory(engine)
+
+    execution_repository = SqlAlchemyPublicationExecutionRepository(
+        session_factory
+    )
+
+    audit_repository = SqlAlchemyPublicationAuditRepository(
+        session_factory
+    )
+
+    audit = DurablePublicationExecutionAudit(
+        repository=audit_repository,
+    )
+
+    service = DurablePublicationExecutionService(
+        publisher=publisher,
+        execution_repository=execution_repository,
+        audit=audit,
+    )
+
+    return DurablePublicationExecutionComposition(
+        engine=engine,
+        session_factory=session_factory,
+        execution_repository=execution_repository,
+        audit_repository=audit_repository,
+        audit=audit,
+        service=service,
+    )
+
+
+__all__ = [
+    "DurablePublicationExecutionComposition",
+    "create_durable_publication_execution_composition",
+]
+
+===== DATABASE =====
+
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+
+class Base(DeclarativeBase):
+    """Canonical SQLAlchemy metadata registry for the platform."""
+
+    pass
+
+
+def database_url() -> str:
+    """Return the canonical PostgreSQL connection URL."""
+
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for PostgreSQL persistence."
+        )
+
+    return value
+
+
+def create_database_engine():
+    """Create the existing synchronous PostgreSQL engine.
+
+    This API is preserved for the existing Beta 1 persistence layer.
+    """
+
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(
+    engine,
+) -> sessionmaker[Session]:
+    """Create the existing synchronous session factory.
+
+    Preserved for existing Beta 1 repositories.
+    """
+
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
+def async_database_url() -> str:
+    """Return DATABASE_URL adapted for SQLAlchemy async PostgreSQL.
+
+    The environment remains the single source of truth. We only adapt the
+    driver at the infrastructure boundary when the configured URL uses the
+    standard PostgreSQL SQLAlchemy scheme.
+    """
+
+    value = database_url()
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    raise RuntimeError(
+        "DATABASE_URL must use a PostgreSQL URL compatible with "
+        "the synchronous or async PostgreSQL persistence boundary."
+    )
+
+
+def create_async_database_engine() -> AsyncEngine:
+    """Create the canonical asynchronous PostgreSQL engine.
+
+    This is used by durable WS-22 persistence while sharing the same
+    DATABASE_URL and canonical Base as the existing persistence layer.
+    """
+
+    return create_async_engine(
+        async_database_url(),
+        pool_pre_ping=True,
+    )
+
+
+def create_async_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    """Create the canonical asynchronous PostgreSQL session factory."""
+
+    return async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+===== APPROVAL SERVICE =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Protocol
+
+from backend.app.application.announcements.publication_service import (
+    AnnouncementPublicationService,
+)
+from backend.app.domain.announcements.publication import Publication
+
+
+class PublicationApprovalAudit(Protocol):
+    async def record_approval(
+        self,
+        *,
+        publication: Publication,
+        actor: str,
+        occurred_at: datetime,
+    ) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class PublicationApprovalResult:
+    publication: Publication
+    actor: str
+    approved_at: datetime
+
+
+class AnnouncementPublicationApprovalService:
+    """Authorized application boundary for WS-23.1.3 approval.
+
+    Lifecycle validation remains in the Publication domain model.
+    Persistence remains behind PublicationRepository.
+    Telegram delivery is deliberately outside this service.
+    """
+
+    def __init__(
+        self,
+        *,
+        publications: AnnouncementPublicationService,
+        audit: PublicationApprovalAudit,
+    ) -> None:
+        if publications is None or audit is None:
+            raise ValueError("publications and audit are required.")
+        self._publications = publications
+        self._audit = audit
+
+    async def approve(
+        self,
+        *,
+        publication_id: str,
+        actor: str,
+    ) -> PublicationApprovalResult:
+        if not actor.strip():
+            raise ValueError("actor cannot be empty.")
+
+        publication = self._publications.approve(publication_id)
+        approved_at = publication.approved_at or datetime.now(timezone.utc)
+
+        await self._audit.record_approval(
+            publication=publication,
+            actor=actor.strip(),
+            occurred_at=approved_at,
+        )
+
+        return PublicationApprovalResult(
+            publication=publication,
+            actor=actor.strip(),
+            approved_at=approved_at,
+        )
+
+
+==============================
+END REVIEW
+==============================

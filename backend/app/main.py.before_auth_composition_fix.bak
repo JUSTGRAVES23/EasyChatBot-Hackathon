@@ -1,0 +1,659 @@
+﻿"""
+EasyChatBot FastAPI Application.
+
+Application entry point.
+
+Responsibilities:
+- Create FastAPI application.
+- Register active API routers.
+- Configure application metadata.
+- Manage application lifecycle.
+- Compose controlled announcement publication dependencies.
+
+Does NOT:
+- Execute AI agents.
+- Handle business logic.
+- Manage voice sessions.
+- Execute cybersecurity workflows.
+- Execute Telegram polling.
+- Create the classroom Telegram runtime.
+- Perform autonomous announcement publication.
+- Implement administrator authentication.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+
+#
+# Local development environment
+#
+# Production deployments should provide environment variables
+# through the deployment environment/secrets manager.
+#
+
+load_dotenv()
+
+
+logger = logging.getLogger(__name__)
+
+
+#
+# Scheduler lifecycle boundary
+#
+# FastAPI only controls lifecycle.
+# Business logic remains outside.
+#
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+#
+# Governance Audit API
+#
+# Read-only governance evidence boundary.
+#
+# Does NOT:
+# - modify controls;
+# - execute actions;
+# - change audit history.
+#
+
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+
+
+#
+# Operations Center Governance API
+#
+# Read-only governance visibility.
+#
+# Provides:
+# - control status;
+# - audit visibility;
+# - YETI governance messages.
+#
+
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+
+#
+# Governance Evidence Timeline API
+#
+# Read-only evidence explorer.
+#
+# Provides:
+# - governance events;
+# - operational history;
+# - audit evidence visibility.
+#
+
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+
+
+#
+# Governance Change Lifecycle API
+#
+# Provides:
+# - approval lifecycle;
+# - change management visibility;
+# - audit lifecycle integration.
+#
+# Flow:
+#
+# Approval
+#    |
+#    v
+# Change Record
+#    |
+#    v
+# Governance Audit
+#
+
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+
+
+#
+# Provider Management Controls
+#
+# Human-controlled provider delivery governance.
+#
+# Provider Management owns the control.
+# Governance Center observes and explains the state.
+#
+
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+
+
+#
+# Privacy Governance Operations Center API
+#
+# Privacy governance API boundary.
+#
+# Provides:
+# - governance summary;
+# - governance status chart;
+# - governance case list;
+# - governance case detail;
+# - explicit human governance decisions;
+# - controlled Beta/demo case creation.
+#
+# Decision logic remains inside the application service layer.
+#
+
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+
+
+#
+# Announcement Operations API
+#
+# Controlled administrator announcement publication boundary.
+#
+# Flow:
+#
+# FastAPI
+#    |
+#    v
+# Announcement API
+#    |
+#    v
+# ControlledAnnouncementPublisher
+#    |
+#    v
+# TelegramAnnouncementPublisher
+#    |
+#    v
+# TelegramAnnouncementClient
+#    |
+#    v
+# Telegram sendMessage API
+#
+# IMPORTANT:
+#
+# This is an outbound-only Telegram client.
+#
+# It does NOT:
+# - call getUpdates;
+# - start polling;
+# - register handlers;
+# - interfere with the classroom Telegram runtime.
+#
+
+from backend.app.api.announcement_controls import (
+    create_announcement_router,
+)
+
+from backend.app.application.announcement.announcement_publisher import (
+    ControlledAnnouncementPublisher,
+)
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+
+
+#
+# Voice APIs
+#
+
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+
+
+#
+# AI Operations Center
+#
+
+from app.api.operations_center import (
+    router as operations_center_router,
+)
+
+
+#
+# Cybersecurity Intelligence API
+#
+
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+
+#
+# Cybersecurity Decision Support API
+#
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+
+
+#
+# Cybersecurity Reports API
+#
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+#
+# Cybersecurity Live Reports API
+#
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Scheduler runtime instance
+#
+
+scheduler_runtime = create_cybersecurity_scheduler_runtime()
+
+
+#
+# Announcement configuration
+#
+
+def _announcement_publishing_enabled() -> bool:
+    """
+    Resolve the explicit Beta 1 announcement publication switch.
+
+    Publication is disabled by default.
+
+    Accepted truthy values:
+    - true
+    - 1
+    - yes
+    - on
+    """
+
+    value = os.getenv(
+        "EASYCHATBOT_ANNOUNCEMENT_PUBLISHING_ENABLED",
+        "false",
+    )
+
+    return value.strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+
+
+#
+# Administrator authorization
+#
+
+async def _default_announcement_admin_authorizer() -> bool:
+    """
+    Fail-closed administrator authorization.
+
+    The repository does not yet expose a real authenticated
+    operator identity dependency.
+
+    Therefore announcement publication MUST remain denied
+    until the real authentication/authorization boundary is
+    connected.
+
+    This is intentional security behavior.
+    """
+
+    return False
+
+
+#
+# Announcement composition
+#
+
+def _create_announcement_components() -> tuple[
+    TelegramAnnouncementClient,
+    ControlledAnnouncementPublisher,
+]:
+    """
+    Compose the outbound announcement publication infrastructure.
+
+    This function creates an outbound-only Telegram client.
+
+    It does NOT:
+    - start Telegram polling;
+    - create Telegram handlers;
+    - create the classroom Telegram runtime;
+    - call getUpdates();
+    """
+
+    telegram_client = TelegramAnnouncementClient()
+
+    telegram_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    controlled_publisher = ControlledAnnouncementPublisher(
+        publisher=telegram_publisher,
+        publishing_enabled=_announcement_publishing_enabled(),
+    )
+
+    return (
+        telegram_client,
+        controlled_publisher,
+    )
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    Starts:
+    - cybersecurity scheduler runtime.
+
+    Stops:
+    - cybersecurity scheduler runtime;
+    - outbound announcement Telegram client.
+
+    IMPORTANT:
+
+    The classroom Telegram polling runtime is NOT started here.
+
+    It remains owned by:
+
+        backend/scripts/run_telegram_runtime.py
+
+    This prevents multiple getUpdates consumers.
+    """
+
+    try:
+        await scheduler_runtime.start()
+
+    except Exception as exc:
+        logger.exception(
+            "Cybersecurity scheduler startup failed: %s",
+            exc,
+        )
+
+    try:
+        yield
+
+    finally:
+
+        #
+        # Scheduler shutdown
+        #
+
+        try:
+            await scheduler_runtime.stop()
+
+        except Exception as exc:
+            logger.exception(
+                "Cybersecurity scheduler shutdown failed: %s",
+                exc,
+            )
+
+        #
+        # Announcement Telegram client shutdown
+        #
+        # The client is outbound-only and does not own Telegram
+        # polling.
+        #
+
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+
+        if telegram_client is not None:
+
+            try:
+                await telegram_client.close()
+
+            except Exception as exc:
+                logger.exception(
+                    "Announcement Telegram client shutdown failed: %s",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+    """
+
+    #
+    # Announcement dependency composition.
+    #
+    # This creates only the outbound Telegram client.
+    #
+    # It does NOT start Telegram polling.
+    #
+
+    (
+        announcement_telegram_client,
+        announcement_publisher,
+    ) = _create_announcement_components()
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    #
+    # Store infrastructure resource on application state.
+    #
+    # Lifespan closes it during application shutdown.
+    #
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    #
+    # CORS
+    #
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=[
+            "*",
+        ],
+        allow_headers=[
+            "*",
+        ],
+    )
+
+    #
+    # Voice APIs
+    #
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    #
+    # AI Operations Center
+    #
+
+    application.include_router(
+        operations_center_router,
+    )
+
+    #
+    # Privacy Governance Operations Center
+    #
+    # Existing privacy governance API contract.
+    #
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    #
+    # Provider Management Controls
+    #
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    #
+    # Governance Audit API
+    #
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    #
+    # Operations Center Governance API
+    #
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    #
+    # Governance Evidence Timeline API
+    #
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    #
+    # Governance Change Lifecycle API
+    #
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    #
+    # Cybersecurity Intelligence
+    #
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    #
+    # Cybersecurity Decision Support
+    #
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    #
+    # Cybersecurity Reports
+    #
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    #
+    # Cybersecurity Live Reports
+    #
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    #
+    # Announcement Operations
+    #
+    # Controlled administrator publication boundary.
+    #
+    # Endpoint:
+    #
+    # POST /admin/announcements/publish
+    #
+    # Security:
+    #
+    # - administrator authorization required;
+    # - authorization currently fails closed;
+    # - publication switch independently controls execution;
+    # - Telegram channel ID comes from configuration;
+    # - Telegram transport is outbound-only.
+    #
+
+    application.include_router(
+        create_announcement_router(
+            publisher=announcement_publisher,
+            admin_authorizer=(
+                _default_announcement_admin_authorizer
+            ),
+        ),
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]

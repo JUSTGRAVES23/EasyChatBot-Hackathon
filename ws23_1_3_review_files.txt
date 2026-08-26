@@ -1,0 +1,778 @@
+====================================================================================================
+FILE: .\backend\app\application\announcements\publication_service.py
+====================================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping
+
+from backend.app.application.announcements.repositories import PublicationRepository
+from backend.app.application.announcements.template_registry import AnnouncementTemplateRegistry
+from backend.app.domain.announcements.publication import Publication
+from backend.app.domain.announcements.template_models import PublicationStatus
+
+
+@dataclass(frozen=True)
+class PublicationPreview:
+    publication_type: str
+    template_id: str
+    template_version: int
+    content: str
+
+
+class AnnouncementPublicationService:
+    def __init__(
+        self,
+        *,
+        templates: AnnouncementTemplateRegistry,
+        publications: PublicationRepository,
+    ) -> None:
+        if templates is None or publications is None:
+            raise ValueError("templates and publications are required.")
+        self._templates = templates
+        self._publications = publications
+
+    def preview(
+        self,
+        *,
+        template_id: str,
+        values: Mapping[str, str],
+        version: int | None = None,
+    ) -> PublicationPreview:
+        template = self._templates.get_version(template_id, version)
+        content = self._templates.preview(
+            template_id=template_id,
+            values=dict(values),
+            version=template.version,
+        )
+        return PublicationPreview(
+            publication_type=template.publication_type.value,
+            template_id=template.template_id,
+            template_version=template.version,
+            content=content,
+        )
+
+    def create(
+        self,
+        *,
+        publication_id: str,
+        template_id: str,
+        title: str,
+        values: Mapping[str, str],
+        version: int | None = None,
+    ) -> Publication:
+        template = self._templates.get_version(template_id, version)
+        content = self._templates.preview(
+            template_id=template_id,
+            values=dict(values),
+            version=template.version,
+        )
+        publication = Publication(
+            publication_id=publication_id,
+            template_id=template.template_id,
+            template_version=template.version,
+            publication_type=template.publication_type,
+            title=title,
+            content=content,
+            status=PublicationStatus.DRAFT,
+        )
+        self._publications.save(publication)
+        return publication
+
+    def _get(self, publication_id: str) -> Publication:
+        publication = self._publications.get(publication_id)
+        if publication is None:
+            raise LookupError(f"Unknown publication '{publication_id}'.")
+        return publication
+
+    def request_approval(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.request_approval()
+        self._publications.save(publication)
+        return publication
+
+    def approve(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.approve()
+        self._publications.save(publication)
+        return publication
+
+    def begin_publish(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.begin_publish()
+        self._publications.save(publication)
+        return publication
+
+    def mark_publish_failure(self, publication_id: str, reason: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.mark_failure(reason)
+        self._publications.save(publication)
+        return publication
+
+    def mark_publish_success(self, publication_id: str) -> Publication:
+        publication = self._get(publication_id)
+        publication.publish_success()
+        self._publications.save(publication)
+        return publication
+
+
+
+====================================================================================================
+FILE: .\backend\app\application\announcements\repositories.py
+====================================================================================================
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from backend.app.domain.announcements.publication import Publication
+from backend.app.domain.announcements.template_models import AnnouncementTemplate
+
+
+class AnnouncementTemplateRepository(ABC):
+    @abstractmethod
+    def save(self, template: AnnouncementTemplate) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, template_id: str) -> AnnouncementTemplate | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_all(self) -> tuple[AnnouncementTemplate, ...]:
+        raise NotImplementedError
+
+
+class PublicationRepository(ABC):
+    @abstractmethod
+    def save(self, publication: Publication) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, publication_id: str) -> Publication | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_all(self) -> tuple[Publication, ...]:
+        raise NotImplementedError
+
+
+
+====================================================================================================
+FILE: .\backend\app\api\announcement_controls.py
+====================================================================================================
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from os import getenv
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+from app.application.announcement.announcement_composer import (
+    AnnouncementComposer,
+)
+from app.application.announcement.announcement_publisher import (
+    ControlledAnnouncementPublisher,
+    PublicationDisabledError,
+)
+from app.application.announcement.models import AnnouncementType
+
+
+class AnnouncementPublishRequest(BaseModel):
+    """Administrator request for publishing a Beta announcement."""
+
+    announcement_type: AnnouncementType
+    title: str = Field(min_length=1, max_length=120)
+    body: str = Field(min_length=1, max_length=1800)
+    footer: str | None = Field(default=None, max_length=300)
+
+
+class AnnouncementPublishResponse(BaseModel):
+    """Controlled publication result."""
+
+    channel_id: str
+    message_id: str
+    announcement_type: str
+    published_at: str
+
+
+AdminAuthorizer = Callable[[], Awaitable[bool]]
+
+
+async def _default_admin_authorizer() -> bool:
+    """
+    Fail-closed default administrator authorization.
+
+    Production composition must inject the real administrator
+    authorization mechanism.
+    """
+    return False
+
+
+def create_announcement_router(
+    *,
+    publisher: ControlledAnnouncementPublisher,
+    composer: AnnouncementComposer | None = None,
+    admin_authorizer: AdminAuthorizer = _default_admin_authorizer,
+) -> APIRouter:
+    """
+    Create the WS-02 administrator announcement router.
+
+    The API layer does not:
+    - talk directly to Telegram;
+    - construct Telegram clients;
+    - bypass AnnouncementPolicy;
+    - bypass ControlledAnnouncementPublisher;
+    - perform autonomous publication.
+    """
+
+    if publisher is None:
+        raise ValueError("publisher cannot be None.")
+
+    if admin_authorizer is None:
+        raise ValueError("admin_authorizer cannot be None.")
+
+    announcement_composer = composer or AnnouncementComposer()
+
+    router = APIRouter(
+        prefix="/admin/announcements",
+        tags=["admin-announcements"],
+    )
+
+    async def require_admin() -> None:
+        try:
+            authorized = await admin_authorizer()
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Administrator authorization required.",
+            ) from None
+
+        if not authorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Administrator authorization required.",
+            )
+
+    @router.post(
+        "/publish",
+        response_model=AnnouncementPublishResponse,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_admin)],
+    )
+    async def publish_announcement(
+        request: AnnouncementPublishRequest,
+    ) -> AnnouncementPublishResponse:
+        # ---------------------------------------------------------
+        # Composition / policy validation
+        # ---------------------------------------------------------
+        try:
+            composed = announcement_composer.compose(
+                announcement_type=request.announcement_type,
+                title=request.title,
+                body=request.body,
+                footer=request.footer,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        # ---------------------------------------------------------
+        # Configuration
+        # ---------------------------------------------------------
+        try:
+            channel_id = _resolve_channel_id()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+        # ---------------------------------------------------------
+        # Controlled publication
+        #
+        # PublicationDisabledError is an expected operational state.
+        # It is translated here at the HTTP boundary into 503.
+        # ---------------------------------------------------------
+        try:
+            record = await publisher.publish(
+                channel_id=channel_id,
+                text=composed.rendered_text,
+                announcement_type=(
+                    composed.announcement.announcement_type.value
+                ),
+            )
+        except PublicationDisabledError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Telegram announcement publishing is disabled.",
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        # ---------------------------------------------------------
+        # Successful publication
+        # ---------------------------------------------------------
+        return AnnouncementPublishResponse(
+            channel_id=record.channel_id,
+            message_id=record.message_id,
+            announcement_type=record.announcement_type,
+            published_at=record.published_at.isoformat(),
+        )
+
+    return router
+
+
+def _resolve_channel_id() -> str:
+    """
+    Resolve the Beta 1 announcement channel from configuration.
+
+    The channel ID is deliberately not hard-coded.
+    """
+
+    channel_id = getenv(
+        "BETA1_ANNOUNCEMENT_CHANNEL_ID",
+    )
+
+    if not channel_id:
+        raise ValueError(
+            "BETA1_ANNOUNCEMENT_CHANNEL_ID is not configured."
+        )
+
+    return channel_id
+
+
+__all__ = [
+    "AnnouncementPublishRequest",
+    "AnnouncementPublishResponse",
+    "create_announcement_router",
+]
+
+
+====================================================================================================
+FILE: .\backend\app\domain\announcements\publication.py
+====================================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from .template_models import PublicationStatus, PublicationType
+
+
+_ALLOWED_TRANSITIONS = {
+    PublicationStatus.DRAFT: {
+        PublicationStatus.PENDING_APPROVAL,
+        PublicationStatus.CANCELLED,
+    },
+    PublicationStatus.PENDING_APPROVAL: {
+        PublicationStatus.APPROVED,
+        PublicationStatus.CANCELLED,
+    },
+    PublicationStatus.APPROVED: {
+        PublicationStatus.PUBLISHING,
+        PublicationStatus.CANCELLED,
+    },
+    PublicationStatus.PUBLISHING: {
+        PublicationStatus.PUBLISHED,
+        PublicationStatus.FAILED,
+    },
+    PublicationStatus.FAILED: {
+        PublicationStatus.PUBLISHING,
+        PublicationStatus.CANCELLED,
+    },
+    PublicationStatus.PUBLISHED: set(),
+    PublicationStatus.CANCELLED: set(),
+}
+
+
+@dataclass
+class Publication:
+    publication_id: str
+    template_id: str
+    template_version: int
+    publication_type: PublicationType
+    title: str
+    content: str
+    status: PublicationStatus = PublicationStatus.DRAFT
+    created_at: datetime | None = None
+    approved_at: datetime | None = None
+    published_at: datetime | None = None
+    failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.publication_id.strip():
+            raise ValueError("publication_id cannot be empty.")
+        if not self.template_id.strip():
+            raise ValueError("template_id cannot be empty.")
+        if self.template_version < 1:
+            raise ValueError("template_version must be >= 1.")
+        if not self.title.strip():
+            raise ValueError("title cannot be empty.")
+        if not self.content.strip():
+            raise ValueError("content cannot be empty.")
+        if self.created_at is None:
+            self.created_at = datetime.now(timezone.utc)
+
+    def transition(self, target: PublicationStatus) -> None:
+        if target not in _ALLOWED_TRANSITIONS[self.status]:
+            raise ValueError(
+                f"Invalid publication transition: "
+                f"{self.status.value} -> {target.value}"
+            )
+        self.status = target
+        now = datetime.now(timezone.utc)
+        if target is PublicationStatus.APPROVED:
+            self.approved_at = now
+        elif target is PublicationStatus.PUBLISHED:
+            self.published_at = now
+            self.failure_reason = None
+
+    def request_approval(self) -> None:
+        self.transition(PublicationStatus.PENDING_APPROVAL)
+
+    def approve(self) -> None:
+        self.transition(PublicationStatus.APPROVED)
+
+    def begin_publish(self) -> None:
+        self.transition(PublicationStatus.PUBLISHING)
+
+    def mark_failure(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("failure reason cannot be empty.")
+        if self.status is not PublicationStatus.PUBLISHING:
+            raise ValueError("A publication can only fail while publishing.")
+        self.failure_reason = reason.strip()
+        self.transition(PublicationStatus.FAILED)
+
+    def publish_success(self) -> None:
+        self.transition(PublicationStatus.PUBLISHED)
+
+
+
+====================================================================================================
+FILE: .\backend\app\application\announcements\execution\durable_execution_service.py
+====================================================================================================
+
+"""WS-22.3.2 durable execution orchestration."""
+
+from __future__ import annotations
+
+from backend.app.application.announcements.execution.contracts import (
+    AnnouncementPublisher,
+    PublicationExecutionRequest,
+    PublicationExecutionResult,
+    PublicationExecutionStatus,
+)
+from backend.app.application.announcements.execution.durable_contracts import (
+    DurableExecutionStatus,
+    PublicationExecutionRepository,
+)
+
+
+class DurablePublicationExecutionService:
+    """Retry-safe execution service backed by durable idempotency state.
+
+    A completed idempotency key is never sent again.
+
+    A STARTED record is treated as an interrupted attempt and is retryable.
+
+    A FAILED record is also retryable. Before a retry is executed, the
+    repository is responsible for incrementing the durable attempt counter
+    and transitioning the record back to STARTED.
+
+    The repository implementation must make creation atomic against a
+    unique idempotency key.
+    """
+
+    def __init__(
+        self,
+        *,
+        publisher: AnnouncementPublisher,
+        execution_repository: PublicationExecutionRepository,
+        audit,
+    ) -> None:
+        if publisher is None:
+            raise ValueError("publisher cannot be None.")
+
+        if execution_repository is None:
+            raise ValueError("execution_repository cannot be None.")
+
+        if audit is None:
+            raise ValueError("audit cannot be None.")
+
+        self._publisher = publisher
+        self._repository = execution_repository
+        self._audit = audit
+
+    async def execute(
+        self,
+        *,
+        publication,
+        request: PublicationExecutionRequest,
+    ) -> PublicationExecutionResult:
+        existing = await self._repository.get_by_idempotency_key(
+            request.idempotency_key
+        )
+
+        # A successful execution is terminal for the idempotency key.
+        # Never call the external provider again.
+        if (
+            existing is not None
+            and existing.status is DurableExecutionStatus.SUCCEEDED
+        ):
+            return PublicationExecutionResult(
+                publication_id=existing.publication_id,
+                status=PublicationExecutionStatus.IDEMPOTENT_REPLAY,
+                idempotency_key=existing.idempotency_key,
+                correlation_id=request.correlation_id,
+                provider_message_id=existing.provider_message_id,
+            )
+
+        self._assert_approved(publication)
+
+        # The repository owns the atomic unique-key operation. If another
+        # worker already created the same key, re-read and honour its state.
+        if existing is None:
+            try:
+                record = await self._repository.create_started(
+                    publication_id=publication.id,
+                    idempotency_key=request.idempotency_key,
+                    correlation_id=request.correlation_id,
+                )
+            except Exception:
+                record = await self._repository.get_by_idempotency_key(
+                    request.idempotency_key
+                )
+
+                if record is None:
+                    raise
+
+        elif existing.status is DurableExecutionStatus.FAILED:
+            # A FAILED execution is retryable. Reuse the same durable
+            # idempotency record and increment its attempt number rather
+            # than creating a second row.
+            record = await self._repository.start_retry(
+                idempotency_key=request.idempotency_key,
+            )
+
+        else:
+            # STARTED represents an interrupted/incomplete attempt.
+            # Preserve the existing durable attempt number and retry it.
+            record = existing
+
+        publication.begin_publish()
+
+        try:
+            provider_message_id = await self._publisher.publish(
+                publication_id=publication.id,
+                title=publication.title,
+                content=publication.content,
+                correlation_id=request.correlation_id,
+                idempotency_key=request.idempotency_key,
+            )
+        except Exception as exc:
+            error_code = self._error_code(exc)
+
+            publication.mark_failure(error_code)
+
+            await self._repository.mark_failed(
+                idempotency_key=request.idempotency_key,
+                error_code=error_code,
+            )
+
+            await self._audit.record_failure(
+                publication_id=publication.id,
+                actor=request.actor,
+                correlation_id=request.correlation_id,
+                error_code=error_code,
+            )
+
+            return PublicationExecutionResult(
+                publication_id=publication.id,
+                status=PublicationExecutionStatus.FAILED,
+                idempotency_key=request.idempotency_key,
+                correlation_id=request.correlation_id,
+                error_code=error_code,
+            )
+
+        publication.publish_success(provider_message_id)
+
+        await self._repository.mark_succeeded(
+            idempotency_key=request.idempotency_key,
+            provider_message_id=provider_message_id,
+        )
+
+        await self._audit.record_success(
+            publication_id=publication.id,
+            actor=request.actor,
+            correlation_id=request.correlation_id,
+            provider_message_id=provider_message_id,
+        )
+
+        return PublicationExecutionResult(
+            publication_id=publication.id,
+            status=PublicationExecutionStatus.SUCCEEDED,
+            idempotency_key=request.idempotency_key,
+            correlation_id=request.correlation_id,
+            provider_message_id=provider_message_id,
+        )
+
+    @staticmethod
+    def _assert_approved(publication) -> None:
+        value = getattr(publication.status, "value", publication.status)
+
+        if value != "approved":
+            raise ValueError(
+                "Only approved publications may be executed."
+            )
+
+    @staticmethod
+    def _error_code(exc: Exception) -> str:
+        explicit = getattr(exc, "error_code", None)
+
+        return (
+            explicit.strip()[:100]
+            if isinstance(explicit, str) and explicit.strip()
+            else type(exc).__name__.upper()[:100]
+        )
+
+
+====================================================================================================
+FILE: .\backend\app\application\announcements\execution\durable_execution_composition.py
+====================================================================================================
+
+"""WS-22.3.5.3 canonical durable publication execution composition.
+
+This module is the composition boundary for the WS-22 durable execution
+vertical slice.
+
+It deliberately does not create a new persistence architecture. The
+canonical PostgreSQL engine and async session factory are supplied by the
+platform persistence boundary in:
+
+    backend.app.infrastructure.persistence.database
+
+The resulting object graph is:
+
+    PostgreSQL
+        |
+        v
+    canonical async session factory
+        |
+        +--> execution repository
+        |
+        +--> audit repository
+                  |
+                  v
+        DurablePublicationExecutionAudit
+                  |
+                  v
+        DurablePublicationExecutionService
+
+Provider selection remains outside this module.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from backend.app.application.announcements.execution.audit_adapter import (
+    DurablePublicationExecutionAudit,
+)
+from backend.app.application.announcements.execution.durable_execution_service import (
+    DurablePublicationExecutionService,
+)
+from backend.app.infrastructure.announcements.publication_audit_repository import (
+    SqlAlchemyPublicationAuditRepository,
+)
+from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+    SqlAlchemyPublicationExecutionRepository,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DurablePublicationExecutionComposition:
+    """Fully composed WS-22 durable execution boundary."""
+
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+    execution_repository: SqlAlchemyPublicationExecutionRepository
+    audit_repository: SqlAlchemyPublicationAuditRepository
+    audit: DurablePublicationExecutionAudit
+    service: DurablePublicationExecutionService
+
+    async def dispose(self) -> None:
+        """Release the shared PostgreSQL async engine."""
+
+        await self.engine.dispose()
+
+
+def create_durable_publication_execution_composition(
+    *,
+    publisher,
+) -> DurablePublicationExecutionComposition:
+    """Create the canonical WS-22 durable execution graph.
+
+    The publisher is deliberately injected because provider selection belongs
+    outside the durable execution composition.
+
+    This function creates exactly one PostgreSQL engine and exactly one async
+    session factory. Both durable repositories receive that same factory.
+    """
+
+    if publisher is None:
+        raise ValueError("publisher cannot be None.")
+
+    engine = create_async_database_engine()
+    session_factory = create_async_session_factory(engine)
+
+    execution_repository = SqlAlchemyPublicationExecutionRepository(
+        session_factory
+    )
+
+    audit_repository = SqlAlchemyPublicationAuditRepository(
+        session_factory
+    )
+
+    audit = DurablePublicationExecutionAudit(
+        repository=audit_repository,
+    )
+
+    service = DurablePublicationExecutionService(
+        publisher=publisher,
+        execution_repository=execution_repository,
+        audit=audit,
+    )
+
+    return DurablePublicationExecutionComposition(
+        engine=engine,
+        session_factory=session_factory,
+        execution_repository=execution_repository,
+        audit_repository=audit_repository,
+        audit=audit,
+        service=service,
+    )
+
+
+__all__ = [
+    "DurablePublicationExecutionComposition",
+    "create_durable_publication_execution_composition",
+]
+
+

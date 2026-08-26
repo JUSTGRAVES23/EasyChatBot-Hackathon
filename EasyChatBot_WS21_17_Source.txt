@@ -1,0 +1,4910 @@
+﻿
+
+============================================================
+FILE: .\app\interfaces\provider_management\operations_center_dashboard_router.py
+============================================================
+"""
+EasyChatBot AI Operations Center HTTP router.
+
+Exposes the existing Platform Overview and the additive
+WS-21.15 Chat Operations dashboard.
+
+HTTP contract:
+
+    GET /api/operations-center/dashboard
+        Existing Platform Overview contract.
+
+    GET /api/operations-center/operational-events
+        Existing operational-event history.
+
+    GET /api/operations-center/chat-operations
+        WS-21.15 operational Chat Operations contract.
+
+Important architectural rule:
+
+The existing Platform Overview remains backed by the
+provider-management Operations Center implementation.
+
+The new Chat Operations endpoint is backed by the
+WS-21 operational dashboard implementation.
+
+The two contracts are intentionally kept separate.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends
+
+from app.application.provider_management.operations_center_dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+
+from app.application.provider_management.operations_center_dashboard_composition import (
+    OperationsCenterComposition,
+    create_operations_center_composition,
+)
+
+from app.application.provider_management.operations_center_operational_events_api import (
+    OperationsCenterOperationalEventsAPI,
+)
+
+from app.application.provider_management.provider_health_refresh_service import (
+    ProviderHealthRefreshService,
+)
+
+from backend.app.application.operations_center.dashboard_composition import (
+    create_operations_center_dashboard_api as create_ws21_dashboard_api,
+)
+
+from backend.app.application.operations_center.dashboard_api import (
+    OperationsCenterDashboardAPI as WS21OperationsCenterDashboardAPI,
+)
+
+
+router = APIRouter(
+    prefix="/api/operations-center",
+    tags=[
+        "AI Operations Center",
+    ],
+)
+
+
+# =========================================================
+# EXISTING Platform Overview composition
+# =========================================================
+
+_composition: OperationsCenterComposition = (
+    create_operations_center_composition()
+)
+
+_dashboard_api: OperationsCenterDashboardAPI = (
+    _composition.dashboard_api
+)
+
+_health_refresh_service: (
+    ProviderHealthRefreshService | None
+) = (
+    _composition.health_refresh_service
+)
+
+_operational_events_api: OperationsCenterOperationalEventsAPI = (
+    _composition.operational_events_api
+)
+
+
+# =========================================================
+# WS-21.15 Chat Operations composition
+# =========================================================
+
+_ws21_chat_operations_api: WS21OperationsCenterDashboardAPI = (
+    create_ws21_dashboard_api()
+)
+
+
+# =========================================================
+# Dependency configuration
+# =========================================================
+
+def configure_dashboard_api(
+    dashboard_api: OperationsCenterDashboardAPI,
+) -> None:
+    """
+    Configure the existing Platform Overview dashboard API.
+
+    This preserves compatibility with existing integration
+    tests and application composition.
+
+    It does not affect the WS-21.15 Chat Operations API.
+    """
+
+    global _dashboard_api
+
+    if dashboard_api is None:
+        raise ValueError(
+            "Dashboard API cannot be None."
+        )
+
+    _dashboard_api = dashboard_api
+
+
+def get_dashboard_api() -> OperationsCenterDashboardAPI:
+    """
+    Provide the existing Platform Overview application boundary.
+    """
+
+    return _dashboard_api
+
+
+def get_health_refresh_service() -> (
+    ProviderHealthRefreshService | None
+):
+    """
+    Provide the optional provider health refresh service.
+    """
+
+    return _health_refresh_service
+
+
+def get_operational_events_api() -> (
+    OperationsCenterOperationalEventsAPI
+):
+    """
+    Provide the existing operational events application boundary.
+    """
+
+    return _operational_events_api
+
+
+def get_ws21_chat_operations_api() -> (
+    WS21OperationsCenterDashboardAPI
+):
+    """
+    Provide the WS-21.15 Chat Operations application boundary.
+
+    This dependency is deliberately separate from the existing
+    Platform Overview API.
+    """
+
+    return _ws21_chat_operations_api
+
+
+# =========================================================
+# EXISTING Platform Overview
+# =========================================================
+
+@router.get("/dashboard")
+async def get_operations_center_dashboard(
+    dashboard_api: OperationsCenterDashboardAPI = Depends(
+        get_dashboard_api
+    ),
+    health_refresh_service: (
+        ProviderHealthRefreshService | None
+    ) = Depends(
+        get_health_refresh_service
+    ),
+) -> dict[str, Any]:
+    """
+    Existing Platform Overview endpoint.
+
+    IMPORTANT:
+
+    This route is intentionally unchanged in contract.
+
+    It continues to expose the existing Operations Center
+    Platform Overview.
+    """
+
+    if health_refresh_service is not None:
+        await health_refresh_service.refresh()
+
+    return dashboard_api.get_dashboard()
+
+
+# =========================================================
+# WS-21.15 Chat Operations
+# =========================================================
+
+@router.get("/chat-operations")
+async def get_operations_center_chat_operations(
+    dashboard_api: WS21OperationsCenterDashboardAPI = Depends(
+        get_ws21_chat_operations_api
+    ),
+) -> dict[str, Any]:
+    """
+    WS-21.15 additive Chat Operations endpoint.
+
+    Contract:
+
+        generated_at
+        overall
+        private_classroom
+        announcement_group
+        incidents
+
+    This endpoint is intentionally independent from the
+    existing Platform Overview implementation.
+
+    It is read-only and performs no operational action.
+    """
+
+    return await dashboard_api.get_dashboard()
+
+
+# =========================================================
+# Existing operational events
+# =========================================================
+
+@router.get("/operational-events")
+def get_operations_center_operational_events(
+    operational_events_api: OperationsCenterOperationalEventsAPI = Depends(
+        get_operational_events_api
+    ),
+) -> list[dict[str, Any]]:
+    """
+    Return operational event history.
+    """
+
+    return operational_events_api.list_events()
+
+
+__all__ = [
+    "router",
+]
+
+
+============================================================
+FILE: .\backend\api\main.py
+============================================================
+"""
+EasyChatBot API Application.
+
+Hosts the user interaction layer.
+
+The API application is responsible only for:
+
+- creating the FastAPI application;
+- registering API routes;
+- exposing the application health endpoint;
+- triggering application composition bootstrap during startup;
+- allowing the local frontend to communicate with the API.
+
+Business logic belongs to application services.
+
+Agent execution belongs to the agent/runtime layer.
+
+Provider construction belongs to the composition layer.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.api.routes import router
+from backend.api.character_theme_routes import (
+    router as character_theme_router,
+)
+from backend.api.character_routes import (
+    router as character_router,
+)
+
+from backend.application.bootstrap import (
+    bootstrap_application,
+)
+
+from backend.application.telegram_bootstrap import (
+    start_telegram_runtime,
+    stop_telegram_runtime,
+)
+
+from app.interfaces.provider_management.operations_center_dashboard_router import (
+    router as operations_center_dashboard_router,
+)
+
+from backend.app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Manage application startup and shutdown lifecycle.
+
+    Startup:
+        - compose application dependencies;
+        - start Telegram transport runtime.
+
+    Shutdown:
+        - stop Telegram transport runtime.
+
+    This layer does not:
+
+    - execute agents;
+    - execute capabilities;
+    - create providers;
+    - create Runtime components.
+    """
+
+    bootstrap_application()
+
+    await start_telegram_runtime()
+
+    try:
+        yield
+
+    finally:
+        await stop_telegram_runtime()
+
+
+def create_app() -> FastAPI:
+    """
+    Create the EasyChatBot FastAPI application.
+
+    Application composition is intentionally separated
+    from the HTTP layer.
+
+    This function:
+
+    - creates the FastAPI application;
+    - configures local frontend access;
+    - registers API routes;
+    - attaches lifecycle management.
+
+    It does not:
+
+    - execute agents;
+    - execute capabilities;
+    - call providers directly;
+    - create Runtime executors.
+    """
+
+    application = FastAPI(
+        title="EasyChatBot",
+        description="AI companion learning platform",
+        lifespan=lifespan,
+    )
+
+    # =========================================================
+    # Local Frontend CORS
+    # =========================================================
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:5500",
+            "http://localhost:5500",
+            "http://127.0.0.1:5501",
+            "http://localhost:5501",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # =========================================================
+    # Existing API Routes
+    # =========================================================
+
+    application.include_router(
+        router,
+    )
+
+    # =========================================================
+    # Character Theme Routes
+    # =========================================================
+
+    application.include_router(
+        character_theme_router,
+    )
+
+    # =========================================================
+    # Character Catalogue Routes
+    # =========================================================
+
+    application.include_router(
+        character_router,
+    )
+
+    # =========================================================
+    # AI Operations Center Routes
+    # =========================================================
+
+    application.include_router(
+        operations_center_dashboard_router,
+    )
+
+    # =========================================================
+    # Cybersecurity Intelligence Routes
+    # =========================================================
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    return application
+
+
+app = create_app()
+
+
+@app.get("/")
+def health() -> dict[str, str]:
+    """
+    Return application health status.
+    """
+
+    return {
+        "status": "EasyChatBot running",
+        "architecture": (
+            "Runtime + Agents + Memory"
+        ),
+    }
+
+
+============================================================
+FILE: .\backend\app\api\operations_center.py
+============================================================
+"""
+EasyChatBot AI Operations Center HTTP API.
+
+FastAPI adapter for the read-only Operations Center dashboards.
+
+Existing Platform Overview routes are preserved.
+
+WS-21.15 adds:
+
+    GET /api/operations-center/chat-operations
+
+Architecture:
+
+    Existing Platform Overview
+        |
+        +--> /dashboard
+        +--> /operational-events
+
+    New Chat Operations
+        |
+        +--> /chat-operations
+              |
+              v
+        ChatOperationsDashboardAPI
+              |
+              v
+        OperationalDashboardService
+
+This module does NOT:
+
+- execute agents;
+- execute providers;
+- modify Runtime routing;
+- approve escalations;
+- send notifications;
+- perform remediation.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter
+
+from backend.app.application.operations_center.chat_operations_dashboard_api import (
+    create_chat_operations_dashboard_api,
+)
+
+
+router = APIRouter(
+    prefix="/api/operations-center",
+    tags=[
+        "operations-center",
+    ],
+)
+
+
+# =========================================================
+# Existing Platform Overview composition
+# =========================================================
+
+from backend.app.application.operations_center.dashboard_composition import (
+    create_operations_center_dashboard_api,
+)
+
+
+_dashboard_api = (
+    create_operations_center_dashboard_api()
+)
+
+
+# =========================================================
+# WS-21.15 Chat Operations composition
+# =========================================================
+
+_chat_operations_api = (
+    create_chat_operations_dashboard_api()
+)
+
+
+# =========================================================
+# Existing Platform Overview endpoint
+# =========================================================
+
+@router.get(
+    "/dashboard",
+)
+async def get_dashboard() -> dict[str, Any]:
+    """
+    Return the existing Platform Overview dashboard.
+
+    IMPORTANT:
+
+    This endpoint is intentionally unchanged in contract.
+    """
+
+    return await _dashboard_api.get_dashboard()
+
+
+# =========================================================
+# WS-21.15 Chat Operations endpoint
+# =========================================================
+
+@router.get(
+    "/chat-operations",
+)
+async def get_chat_operations_dashboard() -> dict[str, Any]:
+    """
+    Return the additive WS-21.15 Chat Operations dashboard.
+
+    Contract:
+
+        generated_at
+        overall
+        private_classroom
+        announcement_group
+        incidents
+
+    This is intentionally separate from the existing
+    Platform Overview endpoint.
+    """
+
+    return await _chat_operations_api.get_dashboard()
+
+
+# =========================================================
+# Existing operational events endpoint
+# =========================================================
+
+@router.get(
+    "/operational-events",
+)
+def get_operational_events() -> list[dict[str, Any]]:
+    """
+    Return operational event history.
+
+    NOTE:
+
+    This endpoint remains part of the existing Operations Center
+    implementation and is intentionally not changed by WS-21.15.
+    """
+
+    # Preserve the existing behavior through the existing
+    # application boundary when available.
+    #
+    # The existing router implementation owns the authoritative
+    # operational-events composition.
+    from backend.app.application.operations_center.dashboard_composition import (
+        OperationsCenterComposition,
+    )
+
+    composition = OperationsCenterComposition()
+
+    return composition.event_service.list_events()
+
+
+__all__ = [
+    "router",
+]
+
+
+============================================================
+FILE: .\backend\app\application\operations_center\chat_operations_dashboard_api.py
+============================================================
+"""
+EasyChatBot Chat Operations Dashboard application API.
+
+WS-21.15 additive application boundary.
+
+This API exposes the WS-21 operational dashboard contract for the
+dedicated Chat Operations screen.
+
+It does NOT replace the existing Platform Overview API.
+
+Contract:
+
+    generated_at
+    overall
+    private_classroom
+    announcement_group
+    incidents
+
+Architecture:
+
+    HTTP/API
+        |
+        v
+    ChatOperationsDashboardAPI
+        |
+        v
+    OperationalDashboardService
+        |
+        +--> OperationalHealthSnapshotService
+        |
+        +--> OperationalEventService
+
+The API is read-only and performs no remediation, provider routing,
+agent execution, notification, or production mutation.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from backend.app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from backend.app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from backend.app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+
+
+class ChatOperationsDashboardAPI:
+    """
+    Read-only application boundary for WS-21.15 Chat Operations.
+
+    The API deliberately returns the established WS-21 dashboard
+    contract rather than the legacy Platform Overview contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        dashboard_service: OperationalDashboardService,
+    ) -> None:
+        if dashboard_service is None:
+            raise ValueError(
+                "dashboard_service cannot be None."
+            )
+
+        self._dashboard_service = dashboard_service
+
+    async def get_dashboard(self) -> dict[str, Any]:
+        """
+        Return one WS-21 operational dashboard snapshot.
+        """
+
+        snapshot = (
+            await self._dashboard_service
+            .create_dashboard_snapshot()
+        )
+
+        return snapshot.as_dict()
+
+
+def create_chat_operations_dashboard_api() -> (
+    ChatOperationsDashboardAPI
+):
+    """
+    Create the WS-21.15 Chat Operations application boundary.
+
+    Composition is intentionally isolated from the HTTP adapter.
+    """
+
+    configuration = ProductionHealthConfiguration()
+
+    readiness_service = ProductionReadinessService(
+        checks=configuration.build_checks(),
+    )
+
+    health_snapshot_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=readiness_service,
+        )
+    )
+
+    event_service = OperationalEventService()
+
+    dashboard_service = OperationalDashboardService(
+        health_snapshot_service=health_snapshot_service,
+        event_service=event_service,
+    )
+
+    return ChatOperationsDashboardAPI(
+        dashboard_service=dashboard_service,
+    )
+
+
+__all__ = [
+    "ChatOperationsDashboardAPI",
+    "create_chat_operations_dashboard_api",
+]
+
+
+============================================================
+FILE: .\backend\app\application\operations_center\dashboard_api.py
+============================================================
+"""
+Operations Center Dashboard API application boundary.
+
+This layer contains no health logic and no infrastructure access.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.operations_center.dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+
+class OperationsCenterDashboardAPI:
+    """Read-only asynchronous application API."""
+
+    def __init__(
+        self,
+        *,
+        facade: OperationsCenterDashboardFacade,
+    ) -> None:
+        if facade is None:
+            raise ValueError("Dashboard facade cannot be None.")
+        self._facade = facade
+
+    async def get_dashboard(self) -> dict[str, Any]:
+        return await self._facade.get_dashboard()
+
+
+__all__ = ["OperationsCenterDashboardAPI"]
+
+
+
+============================================================
+FILE: .\backend\app\application\operations_center\dashboard_composition.py
+============================================================
+"""
+EasyChatBot Operations Center production composition.
+
+The Operations Center observes existing production dependencies. It does
+not create or execute a second AI/runtime stack.
+
+Composition:
+ProductionHealthConfiguration
+    -> ProductionReadinessService
+    -> OperationalHealthSnapshotService
+    -> OperationalDashboardService
+    -> OperationsCenterDashboardFacade
+    -> OperationsCenterDashboardAPI
+
+OperationalEventService is application-owned and deliberately created once
+by this composition root so in-memory incident/event state is not reset per
+request.
+"""
+from __future__ import annotations
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from backend.app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from backend.app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from backend.app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from backend.app.application.operations_center.dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+from backend.app.application.operations_center.dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+
+class OperationsCenterComposition:
+    """Application-owned, reusable Operations Center dependencies."""
+
+    def __init__(self) -> None:
+        configuration = ProductionHealthConfiguration()
+
+        readiness_service = ProductionReadinessService(
+            checks=configuration.build_checks(),
+        )
+
+        health_snapshot_service = OperationalHealthSnapshotService(
+            readiness_service=readiness_service,
+        )
+
+        event_service = OperationalEventService()
+
+        dashboard_service = OperationalDashboardService(
+            health_snapshot_service=health_snapshot_service,
+            event_service=event_service,
+        )
+
+        facade = OperationsCenterDashboardFacade(
+            dashboard_service=dashboard_service,
+        )
+
+        self._event_service = event_service
+        self._dashboard_api = OperationsCenterDashboardAPI(
+            facade=facade,
+        )
+
+    @property
+    def event_service(self) -> OperationalEventService:
+        """Return the application-owned operational event service."""
+        return self._event_service
+
+    @property
+    def dashboard_api(self) -> OperationsCenterDashboardAPI:
+        """Return the application-owned dashboard API."""
+        return self._dashboard_api
+
+
+def create_operations_center_dashboard_api() -> OperationsCenterDashboardAPI:
+    """Create a production Operations Center application API."""
+    return OperationsCenterComposition().dashboard_api
+
+
+__all__ = [
+    "OperationsCenterComposition",
+    "create_operations_center_dashboard_api",
+]
+
+
+
+============================================================
+FILE: .\backend\app\application\operations_center\dashboard_facade.py
+============================================================
+"""
+Operations Center Dashboard Facade.
+
+Read-only application boundary for the real WS-21 operational dashboard.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+
+
+class OperationsCenterDashboardFacade:
+    """Protect the HTTP/UI contract from internal dashboard services."""
+
+    def __init__(
+        self,
+        *,
+        dashboard_service: OperationalDashboardService,
+    ) -> None:
+        if dashboard_service is None:
+            raise ValueError("Dashboard service cannot be None.")
+
+        self._dashboard_service = dashboard_service
+
+    async def get_dashboard(self) -> dict[str, Any]:
+        """Return the real, sanitized operational dashboard snapshot."""
+        snapshot = await self._dashboard_service.create_dashboard_snapshot()
+        return snapshot.as_dict()
+
+
+__all__ = ["OperationsCenterDashboardFacade"]
+
+
+
+============================================================
+FILE: .\backend\app\application\health\health_result.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class HealthStatus(str, Enum):
+    HEALTHY = "healthy"
+    UNHEALTHY = "unhealthy"
+    NOT_CONFIGURED = "not_configured"
+
+
+@dataclass(frozen=True)
+class HealthCheckResult:
+    """Sanitized result of one dependency health check."""
+
+    name: str
+    status: HealthStatus
+    details: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.status is HealthStatus.HEALTHY
+
+
+@dataclass(frozen=True)
+class ProductionReadinessResult:
+    """Aggregated, dashboard-safe production readiness result."""
+
+    status: HealthStatus
+    checks: tuple[HealthCheckResult, ...]
+
+    @property
+    def ready(self) -> bool:
+        return self.status is HealthStatus.HEALTHY
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "ready": self.ready,
+            "checks": {
+                check.name: {
+                    "status": check.status.value,
+                    "details": dict(check.details),
+                }
+                for check in self.checks
+            },
+        }
+
+
+
+============================================================
+FILE: .\backend\app\application\health\operational_dashboard_models.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from .health_result import HealthStatus
+from .operational_event import OperationalSurface
+from .operational_incident import OperationalIncident
+
+
+@dataclass(frozen=True)
+class DashboardDependencyStatus:
+    name: str
+    status: HealthStatus
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "status": self.status.value,
+            "details": dict(self.details),
+        }
+
+
+@dataclass(frozen=True)
+class DashboardIncidentSummary:
+    total: int = 0
+    open: int = 0
+    critical: int = 0
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    info: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "total": self.total,
+            "open": self.open,
+            "critical": self.critical,
+            "high": self.high,
+            "medium": self.medium,
+            "low": self.low,
+            "info": self.info,
+        }
+
+
+@dataclass(frozen=True)
+class DashboardOperationalMetrics:
+    message_failures: int = 0
+    rate_limit_events: int = 0
+    abuse_events: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "message_failures": self.message_failures,
+            "rate_limit_events": self.rate_limit_events,
+            "abuse_events": self.abuse_events,
+        }
+
+
+@dataclass(frozen=True)
+class DashboardSurfaceStatus:
+    surface: OperationalSurface
+    status: HealthStatus
+    dependencies: tuple[
+        DashboardDependencyStatus,
+        ...,
+    ] = ()
+    incidents: DashboardIncidentSummary = (
+        DashboardIncidentSummary()
+    )
+    metrics: DashboardOperationalMetrics = (
+        DashboardOperationalMetrics()
+    )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "surface": self.surface.value,
+            "status": self.status.value,
+            "dependencies": [
+                dependency.as_dict()
+                for dependency in self.dependencies
+            ],
+            "incidents": self.incidents.as_dict(),
+            "metrics": self.metrics.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class DashboardIncident:
+    """
+    Sanitized incident representation for the dashboard.
+
+    Operational references are retained for authorized investigation.
+    Learner content and secrets are never part of this model.
+    """
+
+    incident_id: str
+    correlation_id: str
+    surface: OperationalSurface
+    severity: str
+    status: str
+    first_seen: datetime
+    last_seen: datetime
+    occurrence_count: int
+    user_reference: str | None = None
+    world_id: str | None = None
+
+    @classmethod
+    def from_incident(
+        cls,
+        incident: OperationalIncident,
+    ) -> "DashboardIncident":
+        return cls(
+            incident_id=incident.incident_id,
+            correlation_id=incident.correlation_id,
+            surface=incident.surface,
+            severity=incident.severity.value,
+            status=incident.status.value,
+            first_seen=incident.first_seen,
+            last_seen=incident.last_seen,
+            occurrence_count=incident.occurrence_count,
+            user_reference=incident.user_reference,
+            world_id=incident.world_id,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "incident_id": self.incident_id,
+            "correlation_id": self.correlation_id,
+            "surface": self.surface.value,
+            "severity": self.severity,
+            "status": self.status,
+            "first_seen": self.first_seen.isoformat(),
+            "last_seen": self.last_seen.isoformat(),
+            "occurrence_count": self.occurrence_count,
+            "user_reference": self.user_reference,
+            "world_id": self.world_id,
+        }
+
+
+@dataclass(frozen=True)
+class OperationalDashboardSnapshot:
+    """
+    Stable application contract consumed by the future
+    Operations Center UI/API adapter.
+    """
+
+    generated_at: datetime
+    overall_status: HealthStatus
+    health_score: int
+
+    private_classroom: DashboardSurfaceStatus
+    announcement_group: DashboardSurfaceStatus
+
+    incidents: tuple[
+        DashboardIncident,
+        ...
+    ] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "generated_at": (
+                self.generated_at.isoformat()
+            ),
+            "overall": {
+                "status": self.overall_status.value,
+                "health_score": self.health_score,
+            },
+            "private_classroom": (
+                self.private_classroom.as_dict()
+            ),
+            "announcement_group": (
+                self.announcement_group.as_dict()
+            ),
+            "incidents": [
+                incident.as_dict()
+                for incident in self.incidents
+            ],
+        }
+
+
+__all__ = [
+    "DashboardDependencyStatus",
+    "DashboardIncident",
+    "DashboardIncidentSummary",
+    "DashboardOperationalMetrics",
+    "DashboardSurfaceStatus",
+    "OperationalDashboardSnapshot",
+]
+
+
+============================================================
+FILE: .\backend\app\application\health\operational_dashboard_service.py
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .health_result import HealthStatus
+from .operational_dashboard_models import (
+    DashboardDependencyStatus,
+    DashboardIncident,
+    DashboardIncidentSummary,
+    DashboardOperationalMetrics,
+    DashboardSurfaceStatus,
+    OperationalDashboardSnapshot,
+)
+from .operational_event import (
+    OperationalEventType,
+    OperationalSurface,
+)
+from .operational_event_service import (
+    OperationalEventService,
+)
+from .operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+
+
+class OperationalDashboardService:
+    """
+    Application service producing the read-only operational
+    dashboard contract.
+
+    WS-21.10 aggregates two authoritative sources:
+
+        WS-21.8
+            Current dependency/system health.
+
+        WS-21.9
+            Operational events and incidents.
+
+    The service does not access infrastructure directly.
+
+    It does NOT:
+
+        - access Telegram directly
+        - access PostgreSQL directly
+        - execute LLM operations
+        - perform remediation
+        - send notifications
+        - modify production state
+    """
+
+    def __init__(
+        self,
+        *,
+        health_snapshot_service: (
+            OperationalHealthSnapshotService
+        ),
+        event_service: OperationalEventService,
+    ) -> None:
+        if health_snapshot_service is None:
+            raise ValueError(
+                "health_snapshot_service cannot be None."
+            )
+
+        if event_service is None:
+            raise ValueError(
+                "event_service cannot be None."
+            )
+
+        self._health_snapshot_service = (
+            health_snapshot_service
+        )
+
+        self._event_service = (
+            event_service
+        )
+
+    async def create_dashboard_snapshot(
+        self,
+    ) -> OperationalDashboardSnapshot:
+        """
+        Produce one complete dashboard snapshot.
+
+        Current dependency health comes from WS-21.8.
+
+        Operational events and incidents come from WS-21.9.
+        """
+
+        health = await (
+            self._health_snapshot_service
+            .create_snapshot()
+        )
+
+        incidents = (
+            self._event_service
+            .list_incidents()
+        )
+
+        # ---------------------------------------------------------
+        # WS-21.9 is the authoritative source for operational
+        # events represented by the dashboard.
+        # ---------------------------------------------------------
+        operational_events = tuple(
+            event
+            for incident in incidents
+            for event in incident.events
+        )
+
+        dashboard_incidents = tuple(
+            DashboardIncident.from_incident(
+                incident
+            )
+            for incident in incidents
+        )
+
+        private_incidents = tuple(
+            incident
+            for incident in incidents
+            if incident.surface
+            is OperationalSurface.PRIVATE_CLASSROOM
+        )
+
+        announcement_incidents = tuple(
+            incident
+            for incident in incidents
+            if incident.surface
+            is OperationalSurface.ANNOUNCEMENT_GROUP
+        )
+
+        private_events = tuple(
+            event
+            for event in operational_events
+            if event.surface
+            is OperationalSurface.PRIVATE_CLASSROOM
+        )
+
+        announcement_events = tuple(
+            event
+            for event in operational_events
+            if event.surface
+            is OperationalSurface.ANNOUNCEMENT_GROUP
+        )
+
+        private_status = (
+            self._surface_status(
+                health=health,
+                surface=(
+                    OperationalSurface.PRIVATE_CLASSROOM
+                ),
+                incidents=private_incidents,
+                events=private_events,
+            )
+        )
+
+        announcement_status = (
+            self._surface_status(
+                health=health,
+                surface=(
+                    OperationalSurface.ANNOUNCEMENT_GROUP
+                ),
+                incidents=announcement_incidents,
+                events=announcement_events,
+            )
+        )
+
+        return OperationalDashboardSnapshot(
+            generated_at=datetime.now(
+                timezone.utc
+            ),
+            overall_status=health.overall_status,
+            health_score=(
+                self._calculate_health_score(
+                    health.overall_status,
+                    incidents,
+                )
+            ),
+            private_classroom=private_status,
+            announcement_group=announcement_status,
+            incidents=dashboard_incidents,
+        )
+
+    def _surface_status(
+        self,
+        *,
+        health,
+        surface: OperationalSurface,
+        incidents,
+        events,
+    ) -> DashboardSurfaceStatus:
+        dependencies = (
+            self._dependency_statuses(
+                health
+            )
+        )
+
+        incident_summary = (
+            self._incident_summary(
+                incidents
+            )
+        )
+
+        metrics = (
+            self._operational_metrics(
+                events
+            )
+        )
+
+        status = self._surface_health_status(
+            health=health,
+            surface=surface,
+            incidents=incidents,
+        )
+
+        return DashboardSurfaceStatus(
+            surface=surface,
+            status=status,
+            dependencies=dependencies,
+            incidents=incident_summary,
+            metrics=metrics,
+        )
+
+    @staticmethod
+    def _dependency_statuses(
+        health,
+    ) -> tuple[
+        DashboardDependencyStatus,
+        ...,
+    ]:
+        result = []
+
+        for name, value in (
+            health.dependency_health.items()
+        ):
+            try:
+                status = HealthStatus(
+                    value.get(
+                        "status",
+                        HealthStatus.UNHEALTHY.value,
+                    )
+                )
+            except ValueError:
+                status = HealthStatus.UNHEALTHY
+
+            details = value.get(
+                "details",
+                {},
+            )
+
+            result.append(
+                DashboardDependencyStatus(
+                    name=name,
+                    status=status,
+                    details=dict(details),
+                )
+            )
+
+        return tuple(result)
+
+    @staticmethod
+    def _incident_summary(
+        incidents,
+    ) -> DashboardIncidentSummary:
+        return DashboardIncidentSummary(
+            total=len(incidents),
+            open=sum(
+                incident.is_open
+                for incident in incidents
+            ),
+            critical=sum(
+                incident.severity.value
+                == "critical"
+                for incident in incidents
+            ),
+            high=sum(
+                incident.severity.value
+                == "high"
+                for incident in incidents
+            ),
+            medium=sum(
+                incident.severity.value
+                == "medium"
+                for incident in incidents
+            ),
+            low=sum(
+                incident.severity.value
+                == "low"
+                for incident in incidents
+            ),
+            info=sum(
+                incident.severity.value
+                == "info"
+                for incident in incidents
+            ),
+        )
+
+    @staticmethod
+    def _operational_metrics(
+        events,
+    ) -> DashboardOperationalMetrics:
+        """
+        Convert WS-21.9 operational events into
+        dashboard KPI/KRI counters.
+        """
+
+        return DashboardOperationalMetrics(
+            message_failures=sum(
+                event.event_type
+                is OperationalEventType.MESSAGE_FAILURE
+                for event in events
+            ),
+            rate_limit_events=sum(
+                event.event_type
+                is OperationalEventType.RATE_LIMIT
+                for event in events
+            ),
+            abuse_events=sum(
+                event.event_type
+                is OperationalEventType.ABUSE
+                for event in events
+            ),
+        )
+
+    @staticmethod
+    def _surface_health_status(
+        *,
+        health,
+        surface,
+        incidents,
+    ) -> HealthStatus:
+        """
+        Surface status is derived conservatively.
+
+        An open critical/high incident makes the
+        surface unhealthy. Otherwise dependency
+        health is used.
+        """
+
+        if any(
+            incident.is_open
+            and incident.severity.value
+            in {
+                "critical",
+                "high",
+            }
+            for incident in incidents
+        ):
+            return HealthStatus.UNHEALTHY
+
+        if (
+            surface
+            is OperationalSurface.PRIVATE_CLASSROOM
+        ):
+            statuses = (
+                health.telegram_status,
+                health.postgresql_status,
+                health.llm_status,
+            )
+        else:
+            statuses = (
+                health.telegram_status,
+            )
+
+        if all(
+            status is HealthStatus.HEALTHY
+            for status in statuses
+        ):
+            return HealthStatus.HEALTHY
+
+        return HealthStatus.UNHEALTHY
+
+    @staticmethod
+    def _calculate_health_score(
+        overall_status: HealthStatus,
+        incidents,
+    ) -> int:
+        """
+        Dashboard KPI only.
+
+        This score is not a security decision and
+        does not trigger automated remediation.
+        """
+
+        if (
+            overall_status
+            is HealthStatus.HEALTHY
+        ):
+            score = 100
+        else:
+            score = 60
+
+        critical_open = sum(
+            incident.is_open
+            and incident.severity.value
+            == "critical"
+            for incident in incidents
+        )
+
+        high_open = sum(
+            incident.is_open
+            and incident.severity.value
+            == "high"
+            for incident in incidents
+        )
+
+        score -= (
+            critical_open * 20
+        )
+
+        score -= (
+            high_open * 10
+        )
+
+        return max(
+            0,
+            min(
+                100,
+                score,
+            ),
+        )
+
+
+__all__ = [
+    "OperationalDashboardService",
+]
+
+
+============================================================
+FILE: .\backend\app\application\health\operational_event.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+
+class OperationalSurface(str, Enum):
+    """
+    Operational surface being monitored.
+
+    Private classroom and announcement-group operations
+    remain explicitly separated.
+    """
+
+    PRIVATE_CLASSROOM = "private_classroom"
+    ANNOUNCEMENT_GROUP = "announcement_group"
+
+
+class OperationalEventType(str, Enum):
+    """Supported operational event categories."""
+
+    MESSAGE_FAILURE = "message_failure"
+    RATE_LIMIT = "rate_limit"
+    ABUSE = "abuse"
+    PROVIDER_FAILURE = "provider_failure"
+    DATABASE_FAILURE = "database_failure"
+    TELEGRAM_FAILURE = "telegram_failure"
+    NOTIFICATION_FAILURE = "notification_failure"
+
+
+class OperationalSeverity(str, Enum):
+    """Operational incident severity."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+@dataclass(frozen=True)
+class OperationalEvent:
+    """
+    Sanitized operational event.
+
+    The event intentionally contains operational metadata only.
+
+    It must never contain:
+        - learner message content
+        - prompts
+        - model responses
+        - passwords
+        - API keys
+        - database URLs
+        - Telegram bot tokens
+    """
+
+    event_type: OperationalEventType
+    surface: OperationalSurface
+    correlation_id: str
+
+    severity: OperationalSeverity = (
+        OperationalSeverity.MEDIUM
+    )
+
+    occurred_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    user_reference: str | None = None
+    world_id: str | None = None
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        correlation_id = (
+            self.correlation_id
+            .replace("\r", "")
+            .replace("\n", "")
+            .strip()
+        )
+
+        if not correlation_id:
+            raise ValueError(
+                "correlation_id cannot be empty."
+            )
+
+        object.__setattr__(
+            self,
+            "correlation_id",
+            correlation_id,
+        )
+
+        if self.user_reference is not None:
+            object.__setattr__(
+                self,
+                "user_reference",
+                self._clean_identifier(
+                    self.user_reference
+                ),
+            )
+
+        if self.world_id is not None:
+            object.__setattr__(
+                self,
+                "world_id",
+                self._clean_identifier(
+                    self.world_id
+                ),
+            )
+
+    @staticmethod
+    def _clean_identifier(
+        value: str,
+    ) -> str:
+        return (
+            str(value)
+            .replace("\r", "")
+            .replace("\n", "")
+            .strip()
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """
+        Return an operationally safe representation.
+
+        Learner content is not part of the event contract.
+        """
+
+        return {
+            "event_type": self.event_type.value,
+            "surface": self.surface.value,
+            "correlation_id": self.correlation_id,
+            "severity": self.severity.value,
+            "occurred_at": (
+                self.occurred_at.isoformat()
+            ),
+            "user_reference": self.user_reference,
+            "world_id": self.world_id,
+            "metadata": dict(self.metadata),
+        }
+
+
+__all__ = [
+    "OperationalEvent",
+    "OperationalEventType",
+    "OperationalSeverity",
+    "OperationalSurface",
+]
+
+
+============================================================
+FILE: .\backend\app\application\health\operational_event_service.py
+============================================================
+from __future__ import annotations
+
+from collections.abc import Iterable
+from uuid import uuid4
+
+from .operational_event import (
+    OperationalEvent,
+)
+from .operational_incident import (
+    IncidentStatus,
+    OperationalIncident,
+)
+
+
+class OperationalEventService:
+    """
+    Application service for operational event correlation
+    and incident lifecycle management.
+
+    This service intentionally uses in-memory state for WS-21.9.
+
+    Persistence will be introduced separately once the event
+    semantics are proven.
+
+    Responsibilities:
+        - accept sanitized operational events
+        - correlate repeated events
+        - create incidents
+        - update occurrence counts
+        - maintain incident lifecycle
+        - expose dashboard-safe snapshots
+
+    Does NOT:
+        - perform remediation
+        - send Telegram messages
+        - modify production systems
+        - execute AI
+        - access learner conversation content
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_incidents: Iterable[
+            OperationalIncident
+        ] = (),
+    ) -> None:
+        self._incidents: dict[
+            str,
+            OperationalIncident,
+        ] = {
+            incident.incident_id: incident
+            for incident in initial_incidents
+        }
+
+        self._correlation_index: dict[
+            str,
+            str,
+        ] = {}
+
+        for incident in self._incidents.values():
+            self._correlation_index[
+                incident.correlation_id
+            ] = incident.incident_id
+
+    def record_event(
+        self,
+        event: OperationalEvent,
+    ) -> OperationalIncident:
+        """
+        Record an event.
+
+        If an open incident already exists for the
+        correlation ID, the event is aggregated into it.
+
+        Otherwise a new incident is created.
+        """
+
+        existing_id = (
+            self._correlation_index.get(
+                event.correlation_id
+            )
+        )
+
+        if existing_id is not None:
+            incident = self._incidents[
+                existing_id
+            ]
+
+            if not incident.is_open:
+                incident = self._create_incident(
+                    event
+                )
+            else:
+                incident.add_event(event)
+
+            return incident
+
+        return self._create_incident(event)
+
+    def get_incident(
+        self,
+        incident_id: str,
+    ) -> OperationalIncident | None:
+        return self._incidents.get(
+            incident_id
+        )
+
+    def get_by_correlation_id(
+        self,
+        correlation_id: str,
+    ) -> OperationalIncident | None:
+        incident_id = (
+            self._correlation_index.get(
+                correlation_id
+            )
+        )
+
+        if incident_id is None:
+            return None
+
+        return self._incidents.get(
+            incident_id
+        )
+
+    def list_incidents(
+        self,
+        *,
+        surface=None,
+        status=None,
+    ) -> tuple[
+        OperationalIncident,
+        ...
+    ]:
+        """
+        Return incidents with optional operational filters.
+        """
+
+        incidents = tuple(
+            self._incidents.values()
+        )
+
+        if surface is not None:
+            incidents = tuple(
+                incident
+                for incident in incidents
+                if incident.surface is surface
+            )
+
+        if status is not None:
+            incidents = tuple(
+                incident
+                for incident in incidents
+                if incident.status is status
+            )
+
+        return incidents
+
+    def transition_incident(
+        self,
+        *,
+        incident_id: str,
+        status: IncidentStatus,
+    ) -> OperationalIncident:
+        """
+        Explicitly transition an incident.
+        """
+
+        incident = self._incidents.get(
+            incident_id
+        )
+
+        if incident is None:
+            raise KeyError(
+                f"Unknown incident: {incident_id}"
+            )
+
+        incident.transition(status)
+
+        return incident
+
+    def count_open_incidents(self) -> int:
+        return sum(
+            incident.is_open
+            for incident
+            in self._incidents.values()
+        )
+
+    def dashboard_snapshot(self) -> dict:
+        """
+        Return a dashboard-safe operational snapshot.
+        """
+
+        incidents = tuple(
+            self._incidents.values()
+        )
+
+        return {
+            "total_incidents": len(
+                incidents
+            ),
+            "open_incidents": sum(
+                incident.is_open
+                for incident in incidents
+            ),
+            "critical_incidents": sum(
+                incident.severity.value
+                == "critical"
+                and incident.is_open
+                for incident in incidents
+            ),
+            "private_classroom_incidents": sum(
+                incident.surface.value
+                == "private_classroom"
+                and incident.is_open
+                for incident in incidents
+            ),
+            "announcement_group_incidents": sum(
+                incident.surface.value
+                == "announcement_group"
+                and incident.is_open
+                for incident in incidents
+            ),
+            "incidents": [
+                incident.as_dict()
+                for incident in incidents
+            ],
+        }
+
+    def _create_incident(
+        self,
+        event: OperationalEvent,
+    ) -> OperationalIncident:
+        incident = OperationalIncident(
+            incident_id=(
+                f"incident-{uuid4().hex}"
+            ),
+            correlation_id=(
+                event.correlation_id
+            ),
+            event_type=event.event_type,
+            surface=event.surface,
+            severity=event.severity,
+            user_reference=(
+                event.user_reference
+            ),
+            world_id=event.world_id,
+            events=[event],
+        )
+
+        self._incidents[
+            incident.incident_id
+        ] = incident
+
+        self._correlation_index[
+            incident.correlation_id
+        ] = incident.incident_id
+
+        return incident
+
+
+__all__ = [
+    "OperationalEventService",
+]
+
+
+============================================================
+FILE: .\backend\app\application\health\operational_health_snapshot.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+import re
+from typing import Any, Protocol
+
+from .health_result import (
+    HealthStatus,
+    ProductionReadinessResult,
+)
+from .operational_event import (
+    OperationalEvent,
+    OperationalEventType,
+    OperationalSurface,
+    OperationalSeverity,
+)
+
+
+class TelegramIdentityResolver(Protocol):
+    """
+    Controlled application boundary for Telegram identity resolution.
+    """
+
+    async def resolve(
+        self,
+        user_reference: str,
+    ) -> str | None:
+        ...
+
+
+@dataclass(frozen=True)
+class OperationalHealthSnapshot:
+    """
+    Complete dashboard-safe operational snapshot.
+    """
+
+    generated_at: datetime
+    overall_status: HealthStatus
+    ready: bool
+
+    dependency_health: dict[str, dict[str, Any]]
+
+    events: tuple[OperationalEvent, ...]
+
+    private_classroom_events: tuple[
+        OperationalEvent,
+        ...
+    ]
+
+    announcement_group_events: tuple[
+        OperationalEvent,
+        ...
+    ]
+
+    @property
+    def postgresql_status(self) -> HealthStatus:
+        return self._dependency_status("postgresql")
+
+    @property
+    def llm_status(self) -> HealthStatus:
+        return self._dependency_status("llm_provider")
+
+    @property
+    def telegram_status(self) -> HealthStatus:
+        return self._dependency_status("telegram")
+
+    def _dependency_status(
+        self,
+        name: str,
+    ) -> HealthStatus:
+        value = self.dependency_health.get(name)
+
+        if value is None:
+            return HealthStatus.UNHEALTHY
+
+        raw_status = value.get(
+            "status",
+            HealthStatus.UNHEALTHY.value,
+        )
+
+        try:
+            return HealthStatus(raw_status)
+        except ValueError:
+            return HealthStatus.UNHEALTHY
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "generated_at": self.generated_at.isoformat(),
+            "overall_status": self.overall_status.value,
+            "ready": self.ready,
+            "dependency_health": {
+                name: dict(details)
+                for name, details
+                in self.dependency_health.items()
+            },
+            "events": [
+                _event_to_dict(event)
+                for event in self.events
+            ],
+            "private_classroom_events": [
+                _event_to_dict(event)
+                for event in self.private_classroom_events
+            ],
+            "announcement_group_events": [
+                _event_to_dict(event)
+                for event in self.announcement_group_events
+            ],
+        }
+
+
+class OperationalHealthSnapshotService:
+    """
+    Produces the complete operational health snapshot.
+    """
+
+    _SECRET_PATTERN = re.compile(
+        r"(?i)"
+        r"(password|passwd|secret|api[_-]?key|"
+        r"access[_-]?token|refresh[_-]?token|"
+        r"authorization|database[_-]?url|"
+        r"telegram[_-]?bot[_-]?token)"
+        r"\s*[:=]\s*"
+        r"[^,\s;]+"
+    )
+
+    _SENSITIVE_KEY_PATTERN = re.compile(
+        r"(?i)"
+        r"password|passwd|secret|api[_-]?key|"
+        r"access[_-]?token|refresh[_-]?token|"
+        r"authorization|database[_-]?url|"
+        r"bot[_-]?token|message|prompt|response"
+    )
+
+    def __init__(
+        self,
+        *,
+        readiness_service,
+        identity_resolver: (
+            TelegramIdentityResolver | None
+        ) = None,
+    ) -> None:
+        if readiness_service is None:
+            raise ValueError(
+                "readiness_service cannot be None."
+            )
+
+        self._readiness_service = readiness_service
+        self._identity_resolver = identity_resolver
+
+    async def create_snapshot(
+        self,
+        *,
+        events: tuple[OperationalEvent, ...] = (),
+    ) -> OperationalHealthSnapshot:
+
+        readiness = await self._readiness_service.check()
+
+        sanitized_events: list[OperationalEvent] = []
+
+        for event in events:
+            sanitized_event = await self._sanitize_event(event)
+            sanitized_events.append(sanitized_event)
+
+        private_events = tuple(
+            event
+            for event in sanitized_events
+            if event.surface
+            is OperationalSurface.PRIVATE_CLASSROOM
+        )
+
+        announcement_events = tuple(
+            event
+            for event in sanitized_events
+            if event.surface
+            is OperationalSurface.ANNOUNCEMENT_GROUP
+        )
+
+        dependency_health = (
+            self._sanitize_dependency_health(readiness)
+        )
+
+        return OperationalHealthSnapshot(
+            generated_at=datetime.now(timezone.utc),
+            overall_status=readiness.status,
+            ready=readiness.ready,
+            dependency_health=dependency_health,
+            events=tuple(sanitized_events),
+            private_classroom_events=private_events,
+            announcement_group_events=announcement_events,
+        )
+
+    async def _sanitize_event(
+        self,
+        event: OperationalEvent,
+    ) -> OperationalEvent:
+
+        user_reference = event.user_reference
+
+        if user_reference and self._identity_resolver:
+            try:
+                resolved = await self._identity_resolver.resolve(
+                    user_reference
+                )
+            except Exception:
+                resolved = None
+
+            if resolved:
+                user_reference = resolved
+
+        sanitized_metadata = self._sanitize_metadata(
+            event.metadata
+        )
+
+        return OperationalEvent(
+            event_type=event.event_type,
+            surface=event.surface,
+            correlation_id=self._sanitize_identifier(
+                event.correlation_id
+            ),
+            severity=event.severity,
+            occurred_at=event.occurred_at,
+            user_reference=(
+                self._sanitize_identifier(user_reference)
+                if user_reference
+                else None
+            ),
+            world_id=(
+                self._sanitize_identifier(event.world_id)
+                if event.world_id
+                else None
+            ),
+            metadata=sanitized_metadata,
+        )
+
+    def _sanitize_dependency_health(
+        self,
+        readiness: ProductionReadinessResult,
+    ) -> dict[str, dict[str, Any]]:
+
+        result: dict[str, dict[str, Any]] = {}
+
+        for check in readiness.checks:
+            details = self._sanitize_metadata(
+                check.details
+            )
+
+            result[
+                self._sanitize_identifier(check.name)
+            ] = {
+                "status": check.status.value,
+                "details": details,
+            }
+
+        return result
+
+    def _sanitize_metadata(
+        self,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+
+        sanitized: dict[str, Any] = {}
+
+        for key, value in metadata.items():
+
+            if self._SENSITIVE_KEY_PATTERN.search(
+                str(key)
+            ):
+                continue
+
+            sanitized[
+                self._sanitize_identifier(str(key))
+            ] = self._sanitize_value(value)
+
+        return sanitized
+
+    def _sanitize_value(
+        self,
+        value: Any,
+    ) -> Any:
+
+        if isinstance(value, dict):
+            return self._sanitize_metadata(value)
+
+        if isinstance(value, (list, tuple)):
+            return [
+                self._sanitize_value(item)
+                for item in value
+            ]
+
+        if isinstance(value, str):
+            sanitized = self._SECRET_PATTERN.sub(
+                "[REDACTED]",
+                value,
+            )
+
+            if len(sanitized) > 500:
+                return sanitized[:500] + "..."
+
+            return sanitized
+
+        if isinstance(value, (int, float, bool)):
+            return value
+
+        return str(value)
+
+    @staticmethod
+    def _sanitize_identifier(value: str) -> str:
+        return (
+            str(value)
+            .replace("\r", "")
+            .replace("\n", "")
+            .strip()
+        )
+
+
+def _event_to_dict(
+    event: OperationalEvent,
+) -> dict[str, Any]:
+
+    return {
+        "event_type": event.event_type.value,
+        "surface": event.surface.value,
+        "correlation_id": event.correlation_id,
+        "severity": event.severity.value,
+        "occurred_at": event.occurred_at.isoformat(),
+        "user_reference": event.user_reference,
+        "world_id": event.world_id,
+        "metadata": dict(event.metadata),
+    }
+
+
+__all__ = [
+    "OperationalEvent",
+    "OperationalEventType",
+    "OperationalSeverity",
+    "OperationalHealthSnapshot",
+    "OperationalHealthSnapshotService",
+    "OperationalSurface",
+    "TelegramIdentityResolver",
+]
+
+
+
+
+============================================================
+FILE: .\backend\app\application\health\operational_incident.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+
+from .operational_event import (
+    OperationalEvent,
+    OperationalEventType,
+    OperationalSeverity,
+    OperationalSurface,
+)
+
+
+class IncidentStatus(str, Enum):
+    """Operational incident lifecycle."""
+
+    DETECTED = "detected"
+    OPEN = "open"
+    ACKNOWLEDGED = "acknowledged"
+    INVESTIGATING = "investigating"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+@dataclass
+class OperationalIncident:
+    """
+    Correlated operational incident.
+
+    An incident aggregates one or more operational events
+    describing the same operational problem.
+
+    This is an application model only. Persistence is deliberately
+    handled outside this service.
+    """
+
+    incident_id: str
+    correlation_id: str
+    event_type: OperationalEventType
+    surface: OperationalSurface
+    severity: OperationalSeverity
+
+    status: IncidentStatus = (
+        IncidentStatus.DETECTED
+    )
+
+    first_seen: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    last_seen: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    occurrence_count: int = 1
+
+    user_reference: str | None = None
+    world_id: str | None = None
+
+    events: list[OperationalEvent] = field(
+        default_factory=list
+    )
+
+    def __post_init__(self) -> None:
+        if not self.incident_id.strip():
+            raise ValueError(
+                "incident_id cannot be empty."
+            )
+
+        if not self.correlation_id.strip():
+            raise ValueError(
+                "correlation_id cannot be empty."
+            )
+
+        if self.occurrence_count < 1:
+            raise ValueError(
+                "occurrence_count must be at least 1."
+            )
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in {
+            IncidentStatus.DETECTED,
+            IncidentStatus.OPEN,
+            IncidentStatus.ACKNOWLEDGED,
+            IncidentStatus.INVESTIGATING,
+        }
+
+    def add_event(
+        self,
+        event: OperationalEvent,
+    ) -> None:
+        """
+        Associate another event with this incident.
+        """
+
+        if event.event_type is not self.event_type:
+            raise ValueError(
+                "Event type does not match incident."
+            )
+
+        if event.surface is not self.surface:
+            raise ValueError(
+                "Event surface does not match incident."
+            )
+
+        if (
+            event.correlation_id
+            != self.correlation_id
+        ):
+            raise ValueError(
+                "Event correlation ID does not "
+                "match incident."
+            )
+
+        self.events.append(event)
+
+        self.occurrence_count += 1
+
+        if event.occurred_at > self.last_seen:
+            self.last_seen = event.occurred_at
+
+        if (
+            self.user_reference is None
+            and event.user_reference is not None
+        ):
+            self.user_reference = (
+                event.user_reference
+            )
+
+        if (
+            self.world_id is None
+            and event.world_id is not None
+        ):
+            self.world_id = event.world_id
+
+    def transition(
+        self,
+        new_status: IncidentStatus,
+    ) -> None:
+        """
+        Apply an explicit lifecycle transition.
+        """
+
+        if not isinstance(
+            new_status,
+            IncidentStatus,
+        ):
+            raise TypeError(
+                "new_status must be IncidentStatus."
+            )
+
+        allowed = {
+            IncidentStatus.DETECTED: {
+                IncidentStatus.OPEN,
+                IncidentStatus.ACKNOWLEDGED,
+                IncidentStatus.RESOLVED,
+            },
+            IncidentStatus.OPEN: {
+                IncidentStatus.ACKNOWLEDGED,
+                IncidentStatus.INVESTIGATING,
+                IncidentStatus.RESOLVED,
+            },
+            IncidentStatus.ACKNOWLEDGED: {
+                IncidentStatus.INVESTIGATING,
+                IncidentStatus.RESOLVED,
+            },
+            IncidentStatus.INVESTIGATING: {
+                IncidentStatus.RESOLVED,
+            },
+            IncidentStatus.RESOLVED: {
+                IncidentStatus.CLOSED,
+            },
+            IncidentStatus.CLOSED: set(),
+        }
+
+        if new_status not in allowed[self.status]:
+            raise ValueError(
+                f"Invalid incident transition: "
+                f"{self.status.value} -> "
+                f"{new_status.value}"
+            )
+
+        self.status = new_status
+
+    def as_dict(self) -> dict:
+        """
+        Return a dashboard-safe incident representation.
+        """
+
+        return {
+            "incident_id": self.incident_id,
+            "correlation_id": self.correlation_id,
+            "event_type": self.event_type.value,
+            "surface": self.surface.value,
+            "severity": self.severity.value,
+            "status": self.status.value,
+            "first_seen": (
+                self.first_seen.isoformat()
+            ),
+            "last_seen": (
+                self.last_seen.isoformat()
+            ),
+            "occurrence_count": (
+                self.occurrence_count
+            ),
+            "user_reference": (
+                self.user_reference
+            ),
+            "world_id": self.world_id,
+            "events": [
+                event.as_dict()
+                for event in self.events
+            ],
+        }
+
+
+__all__ = [
+    "IncidentStatus",
+    "OperationalIncident",
+]
+
+
+============================================================
+FILE: .\backend\app\application\health\production_health_configuration.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from app.infrastructure.health.llm_provider_health_check import (
+    LLMProviderHealthCheck,
+)
+from app.infrastructure.health.postgresql_health_check import (
+    PostgreSQLHealthCheck,
+)
+from app.infrastructure.health.telegram_health_check import (
+    TelegramHealthCheck,
+)
+
+
+@dataclass(frozen=True)
+class ProductionHealthConfiguration:
+    """
+    Composition configuration for production health monitoring.
+
+    Keeps dependency creation outside the readiness service.
+    """
+
+    database_engine: Any | None = None
+
+    telegram_bot_factory: Any | None = None
+
+    llm_provider: str | None = None
+
+    llm_request_get: Any | None = None
+
+    def build_checks(self) -> tuple:
+        """
+        Build production dependency health checks.
+        """
+
+        return (
+            PostgreSQLHealthCheck(
+                engine=self.database_engine,
+            ),
+            LLMProviderHealthCheck(
+                provider=self.llm_provider,
+                request_get=self.llm_request_get,
+            ),
+            TelegramHealthCheck(
+                bot_factory=self.telegram_bot_factory,
+            ),
+        )
+
+
+__all__ = [
+    "ProductionHealthConfiguration",
+]
+
+
+
+
+============================================================
+FILE: .\backend\app\application\health\production_readiness_service.py
+============================================================
+from __future__ import annotations
+
+import logging
+from typing import Iterable
+
+from .dependency_checks import HealthDependencyCheck
+from .health_result import (
+    HealthCheckResult,
+    HealthStatus,
+    ProductionReadinessResult,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ProductionReadinessService:
+    """Runs independent production dependency checks.
+
+    A failed probe is converted into a sanitized unhealthy result and does
+    not prevent the remaining probes from running.
+    """
+
+    def __init__(
+        self,
+        *,
+        checks: Iterable[HealthDependencyCheck],
+    ) -> None:
+        resolved = tuple(checks)
+        names = [check.name for check in resolved]
+
+        if len(names) != len(set(names)):
+            raise ValueError("Health check names must be unique.")
+
+        self._checks = resolved
+
+    async def check(self) -> ProductionReadinessResult:
+        results: list[HealthCheckResult] = []
+
+        for dependency in self._checks:
+            try:
+                result = await dependency.check()
+            except Exception:
+                logger.exception(
+                    "Production dependency health check failed: %s",
+                    dependency.name,
+                )
+                result = HealthCheckResult(
+                    name=dependency.name,
+                    status=HealthStatus.UNHEALTHY,
+                    details={"reason": "health_check_failed"},
+                )
+
+            results.append(result)
+
+        ready = bool(results) and all(
+            result.status is HealthStatus.HEALTHY
+            for result in results
+        )
+
+        return ProductionReadinessResult(
+            status=(
+                HealthStatus.HEALTHY
+                if ready
+                else HealthStatus.UNHEALTHY
+            ),
+            checks=tuple(results),
+        )
+
+
+
+============================================================
+FILE: .\backend\app\infrastructure\health\llm_provider_health_check.py
+============================================================
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Any
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+
+
+class LLMProviderHealthCheck:
+    """Read-only health probe for the configured LLM provider.
+
+    Ollama uses /api/tags.
+
+    OpenAI uses the models endpoint.
+
+    Neither probe generates a learner response or sends
+    learner content to the provider.
+    """
+
+    name = "llm_provider"
+
+    def __init__(
+        self,
+        *,
+        provider: str | None = None,
+        request_get: Any | None = None,
+        openai_client_factory: Any | None = None,
+    ) -> None:
+        self._provider = (
+            provider
+            or os.getenv(
+                "LLM_PROVIDER",
+                "ollama",
+            )
+        ).strip().lower()
+
+        self._request_get = request_get
+        self._openai_client_factory = (
+            openai_client_factory
+        )
+
+    async def check(self) -> HealthCheckResult:
+        if self._provider == "ollama":
+            return await self._check_ollama()
+
+        if self._provider == "openai":
+            return await self._check_openai()
+
+        return HealthCheckResult(
+            name=self.name,
+            status=HealthStatus.UNHEALTHY,
+            details={
+                "reason": "unsupported_provider",
+            },
+        )
+
+    async def _check_ollama(
+        self,
+    ) -> HealthCheckResult:
+        base_url = os.getenv(
+            "OLLAMA_BASE_URL",
+            "http://localhost:11434",
+        ).rstrip("/")
+
+        try:
+            if self._request_get is not None:
+                response = await self._request_get(
+                    f"{base_url}/api/tags"
+                )
+
+                status_code = getattr(
+                    response,
+                    "status_code",
+                    200,
+                )
+
+                if status_code >= 400:
+                    raise RuntimeError(
+                        "Ollama health request failed."
+                    )
+
+            else:
+                import requests
+
+                response = await asyncio.to_thread(
+                    requests.get,
+                    f"{base_url}/api/tags",
+                    timeout=10,
+                )
+
+                response.raise_for_status()
+
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "ollama",
+                    "reachable": True,
+                },
+            )
+
+        except Exception:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "provider": "ollama",
+                    "reason": "provider_unavailable",
+                },
+            )
+
+    async def _check_openai(
+        self,
+    ) -> HealthCheckResult:
+        if not os.getenv(
+            "OPENAI_API_KEY"
+        ):
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.NOT_CONFIGURED,
+                details={
+                    "provider": "openai",
+                    "configured": False,
+                },
+            )
+
+        try:
+            if self._openai_client_factory is None:
+                from openai import AsyncOpenAI
+
+                client = AsyncOpenAI(
+                    api_key=os.environ[
+                        "OPENAI_API_KEY"
+                    ],
+                )
+
+            else:
+                client = (
+                    self._openai_client_factory()
+                )
+
+            await client.models.list()
+
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "openai",
+                    "reachable": True,
+                },
+            )
+
+        except Exception:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "provider": "openai",
+                    "reason": "provider_unavailable",
+                },
+            )
+
+
+__all__ = [
+    "LLMProviderHealthCheck",
+]
+
+
+
+
+
+============================================================
+FILE: .\backend\app\infrastructure\health\postgresql_health_check.py
+============================================================
+from __future__ import annotations
+
+import asyncio
+
+from sqlalchemy import text
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_database_engine,
+)
+
+
+class PostgreSQLHealthCheck:
+    """Read-only PostgreSQL connectivity probe.
+
+    Reuses the existing database factory and performs only SELECT 1.
+    """
+
+    name = "postgresql"
+
+    def __init__(self, *, engine=None) -> None:
+        self._engine = engine
+
+    async def check(self) -> HealthCheckResult:
+        owns_engine = self._engine is None
+        engine = self._engine or create_database_engine()
+
+        try:
+            await asyncio.to_thread(
+                self._select_one,
+                engine,
+            )
+
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+                details={
+                    "connectivity": "ok",
+                },
+            )
+
+        except Exception:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "reason": "database_unavailable",
+                },
+            )
+
+        finally:
+            if owns_engine:
+                await asyncio.to_thread(
+                    engine.dispose,
+                )
+
+    @staticmethod
+    def _select_one(engine) -> None:
+        with engine.connect() as connection:
+            connection.execute(
+                text("SELECT 1")
+            )
+
+
+__all__ = [
+    "PostgreSQLHealthCheck",
+]
+
+
+
+
+
+
+
+============================================================
+FILE: .\backend\app\infrastructure\health\telegram_health_check.py
+============================================================
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+
+
+class TelegramHealthCheck:
+    """Read-only Telegram Bot API readiness probe.
+
+    Uses Telegram getMe to verify that the configured bot token
+    is valid and the Telegram API is reachable.
+
+    No classroom or announcement-group message is sent.
+    """
+
+    name = "telegram"
+
+    def __init__(
+        self,
+        *,
+        bot_factory: Any | None = None,
+    ) -> None:
+        self._bot_factory = bot_factory
+
+    async def check(self) -> HealthCheckResult:
+        token = os.getenv(
+            "TELEGRAM_BOT_TOKEN"
+        )
+
+        if not token:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.NOT_CONFIGURED,
+                details={
+                    "configured": False,
+                },
+            )
+
+        try:
+            if self._bot_factory is None:
+                from telegram import Bot
+
+                bot = Bot(
+                    token=token,
+                )
+            else:
+                bot = self._bot_factory(
+                    token,
+                )
+
+            try:
+                user = await bot.get_me()
+
+            finally:
+                shutdown = getattr(
+                    bot,
+                    "shutdown",
+                    None,
+                )
+
+                if shutdown is not None:
+                    result = shutdown()
+
+                    if hasattr(
+                        result,
+                        "__await__",
+                    ):
+                        await result
+
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+                details={
+                    "configured": True,
+                    "bot_reachable": True,
+                    "bot_id_present": bool(
+                        getattr(
+                            user,
+                            "id",
+                            None,
+                        )
+                    ),
+                },
+            )
+
+        except Exception:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "configured": True,
+                    "reason": "telegram_api_unavailable",
+                },
+            )
+
+
+__all__ = [
+    "TelegramHealthCheck",
+]
+
+
+
+
+
+============================================================
+FILE: .\backend\tests\health\test_ws21_10_dashboard_api_contract.py
+============================================================
+from __future__ import annotations
+
+import pytest
+
+from app.application.health.dependency_checks import (
+    AsyncDependencyCheck,
+    ConfigurationCheck,
+)
+from app.application.health.health_result import (
+    HealthStatus,
+)
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.operational_event import (
+    OperationalEvent,
+    OperationalEventType,
+    OperationalSeverity,
+    OperationalSurface,
+)
+from app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+
+
+async def healthy_probe():
+    return True
+
+
+def make_readiness():
+    return ProductionReadinessService(
+        checks=(
+            ConfigurationCheck(
+                name="telegram",
+                configured=True,
+            ),
+            AsyncDependencyCheck(
+                name="postgresql",
+                probe=healthy_probe,
+            ),
+            AsyncDependencyCheck(
+                name="llm_provider",
+                probe=healthy_probe,
+            ),
+        )
+    )
+
+
+def make_service():
+    health_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=make_readiness()
+        )
+    )
+
+    event_service = (
+        OperationalEventService()
+    )
+
+    return (
+        OperationalDashboardService(
+            health_snapshot_service=(
+                health_service
+            ),
+            event_service=event_service,
+        ),
+        event_service,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_produces_complete_dashboard_contract():
+
+    service, _events = make_service()
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    payload = snapshot.as_dict()
+
+    assert "generated_at" in payload
+    assert "overall" in payload
+    assert "private_classroom" in payload
+    assert "announcement_group" in payload
+    assert "incidents" in payload
+
+    assert (
+        payload["overall"]["status"]
+        == "healthy"
+    )
+
+    assert (
+        payload["overall"]["health_score"]
+        == 100
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_private_classroom_contains_dependencies():
+
+    service, _events = make_service()
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    private = (
+        snapshot.private_classroom
+    )
+
+    dependency_names = {
+        dependency.name
+        for dependency
+        in private.dependencies
+    }
+
+    assert "telegram" in dependency_names
+    assert "postgresql" in dependency_names
+    assert "llm_provider" in dependency_names
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_announcement_group_is_separate():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType
+                .NOTIFICATION_FAILURE
+            ),
+            surface=(
+                OperationalSurface
+                .ANNOUNCEMENT_GROUP
+            ),
+            correlation_id="announcement-001",
+            severity=(
+                OperationalSeverity.HIGH
+            ),
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    assert (
+        snapshot.announcement_group
+        .surface
+        is OperationalSurface.ANNOUNCEMENT_GROUP
+    )
+
+    assert (
+        snapshot.announcement_group
+        .incidents.total
+        == 1
+    )
+
+    assert (
+        snapshot.private_classroom
+        .incidents.total
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_private_operational_metrics_are_exposed():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.MESSAGE_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="message-001",
+        )
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.RATE_LIMIT
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="rate-001",
+        )
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.ABUSE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="abuse-001",
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    metrics = (
+        snapshot.private_classroom
+        .metrics
+    )
+
+    assert metrics.message_failures == 1
+    assert metrics.rate_limit_events == 1
+    assert metrics.abuse_events == 1
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_incident_severity_counts():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType
+                .DATABASE_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="critical-001",
+            severity=(
+                OperationalSeverity.CRITICAL
+            ),
+        )
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.PROVIDER_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="high-001",
+            severity=(
+                OperationalSeverity.HIGH
+            ),
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    summary = (
+        snapshot.private_classroom
+        .incidents
+    )
+
+    assert summary.total == 2
+    assert summary.open == 2
+    assert summary.critical == 1
+    assert summary.high == 1
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_incident_includes_investigation_fields():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.MESSAGE_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="investigate-001",
+            severity=(
+                OperationalSeverity.HIGH
+            ),
+            user_reference="user-ref-001",
+            world_id="world-fr",
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    assert len(
+        snapshot.incidents
+    ) == 1
+
+    incident = snapshot.incidents[0]
+
+    assert (
+        incident.correlation_id
+        == "investigate-001"
+    )
+
+    assert (
+        incident.user_reference
+        == "user-ref-001"
+    )
+
+    assert (
+        incident.world_id
+        == "world-fr"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_dashboard_contract_exposes_no_learner_content():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.MESSAGE_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="safe-001",
+            metadata={
+                "message": (
+                    "PRIVATE LEARNER CONTENT"
+                ),
+                "prompt": (
+                    "PRIVATE PROMPT"
+                ),
+                "response": (
+                    "PRIVATE AI RESPONSE"
+                ),
+                "safe_status": "timeout",
+            },
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    payload = str(
+        snapshot.as_dict()
+    )
+
+    assert (
+        "PRIVATE LEARNER CONTENT"
+        not in payload
+    )
+
+    assert (
+        "PRIVATE PROMPT"
+        not in payload
+    )
+
+    assert (
+        "PRIVATE AI RESPONSE"
+        not in payload
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_dashboard_contract_contains_no_secrets():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType
+                .PROVIDER_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="secret-001",
+            metadata={
+                "api_key": "SUPER-SECRET",
+                "password": "PASSWORD-SECRET",
+                "database_url": (
+                    "postgresql://secret"
+                ),
+            },
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    payload = str(
+        snapshot.as_dict()
+    ).lower()
+
+    assert "super-secret" not in payload
+    assert "password-secret" not in payload
+    assert "postgresql://secret" not in payload
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_critical_incident_reduces_health_score():
+
+    service, event_service = (
+        make_service()
+    )
+
+    event_service.record_event(
+        OperationalEvent(
+            event_type=(
+                OperationalEventType
+                .DATABASE_FAILURE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="critical-001",
+            severity=(
+                OperationalSeverity.CRITICAL
+            ),
+        )
+    )
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    assert (
+        snapshot.overall_status
+        is HealthStatus.HEALTHY
+    )
+
+    assert (
+        snapshot.health_score
+        == 80
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_dashboard_snapshot_is_read_only():
+
+    service, _events = make_service()
+
+    first = (
+        await service.create_dashboard_snapshot()
+    )
+
+    second = (
+        await service.create_dashboard_snapshot()
+    )
+
+    assert (
+        first.private_classroom
+        .incidents.total
+        == second.private_classroom
+        .incidents.total
+    )
+
+    assert (
+        first.announcement_group
+        .incidents.total
+        == second.announcement_group
+        .incidents.total
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_10_dashboard_contract_is_serializable():
+
+    service, _events = make_service()
+
+    snapshot = (
+        await service.create_dashboard_snapshot()
+    )
+
+    payload = snapshot.as_dict()
+
+    assert isinstance(payload, dict)
+
+    assert isinstance(
+        payload["incidents"],
+        list,
+    )
+
+    assert isinstance(
+        payload["private_classroom"],
+        dict,
+    )
+
+    assert isinstance(
+        payload["announcement_group"],
+        dict,
+    )
+
+    assert isinstance(
+        payload["overall"],
+        dict,
+    )
+
+
+============================================================
+FILE: .\backend\tests\health\test_ws21_5_production_readiness.py
+============================================================
+from __future__ import annotations
+
+import pytest
+
+from app.application.health.dependency_checks import (
+    AsyncDependencyCheck,
+    ConfigurationCheck,
+)
+from app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+from app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+
+
+@pytest.mark.asyncio
+async def test_all_dependencies_healthy_produces_ready_result():
+    async def healthy():
+        return True
+
+    service = ProductionReadinessService(
+        checks=(
+            ConfigurationCheck(name="telegram", configured=True),
+            AsyncDependencyCheck(name="postgresql", probe=healthy),
+            AsyncDependencyCheck(name="llm_provider", probe=healthy),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is True
+    assert result.status is HealthStatus.HEALTHY
+    assert all(
+        check.status is HealthStatus.HEALTHY
+        for check in result.checks
+    )
+
+
+@pytest.mark.asyncio
+async def test_postgresql_failure_makes_system_not_ready():
+    async def failing_database():
+        raise RuntimeError("database password=SECRET")
+
+    service = ProductionReadinessService(
+        checks=(
+            AsyncDependencyCheck(
+                name="postgresql",
+                probe=failing_database,
+            ),
+            ConfigurationCheck(name="telegram", configured=True),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is False
+    database = next(
+        check for check in result.checks if check.name == "postgresql"
+    )
+
+    assert database.status is HealthStatus.UNHEALTHY
+    assert "SECRET" not in str(result.as_dict())
+    assert "password" not in str(result.as_dict()).lower()
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_does_not_hide_other_dependency_results():
+    async def failing_llm():
+        raise RuntimeError("provider api_key=SECRET")
+
+    async def healthy():
+        return True
+
+    service = ProductionReadinessService(
+        checks=(
+            ConfigurationCheck(name="telegram", configured=True),
+            AsyncDependencyCheck(name="postgresql", probe=healthy),
+            AsyncDependencyCheck(name="llm_provider", probe=failing_llm),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is False
+    assert {check.name for check in result.checks} == {
+        "telegram",
+        "postgresql",
+        "llm_provider",
+    }
+    assert "SECRET" not in str(result.as_dict())
+
+
+@pytest.mark.asyncio
+async def test_missing_telegram_configuration_is_not_ready():
+    service = ProductionReadinessService(
+        checks=(
+            ConfigurationCheck(name="telegram", configured=False),
+            ConfigurationCheck(name="postgresql", configured=True),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is False
+
+    telegram = next(
+        check for check in result.checks if check.name == "telegram"
+    )
+
+    assert telegram.status is HealthStatus.NOT_CONFIGURED
+    assert telegram.details == {"configured": False}
+
+
+@pytest.mark.asyncio
+async def test_empty_check_set_is_not_ready():
+    service = ProductionReadinessService(checks=())
+
+    result = await service.check()
+
+    assert result.ready is False
+    assert result.status is HealthStatus.UNHEALTHY
+    assert result.checks == ()
+
+
+@pytest.mark.asyncio
+async def test_one_broken_check_does_not_stop_remaining_checks():
+    calls: list[str] = []
+
+    async def broken():
+        calls.append("broken")
+        raise RuntimeError("internal failure")
+
+    async def healthy():
+        calls.append("healthy")
+        return True
+
+    service = ProductionReadinessService(
+        checks=(
+            AsyncDependencyCheck(name="broken_dependency", probe=broken),
+            AsyncDependencyCheck(name="healthy_dependency", probe=healthy),
+        )
+    )
+
+    result = await service.check()
+
+    assert calls == ["broken", "healthy"]
+    assert result.ready is False
+
+    statuses = {
+        check.name: check.status
+        for check in result.checks
+    }
+
+    assert statuses["broken_dependency"] is HealthStatus.UNHEALTHY
+    assert statuses["healthy_dependency"] is HealthStatus.HEALTHY
+
+
+@pytest.mark.asyncio
+async def test_health_result_can_be_returned_directly_by_probe():
+    async def probe():
+        return HealthCheckResult(
+            name="postgresql",
+            status=HealthStatus.HEALTHY,
+            details={"connectivity": "ok"},
+        )
+
+    service = ProductionReadinessService(
+        checks=(
+            AsyncDependencyCheck(name="postgresql", probe=probe),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is True
+    assert result.checks[0].details == {"connectivity": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_configuration_values_are_never_exposed():
+    secret = "super-secret-token"
+
+    service = ProductionReadinessService(
+        checks=(
+            ConfigurationCheck(
+                name="telegram",
+                configured=bool(secret),
+            ),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.as_dict() == {
+        "status": "healthy",
+        "ready": True,
+        "checks": {
+            "telegram": {
+                "status": "healthy",
+                "details": {"configured": True},
+            }
+        },
+    }
+
+    assert secret not in str(result.as_dict())
+
+
+@pytest.mark.asyncio
+async def test_dependency_check_failure_is_safe_and_generic():
+    async def failing():
+        raise RuntimeError(
+            "DATABASE_URL=postgresql://user:password@host/db"
+        )
+
+    check = AsyncDependencyCheck(
+        name="postgresql",
+        probe=failing,
+    )
+
+    result = await check.check()
+
+    assert result.status is HealthStatus.UNHEALTHY
+    assert result.details == {
+        "reason": "dependency_check_failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_dependency_becomes_healthy():
+    state = {"healthy": False}
+
+    async def recoverable_probe():
+        return state["healthy"]
+
+    service = ProductionReadinessService(
+        checks=(
+            AsyncDependencyCheck(
+                name="postgresql",
+                probe=recoverable_probe,
+            ),
+        )
+    )
+
+    first = await service.check()
+    assert first.ready is False
+
+    state["healthy"] = True
+
+    second = await service.check()
+
+    assert second.ready is True
+    assert second.checks[0].status is HealthStatus.HEALTHY
+
+
+
+============================================================
+FILE: .\backend\tests\health\test_ws21_6_real_dependency_health.py
+============================================================
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from app.application.health.health_result import HealthStatus
+from app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from app.infrastructure.health.llm_provider_health_check import (
+    LLMProviderHealthCheck,
+)
+from app.infrastructure.health.postgresql_health_check import (
+    PostgreSQLHealthCheck,
+)
+from app.infrastructure.health.telegram_health_check import (
+    TelegramHealthCheck,
+)
+
+
+class FakeConnection:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, statement):
+        self.calls.append(str(statement))
+
+
+class FakeEngine:
+    def __init__(self):
+        self.calls = []
+        self.disposed = False
+
+    def connect(self):
+        return FakeConnection(self.calls)
+
+    def dispose(self):
+        self.disposed = True
+
+
+@pytest.mark.asyncio
+async def test_postgresql_probe_is_read_only():
+    engine = FakeEngine()
+
+    result = await PostgreSQLHealthCheck(
+        engine=engine
+    ).check()
+
+    assert result.status is HealthStatus.HEALTHY
+    assert "SELECT 1" in engine.calls[0]
+    assert engine.disposed is False
+
+
+@pytest.mark.asyncio
+async def test_postgresql_failure_is_sanitized():
+    class BrokenEngine:
+        def connect(self):
+            raise RuntimeError(
+                "postgresql password=SECRET"
+            )
+
+    result = await PostgreSQLHealthCheck(
+        engine=BrokenEngine()
+    ).check()
+
+    assert result.status is HealthStatus.UNHEALTHY
+    assert result.details == {
+        "reason": "database_unavailable"
+    }
+    assert "SECRET" not in str(result.details)
+
+
+@pytest.mark.asyncio
+async def test_telegram_missing_token_is_not_configured(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    result = await TelegramHealthCheck().check()
+
+    assert result.status is HealthStatus.NOT_CONFIGURED
+    assert result.details == {"configured": False}
+
+
+@pytest.mark.asyncio
+async def test_telegram_probe_uses_get_me_only(monkeypatch):
+    calls = []
+
+    class FakeUser:
+        id = 123
+
+    class FakeBot:
+        def __init__(self, token):
+            assert token == "test-token"
+
+        async def get_me(self):
+            calls.append("get_me")
+            return FakeUser()
+
+        async def shutdown(self):
+            calls.append("shutdown")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+
+    result = await TelegramHealthCheck(
+        bot_factory=FakeBot
+    ).check()
+
+    assert result.status is HealthStatus.HEALTHY
+    assert calls == ["get_me", "shutdown"]
+    assert "test-token" not in str(result.details)
+
+
+@pytest.mark.asyncio
+async def test_ollama_probe_does_not_generate():
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+    async def fake_get(url):
+        calls.append(url)
+        return FakeResponse()
+
+    result = await LLMProviderHealthCheck(
+        provider="ollama",
+        request_get=fake_get,
+    ).check()
+
+    assert result.status is HealthStatus.HEALTHY
+    assert calls == [
+        "http://localhost:11434/api/tags"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openai_missing_key_is_not_configured(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = await LLMProviderHealthCheck(
+        provider="openai"
+    ).check()
+
+    assert result.status is HealthStatus.NOT_CONFIGURED
+    assert result.details == {
+        "provider": "openai",
+        "configured": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_is_sanitized():
+    async def failing_get(_url):
+        raise RuntimeError(
+            "api_key=SUPER_SECRET"
+        )
+
+    result = await LLMProviderHealthCheck(
+        provider="ollama",
+        request_get=failing_get,
+    ).check()
+
+    assert result.status is HealthStatus.UNHEALTHY
+    assert result.details == {
+        "provider": "ollama",
+        "reason": "provider_unavailable",
+    }
+    assert "SUPER_SECRET" not in str(result.details)
+
+
+@pytest.mark.asyncio
+async def test_readiness_runs_all_checks_after_failure():
+    class HealthyCheck:
+        name = "healthy"
+
+        async def check(self):
+            return {
+                "name": self.name
+            }
+
+    class BrokenCheck:
+        name = "broken"
+
+        async def check(self):
+            raise RuntimeError("secret")
+
+    # Return proper results while proving aggregation continues.
+    from app.application.health.health_result import HealthCheckResult
+
+    class SafeBrokenCheck:
+        name = "broken"
+
+        async def check(self):
+            raise RuntimeError("secret")
+
+    class SafeHealthyCheck:
+        name = "healthy"
+
+        async def check(self):
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+            )
+
+    result = await ProductionReadinessService(
+        checks=(
+            SafeBrokenCheck(),
+            SafeHealthyCheck(),
+        )
+    ).check()
+
+    assert result.ready is False
+    assert [item.name for item in result.checks] == [
+        "broken",
+        "healthy",
+    ]
+    assert result.checks[0].details == {
+        "reason": "health_check_failed"
+    }
+
+
+@pytest.mark.asyncio
+async def test_full_readiness_aggregates_postgres_llm_telegram(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "TELEGRAM_BOT_TOKEN",
+        "test-token",
+    )
+
+    class FakeUser:
+        id = 1
+
+    class FakeBot:
+        def __init__(self, token):
+            pass
+
+        async def get_me(self):
+            return FakeUser()
+
+        async def shutdown(self):
+            pass
+
+    async def ollama_get(_url):
+        return type(
+            "Response",
+            (),
+            {"status_code": 200},
+        )()
+
+    engine = FakeEngine()
+
+    service = ProductionReadinessService(
+        checks=(
+            PostgreSQLHealthCheck(engine=engine),
+            LLMProviderHealthCheck(
+                provider="ollama",
+                request_get=ollama_get,
+            ),
+            TelegramHealthCheck(
+                bot_factory=FakeBot
+            ),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is True
+    assert {
+        item.name for item in result.checks
+    } == {
+        "postgresql",
+        "llm_provider",
+        "telegram",
+    }
+
+
+
+============================================================
+FILE: .\backend\tests\health\test_ws21_7_operational_health_integration.py
+============================================================
+from __future__ import annotations
+
+import pytest
+
+from app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+from app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+
+
+class FakeEngine:
+    def connect(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(
+        self,
+        exc_type,
+        exc,
+        traceback,
+    ):
+        return False
+
+    def execute(self, statement):
+        return None
+
+
+class FakeTelegramBot:
+
+    def __init__(
+        self,
+        token,
+    ):
+        self.token = token
+
+    async def get_me(self):
+
+        class User:
+            id = 123
+
+        return User()
+
+    async def shutdown(self):
+        pass
+
+
+async def fake_ollama_get(
+    _url,
+):
+    return type(
+        "Response",
+        (),
+        {
+            "status_code": 200,
+        },
+    )()
+
+
+@pytest.mark.asyncio
+async def test_ws21_7_builds_production_health_graph(
+    monkeypatch,
+):
+
+    monkeypatch.setenv(
+        "TELEGRAM_BOT_TOKEN",
+        "test-token",
+    )
+
+    service = ProductionHealthService(
+        configuration=ProductionHealthConfiguration(
+            database_engine=FakeEngine(),
+            telegram_bot_factory=FakeTelegramBot,
+            llm_provider="ollama",
+            llm_request_get=fake_ollama_get,
+        )
+    )
+
+    result = await (
+        service
+        .check_production_health()
+    )
+
+    assert result.ready is True
+
+    assert {
+        check.name
+        for check in result.checks
+    } == {
+        "postgresql",
+        "llm_provider",
+        "telegram",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ws21_7_keeps_dependency_failures_isolated(
+):
+
+    class BrokenCheck:
+
+        name = "broken"
+
+        async def check(self):
+
+            raise RuntimeError(
+                "secret=password"
+            )
+
+    class HealthyCheck:
+
+        name = "healthy"
+
+        async def check(self):
+
+            return HealthCheckResult(
+                name="healthy",
+                status=HealthStatus.HEALTHY,
+            )
+
+    from app.application.health.production_readiness_service import (
+        ProductionReadinessService,
+    )
+
+    service = ProductionReadinessService(
+        checks=(
+            BrokenCheck(),
+            HealthyCheck(),
+        )
+    )
+
+    result = await service.check()
+
+    assert result.ready is False
+
+    assert (
+        result.checks[0]
+        .details
+        ==
+        {
+            "reason": "health_check_failed"
+        }
+    )
+
+    assert "password" not in str(
+        result.checks
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_7_result_is_dashboard_ready(
+):
+
+    service = ProductionHealthService(
+        configuration=ProductionHealthConfiguration(
+            database_engine=FakeEngine(),
+            telegram_bot_factory=FakeTelegramBot,
+            llm_provider="ollama",
+            llm_request_get=fake_ollama_get,
+        )
+    )
+
+    result = await (
+        service
+        .check_production_health()
+    )
+
+    payload = result.as_dict()
+
+    assert "status" in payload
+    assert "ready" in payload
+    assert "checks" in payload
+
+    assert isinstance(
+        payload["checks"],
+        dict,
+    )
+
+
+============================================================
+FILE: .\backend\tests\health\test_ws21_8_operational_health_snapshot.py
+============================================================
+from __future__ import annotations
+
+import pytest
+
+from app.application.health.dependency_checks import (
+    AsyncDependencyCheck,
+    ConfigurationCheck,
+)
+from app.application.health.health_result import (
+    HealthStatus,
+)
+from app.application.health.operational_health_snapshot import (
+    OperationalEvent,
+    OperationalEventType,
+    OperationalHealthSnapshotService,
+    OperationalSurface,
+)
+from app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+
+
+class FakeIdentityResolver:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def resolve(
+        self,
+        user_reference: str,
+    ) -> str | None:
+        self.calls.append(
+            user_reference
+        )
+
+        return (
+            f"telegram-user:{user_reference}"
+        )
+
+
+async def healthy_probe():
+    return True
+
+
+def make_readiness_service():
+    return ProductionReadinessService(
+        checks=(
+            ConfigurationCheck(
+                name="telegram",
+                configured=True,
+            ),
+            AsyncDependencyCheck(
+                name="postgresql",
+                probe=healthy_probe,
+            ),
+            AsyncDependencyCheck(
+                name="llm_provider",
+                probe=healthy_probe,
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_complete_operational_snapshot():
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    snapshot = await service.create_snapshot()
+
+    assert snapshot.ready is True
+
+    assert (
+        snapshot.overall_status
+        is HealthStatus.HEALTHY
+    )
+
+    assert (
+        snapshot.postgresql_status
+        is HealthStatus.HEALTHY
+    )
+
+    assert (
+        snapshot.llm_status
+        is HealthStatus.HEALTHY
+    )
+
+    assert (
+        snapshot.telegram_status
+        is HealthStatus.HEALTHY
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_dependency_failure_is_sanitized():
+
+    async def failing_database():
+        raise RuntimeError(
+            "DATABASE_URL=postgresql://user:password@host/db"
+        )
+
+    readiness = ProductionReadinessService(
+        checks=(
+            AsyncDependencyCheck(
+                name="postgresql",
+                probe=failing_database,
+            ),
+            ConfigurationCheck(
+                name="telegram",
+                configured=True,
+            ),
+        )
+    )
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=readiness
+        )
+    )
+
+    snapshot = await service.create_snapshot()
+
+    assert snapshot.ready is False
+
+    payload = snapshot.as_dict()
+
+    serialized = str(payload).lower()
+
+    assert "password" not in serialized
+    assert "postgresql://user" not in serialized
+    assert "database_url" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_correlation_user_and_world_are_preserved():
+
+    resolver = FakeIdentityResolver()
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            ),
+            identity_resolver=resolver,
+        )
+    )
+
+    event = OperationalEvent(
+        event_type=(
+            OperationalEventType.MESSAGE_FAILURE
+        ),
+        surface=(
+            OperationalSurface.PRIVATE_CLASSROOM
+        ),
+        correlation_id="corr-001",
+        user_reference="user-ref-001",
+        world_id="world-fr",
+    )
+
+    snapshot = await service.create_snapshot(
+        events=(event,)
+    )
+
+    assert len(snapshot.events) == 1
+
+    stored = snapshot.events[0]
+
+    assert (
+        stored.correlation_id
+        == "corr-001"
+    )
+
+    assert (
+        stored.user_reference
+        == "telegram-user:user-ref-001"
+    )
+
+    assert (
+        stored.world_id
+        == "world-fr"
+    )
+
+    assert resolver.calls == [
+        "user-ref-001"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_rate_limit_and_abuse_events_are_represented():
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    events = (
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.RATE_LIMIT
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="rate-001",
+            user_reference="user-001",
+            world_id="world-fr",
+        ),
+        OperationalEvent(
+            event_type=(
+                OperationalEventType.ABUSE
+            ),
+            surface=(
+                OperationalSurface.PRIVATE_CLASSROOM
+            ),
+            correlation_id="abuse-001",
+            user_reference="user-002",
+            world_id="world-es",
+        ),
+    )
+
+    snapshot = await service.create_snapshot(
+        events=events
+    )
+
+    event_types = {
+        event.event_type
+        for event in snapshot.events
+    }
+
+    assert (
+        OperationalEventType.RATE_LIMIT
+        in event_types
+    )
+
+    assert (
+        OperationalEventType.ABUSE
+        in event_types
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_message_failure_is_represented_without_message_content():
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    event = OperationalEvent(
+        event_type=(
+            OperationalEventType.MESSAGE_FAILURE
+        ),
+        surface=(
+            OperationalSurface.PRIVATE_CLASSROOM
+        ),
+        correlation_id="failure-001",
+        user_reference="user-001",
+        world_id="world-fr",
+        metadata={
+            "error_type": "TimeoutError",
+        },
+    )
+
+    snapshot = await service.create_snapshot(
+        events=(event,)
+    )
+
+    payload = snapshot.as_dict()
+
+    assert (
+        len(
+            payload[
+                "private_classroom_events"
+            ]
+        )
+        == 1
+    )
+
+    assert (
+        "message"
+        not in payload[
+            "private_classroom_events"
+        ][0]["metadata"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_private_and_announcement_surfaces_are_separate():
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    private_event = OperationalEvent(
+        event_type=(
+            OperationalEventType.MESSAGE_FAILURE
+        ),
+        surface=(
+            OperationalSurface.PRIVATE_CLASSROOM
+        ),
+        correlation_id="private-001",
+    )
+
+    announcement_event = OperationalEvent(
+        event_type=(
+            OperationalEventType.TELEGRAM_FAILURE
+        ),
+        surface=(
+            OperationalSurface.ANNOUNCEMENT_GROUP
+        ),
+        correlation_id="announcement-001",
+    )
+
+    snapshot = await service.create_snapshot(
+        events=(
+            private_event,
+            announcement_event,
+        )
+    )
+
+    assert len(
+        snapshot.private_classroom_events
+    ) == 1
+
+    assert len(
+        snapshot.announcement_group_events
+    ) == 1
+
+    assert (
+        snapshot.private_classroom_events[0]
+        .surface
+        is OperationalSurface.PRIVATE_CLASSROOM
+    )
+
+    assert (
+        snapshot.announcement_group_events[0]
+        .surface
+        is OperationalSurface.ANNOUNCEMENT_GROUP
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_sensitive_metadata_is_removed():
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    event = OperationalEvent(
+        event_type=(
+            OperationalEventType.PROVIDER_FAILURE
+        ),
+        surface=(
+            OperationalSurface.PRIVATE_CLASSROOM
+        ),
+        correlation_id="provider-001",
+        metadata={
+            "provider": "ollama",
+            "api_key": "SECRET-123",
+            "password": "SECRET-PASSWORD",
+            "database_url": (
+                "postgresql://user:password@host/db"
+            ),
+            "safe_status": "timeout",
+        },
+    )
+
+    snapshot = await service.create_snapshot(
+        events=(event,)
+    )
+
+    payload = str(
+        snapshot.as_dict()
+    ).lower()
+
+    assert "secret-123" not in payload
+    assert "secret-password" not in payload
+    assert "postgresql://" not in payload
+    assert "safe_status" in payload
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_learner_content_is_not_exposed():
+
+    learner_message = (
+        "Bonjour, ceci est un message "
+        "confidentiel du learner."
+    )
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    event = OperationalEvent(
+        event_type=(
+            OperationalEventType.MESSAGE_FAILURE
+        ),
+        surface=(
+            OperationalSurface.PRIVATE_CLASSROOM
+        ),
+        correlation_id="message-001",
+        metadata={
+            "message": learner_message,
+            "error_type": "TimeoutError",
+        },
+    )
+
+    snapshot = await service.create_snapshot(
+        events=(event,)
+    )
+
+    payload = str(
+        snapshot.as_dict()
+    )
+
+    assert learner_message not in payload
+    assert '"message"' not in payload.lower()
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_identity_resolution_failure_is_safe():
+
+    class BrokenResolver:
+
+        async def resolve(
+            self,
+            user_reference: str,
+        ):
+            raise RuntimeError(
+                "database password=SECRET"
+            )
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            ),
+            identity_resolver=BrokenResolver(),
+        )
+    )
+
+    event = OperationalEvent(
+        event_type=(
+            OperationalEventType.MESSAGE_FAILURE
+        ),
+        surface=(
+            OperationalSurface.PRIVATE_CLASSROOM
+        ),
+        correlation_id="identity-001",
+        user_reference="user-001",
+    )
+
+    snapshot = await service.create_snapshot(
+        events=(event,)
+    )
+
+    assert len(snapshot.events) == 1
+
+    payload = str(
+        snapshot.as_dict()
+    ).lower()
+
+    assert "password" not in payload
+    assert "secret" not in payload
+
+
+@pytest.mark.asyncio
+async def test_ws21_8_dashboard_contract_is_serializable():
+
+    service = (
+        OperationalHealthSnapshotService(
+            readiness_service=(
+                make_readiness_service()
+            )
+        )
+    )
+
+    snapshot = await service.create_snapshot()
+
+    payload = snapshot.as_dict()
+
+    assert set(payload) == {
+        "generated_at",
+        "overall_status",
+        "ready",
+        "dependency_health",
+        "events",
+        "private_classroom_events",
+        "announcement_group_events",
+    }
+
+    assert isinstance(
+        payload["dependency_health"],
+        dict,
+    )
+
+    assert isinstance(
+        payload["events"],
+        list,
+    )

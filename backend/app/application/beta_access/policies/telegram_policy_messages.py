@@ -98,6 +98,25 @@ class TelegramPolicyMessageService:
             messages[self.DEFAULT_LANGUAGE],
         )
 
+    def abuse_protection_message(
+        self,
+        *,
+        context,
+        retry_after_seconds: float | None = None,
+    ) -> str:
+        """
+        Compatibility alias for the application boundary.
+
+        The canonical implementation remains abuse_limit_message().
+        This method keeps the policy service compatible with callers
+        using the explicit 'abuse_protection' terminology.
+        """
+
+        return self.abuse_limit_message(
+            context=context,
+            retry_after_seconds=retry_after_seconds,
+        )
+
     @staticmethod
     def _language_from_context(context) -> str:
         language = getattr(

@@ -7,10 +7,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.application.announcement.announcement_composer import (
+from backend.app.application.announcement.announcement_composer import (
     AnnouncementComposer,
 )
-from app.application.announcement.announcement_publisher import (
+from backend.app.application.announcement.announcement_publisher import (
     ControlledAnnouncementPublisher,
 )
 from app.api.announcement_controls import (

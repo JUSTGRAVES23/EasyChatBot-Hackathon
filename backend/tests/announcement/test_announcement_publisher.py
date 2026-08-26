@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.application.announcement.announcement_publisher import (
+from backend.app.application.announcement.announcement_publisher import (
     ControlledAnnouncementPublisher,
     PublicationDisabledError,
 )
@@ -104,3 +104,4 @@ async def test_controlled_publisher_records_success():
     assert record.message_id == "42"
     assert record.announcement_type == "important"
     assert record.published_at.tzinfo is not None
+

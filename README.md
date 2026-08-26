@@ -1,20 +1,21 @@
-# EasyChatBot Phase 6H.1 — Case ↔ Change Relationship
+# EasyChatBot — Authentication Persistence Integration Patch
 
-Focused implementation package for preserving traceability between a privacy
-governance case and its authoritative privacy change.
+This is the next vertical-slice implementation after the repository inspection.
+It deliberately does **not** introduce a second authentication system, JWTs,
+Supabase authentication, or duplicate user tables.
 
-## Files
+See `docs/authentication-persistence-integration.md` for integration and
+verification steps.
 
-- `backend/app/application/privacy/privacy_governance_case.py`
-- `backend/app/application/privacy/privacy_governance_case_change_link.py`
-- `backend/app/application/privacy/privacy_governance_case_service.py` — focused
-  patch instruction showing the required `change_id=change_id` constructor line
-- `tests/application/test_privacy_governance_case_change_link.py`
-- `docs/PHASE_6H1_CASE_CHANGE_RELATIONSHIP.md`
+## Delivery status
 
-## Integration
+- Architecture review: PASS
+- Security boundary review: PASS
+- Existing schema preservation: PASS
+- Migration chain identified: PASS
+- Unit/static validation in this package: PASS
+- Live PostgreSQL verification: **PENDING — requires the actual project
+  environment/DATABASE_URL**
 
-Do not replace the live 6G composition or decision service. Add the
-`change_id=change_id` line to the existing `PrivacyGovernanceCaseService`
-`create_case()` constructor call, then run the focused and existing regression
-suites.
+Do not proceed to frontend login/registration integration until the live
+PostgreSQL migration and smoke test pass.

@@ -28,12 +28,16 @@ class TelegramBotRuntime:
     Responsibilities:
     - Telegram application lifecycle;
     - Telegram handler registration;
-    - delegation to BetaTelegramAdapter.
+    - delegation to BetaTelegramAdapter;
+    - exposing the already-created Telegram bot client to
+      controlled infrastructure adapters.
 
     The runtime MUST NOT:
     - perform Beta authorization;
     - execute conversation logic;
-    - deliver classroom responses returned by the adapter.
+    - deliver classroom responses returned by the adapter;
+    - create a second Telegram client;
+    - bypass the controlled publication boundary.
 
     IMPORTANT RESPONSE OWNERSHIP:
 
@@ -56,6 +60,21 @@ class TelegramBotRuntime:
     response returned by the adapter.
 
     This prevents duplicate Telegram messages.
+
+    PUBLICATION CLIENT OWNERSHIP:
+
+        TelegramBotRuntime
+              |
+              +----> existing Application
+                           |
+                           +----> existing Bot client
+                                      |
+                                      v
+                         Controlled publication adapters
+
+    The runtime remains the owner of Telegram client creation
+    and lifecycle. Consumers receive a reference to the existing
+    client through the read-only ``bot`` property.
     """
 
     def __init__(
@@ -122,6 +141,36 @@ class TelegramBotRuntime:
         )
 
         return application
+
+    # =========================================================
+    # Existing Telegram bot client
+    # =========================================================
+
+    @property
+    def bot(self) -> Any:
+        """
+        Return the existing Telegram bot client.
+
+        The TelegramBotRuntime remains responsible for creating
+        and owning the Telegram Application and its Bot client.
+
+        This property does not create another client and does not
+        expose credentials.
+
+        Consumers may use this reference for controlled outbound
+        operations such as the announcement publication adapter.
+
+        Raises:
+            RuntimeError: If the Telegram application has not yet
+                been built.
+        """
+
+        if self._application is None:
+            raise RuntimeError(
+                "Telegram bot runtime has not been built."
+            )
+
+        return self._application.bot
 
     # =========================================================
     # Lifecycle

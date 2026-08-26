@@ -124,12 +124,33 @@ class ResendEmailProvider:
         # Presentation
         # --------------------------------------------------------
 
-        # Privacy Governance owns its complete presentation.
+        # Application-owned presentation boundaries.
         #
-        # Do not replace the supplied HTML with the
-        # Cybersecurity renderer.
-        if email_type == "privacy_governance_reminder":
+        # Authentication registration emails already contain their
+        # complete approved HTML presentation. Use that HTML directly.
+        #
+        # Privacy Governance has its existing html_body contract and
+        # therefore continues through its dedicated helper.
+        #
+        # All other email types preserve the existing Cybersecurity
+        # renderer.
+        if email_type == "authentication_verification":
+            supplied_html = content.get("html")
+
+            if (
+                not isinstance(supplied_html, str)
+                or not supplied_html.strip()
+            ):
+                raise ValueError(
+                    "Authentication registration email requires "
+                    "html to be a non-empty string."
+                )
+
+            html = supplied_html
+
+        elif email_type == "privacy_governance_reminder":
             html = self._get_supplied_html_body(content)
+
         else:
             # Preserve existing Cybersecurity behaviour.
             html = self._build_html(content)
@@ -151,8 +172,30 @@ class ResendEmailProvider:
         # Base Resend request
         # --------------------------------------------------------
 
+        # Sender ownership.
+        #
+        # Authentication registration emails explicitly provide their
+        # approved sender through the application boundary.
+        #
+        # Existing cybersecurity and other provider-managed emails
+        # continue using the provider's configured default sender.
+        sender = self.sender
+
+        if email_type == "authentication_verification":
+            supplied_sender = content.get("from")
+
+            if (
+                not isinstance(supplied_sender, str)
+                or not supplied_sender.strip()
+            ):
+                raise ValueError(
+                    "Authentication registration email sender is required."
+                )
+
+            sender = supplied_sender.strip()
+
         params: dict[str, Any] = {
-            "from": self.sender,
+            "from": sender,
             "to": [recipient],
             "subject": subject.strip(),
             "html": html,

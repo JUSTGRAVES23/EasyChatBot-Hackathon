@@ -1,93 +1,90 @@
-﻿"""
+"""
 EasyChatBot AI Operations Center HTTP API.
 
-FastAPI adapter for the read-only Operations Center dashboard.
+FastAPI adapter for read-only Operations Center dashboards.
 
-Architecture:
+WS-21.15:
+    GET /api/operations-center/chat-operations
 
-HTTP Client
-      |
-      v
-OperationsCenter Router
-      |
-      v
-OperationsCenterDashboardAPI
-      |
-      v
-OperationsCenterDashboardFacade
-      |
-      v
-Dashboard Application Services
+WS-21.17:
+    GET /api/operations-center/chat-operations/private-classroom
 
-
-Responsibilities:
-
-- expose HTTP endpoints;
-- translate application responses;
-- keep HTTP concerns isolated;
-- provide dashboard read access.
-
-Does NOT:
-
-- calculate dashboard metrics;
-- execute providers;
-- execute agents;
-- modify Runtime routing;
-- approve escalations;
-- send notifications;
-- perform remediation.
+WS-21.18:
+    GET /api/operations-center/chat-operations/announcement-group
 """
 
 from __future__ import annotations
 
+from typing import Any
 
 from fastapi import APIRouter
 
-
 from backend.app.application.operations_center.dashboard_composition import (
+    create_chat_operations_dashboard_api,
+)
+from backend.app.application.operations_center.dashboard_composition import (
+    OperationsCenterComposition,
     create_operations_center_dashboard_api,
 )
 
 
-
 router = APIRouter(
     prefix="/api/operations-center",
-    tags=[
-        "operations-center",
-    ],
+    tags=["operations-center"],
 )
 
 
-
-#
-# Composition root.
-#
-# The router receives the application boundary,
-# not individual services.
-#
-
-_dashboard_api = (
-    create_operations_center_dashboard_api()
-)
+_dashboard_api = create_operations_center_dashboard_api()
+_chat_operations_api = create_chat_operations_dashboard_api()
 
 
+@router.get("/dashboard")
+async def get_dashboard() -> dict[str, Any]:
+    """Return the existing Platform Overview dashboard."""
+    return await _dashboard_api.get_dashboard()
 
-@router.get(
-    "/dashboard",
-)
-def get_dashboard() -> dict:
+
+@router.get("/chat-operations")
+async def get_chat_operations_dashboard() -> dict[str, Any]:
+    """Return the current WS-21.15 Chat Operations snapshot."""
+    return await _chat_operations_api.get_dashboard()
+
+
+@router.get("/chat-operations/private-classroom")
+async def get_private_classroom_operations() -> dict[str, Any]:
     """
-    Return the read-only Operations Center dashboard.
+    Return a fresh WS-21.17 Private Classroom operational snapshot.
 
-    This endpoint exposes the application dashboard
-    contract without adding business logic.
+    Each request re-runs dependency health probes and reads the current
+    in-process incident/event state from the shared Chat Operations
+    application composition.
     """
+    return await _chat_operations_api.get_private_classroom_details()
 
-    return (
-        _dashboard_api
-        .get_dashboard()
-    )
 
+@router.get("/chat-operations/announcement-group")
+async def get_announcement_group_operations() -> dict[str, Any]:
+    """
+    Return a fresh WS-21.18 Announcement Group operational snapshot.
+
+    Each request re-runs dependency health probes and reads the current
+    in-process incident/event state from the shared Chat Operations
+    application composition.
+
+    The response is strictly read-only.
+    """
+    return await _chat_operations_api.get_announcement_group_details()
+
+
+@router.get("/operational-events")
+def get_operational_events() -> list[dict[str, Any]]:
+    """
+    Return the existing operational event history.
+
+    This route remains an existing compatibility surface.
+    """
+    composition = OperationsCenterComposition()
+    return composition.event_service.list_events()
 
 
 __all__ = [

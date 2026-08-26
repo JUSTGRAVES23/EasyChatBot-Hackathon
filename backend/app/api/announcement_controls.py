@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from os import getenv
@@ -6,14 +6,14 @@ from os import getenv
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app.application.announcement.announcement_composer import (
+from backend.app.application.announcement.announcement_composer import (
     AnnouncementComposer,
 )
-from app.application.announcement.announcement_publisher import (
+from backend.app.application.announcement.announcement_publisher import (
     ControlledAnnouncementPublisher,
     PublicationDisabledError,
 )
-from app.application.announcement.models import AnnouncementType
+from backend.app.application.announcement.models import AnnouncementType
 
 
 class AnnouncementPublishRequest(BaseModel):
