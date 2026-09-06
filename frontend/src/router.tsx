@@ -51,4 +51,10 @@ export default function AppRouter() {
       />
     </Routes>
   );
-}
+}import EmailWorkflowsPage from "../app/operations-center/email-workflows/page";
+      {/* Operations Center Email Workflows */}
+      <Route
+        path="/operations-center/email-workflows"
+        element={<EmailWorkflowsPage />}
+      />
+
