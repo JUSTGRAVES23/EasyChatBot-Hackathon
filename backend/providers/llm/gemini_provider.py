@@ -1,45 +1,19 @@
-"""
+﻿"""
 Gemini LLM Provider.
 
 Concrete Gemini implementation of the provider-independent
 LLMProvider contract used by the EasyChatBot hackathon runtime.
 
-Architecture:
+The provider isolates the Google Gemini SDK from application
+and runtime layers.
 
-    ConversationAgent
-            |
-            v
-    ConversationRequest
-            |
-            v
-       LLMProvider
-            |
-            v
-      GeminiProvider
-            |
-            v
-       Gemini API
-            |
-            v
-      ProviderResult
+Structured output is opt-in through ConversationRequest.
 
-Responsibilities:
-- execute ConversationRequest through Gemini
-- use the configured Gemini model
-- translate Gemini responses into ProviderResult
-- isolate the Gemini SDK from the application/runtime layers
-
-Does not:
-- build application workflows
-- perform research
-- manage memory
-- select providers
-- manage conversations
-- modify application state
-
-The provider uses Google's current `google-genai` SDK.
-The SDK client is injectable so unit tests do not need a real
-Gemini API call.
+The hackathon runtime uses Google Cloud Vertex AI authentication
+rather than Gemini API-key authentication. The Google Cloud project
+is resolved from Application Default Credentials, while the Gemini
+execution location is controlled independently from the Agent Runtime
+deployment location.
 """
 
 from __future__ import annotations
@@ -69,15 +43,16 @@ class GeminiProvider(LLMProvider):
     The Google Gemini SDK is deliberately isolated inside this
     infrastructure adapter.
 
-    Args:
-        model:
-            Gemini model identifier.
+    Authentication is performed through Google Cloud Vertex AI.
+    The Google Cloud project is resolved through Application Default
+    Credentials rather than a Gemini API key.
 
-        client:
-            Optional injected `google.genai.Client`.
+    The Gemini model location is controlled independently through:
 
-            Dependency injection allows unit tests to provide a
-            fake client without making a real API call.
+        EASYCHATBOT_GEMINI_LOCATION
+
+    This is intentionally separate from the Agent Runtime deployment
+    location.
     """
 
     def __init__(
@@ -99,33 +74,66 @@ class GeminiProvider(LLMProvider):
 
     def _get_client(self) -> Any:
         """
-        Lazily create the Google GenAI client.
+        Lazily create the Google GenAI Vertex AI client.
 
-        The API key is read from GEMINI_API_KEY and is never
-        hard-coded into the provider.
+        Agent Runtime reserves GOOGLE_CLOUD_PROJECT and
+        GOOGLE_CLOUD_LOCATION, so those variables are not injected
+        through Agent Runtime env_vars.
+
+        The Google Cloud project is resolved from Application Default
+        Credentials / the Agent Runtime execution identity.
+
+        Gemini model execution location is controlled through:
+
+            EASYCHATBOT_GEMINI_LOCATION
+
+        Default:
+
+            eu
         """
 
         if self._client is not None:
             return self._client
 
-        api_key = os.getenv("GEMINI_API_KEY")
+        location = os.getenv(
+            "EASYCHATBOT_GEMINI_LOCATION",
+            "eu",
+        )
 
-        if not api_key:
+        location = location.strip()
+
+        if not location:
             raise RuntimeError(
-                "GEMINI_API_KEY environment variable is required."
+                "EASYCHATBOT_GEMINI_LOCATION cannot be empty."
             )
 
         try:
             from google import genai
+            from google.auth import default as google_auth_default
         except ImportError as exc:
             raise RuntimeError(
-                "The google-genai package is required for "
-                "GeminiProvider. Install it with: "
-                "pip install google-genai"
+                "The google-genai and google-auth packages are required "
+                "for GeminiProvider."
             ) from exc
 
+        try:
+            _, project = google_auth_default()
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to resolve the Google Cloud project from "
+                "Application Default Credentials."
+            ) from exc
+
+        if not project:
+            raise RuntimeError(
+                "Google Cloud project could not be resolved from "
+                "Application Default Credentials."
+            )
+
         self._client = genai.Client(
-            api_key=api_key,
+            vertexai=True,
+            project=project,
+            location=location,
         )
 
         return self._client
@@ -135,15 +143,7 @@ class GeminiProvider(LLMProvider):
         request: ConversationRequest,
     ) -> str:
         """
-        Convert the provider-independent request into the
-        user-facing content sent to Gemini.
-
-        System behaviour remains separate and is supplied through
-        Gemini's system_instruction configuration.
-
-        Live intelligence, when present, is deliberately carried
-        through the existing ConversationRequest context rather
-        than retrieved by Gemini itself.
+        Convert the provider-independent request into Gemini content.
         """
 
         sections: list[str] = []
@@ -166,12 +166,38 @@ class GeminiProvider(LLMProvider):
 
         return "\n".join(sections)
 
+    @staticmethod
+    def _build_config(
+        request: ConversationRequest,
+        types: Any,
+    ) -> Any:
+        """
+        Translate provider-independent request configuration
+        into Gemini-specific generation configuration.
+        """
+
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": request.system_instruction,
+        }
+
+        if request.response_schema is not None:
+            config_kwargs.update(
+                {
+                    "response_mime_type": "application/json",
+                    "response_schema": request.response_schema,
+                }
+            )
+
+        return types.GenerateContentConfig(
+            **config_kwargs,
+        )
+
     async def generate(
         self,
         request: ConversationRequest,
     ) -> ProviderResult:
         """
-        Generate a response using Gemini.
+        Generate a response using Gemini through Vertex AI.
 
         Returns a provider-independent ProviderResult and never
         exposes Gemini SDK response objects to the application.
@@ -191,10 +217,9 @@ class GeminiProvider(LLMProvider):
                 request,
             )
 
-            config = types.GenerateContentConfig(
-                system_instruction=(
-                    request.system_instruction
-                ),
+            config = self._build_config(
+                request,
+                types,
             )
 
             response = await client.aio.models.generate_content(
