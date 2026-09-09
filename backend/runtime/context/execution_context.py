@@ -1,19 +1,18 @@
-"""
-Runtime Execution Context.
+﻿"""
+Backend Runtime Execution Context.
 
-Provides immutable runtime context shared with agents.
+This context remains compatible with existing backend agents,
+providers and services while supporting memory and intelligence
+enrichment.
 
-Responsibilities:
-- identify an execution
-- carry user request information
-- provide runtime metadata
-- optionally carry live intelligence context
-- optionally carry bounded learner memory context
+The canonical governed AI Runtime has its own RuntimeContext.
 
-Does not:
-- execute providers
-- manage memory persistence
-- modify systems
+This backend ExecutionContext is therefore retained as a
+compatibility/application context and must not be confused with
+the canonical Runtime execution model.
+
+The context is immutable so application services can safely create
+derived contexts with dataclasses.replace().
 """
 
 from __future__ import annotations
@@ -23,6 +22,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from backend.intelligence.intelligence_context import (
+    IntelligenceContext,
+)
 from src.ai_runtime.memory.context_builder import (
     MemoryContext,
 )
@@ -31,51 +33,49 @@ from src.ai_runtime.memory.context_builder import (
 @dataclass(frozen=True)
 class ExecutionContext:
     """
-    Runtime execution context shared with agents.
+    Immutable backend execution context used by existing
+    integrations, agents and application services.
 
-    The context is immutable. Enrichment must therefore use
-    dataclasses.replace() rather than mutating an existing
-    instance.
+    The context carries execution metadata plus optional bounded
+    learner memory and live-intelligence context.
+
+    Context enrichment must use dataclasses.replace() rather than
+    mutating an existing instance.
     """
-
-    user_id: str
-
-    request: str
 
     execution_id: str = field(
         default_factory=lambda: str(uuid4())
-    )
-
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
     )
 
     metadata: dict[str, Any] = field(
         default_factory=dict
     )
 
-    intelligence_context: Any | None = None
+    user_id: str | None = None
+
+    request: str | None = None
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
     memory_context: MemoryContext | None = None
 
-    @property
-    def has_intelligence_context(self) -> bool:
-        """
-        Return whether live intelligence is attached.
-        """
-
-        return (
-            self.intelligence_context is not None
-        )
+    intelligence_context: IntelligenceContext | None = None
 
     @property
     def has_memory_context(self) -> bool:
         """
-        Return whether bounded learner memory context
-        is attached.
+        Return True when bounded learner memory is available.
         """
-
         return (
             self.memory_context is not None
             and not self.memory_context.is_empty
         )
+
+    @property
+    def has_intelligence_context(self) -> bool:
+        """
+        Return True when live intelligence is available.
+        """
+        return self.intelligence_context is not None

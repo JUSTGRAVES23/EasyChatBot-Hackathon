@@ -124,17 +124,10 @@ class ResendEmailProvider:
         # Presentation
         # --------------------------------------------------------
 
-        # Application-owned presentation boundaries.
-        #
-        # Authentication registration emails already contain their
-        # complete approved HTML presentation. Use that HTML directly.
-        #
-        # Privacy Governance has its existing html_body contract and
-        # therefore continues through its dedicated helper.
-        #
-        # All other email types preserve the existing Cybersecurity
-        # renderer.
-        if email_type == "authentication_verification":
+        if email_type in {
+            "authentication_verification",
+            "academy_notification",
+        }:
             supplied_html = content.get("html")
 
             if (
@@ -142,7 +135,7 @@ class ResendEmailProvider:
                 or not supplied_html.strip()
             ):
                 raise ValueError(
-                    "Authentication registration email requires "
+                    f"{email_type} requires "
                     "html to be a non-empty string."
                 )
 
@@ -172,16 +165,12 @@ class ResendEmailProvider:
         # Base Resend request
         # --------------------------------------------------------
 
-        # Sender ownership.
-        #
-        # Authentication registration emails explicitly provide their
-        # approved sender through the application boundary.
-        #
-        # Existing cybersecurity and other provider-managed emails
-        # continue using the provider's configured default sender.
         sender = self.sender
 
-        if email_type == "authentication_verification":
+        if email_type in {
+            "authentication_verification",
+            "academy_notification",
+        }:
             supplied_sender = content.get("from")
 
             if (
@@ -189,7 +178,7 @@ class ResendEmailProvider:
                 or not supplied_sender.strip()
             ):
                 raise ValueError(
-                    "Authentication registration email sender is required."
+                    f"{email_type} sender is required."
                 )
 
             sender = supplied_sender.strip()
@@ -206,30 +195,6 @@ class ResendEmailProvider:
 
         # --------------------------------------------------------
         # Optional email threading
-        # --------------------------------------------------------
-        #
-        # These values are intentionally supplied by the
-        # application layer.
-        #
-        # The provider does not decide:
-        #
-        #     which case belongs to which thread
-        #
-        # or:
-        #
-        #     whether an email should be a reply.
-        #
-        # It simply translates the approved metadata into
-        # standard email headers.
-        #
-        # Example:
-        #
-        #     In-Reply-To: <previous-message-id>
-        #     References:  <previous-message-id>
-        #
-        # This allows clients such as Gmail to group the initial
-        # governance notification and subsequent reminders into
-        # the same conversation.
         # --------------------------------------------------------
 
         in_reply_to = self._normalize_header_value(
@@ -295,14 +260,6 @@ class ResendEmailProvider:
     ) -> str | None:
         """
         Validate and normalize optional email-header metadata.
-
-        Header values must be strings when supplied.
-
-        Empty values are treated as absent.
-
-        This method intentionally does not generate or transform
-        message IDs. The application/provider integration must
-        supply the correct message identifier.
         """
 
         if value is None:
@@ -325,11 +282,7 @@ class ResendEmailProvider:
         content: dict[str, Any],
     ) -> str:
         """
-        Return the application-owned Privacy Governance HTML.
-
-        The provider deliberately does not generate or alter this
-        HTML because the application service owns the presentation
-        and governance message.
+        Return application-owned Privacy Governance HTML.
         """
 
         html_body = content.get("html_body")
@@ -354,14 +307,6 @@ class ResendEmailProvider:
         """
         Convert local application attachment metadata into the
         Resend attachment representation.
-
-        Resend rejects Windows/local filesystem paths supplied
-        directly as ``path`` values. Therefore local files are
-        read and encoded as base64 ``content``.
-
-        Supports inline Privacy Governance assets:
-
-            cid:easychatbot-governance-logo
         """
 
         if not isinstance(attachments, list):
@@ -409,9 +354,7 @@ class ResendEmailProvider:
                     "Email attachment filename is required."
                 )
 
-            content_id = attachment.get(
-                "content_id"
-            )
+            content_id = attachment.get("content_id")
 
             inline = bool(
                 attachment.get(
@@ -426,7 +369,6 @@ class ResendEmailProvider:
                     "content_id."
                 )
 
-            # Read the local file and encode it for Resend.
             encoded_content = base64.b64encode(
                 path.read_bytes()
             ).decode("ascii")

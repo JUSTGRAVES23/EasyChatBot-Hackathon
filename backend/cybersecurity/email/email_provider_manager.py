@@ -1,4 +1,4 @@
-"""
+﻿"""
 Email Provider Manager.
 
 Controls provider selection, configuration, availability,
@@ -111,3 +111,8 @@ class EmailProviderManager:
             subject,
             content,
         )
+
+
+__all__ = [
+    "EmailProviderManager",
+]

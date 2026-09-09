@@ -141,7 +141,6 @@ class CybersecurityEmailService:
             }
 
         try:
-
             result = await self.provider_manager.send(
                 subject,
                 content,
@@ -157,7 +156,6 @@ class CybersecurityEmailService:
             }
 
         except Exception as exc:
-
             self.circuit_breaker.record_failure()
 
             return {
@@ -166,3 +164,8 @@ class CybersecurityEmailService:
                 "error": str(exc),
                 "circuit": self.circuit_breaker.status(),
             }
+
+
+__all__ = [
+    "CybersecurityEmailService",
+]
