@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request, status
 
-from backend.app.domain.identity.principal import Principal
-from backend.app.infrastructure.auth.session_identity_provider import (
+from app.domain.identity.principal import Principal
+from app.infrastructure.auth.session_identity_provider import (
     SessionIdentityProvider,
 )
 

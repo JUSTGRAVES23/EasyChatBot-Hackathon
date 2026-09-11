@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, status
 
-from backend.app.api.dependencies.identity import get_current_principal
-from backend.app.application.authorization.authorization_service import (
+from app.api.dependencies.identity import get_current_principal
+from app.application.authorization.authorization_service import (
     AuthorizationService,
     PermissionDeniedError,
 )
-from backend.app.domain.authorization.permissions import Permission
-from backend.app.domain.identity.principal import Principal
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.principal import Principal
 
 
 def require_permission(permission: Permission):
