@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from backend.app.application.announcements.repositories import AnnouncementTemplateRepository
-from backend.app.domain.announcements.template_models import (
+from app.application.announcements.repositories import AnnouncementTemplateRepository
+from app.domain.announcements.template_models import (
     AnnouncementTemplate,
     AnnouncementTemplateVersion,
     render_template,
@@ -46,3 +46,4 @@ class AnnouncementTemplateRegistry:
         version: int | None = None,
     ) -> str:
         return render_template(self.get_version(template_id, version), values)
+

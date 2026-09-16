@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Character Runtime.
 """
 
@@ -183,3 +183,5 @@ def test_character_runtime_generates_character_voice():
     assert provider.last_language_code == (
         "fr"
     )
+
+

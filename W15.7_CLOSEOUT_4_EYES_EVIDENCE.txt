@@ -1,0 +1,3942 @@
+﻿============================================================
+W15.7 CLOSEOUT — 4-EYES EVIDENCE
+============================================================
+Repository: C:\AI Folder\EasyChatBot-Hackathon
+Date: 2026-09-14 08:08:16
+
+============================================================
+1. W15.7 TARGET FILES
+============================================================
+---- transaction_authorization.py ----
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from threading import Lock
+from typing import Mapping, Protocol
+
+from app.domain.identity.authentication_assurance import (
+    AuthenticationAssuranceContext,
+    AuthenticationAssuranceLevel,
+    TrustedClock,
+)
+
+
+class TransactionAuthorizationState(str, Enum):
+    CREATED = "CREATED"
+    PENDING_USER_APPROVAL = "PENDING_USER_APPROVAL"
+    APPROVED = "APPROVED"
+    CONSUMED = "CONSUMED"
+    EXPIRED = "EXPIRED"
+    REJECTED = "REJECTED"
+    REVOKED = "REVOKED"
+
+
+class TransactionAuthorizationFailure(str, Enum):
+    INVALID_TRANSACTION = "INVALID_TRANSACTION"
+    INVALID_PRINCIPAL_BINDING = "INVALID_PRINCIPAL_BINDING"
+    INVALID_TRANSACTION_BINDING = "INVALID_TRANSACTION_BINDING"
+    INVALID_OPERATION_BINDING = "INVALID_OPERATION_BINDING"
+    INVALID_AMOUNT_BINDING = "INVALID_AMOUNT_BINDING"
+    INVALID_CURRENCY_BINDING = "INVALID_CURRENCY_BINDING"
+    INVALID_MERCHANT_BINDING = "INVALID_MERCHANT_BINDING"
+    INVALID_RISK_CONTEXT = "INVALID_RISK_CONTEXT"
+    INVALID_NONCE = "INVALID_NONCE"
+    NONCE_REPLAY = "NONCE_REPLAY"
+    INVALID_APPROVAL = "INVALID_APPROVAL"
+    INSUFFICIENT_AUTHENTICATION_ASSURANCE = (
+        "INSUFFICIENT_AUTHENTICATION_ASSURANCE"
+    )
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+    ALREADY_CONSUMED = "ALREADY_CONSUMED"
+    INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
+    DUPLICATE_AUTHORIZATION_ID = "DUPLICATE_AUTHORIZATION_ID"
+    INVALID_ASSURANCE_PROVENANCE = "INVALID_ASSURANCE_PROVENANCE"
+
+
+class TransactionAuthorizationDecision(str, Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionAuthorizationDecisionResult:
+    decision: TransactionAuthorizationDecision
+    failure: TransactionAuthorizationFailure | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalTransaction:
+    transaction_id: str
+    principal_id: str
+    amount: Decimal | None
+    currency: str | None
+    merchant_or_service: str | None
+    operation: str
+    timestamp: datetime
+    nonce: str
+    risk_context: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.transaction_id:
+            raise ValueError("transaction_id must not be empty")
+
+        if not self.principal_id:
+            raise ValueError("principal_id must not be empty")
+
+        if not self.operation:
+            raise ValueError("operation must not be empty")
+
+        if not self.nonce:
+            raise ValueError("nonce must not be empty")
+
+        if self.amount is not None:
+            normalized = Decimal(str(self.amount))
+
+            if not normalized.is_finite():
+                raise ValueError("amount must be finite")
+
+            object.__setattr__(
+                self,
+                "amount",
+                normalized.quantize(Decimal("0.01")),
+            )
+
+        if self.currency is not None:
+            normalized_currency = self.currency.strip().upper()
+
+            if not normalized_currency:
+                raise ValueError("currency must not be empty")
+
+            object.__setattr__(
+                self,
+                "currency",
+                normalized_currency,
+            )
+
+        if self.merchant_or_service is not None:
+            normalized_merchant = self.merchant_or_service.strip()
+
+            if not normalized_merchant:
+                raise ValueError(
+                    "merchant_or_service must not be empty"
+                )
+
+            object.__setattr__(
+                self,
+                "merchant_or_service",
+                normalized_merchant,
+            )
+
+        normalized_operation = self.operation.strip()
+
+        if not normalized_operation:
+            raise ValueError("operation must not be empty")
+
+        object.__setattr__(
+            self,
+            "operation",
+            normalized_operation,
+        )
+
+        object.__setattr__(
+            self,
+            "timestamp",
+            _normalize_datetime(self.timestamp),
+        )
+
+        object.__setattr__(
+            self,
+            "risk_context",
+            tuple(
+                sorted(
+                    (str(k), str(v))
+                    for k, v in self.risk_context
+                )
+            ),
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        *,
+        transaction_id: str,
+        principal_id: str,
+        amount: Decimal | str | int | float | None,
+        currency: str | None,
+        merchant_or_service: str | None,
+        operation: str,
+        timestamp: datetime,
+        nonce: str,
+        risk_context: Mapping[str, str] | None = None,
+    ) -> "CanonicalTransaction":
+        return cls(
+            transaction_id=transaction_id,
+            principal_id=principal_id,
+            amount=(
+                None
+                if amount is None
+                else Decimal(str(amount))
+            ),
+            currency=currency,
+            merchant_or_service=merchant_or_service,
+            operation=operation,
+            timestamp=timestamp,
+            nonce=nonce,
+            risk_context=tuple(
+                sorted(
+                    (str(k), str(v))
+                    for k, v in (risk_context or {}).items()
+                )
+            ),
+        )
+
+    def canonical_representation(self) -> str:
+        payload = {
+            "amount": (
+                None
+                if self.amount is None
+                else format(self.amount, "f")
+            ),
+            "currency": self.currency,
+            "merchant_or_service": self.merchant_or_service,
+            "nonce": self.nonce,
+            "operation": self.operation,
+            "principal_id": self.principal_id,
+            "risk_context": [
+                [key, value]
+                for key, value in self.risk_context
+            ],
+            "timestamp": self.timestamp.isoformat(),
+            "transaction_id": self.transaction_id,
+        }
+
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedApprovalEvidence:
+    """
+    Approval evidence must already have crossed a trusted application
+    boundary. W15.7 never derives authentication assurance itself.
+    """
+
+    authorization_id: str
+    transaction: CanonicalTransaction
+    approved_at: datetime
+    evidence_id: str
+    assurance_context: AuthenticationAssuranceContext
+
+    def __post_init__(self) -> None:
+        if not self.authorization_id:
+            raise ValueError(
+                "authorization_id must not be empty"
+            )
+
+        if not self.evidence_id:
+            raise ValueError(
+                "evidence_id must not be empty"
+            )
+
+        object.__setattr__(
+            self,
+            "approved_at",
+            _normalize_datetime(self.approved_at),
+        )
+
+        if not isinstance(
+            self.assurance_context,
+            AuthenticationAssuranceContext,
+        ):
+            raise TypeError(
+                "assurance_context must be "
+                "AuthenticationAssuranceContext"
+            )
+
+        if not isinstance(
+            self.assurance_context.assurance_level,
+            AuthenticationAssuranceLevel,
+        ):
+            raise TypeError(
+                "assurance_context.assurance_level must be "
+                "AuthenticationAssuranceLevel"
+            )
+
+        if (
+            self.assurance_context.principal_id
+            != self.transaction.principal_id
+        ):
+            raise ValueError(
+                "approval assurance principal binding mismatch"
+            )
+
+        authentication_time = _normalize_datetime(
+            self.assurance_context.authentication_time
+        )
+
+        assurance_time = _normalize_datetime(
+            self.assurance_context.assurance_time
+        )
+
+        if authentication_time > assurance_time:
+            raise ValueError(
+                "authentication time cannot be after assurance time"
+            )
+
+    @property
+    def assurance_level(
+        self,
+    ) -> AuthenticationAssuranceLevel:
+        return self.assurance_context.assurance_level
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionAuthorization:
+    authorization_id: str
+    transaction: CanonicalTransaction
+    created_at: datetime
+    expires_at: datetime
+    state: TransactionAuthorizationState = (
+        TransactionAuthorizationState.CREATED
+    )
+    approval: TrustedApprovalEvidence | None = None
+
+    def __post_init__(self) -> None:
+        if not self.authorization_id:
+            raise ValueError(
+                "authorization_id must not be empty"
+            )
+
+        created = _normalize_datetime(self.created_at)
+        expires = _normalize_datetime(self.expires_at)
+
+        if expires <= created:
+            raise ValueError(
+                "expires_at must be after created_at"
+            )
+
+        object.__setattr__(
+            self,
+            "created_at",
+            created,
+        )
+
+        object.__setattr__(
+            self,
+            "expires_at",
+            expires,
+        )
+
+        if self.approval is not None:
+            if (
+                self.approval.authorization_id
+                != self.authorization_id
+            ):
+                raise ValueError(
+                    "approval authorization binding mismatch"
+                )
+
+            if (
+                self.approval.assurance_context.principal_id
+                != self.transaction.principal_id
+            ):
+                raise ValueError(
+                    "approval assurance principal binding mismatch"
+                )
+
+            if (
+                self.approval.transaction.canonical_representation()
+                != self.transaction.canonical_representation()
+            ):
+                raise ValueError(
+                    "approval transaction binding mismatch"
+                )
+
+
+_ALLOWED_TRANSITIONS = {
+    TransactionAuthorizationState.CREATED: {
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    },
+    TransactionAuthorizationState.PENDING_USER_APPROVAL: {
+        TransactionAuthorizationState.APPROVED,
+        TransactionAuthorizationState.REJECTED,
+    },
+    TransactionAuthorizationState.APPROVED: {
+        TransactionAuthorizationState.CONSUMED,
+        TransactionAuthorizationState.REVOKED,
+        TransactionAuthorizationState.EXPIRED,
+    },
+    TransactionAuthorizationState.CONSUMED: set(),
+    TransactionAuthorizationState.EXPIRED: set(),
+    TransactionAuthorizationState.REJECTED: set(),
+    TransactionAuthorizationState.REVOKED: set(),
+}
+
+
+class NonceRegistry:
+    """
+    Trusted process-local uniqueness boundary for authorization nonces.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._nonces: set[str] = set()
+
+    def register(self, nonce: str) -> None:
+        if not nonce:
+            raise ValueError("nonce must not be empty")
+
+        with self._lock:
+            if nonce in self._nonces:
+                raise ValueError(
+                    TransactionAuthorizationFailure.NONCE_REPLAY.value
+                )
+
+            self._nonces.add(nonce)
+
+
+class AuthorizationIdRegistry:
+    """
+    Trusted process-local uniqueness boundary for authorization IDs.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._authorization_ids: set[str] = set()
+
+    def register(self, authorization_id: str) -> None:
+        if not authorization_id:
+            raise ValueError(
+                "authorization_id must not be empty"
+            )
+
+        with self._lock:
+            if authorization_id in self._authorization_ids:
+                raise ValueError(
+                    TransactionAuthorizationFailure
+                    .DUPLICATE_AUTHORIZATION_ID.value
+                )
+
+            self._authorization_ids.add(authorization_id)
+
+
+class TransactionAuthorizationRegistry:
+    """
+    Trusted registration and atomic state-update boundary.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._authorizations: dict[
+            str,
+            TransactionAuthorization,
+        ] = {}
+        self._nonces: set[str] = set()
+
+    def register(
+        self,
+        authorization: TransactionAuthorization,
+    ) -> None:
+        authorization_id = authorization.authorization_id
+        nonce = authorization.transaction.nonce
+
+        with self._lock:
+            if authorization_id in self._authorizations:
+                raise ValueError(
+                    TransactionAuthorizationFailure
+                    .DUPLICATE_AUTHORIZATION_ID.value
+                )
+
+            if nonce in self._nonces:
+                raise ValueError(
+                    TransactionAuthorizationFailure.NONCE_REPLAY.value
+                )
+
+            self._authorizations[authorization_id] = authorization
+            self._nonces.add(nonce)
+
+    def get(
+        self,
+        authorization_id: str,
+    ) -> TransactionAuthorization | None:
+        with self._lock:
+            return self._authorizations.get(authorization_id)
+
+    def replace(
+        self,
+        authorization_id: str,
+        expected: TransactionAuthorization,
+        replacement: TransactionAuthorization,
+    ) -> bool:
+        with self._lock:
+            current = self._authorizations.get(
+                authorization_id
+            )
+
+            if current is None or current != expected:
+                return False
+
+            self._authorizations[authorization_id] = replacement
+            return True
+
+
+class TransactionAuthorizationConsumer:
+    """
+    Atomic single-use consumption boundary.
+
+    The in-memory lock provides concurrency semantics for this domain
+    implementation. Durable multi-process persistence must later provide
+    equivalent atomic conditional-update/row-lock semantics.
+    """
+
+    def __init__(
+        self,
+        registry: TransactionAuthorizationRegistry,
+    ) -> None:
+        self._registry = registry
+        self._lock = Lock()
+
+    def consume_once(
+        self,
+        authorization_id: str,
+        *,
+        expected_transaction: CanonicalTransaction,
+        clock: TrustedClock,
+        required_assurance_level: AuthenticationAssuranceLevel = (
+            AuthenticationAssuranceLevel.A0
+        ),
+    ) -> TransactionAuthorizationDecisionResult:
+        if not isinstance(
+            required_assurance_level,
+            AuthenticationAssuranceLevel,
+        ):
+            return TransactionAuthorizationDecisionResult(
+                TransactionAuthorizationDecision.DENY,
+                TransactionAuthorizationFailure
+                .INSUFFICIENT_AUTHENTICATION_ASSURANCE,
+            )
+
+        now = _trusted_now(clock)
+
+        with self._lock:
+            authorization = self._registry.get(
+                authorization_id
+            )
+
+            if authorization is None:
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.INVALID_TRANSACTION,
+                )
+
+            if (
+                authorization.transaction.canonical_representation()
+                != expected_transaction.canonical_representation()
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INVALID_TRANSACTION_BINDING,
+                )
+
+            if (
+                authorization.transaction.principal_id
+                != expected_transaction.principal_id
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INVALID_PRINCIPAL_BINDING,
+                )
+
+            if (
+                authorization.state
+                is TransactionAuthorizationState.CONSUMED
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.ALREADY_CONSUMED,
+                )
+
+            if (
+                authorization.state
+                is TransactionAuthorizationState.REVOKED
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.REVOKED,
+                )
+
+            if (
+                authorization.state
+                is TransactionAuthorizationState.EXPIRED
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.EXPIRED,
+                )
+
+            if now >= authorization.expires_at:
+                expired = transition(
+                    authorization,
+                    TransactionAuthorizationState.EXPIRED,
+                )
+
+                self._registry.replace(
+                    authorization_id,
+                    authorization,
+                    expired,
+                )
+
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.EXPIRED,
+                )
+
+            if (
+                authorization.state
+                is not TransactionAuthorizationState.APPROVED
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.INVALID_APPROVAL,
+                )
+
+            approval = authorization.approval
+
+            if approval is None:
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.INVALID_APPROVAL,
+                )
+
+            if (
+                approval.assurance_context.principal_id
+                != authorization.transaction.principal_id
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INVALID_ASSURANCE_PROVENANCE,
+                )
+
+            if (
+                approval.assurance_context.assurance_time
+                > now
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INVALID_ASSURANCE_PROVENANCE,
+                )
+
+            if (
+                approval.assurance_context.authentication_time
+                > now
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INVALID_ASSURANCE_PROVENANCE,
+                )
+
+            if (
+                approval.transaction.canonical_representation()
+                != authorization.transaction.canonical_representation()
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INVALID_TRANSACTION_BINDING,
+                )
+
+            if (
+                approval.assurance_context.assurance_level.value
+                < required_assurance_level.value
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure
+                    .INSUFFICIENT_AUTHENTICATION_ASSURANCE,
+                )
+
+            consumed = transition(
+                authorization,
+                TransactionAuthorizationState.CONSUMED,
+            )
+
+            if not self._registry.replace(
+                authorization_id,
+                authorization,
+                consumed,
+            ):
+                return TransactionAuthorizationDecisionResult(
+                    TransactionAuthorizationDecision.DENY,
+                    TransactionAuthorizationFailure.ALREADY_CONSUMED,
+                )
+
+            return TransactionAuthorizationDecisionResult(
+                TransactionAuthorizationDecision.ALLOW
+            )
+
+
+def transition(
+    authorization: TransactionAuthorization,
+    new_state: TransactionAuthorizationState,
+) -> TransactionAuthorization:
+    allowed = _ALLOWED_TRANSITIONS[
+        authorization.state
+    ]
+
+    if new_state not in allowed:
+        raise ValueError(
+            "invalid transaction authorization transition: "
+            f"{authorization.state.value} -> "
+            f"{new_state.value}"
+        )
+
+    return TransactionAuthorization(
+        authorization_id=authorization.authorization_id,
+        transaction=authorization.transaction,
+        created_at=authorization.created_at,
+        expires_at=authorization.expires_at,
+        state=new_state,
+        approval=authorization.approval,
+    )
+
+
+def attach_approval(
+    authorization: TransactionAuthorization,
+    approval: TrustedApprovalEvidence,
+    *,
+    clock: TrustedClock,
+) -> TransactionAuthorization:
+    if (
+        authorization.state
+        is not TransactionAuthorizationState.PENDING_USER_APPROVAL
+    ):
+        raise ValueError(
+            "approval can only be attached while pending"
+        )
+
+    if (
+        approval.authorization_id
+        != authorization.authorization_id
+    ):
+        raise ValueError(
+            "approval authorization binding mismatch"
+        )
+
+    if (
+        approval.assurance_context.principal_id
+        != authorization.transaction.principal_id
+    ):
+        raise ValueError(
+            "approval assurance principal binding mismatch"
+        )
+
+    if (
+        approval.transaction.canonical_representation()
+        != authorization.transaction.canonical_representation()
+    ):
+        raise ValueError(
+            "approval is not bound to the exact transaction"
+        )
+
+    now = _trusted_now(clock)
+
+    if (
+        approval.assurance_context.assurance_time
+        > now
+    ):
+        raise ValueError(
+            "future-dated authentication assurance"
+        )
+
+    if (
+        approval.assurance_context.authentication_time
+        > now
+    ):
+        raise ValueError(
+            "future-dated authentication evidence"
+        )
+
+    if approval.approved_at > now:
+        raise ValueError(
+            "future-dated approval is invalid"
+        )
+
+    return transition(
+        TransactionAuthorization(
+            authorization_id=authorization.authorization_id,
+            transaction=authorization.transaction,
+            created_at=authorization.created_at,
+            expires_at=authorization.expires_at,
+            state=TransactionAuthorizationState.PENDING_USER_APPROVAL,
+            approval=approval,
+        ),
+        TransactionAuthorizationState.APPROVED,
+    )
+
+
+def expire_if_due(
+    authorization: TransactionAuthorization,
+    *,
+    clock: TrustedClock,
+) -> TransactionAuthorization:
+    now = _trusted_now(clock)
+
+    if (
+        authorization.state
+        is TransactionAuthorizationState.APPROVED
+        and now >= authorization.expires_at
+    ):
+        return transition(
+            authorization,
+            TransactionAuthorizationState.EXPIRED,
+        )
+
+    return authorization
+
+
+def consume(
+    authorization: TransactionAuthorization,
+    *,
+    clock: TrustedClock,
+    required_assurance_level: AuthenticationAssuranceLevel = (
+        AuthenticationAssuranceLevel.A0
+    ),
+) -> TransactionAuthorizationDecisionResult:
+    if not isinstance(
+        required_assurance_level,
+        AuthenticationAssuranceLevel,
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure
+            .INSUFFICIENT_AUTHENTICATION_ASSURANCE,
+        )
+
+    now = _trusted_now(clock)
+
+    if (
+        authorization.state
+        is TransactionAuthorizationState.CONSUMED
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure.ALREADY_CONSUMED,
+        )
+
+    if (
+        authorization.state
+        is TransactionAuthorizationState.EXPIRED
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure.EXPIRED,
+        )
+
+    if (
+        authorization.state
+        is TransactionAuthorizationState.REVOKED
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure.REVOKED,
+        )
+
+    if (
+        authorization.state
+        is not TransactionAuthorizationState.APPROVED
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure.INVALID_APPROVAL,
+        )
+
+    if now >= authorization.expires_at:
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure.EXPIRED,
+        )
+
+    approval = authorization.approval
+
+    if approval is None:
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure.INVALID_APPROVAL,
+        )
+
+    if (
+        approval.assurance_context.principal_id
+        != authorization.transaction.principal_id
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure
+            .INVALID_ASSURANCE_PROVENANCE,
+        )
+
+    if (
+        approval.assurance_context.assurance_time
+        > now
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure
+            .INVALID_ASSURANCE_PROVENANCE,
+        )
+
+    if (
+        approval.assurance_context.authentication_time
+        > now
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure
+            .INVALID_ASSURANCE_PROVENANCE,
+        )
+
+    if (
+        approval.transaction.canonical_representation()
+        != authorization.transaction.canonical_representation()
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure
+            .INVALID_TRANSACTION_BINDING,
+        )
+
+    if (
+        approval.assurance_context.assurance_level.value
+        < required_assurance_level.value
+    ):
+        return TransactionAuthorizationDecisionResult(
+            TransactionAuthorizationDecision.DENY,
+            TransactionAuthorizationFailure
+            .INSUFFICIENT_AUTHENTICATION_ASSURANCE,
+        )
+
+    return TransactionAuthorizationDecisionResult(
+        TransactionAuthorizationDecision.ALLOW
+    )
+
+
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError(
+            "datetime must be timezone-aware"
+        )
+
+    return value.astimezone(timezone.utc)
+
+
+def _trusted_now(clock: TrustedClock) -> datetime:
+    return _normalize_datetime(clock.now())
+
+---- test_transaction_authorization.py ----
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.domain.identity.authentication_assurance import (
+    AuthenticationAssuranceContext,
+    AuthenticationAssuranceLevel,
+)
+
+from app.domain.identity.transaction_authorization import (
+    AuthorizationIdRegistry,
+    CanonicalTransaction,
+    NonceRegistry,
+    TransactionAuthorization,
+    TransactionAuthorizationConsumer,
+    TransactionAuthorizationDecision,
+    TransactionAuthorizationFailure,
+    TransactionAuthorizationRegistry,
+    TransactionAuthorizationState,
+    TrustedApprovalEvidence,
+    attach_approval,
+    consume,
+    expire_if_due,
+    transition,
+)
+
+
+class FixedClock:
+    def __init__(self, value: datetime) -> None:
+        self.value = value
+
+    def now(self) -> datetime:
+        return self.value
+
+
+@pytest.fixture
+def now() -> datetime:
+    return datetime(2026, 9, 13, 20, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def clock(now: datetime) -> FixedClock:
+    return FixedClock(now)
+
+
+@pytest.fixture
+def transaction(now: datetime) -> CanonicalTransaction:
+    return CanonicalTransaction.from_mapping(
+        transaction_id="tx-001",
+        principal_id="user-001",
+        amount="100.00",
+        currency="eur",
+        merchant_or_service="merchant.example",
+        operation="purchase",
+        timestamp=now,
+        nonce="nonce-001",
+        risk_context={"risk": "medium", "channel": "web"},
+    )
+
+
+@pytest.fixture
+def authorization(
+    transaction: CanonicalTransaction,
+    now: datetime,
+) -> TransactionAuthorization:
+    return TransactionAuthorization(
+        authorization_id="auth-001",
+        transaction=transaction,
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+
+def assurance_context(
+    *,
+    principal_id: str = "user-001",
+    level: AuthenticationAssuranceLevel = AuthenticationAssuranceLevel.A2,
+    assurance_time: datetime | None = None,
+) -> AuthenticationAssuranceContext:
+    assurance_time = assurance_time or datetime(
+        2026,
+        9,
+        13,
+        19,
+        59,
+        tzinfo=timezone.utc,
+    )
+
+    return AuthenticationAssuranceContext(
+        principal_id=principal_id,
+        assurance_level=level,
+        authentication_time=assurance_time,
+        assurance_time=assurance_time,
+        authentication_method="password",
+        authentication_strength="mfa",
+        user_verified=True,
+        phishing_resistant=level is AuthenticationAssuranceLevel.A3,
+        issuer="easychatbot-test",
+        subject=principal_id,
+        audience="easychatbot",
+        evidence_id="assurance-evidence-001",
+        policy_version="W15.6-policy-v1",
+    )
+
+
+def approved_authorization(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+    *,
+    level: AuthenticationAssuranceLevel = AuthenticationAssuranceLevel.A2,
+    principal_id: str = "user-001",
+) -> TransactionAuthorization:
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    approval = TrustedApprovalEvidence(
+        authorization_id=authorization.authorization_id,
+        transaction=authorization.transaction,
+        approved_at=clock.now(),
+        evidence_id=f"approval-{authorization.authorization_id}",
+        assurance_context=assurance_context(
+            principal_id=principal_id,
+            level=level,
+            assurance_time=clock.now(),
+        ),
+    )
+
+    return attach_approval(
+        pending,
+        approval,
+        clock=clock,
+    )
+
+
+def test_assurance_ordering() -> None:
+    assert AuthenticationAssuranceLevel.A0.value < AuthenticationAssuranceLevel.A1.value
+    assert AuthenticationAssuranceLevel.A1.value < AuthenticationAssuranceLevel.A2.value
+    assert AuthenticationAssuranceLevel.A2.value < AuthenticationAssuranceLevel.A3.value
+
+
+def test_validated_assurance_is_immutable() -> None:
+    value = assurance_context()
+
+    with pytest.raises(FrozenInstanceError):
+        value.assurance_level = AuthenticationAssuranceLevel.A3  # type: ignore[misc]
+
+
+def test_assurance_requires_validated_enum_not_arbitrary_integer(
+    transaction: CanonicalTransaction,
+    now: datetime,
+) -> None:
+    context = assurance_context(
+        principal_id=transaction.principal_id,
+        level=AuthenticationAssuranceLevel.A2,
+        assurance_time=now,
+    )
+
+    # Simulate malformed runtime data crossing the W15.6 -> W15.7
+    # trust boundary. W15.6's frozen dataclass is the authoritative type;
+    # this does not create a second assurance authority.
+    object.__setattr__(context, "assurance_level", 999)
+
+    with pytest.raises(TypeError, match="AuthenticationAssuranceLevel"):
+        TrustedApprovalEvidence(
+            authorization_id="auth-malformed-assurance",
+            transaction=transaction,
+            approved_at=now,
+            evidence_id="malformed-assurance",
+            assurance_context=context,
+        )
+
+
+def test_assurance_is_bound_to_transaction_principal(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    with pytest.raises(ValueError, match="principal binding"):
+        TrustedApprovalEvidence(
+            authorization_id=pending.authorization_id,
+            transaction=pending.transaction,
+            approved_at=clock.now(),
+            evidence_id="approval",
+            assurance_context=assurance_context(
+                principal_id="different-user",
+            ),
+        )
+
+
+def test_canonical_transaction_normalizes_monetary_amount(
+    transaction: CanonicalTransaction,
+) -> None:
+    assert str(transaction.amount) == "100.00"
+
+
+def test_canonical_transaction_does_not_use_binary_float_equality(
+    transaction: CanonicalTransaction,
+) -> None:
+    first = CanonicalTransaction.from_mapping(
+        transaction_id="tx-a",
+        principal_id="user-a",
+        amount=0.1,
+        currency="eur",
+        merchant_or_service="merchant",
+        operation="purchase",
+        timestamp=transaction.timestamp,
+        nonce="nonce-a",
+    )
+
+    second = CanonicalTransaction.from_mapping(
+        transaction_id="tx-b",
+        principal_id="user-b",
+        amount="0.10",
+        currency="EUR",
+        merchant_or_service="merchant",
+        operation="purchase",
+        timestamp=transaction.timestamp,
+        nonce="nonce-b",
+    )
+
+    assert first.amount == second.amount
+    assert str(first.amount) == "0.10"
+
+
+def test_canonical_representation_is_deterministic(
+    transaction: CanonicalTransaction,
+) -> None:
+    equivalent = CanonicalTransaction.from_mapping(
+        transaction_id="tx-001",
+        principal_id="user-001",
+        amount="100.00",
+        currency="EUR",
+        merchant_or_service="merchant.example",
+        operation="purchase",
+        timestamp=transaction.timestamp,
+        nonce="nonce-001",
+        risk_context={"channel": "web", "risk": "medium"},
+    )
+
+    assert (
+        transaction.canonical_representation()
+        == equivalent.canonical_representation()
+    )
+
+
+def test_every_security_field_changes_canonical_binding(
+    transaction: CanonicalTransaction,
+) -> None:
+    values = {
+        "transaction_id": "tx-changed",
+        "principal_id": "user-changed",
+        "operation": "refund",
+        "amount": "101.00",
+        "currency": "USD",
+        "merchant_or_service": "other.example",
+        "timestamp": transaction.timestamp + timedelta(seconds=1),
+        "nonce": "nonce-changed",
+        "risk_context": {"risk": "high", "channel": "web"},
+    }
+
+    for field, value in values.items():
+        kwargs = {
+            "transaction_id": transaction.transaction_id,
+            "principal_id": transaction.principal_id,
+            "amount": transaction.amount,
+            "currency": transaction.currency,
+            "merchant_or_service": transaction.merchant_or_service,
+            "operation": transaction.operation,
+            "timestamp": transaction.timestamp,
+            "nonce": transaction.nonce,
+            "risk_context": dict(transaction.risk_context),
+        }
+
+        kwargs[field] = value
+
+        changed = CanonicalTransaction.from_mapping(**kwargs)
+
+        assert (
+            changed.canonical_representation()
+            != transaction.canonical_representation()
+        ), field
+
+
+def test_transaction_binding_covers_required_security_fields(
+    transaction: CanonicalTransaction,
+) -> None:
+    representation = transaction.canonical_representation()
+
+    for value in (
+        transaction.transaction_id,
+        transaction.principal_id,
+        transaction.operation,
+        transaction.nonce,
+        transaction.currency,
+        transaction.merchant_or_service,
+        "medium",
+        "web",
+        "100.00",
+    ):
+        assert value in representation
+
+
+def test_trusted_approval_evidence_is_immutable(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    approved = approved_authorization(authorization, clock)
+
+    assert approved.approval is not None
+
+    with pytest.raises(FrozenInstanceError):
+        approved.approval.evidence_id = "forged"  # type: ignore[misc]
+
+
+def test_caller_boolean_cannot_create_trusted_approval() -> None:
+    assert "approved" not in TrustedApprovalEvidence.__annotations__
+
+
+def test_a3_assurance_is_not_transaction_approval(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    a3 = assurance_context(
+        level=AuthenticationAssuranceLevel.A3,
+    )
+
+    approval = TrustedApprovalEvidence(
+        authorization_id=authorization.authorization_id,
+        transaction=authorization.transaction,
+        approved_at=clock.now(),
+        evidence_id="a3",
+        assurance_context=a3,
+    )
+
+    assert pending.state is TransactionAuthorizationState.PENDING_USER_APPROVAL
+    assert approval.assurance_level is AuthenticationAssuranceLevel.A3
+
+
+def test_future_dated_approval_fails_closed(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    approval = TrustedApprovalEvidence(
+        authorization_id=authorization.authorization_id,
+        transaction=authorization.transaction,
+        approved_at=clock.now() + timedelta(minutes=1),
+        evidence_id="future",
+        assurance_context=assurance_context(
+            assurance_time=clock.now(),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="future-dated"):
+        attach_approval(
+            pending,
+            approval,
+            clock=clock,
+        )
+
+
+def test_trusted_clock_is_used_for_expiry(
+    authorization: TransactionAuthorization,
+    now: datetime,
+) -> None:
+    future_clock = FixedClock(now + timedelta(minutes=10))
+
+    approved = approved_authorization(
+        authorization,
+        FixedClock(now),
+    )
+
+    result = consume(
+        approved,
+        clock=future_clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    assert result.decision is TransactionAuthorizationDecision.DENY
+    assert result.failure is TransactionAuthorizationFailure.EXPIRED
+
+
+def test_future_dated_assurance_does_not_bypass_trusted_time(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    future_context = assurance_context(
+        level=AuthenticationAssuranceLevel.A3,
+        assurance_time=clock.now() + timedelta(hours=1),
+    )
+
+    approval = TrustedApprovalEvidence(
+        authorization_id=authorization.authorization_id,
+        transaction=authorization.transaction,
+        approved_at=clock.now(),
+        evidence_id="future-assurance",
+        assurance_context=future_context,
+    )
+
+    with pytest.raises(ValueError, match="future"):
+        attach_approval(
+            pending,
+            approval,
+            clock=clock,
+        )
+
+
+def test_legal_lifecycle_transitions(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    approved = approved_authorization(
+        authorization,
+        clock,
+    )
+
+    consumed = transition(
+        approved,
+        TransactionAuthorizationState.CONSUMED,
+    )
+
+    assert pending.state is TransactionAuthorizationState.PENDING_USER_APPROVAL
+    assert approved.state is TransactionAuthorizationState.APPROVED
+    assert consumed.state is TransactionAuthorizationState.CONSUMED
+
+
+def test_illegal_lifecycle_transitions_fail_closed(
+    authorization: TransactionAuthorization,
+) -> None:
+    with pytest.raises(ValueError):
+        transition(
+            authorization,
+            TransactionAuthorizationState.CONSUMED,
+        )
+
+    pending = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    with pytest.raises(ValueError):
+        transition(
+            pending,
+            TransactionAuthorizationState.CONSUMED,
+        )
+
+
+def test_unapproved_transaction_denies(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    result = consume(
+        authorization,
+        clock=clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    assert result.decision is TransactionAuthorizationDecision.DENY
+    assert result.failure is TransactionAuthorizationFailure.INVALID_APPROVAL
+
+
+def test_nonce_registry_rejects_replay() -> None:
+    registry = NonceRegistry()
+
+    registry.register("nonce-1")
+
+    with pytest.raises(ValueError, match="NONCE_REPLAY"):
+        registry.register("nonce-1")
+
+
+def test_authorization_id_registry_rejects_duplicates() -> None:
+    registry = AuthorizationIdRegistry()
+
+    registry.register("auth-1")
+
+    with pytest.raises(ValueError, match="DUPLICATE_AUTHORIZATION_ID"):
+        registry.register("auth-1")
+
+
+def test_transaction_registry_rejects_duplicate_authorization_id(
+    authorization: TransactionAuthorization,
+) -> None:
+    registry = TransactionAuthorizationRegistry()
+
+    registry.register(authorization)
+
+    with pytest.raises(ValueError, match="DUPLICATE_AUTHORIZATION_ID"):
+        registry.register(authorization)
+
+
+def test_transaction_registry_rejects_duplicate_nonce(
+    authorization: TransactionAuthorization,
+    transaction: CanonicalTransaction,
+    now: datetime,
+) -> None:
+    registry = TransactionAuthorizationRegistry()
+
+    registry.register(authorization)
+
+    duplicate_transaction = CanonicalTransaction.from_mapping(
+        transaction_id="tx-duplicate",
+        principal_id=transaction.principal_id,
+        amount=transaction.amount,
+        currency=transaction.currency,
+        merchant_or_service=transaction.merchant_or_service,
+        operation=transaction.operation,
+        timestamp=transaction.timestamp,
+        nonce=transaction.nonce,
+    )
+
+    duplicate = TransactionAuthorization(
+        authorization_id="auth-duplicate",
+        transaction=duplicate_transaction,
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    with pytest.raises(ValueError, match="NONCE_REPLAY"):
+        registry.register(duplicate)
+
+
+def test_registry_replace_requires_expected_current_state(
+    authorization: TransactionAuthorization,
+) -> None:
+    registry = TransactionAuthorizationRegistry()
+
+    registry.register(authorization)
+
+    replacement = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    wrong_expected = transition(
+        authorization,
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    )
+
+    assert not registry.replace(
+        authorization.authorization_id,
+        wrong_expected,
+        replacement,
+    )
+
+    assert registry.replace(
+        authorization.authorization_id,
+        authorization,
+        replacement,
+    )
+
+
+def test_atomic_consume_is_single_use(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    approved = approved_authorization(
+        authorization,
+        clock,
+    )
+
+    registry = TransactionAuthorizationRegistry()
+    registry.register(approved)
+
+    consumer = TransactionAuthorizationConsumer(registry)
+
+    first = consumer.consume_once(
+        authorization.authorization_id,
+        expected_transaction=authorization.transaction,
+        clock=clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    second = consumer.consume_once(
+        authorization.authorization_id,
+        expected_transaction=authorization.transaction,
+        clock=clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    assert first.decision is TransactionAuthorizationDecision.ALLOW
+    assert second.decision is TransactionAuthorizationDecision.DENY
+    assert second.failure is TransactionAuthorizationFailure.ALREADY_CONSUMED
+
+
+def test_concurrent_consumption_has_exactly_one_success(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    approved = approved_authorization(
+        authorization,
+        clock,
+    )
+
+    registry = TransactionAuthorizationRegistry()
+    registry.register(approved)
+
+    consumer = TransactionAuthorizationConsumer(registry)
+
+    def attempt():
+        return consumer.consume_once(
+            authorization.authorization_id,
+            expected_transaction=authorization.transaction,
+            clock=clock,
+            required_assurance_level=AuthenticationAssuranceLevel.A2,
+        )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(
+            executor.map(
+                lambda _: attempt(),
+                range(16),
+            )
+        )
+
+    allows = [
+        result
+        for result in results
+        if result.decision is TransactionAuthorizationDecision.ALLOW
+    ]
+
+    assert len(allows) == 1
+
+
+def test_transaction_mismatch_denies(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    approved = approved_authorization(
+        authorization,
+        clock,
+    )
+
+    registry = TransactionAuthorizationRegistry()
+    registry.register(approved)
+
+    consumer = TransactionAuthorizationConsumer(registry)
+
+    wrong_transaction = CanonicalTransaction.from_mapping(
+        transaction_id="different",
+        principal_id=authorization.transaction.principal_id,
+        amount=authorization.transaction.amount,
+        currency=authorization.transaction.currency,
+        merchant_or_service=authorization.transaction.merchant_or_service,
+        operation=authorization.transaction.operation,
+        timestamp=authorization.transaction.timestamp,
+        nonce="different-nonce",
+    )
+
+    result = consumer.consume_once(
+        authorization.authorization_id,
+        expected_transaction=wrong_transaction,
+        clock=clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    assert result.decision is TransactionAuthorizationDecision.DENY
+    assert result.failure is TransactionAuthorizationFailure.INVALID_TRANSACTION_BINDING
+
+
+def test_insufficient_assurance_denies(
+    authorization: TransactionAuthorization,
+    clock: FixedClock,
+) -> None:
+    approved = approved_authorization(
+        authorization,
+        clock,
+        level=AuthenticationAssuranceLevel.A1,
+    )
+
+    registry = TransactionAuthorizationRegistry()
+    registry.register(approved)
+
+    consumer = TransactionAuthorizationConsumer(registry)
+
+    result = consumer.consume_once(
+        authorization.authorization_id,
+        expected_transaction=authorization.transaction,
+        clock=clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    assert result.decision is TransactionAuthorizationDecision.DENY
+    assert (
+        result.failure
+        is TransactionAuthorizationFailure.INSUFFICIENT_AUTHENTICATION_ASSURANCE
+    )
+
+
+def test_transaction_authorization_does_not_implement_business_authorization(
+    authorization: TransactionAuthorization,
+) -> None:
+    assert not hasattr(authorization, "roles")
+    assert not hasattr(authorization, "permissions")
+
+
+def test_no_raw_secret_fields_are_present_in_canonical_representation(
+    transaction: CanonicalTransaction,
+) -> None:
+    representation = transaction.canonical_representation().lower()
+
+    for secret_name in (
+        "password",
+        "access_token",
+        "refresh_token",
+        "otp_secret",
+        "private_key",
+    ):
+        assert secret_name not in representation
+
+---- application service ----
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from app.application.authorization.authorization_service import (
+    AuthorizationService,
+)
+from app.domain.identity.authentication_assurance import (
+    AuthenticationAssuranceContext,
+    AuthenticationAssuranceLevel,
+    TrustedClock,
+)
+from app.domain.identity.principal import Principal
+from app.domain.identity.transaction_authorization import (
+    CanonicalTransaction,
+    TransactionAuthorization,
+    TransactionAuthorizationConsumer,
+    TransactionAuthorizationDecisionResult,
+    TransactionAuthorizationRegistry,
+    TransactionAuthorizationState,
+    TrustedApprovalEvidence,
+    attach_approval,
+    transition,
+)
+
+
+class TransactionAuthorizationApplicationError(RuntimeError):
+    """Application-layer transaction-authorization failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionAuthorizationApplicationService:
+    """Application boundary for transaction authorization.
+
+    Coordinates authenticated-principal validation, domain transaction
+    authorization, assurance-context consumption, and atomic consumption.
+
+    This service does not implement authentication, security-factor
+    management, external identity integration, authentication freshness
+    policy, business authorization policy, payment execution, money movement,
+    or cryptographic transaction signing.
+
+    W15.7 consumes the W15.6 AuthenticationAssuranceContext.
+    """
+
+    authorization_service: AuthorizationService
+    registry: TransactionAuthorizationRegistry
+    consumer: TransactionAuthorizationConsumer
+
+    def require_authorized_principal(
+        self,
+        *,
+        principal: Principal,
+    ) -> Principal:
+        """Require an authenticated and active principal."""
+        return self.authorization_service.require_authenticated(principal)
+
+    def create_pending_authorization(
+        self,
+        *,
+        principal: Principal,
+        transaction: CanonicalTransaction,
+        authorization_id: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> TransactionAuthorization:
+        """Create and register a pending transaction authorization."""
+        authenticated = self.require_authorized_principal(
+            principal=principal,
+        )
+
+        if transaction.principal_id != authenticated.user_id:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction principal does not match authenticated principal."
+            )
+
+        authorization = TransactionAuthorization(
+            authorization_id=authorization_id,
+            transaction=transaction,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+
+        pending = transition(
+            authorization,
+            TransactionAuthorizationState.PENDING_USER_APPROVAL,
+        )
+
+        self.registry.register(pending)
+
+        return pending
+
+    def attach_user_approval(
+        self,
+        *,
+        principal: Principal,
+        authorization: TransactionAuthorization,
+        approval: TrustedApprovalEvidence,
+        clock: TrustedClock,
+    ) -> TransactionAuthorization:
+        """Attach trusted approval to the exact pending transaction.
+
+        Assurance is consumed from the W15.6 AuthenticationAssuranceContext.
+        W15.7 does not derive or recreate authentication assurance.
+        """
+        authenticated = self.require_authorized_principal(
+            principal=principal,
+        )
+
+        if authorization.transaction.principal_id != authenticated.user_id:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction principal does not match authenticated principal."
+            )
+
+        if approval.transaction.principal_id != authenticated.user_id:
+            raise TransactionAuthorizationApplicationError(
+                "Approval principal does not match authenticated principal."
+            )
+
+        if not isinstance(
+            approval.assurance_context,
+            AuthenticationAssuranceContext,
+        ):
+            raise TransactionAuthorizationApplicationError(
+                "W15.6 AuthenticationAssuranceContext is required."
+            )
+
+        if approval.assurance_context.principal_id != authenticated.user_id:
+            raise TransactionAuthorizationApplicationError(
+                "Authentication assurance principal does not match "
+                "authenticated principal."
+            )
+
+        if not isinstance(
+            approval.assurance_context.assurance_level,
+            AuthenticationAssuranceLevel,
+        ):
+            raise TransactionAuthorizationApplicationError(
+                "Authentication assurance level is invalid."
+            )
+
+        approved = attach_approval(
+            authorization,
+            approval,
+            clock=clock,
+        )
+
+        # TransactionAuthorization is immutable. Replace the pending
+        # snapshot in the trusted registry with the approved snapshot.
+        # Compare-and-swap prevents overwriting a concurrent state change.
+        replaced = self.registry.replace(
+            authorization.authorization_id,
+            authorization,
+            approved,
+        )
+
+        if not replaced:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction authorization state changed concurrently."
+            )
+
+        return approved
+
+    def consume_authorization(
+        self,
+        *,
+        principal: Principal,
+        authorization_id: str,
+        expected_transaction: CanonicalTransaction,
+        clock: TrustedClock,
+        required_assurance_level: AuthenticationAssuranceLevel,
+    ) -> TransactionAuthorizationDecisionResult:
+        """Atomically consume one exact transaction authorization."""
+        authenticated = self.require_authorized_principal(
+            principal=principal,
+        )
+
+        if expected_transaction.principal_id != authenticated.user_id:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction principal does not match authenticated principal."
+            )
+
+        if not isinstance(
+            required_assurance_level,
+            AuthenticationAssuranceLevel,
+        ):
+            raise TransactionAuthorizationApplicationError(
+                "Required authentication assurance level is invalid."
+            )
+
+        return self.consumer.consume_once(
+            authorization_id,
+            expected_transaction=expected_transaction,
+            clock=clock,
+            required_assurance_level=required_assurance_level,
+        )
+
+
+__all__ = [
+    "TransactionAuthorizationApplicationError",
+    "TransactionAuthorizationApplicationService",
+]
+
+---- application tests ----
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.application.authorization.authorization_service import (
+    AuthenticationRequiredError,
+    AuthorizationService,
+)
+from app.application.identity.transaction_authorization import (
+    TransactionAuthorizationApplicationError,
+    TransactionAuthorizationApplicationService,
+)
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.authentication_assurance import (
+    AuthenticationAssuranceContext,
+    AuthenticationAssuranceLevel,
+)
+from app.domain.identity.principal import AccountStatus, Principal
+from app.domain.identity.transaction_authorization import (
+    CanonicalTransaction,
+    TransactionAuthorizationConsumer,
+    TransactionAuthorizationRegistry,
+    TrustedApprovalEvidence,
+)
+
+
+class FixedClock:
+    def __init__(self, value: datetime) -> None:
+        self.value = value
+
+    def now(self) -> datetime:
+        return self.value
+
+
+def make_principal(
+    user_id: str = "user-001",
+) -> Principal:
+    return Principal(
+        user_id=user_id,
+        email=f"{user_id}@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset(),
+    )
+
+
+def make_transaction(
+    now: datetime,
+) -> CanonicalTransaction:
+    return CanonicalTransaction.from_mapping(
+        transaction_id="tx-001",
+        principal_id="user-001",
+        amount="100.00",
+        currency="EUR",
+        merchant_or_service="merchant.example",
+        operation="purchase",
+        timestamp=now,
+        nonce="nonce-001",
+        risk_context={
+            "channel": "web",
+            "risk": "medium",
+        },
+    )
+
+
+def make_assurance(
+    *,
+    principal_id: str = "user-001",
+    level: AuthenticationAssuranceLevel = (
+        AuthenticationAssuranceLevel.A2
+    ),
+    assurance_time: datetime,
+) -> AuthenticationAssuranceContext:
+    return AuthenticationAssuranceContext(
+        principal_id=principal_id,
+        assurance_level=level,
+        authentication_time=assurance_time,
+        assurance_time=assurance_time,
+        authentication_method="test",
+        authentication_strength="mfa",
+        user_verified=True,
+        phishing_resistant=(
+            level is AuthenticationAssuranceLevel.A3
+        ),
+        issuer="test",
+        subject=principal_id,
+        audience="easychatbot",
+        evidence_id="assurance-001",
+        policy_version="test-v1",
+    )
+
+
+def make_service() -> TransactionAuthorizationApplicationService:
+    registry = TransactionAuthorizationRegistry()
+
+    return TransactionAuthorizationApplicationService(
+        authorization_service=AuthorizationService(),
+        registry=registry,
+        consumer=TransactionAuthorizationConsumer(registry),
+    )
+
+
+def make_pending_authorization(
+    *,
+    service: TransactionAuthorizationApplicationService,
+    principal: Principal,
+    transaction: CanonicalTransaction,
+    now: datetime,
+) -> object:
+    return service.create_pending_authorization(
+        principal=principal,
+        transaction=transaction,
+        authorization_id="auth-001",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+
+def test_service_requires_authenticated_principal() -> None:
+    now = datetime(
+        2026,
+        9,
+        13,
+        20,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    service = make_service()
+
+    inactive = Principal(
+        user_id="user-001",
+        email="user-001@example.com",
+        email_verified=False,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset(),
+    )
+
+    transaction = make_transaction(now)
+
+    with pytest.raises(AuthenticationRequiredError):
+        service.create_pending_authorization(
+            principal=inactive,
+            transaction=transaction,
+            authorization_id="auth-001",
+            created_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+
+
+def test_service_rejects_principal_substitution() -> None:
+    now = datetime(
+        2026,
+        9,
+        13,
+        20,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    service = make_service()
+    transaction = make_transaction(now)
+
+    with pytest.raises(
+        TransactionAuthorizationApplicationError,
+        match="authenticated principal",
+    ):
+        service.create_pending_authorization(
+            principal=make_principal("user-002"),
+            transaction=transaction,
+            authorization_id="auth-001",
+            created_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+
+
+def test_service_creates_and_registers_pending_authorization() -> None:
+    now = datetime(
+        2026,
+        9,
+        13,
+        20,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    service = make_service()
+    transaction = make_transaction(now)
+
+    pending = service.create_pending_authorization(
+        principal=make_principal(),
+        transaction=transaction,
+        authorization_id="auth-001",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    assert (
+        pending.state.value
+        == "PENDING_USER_APPROVAL"
+    )
+
+    assert (
+        service.registry.get("auth-001")
+        == pending
+    )
+
+
+def test_service_consumes_w156_assurance_context_without_rederiving_assurance() -> None:
+    now = datetime(
+        2026,
+        9,
+        13,
+        20,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    clock = FixedClock(now)
+    service = make_service()
+    transaction = make_transaction(now)
+
+    pending = service.create_pending_authorization(
+        principal=make_principal(),
+        transaction=transaction,
+        authorization_id="auth-001",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    assurance = make_assurance(
+        level=AuthenticationAssuranceLevel.A2,
+        assurance_time=now,
+    )
+
+    approval = object.__new__(TrustedApprovalEvidence)
+
+    object.__setattr__(
+        approval,
+        "authorization_id",
+        "auth-001",
+    )
+    object.__setattr__(
+        approval,
+        "transaction",
+        transaction,
+    )
+    object.__setattr__(
+        approval,
+        "approved_at",
+        now,
+    )
+    object.__setattr__(
+        approval,
+        "evidence_id",
+        "approval-001",
+    )
+    object.__setattr__(
+        approval,
+        "assurance_context",
+        assurance,
+    )
+
+    approved = service.attach_user_approval(
+        principal=make_principal(),
+        authorization=pending,
+        approval=approval,
+        clock=clock,
+    )
+
+    result = service.consume_authorization(
+        principal=make_principal(),
+        authorization_id=approved.authorization_id,
+        expected_transaction=transaction,
+        clock=clock,
+        required_assurance_level=AuthenticationAssuranceLevel.A2,
+    )
+
+    assert result.decision.value == "ALLOW"
+    assert result.failure is None
+
+
+def test_service_rejects_assurance_from_different_principal() -> None:
+    now = datetime(
+        2026,
+        9,
+        13,
+        20,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    clock = FixedClock(now)
+    service = make_service()
+    transaction = make_transaction(now)
+
+    pending = service.create_pending_authorization(
+        principal=make_principal(),
+        transaction=transaction,
+        authorization_id="auth-001",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+
+    valid_assurance = make_assurance(
+        principal_id="user-001",
+        assurance_time=now,
+    )
+
+    approval = object.__new__(TrustedApprovalEvidence)
+
+    object.__setattr__(
+        approval,
+        "authorization_id",
+        "auth-001",
+    )
+    object.__setattr__(
+        approval,
+        "transaction",
+        transaction,
+    )
+    object.__setattr__(
+        approval,
+        "approved_at",
+        now,
+    )
+    object.__setattr__(
+        approval,
+        "evidence_id",
+        "approval-001",
+    )
+    object.__setattr__(
+        approval,
+        "assurance_context",
+        valid_assurance,
+    )
+
+    forged_assurance = make_assurance(
+        principal_id="user-002",
+        assurance_time=now,
+    )
+
+    object.__setattr__(
+        approval,
+        "assurance_context",
+        forged_assurance,
+    )
+
+    with pytest.raises(
+        TransactionAuthorizationApplicationError,
+        match="authenticated principal",
+    ):
+        service.attach_user_approval(
+            principal=make_principal(),
+            authorization=pending,
+            approval=approval,
+            clock=clock,
+        )
+
+
+def test_service_rejects_invalid_required_assurance_level() -> None:
+    now = datetime(
+        2026,
+        9,
+        13,
+        20,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    service = make_service()
+    transaction = make_transaction(now)
+
+    with pytest.raises(
+        TransactionAuthorizationApplicationError,
+        match="assurance level",
+    ):
+        service.consume_authorization(
+            principal=make_principal(),
+            authorization_id="missing",
+            expected_transaction=transaction,
+            clock=FixedClock(now),
+            required_assurance_level=999,  # type: ignore[arg-type]
+        )
+
+
+def test_service_keeps_business_authorization_separate() -> None:
+    service = make_service()
+
+    assert isinstance(
+        service.authorization_service,
+        AuthorizationService,
+    )
+
+    assert not hasattr(
+        service,
+        "require_permission",
+    )
+
+    assert (
+        Permission.FUNCTIONALITY_CONTROL
+        is not None
+    )
+
+
+def test_service_has_no_provider_specific_dependencies() -> None:
+    with open(
+        "backend/app/application/identity/transaction_authorization.py",
+        encoding="utf-8",
+    ) as handle:
+        source = handle.read()
+
+    forbidden = (
+        "zitadel",
+        "keycloak",
+        "webauthn",
+        "passkey",
+        "oidc",
+        "saml",
+    )
+
+    lowered = source.lower()
+
+    for value in forbidden:
+        assert value not in lowered
+
+
+def test_service_does_not_implement_mfa_or_freshness_policy() -> None:
+    with open(
+        "backend/app/application/identity/transaction_authorization.py",
+        encoding="utf-8",
+    ) as handle:
+        source = handle.read().lower()
+
+    assert "totp" not in source
+    assert "otp_secret" not in source
+    assert "webauthn" not in source
+    assert "maximum_age" not in source
+    assert (
+        "authentication_time + timedelta"
+        not in source
+    )
+
+============================================================
+2. W15.6 BOUNDARY
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum, IntEnum
+from typing import Protocol
+
+
+class AuthenticationAssuranceLevel(IntEnum):
+    """
+    Monotonic authentication-assurance levels.
+
+    A higher level represents stronger authentication assurance.
+    Higher assurance does NOT imply authorization.
+    """
+
+    A0 = 0
+    A1 = 1
+    A2 = 2
+    A3 = 3
+
+
+class AuthenticationAssuranceDecision(str, Enum):
+    """Deterministic result of an assurance evaluation."""
+
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+class AuthenticationAssuranceFailure(str, Enum):
+    """Deterministic fail-closed assurance failures."""
+
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    INVALID_AUTHENTICATION_EVIDENCE = "INVALID_AUTHENTICATION_EVIDENCE"
+    INVALID_PRINCIPAL_BINDING = "INVALID_PRINCIPAL_BINDING"
+    INVALID_AUDIENCE = "INVALID_AUDIENCE"
+    STALE_AUTHENTICATION_ASSURANCE = "STALE_AUTHENTICATION_ASSURANCE"
+    INSUFFICIENT_AUTHENTICATION_ASSURANCE = (
+        "INSUFFICIENT_AUTHENTICATION_ASSURANCE"
+    )
+
+
+class TrustedClock(Protocol):
+    """
+    Trusted application/server clock.
+
+    Freshness decisions MUST use this clock rather than timestamps
+    supplied by the caller.
+    """
+
+    def now(self) -> datetime:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedAuthenticationEvidence:
+    """
+    Immutable authentication evidence produced after Identity Adapter
+    validation.
+
+    This object deliberately contains NO caller-supplied assurance level.
+    Assurance is derived by the central AuthenticationAssuranceService
+    from validated evidence and centrally supplied policy.
+
+    Raw credentials, access tokens, refresh tokens, OTP secrets, and
+    WebAuthn private material MUST NOT be stored here.
+    """
+
+    principal_id: str
+    issuer: str
+    subject: str
+    audience: str
+    authentication_time: datetime
+    authentication_method: str
+    authentication_strength: str
+    user_verified: bool
+    phishing_resistant: bool
+    evidence_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticationAssuranceContext:
+    """
+    Immutable, validated assurance context returned after successful
+    assurance evaluation.
+
+    The context describes authentication assurance only. It does not
+    grant business authorization and does not represent transaction
+    authorization.
+    """
+
+    principal_id: str
+    assurance_level: AuthenticationAssuranceLevel
+    authentication_time: datetime
+    assurance_time: datetime
+    authentication_method: str
+    authentication_strength: str
+    user_verified: bool
+    phishing_resistant: bool
+    issuer: str
+    subject: str
+    audience: str
+    evidence_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticationAssuranceDecisionResult:
+    """
+    Deterministic assurance decision.
+
+    ALLOW contains a validated context.
+    DENY contains a deterministic failure reason.
+    """
+
+    decision: AuthenticationAssuranceDecision
+    context: AuthenticationAssuranceContext | None = None
+    failure: AuthenticationAssuranceFailure | None = None
+
+============================================================
+3. PROVIDER COUPLING CHECK
+============================================================
+
+Path                                                              
+----                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\dependencies...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\dependencies...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\dependencies...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\dependencies...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authenticati...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authenticati...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\auth...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\iden...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\iden...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\iden...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\prov...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\prov...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\prov...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\identity\...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\a...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authenticati...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authenticati...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authenticati...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authenticati...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py            
+
+============================================================
+4. GIT STATUS
+============================================================
+ M README.md
+ M app/application/provider_management/operations_center_dashboard_composition.py
+ M app/application/provider_management/provider_health_composition.py
+ M app/interfaces/provider_management/operations_center_dashboard_router.py
+ M app_backup/application/provider_management/operations_center_dashboard_composition.py
+ M app_backup/application/provider_management/provider_health_composition.py
+ M app_backup/provider_health_restore_20260821_222513/operations_center_dashboard_composition.py
+ M backend/agents/base_agent.py
+ M backend/agents/conversation_agent.py
+ M backend/agents/cybersecurity_intelligence_agent.py
+ M backend/agents/discovery/discovery_agent.py
+ M backend/agents/quality_agent.py
+ M backend/agents/research_agent.py
+ M backend/api/character_routes.py
+ M backend/api/character_theme_routes.py
+ M backend/api/dependencies.py
+ M backend/api/main.py
+ M backend/api/routes.py
+ M backend/app/ai_runtime/conversation/conversation_runtime.py
+ M backend/app/ai_runtime/voice/voice_call_execution_runtime.py
+ M backend/app/ai_runtime/voice/voice_call_runtime.py
+ M backend/app/ai_runtime/voice/voice_character_agent.py
+ M backend/app/ai_runtime/voice/voice_character_runtime.py
+ M backend/app/ai_runtime/voice/voice_speech_runtime.py
+ M backend/app/api/announcement_controls.py
+ M backend/app/api/announcement_operations_approval.py
+ M backend/app/api/authentication.py
+ M backend/app/api/cybersecurity_decision_support.py
+ M backend/app/api/cybersecurity_delivery_controls.py
+ M backend/app/api/cybersecurity_intelligence.py
+ M backend/app/api/cybersecurity_live_reports.py
+ M backend/app/api/cybersecurity_reports.py
+ M backend/app/api/operations_center.py
+ M backend/app/api/operations_center_email_workflows.py
+ M backend/app/api/privacy_governance.py
+ M backend/app/api/provider_management_controls.py
+ M backend/app/api/voice_call_trigger.py
+ M backend/app/api/voice_calls.py
+ M backend/app/api/voice_notification_acceptance.py
+ M backend/app/api/voice_reconnect_router.py
+ M backend/app/api_authentication_reference.py
+ M backend/app/application/announcement_operations/publication_execution_ports.py
+ M backend/app/application/announcement_operations/publication_execution_service.py
+ M backend/app/application/announcements/announcement_operations_service.py
+ M backend/app/application/announcements/announcement_repository.py
+ M backend/app/application/announcements/approval/approval_service.py
+ M backend/app/application/announcements/approval/async_approval_service.py
+ M backend/app/application/announcements/approval/composition.py
+ M backend/app/application/announcements/execution/approved_publication_execution.py
+ M backend/app/application/announcements/execution/approved_publication_execution_composition.py
+ M backend/app/application/announcements/execution/audit_adapter.py
+ M backend/app/application/announcements/execution/durable_execution_composition.py
+ M backend/app/application/announcements/execution/durable_execution_service.py
+ M backend/app/application/announcements/execution/legacy_publisher_bridge.py
+ M backend/app/application/announcements/execution/publication_execution_service.py
+ M backend/app/application/announcements/in_memory_repositories.py
+ M backend/app/application/announcements/publication_event_repository.py
+ M backend/app/application/announcements/publication_service.py
+ M backend/app/application/announcements/repositories.py
+ M backend/app/application/announcements/template_editor_service.py
+ M backend/app/application/announcements/template_registry.py
+ M backend/app/application/authorization/authorization_service.py
+ M backend/app/application/beta_access/beta_access_service.py
+ M backend/app/application/beta_access/beta_context_builder.py
+ M backend/app/application/beta_access/beta_telegram_conversation_boundary.py
+ M backend/app/application/beta_access/policies/telegram_observability.py
+ M backend/app/application/beta_access/telegram_conversation_service.py
+ M backend/app/application/composition/beta_telegram_composition.py
+ M backend/app/application/composition/beta_telegram_production.py
+ M backend/app/application/composition/conversation_composition.py
+ M backend/app/application/composition/livekit_voice_composition.py
+ M backend/app/application/composition/voice_call_acceptance_composition.py
+ M backend/app/application/composition/voice_call_dependencies.py
+ M backend/app/application/composition/voice_call_event_composition.py
+ M backend/app/application/composition/voice_call_event_dependencies.py
+ M backend/app/application/composition/voice_call_invitation_composition.py
+ M backend/app/application/composition/voice_call_lifecycle_composition.py
+ M backend/app/application/composition/voice_call_management_composition.py
+ M backend/app/application/composition/voice_call_notification_composition.py
+ M backend/app/application/composition/voice_call_trigger_composition.py
+ M backend/app/application/composition/voice_composition.py
+ M backend/app/application/composition/voice_connection_composition.py
+ M backend/app/application/composition/voice_event_composition.py
+ M backend/app/application/composition/voice_execution_composition.py
+ M backend/app/application/composition/voice_execution_coordinator_composition.py
+ M backend/app/application/composition/voice_lifecycle_composition.py
+ M backend/app/application/health/production_health_configuration.py
+ M backend/app/application/identity/authentication_email_service.py
+ M backend/app/application/identity/authentication_service.py
+ M backend/app/application/identity/identity_provider.py
+ M backend/app/application/memory/memory_approval_service.py
+ M backend/app/application/operations_center/__init__.py
+ M backend/app/application/operations_center/announcement_group_operations_api.py
+ M backend/app/application/operations_center/chat_operations_dashboard_api.py
+ M backend/app/application/operations_center/dashboard_api.py
+ M backend/app/application/operations_center/dashboard_composition.py
+ M backend/app/application/operations_center/dashboard_facade.py
+ M backend/app/application/operations_center/private_classroom_operations_api.py
+ M backend/app/application/operations_center/private_classroom_operations_composition.py
+ M backend/app/application/privacy/privacy_governance_composition.py
+ M backend/app/application/uai/character/character_resolver.py
+ M backend/app/application/uai/context/interaction_context_builder.py
+ M backend/app/application/uai/notifications/voice_call_notification_repository.py
+ M backend/app/application/uai/notifications/voice_call_notification_service.py
+ M backend/app/application/uai/voice/voice_ai_dependencies.py
+ M backend/app/application/uai/voice/voice_call_acceptance_service.py
+ M backend/app/application/uai/voice/voice_call_context_factory.py
+ M backend/app/application/uai/voice/voice_call_end_service.py
+ M backend/app/application/uai/voice/voice_call_event_repository.py
+ M backend/app/application/uai/voice/voice_call_event_service.py
+ M backend/app/application/uai/voice/voice_call_execution_coordinator.py
+ M backend/app/application/uai/voice/voice_call_execution_service.py
+ M backend/app/application/uai/voice/voice_call_invitation_repository.py
+ M backend/app/application/uai/voice/voice_call_invitation_service.py
+ M backend/app/application/uai/voice/voice_call_lifecycle_service.py
+ M backend/app/application/uai/voice/voice_call_management_service.py
+ M backend/app/application/uai/voice/voice_call_orchestrator.py
+ M backend/app/application/uai/voice/voice_call_repository.py
+ M backend/app/application/uai/voice/voice_call_room_service.py
+ M backend/app/application/uai/voice/voice_call_service.py
+ M backend/app/application/uai/voice/voice_call_session_service.py
+ M backend/app/application/uai/voice/voice_call_trigger_service.py
+ M backend/app/application/uai/voice/voice_character_session_service.py
+ M backend/app/application/uai/voice/voice_connection_service.py
+ M backend/app/application/uai/voice/voice_dependencies.py
+ D backend/app/application/uai/voice/voice_interaction_context_service.py
+ M backend/app/application/uai/voice/voice_room_service.py
+ M backend/app/application/uai/voice/voice_session_orchestrator.py
+ M backend/app/application/uai/voice/voice_session_service.py
+ M backend/app/application/uai/world/world_resolver.py
+ M backend/app/domain/authorization/permissions.py
+ M backend/app/domain/beta_access/beta_access_repository.py
+ M backend/app/domain/uai/context/interaction_context.py
+ M backend/app/domain/uai/voice/voice_call.py
+ M backend/app/domain/uai/voice/voice_call_execution_context.py
+ M backend/app/domain/uai/voice/voice_call_room.py
+ M backend/app/domain/uai/voice/voice_call_session.py
+ M backend/app/infrastructure/announcements/async_publication_repository_adapter.py
+ M backend/app/infrastructure/announcements/execution/telegram_publication_publisher_adapter.py
+ M backend/app/infrastructure/announcements/in_memory_repositories.py
+ M backend/app/infrastructure/announcements/publication_approval_audit.py
+ M backend/app/infrastructure/announcements/publication_audit_repository.py
+ M backend/app/infrastructure/announcements/sqlalchemy_publication_execution_repository.py
+ M backend/app/infrastructure/announcements/sqlalchemy_publication_repository.py
+ M backend/app/infrastructure/auth/postgresql_auth_repository.py
+ M backend/app/infrastructure/auth/session_identity_provider.py
+ M backend/app/infrastructure/email/resend_approval_email_sender.py
+ M backend/app/infrastructure/health/llm_provider_health_check.py
+ M backend/app/infrastructure/health/postgresql_health_check.py
+ M backend/app/infrastructure/health/telegram_health_check.py
+ M backend/app/infrastructure/persistence/beta_access_models.py
+ M backend/app/infrastructure/persistence/beta_connection_token_models.py
+ M backend/app/infrastructure/persistence/conversation_event_records.py
+ M backend/app/infrastructure/persistence/in_memory_beta_access_repository.py
+ M backend/app/infrastructure/persistence/in_memory_voice_call_event_repository.py
+ M backend/app/infrastructure/persistence/in_memory_voice_call_invitation_repository.py
+ M backend/app/infrastructure/persistence/in_memory_voice_call_notification_repository.py
+ M backend/app/infrastructure/persistence/memory_records.py
+ M backend/app/infrastructure/persistence/postgresql_beta_access_repository.py
+ M backend/app/infrastructure/persistence/postgresql_beta_connection_token_repository.py
+ M backend/app/infrastructure/persistence/postgresql_conversation_event_repository.py
+ M backend/app/infrastructure/persistence/postgresql_memory_repository.py
+ M backend/app/infrastructure/persistence/voice_call_repository.py
+ M backend/app/infrastructure/privacy/email_approval_sender.py
+ M backend/app/infrastructure/privacy/privacy_governance_reminder_email_sender.py
+ M backend/app/infrastructure/telegram/telegram_announcement_client.py
+ M backend/app/infrastructure/telegram/telegram_bot_runtime.py
+ M backend/app/infrastructure/voice/livekit_adapter.py
+ M backend/app/infrastructure/voice/livekit_conversation_llm.py
+ M backend/app/infrastructure/voice/livekit_realtime_agent.py
+ M backend/app/infrastructure/voice/livekit_token_service.py
+ M backend/app/infrastructure/voice/livekit_voice_runtime_adapter.py
+ M backend/app/infrastructure/voice/livekit_voice_worker.py
+ M backend/app/infrastructure/voice/voice_room_adapter.py
+ M backend/app/interfaces/announcements/template_editor_router.py
+ M backend/app/interfaces/telegram/beta_private_chat_gate.py
+ M backend/app/interfaces/telegram/beta_start_handler.py
+ M backend/app/interfaces/telegram/beta_telegram_adapter.py
+ M backend/app/interfaces/telegram/private_chat_gate.py
+ M backend/app/main.py
+ M backend/app/providers/llm/llm_provider.py
+ M backend/app/providers/llm/llm_provider_factory.py
+ M backend/app/providers/llm/ollama_llm_provider.py
+ M backend/app/providers/llm/openai_llm_provider.py
+ M backend/app/providers/speech/openai_speech_provider.py
+ M backend/app/providers/speech/speech_provider_factory.py
+ M backend/application/bootstrap.py
+ M backend/application/factory.py
+ M backend/application/telegram_bootstrap.py
+ M backend/characters/character_registry.py
+ M backend/conversation/conversation_request.py
+ M backend/cybersecurity/control/cybersecurity_delivery_control.py
+ M backend/cybersecurity/cybersecurity_live_reporting_service.py
+ M backend/cybersecurity/dashboard_data_source.py
+ M backend/cybersecurity/data_source.py
+ M backend/cybersecurity/decision_support/agent/agent.py
+ M backend/cybersecurity/decision_support/priority_engine.py
+ M backend/cybersecurity/decision_support/service.py
+ M backend/cybersecurity/demo_data_source.py
+ M backend/cybersecurity/email/cybersecurity_email_service.py
+ M backend/cybersecurity/email/email_provider_manager.py
+ M backend/cybersecurity/email/resend_email_provider.py
+ M backend/cybersecurity/intelligence_report_service.py
+ M backend/cybersecurity/intelligence_service.py
+ M backend/cybersecurity/live_report_service.py
+ M backend/cybersecurity/notifications/scheduler.py
+ M backend/cybersecurity/report_factory.py
+ M backend/cybersecurity/report_orchestrator.py
+ M backend/cybersecurity/scheduler/cybersecurity_apscheduler_adapter.py
+ M backend/cybersecurity/scheduler/cybersecurity_scheduler_factory.py
+ M backend/cybersecurity/scheduler/cybersecurity_scheduler_runtime.py
+ M backend/cybersecurity/scheduler/cybersecurity_scheduler_workflow.py
+ M backend/cybersecurity/yeti_email_context.py
+ M backend/data/privacy_governance_tracker.xlsx
+ M backend/demo/cybersecurity/cybersecurity_demo_runner.py
+ M backend/demo/provider_management/provider_demo_runner.py
+ M backend/easychatbot_backend.egg-info/PKG-INFO
+ M backend/easychatbot_backend.egg-info/SOURCES.txt
+ M backend/easychatbot_backend.egg-info/requires.txt
+ M backend/governance/api/governance_approval_api.py
+ M backend/governance/api/governance_audit_api.py
+ M backend/governance/api/governance_change_api.py
+ M backend/governance/api/governance_evidence_api.py
+ M backend/governance/api/governance_operations_api.py
+ M backend/governance/api/governance_timeline_api.py
+ M backend/governance/approval/approval_change_service.py
+ M backend/governance/governance_audit_service.py
+ M backend/governance/operations_center/governance_runtime.py
+ M backend/intelligence/research_service.py
+ M backend/memory/memory_service.py
+ M backend/provider_management/control/provider_delivery_control.py
+ M backend/providers/base_provider.py
+ M backend/providers/llm/gemini_provider.py
+ M backend/providers/llm/llm_provider.py
+ M backend/providers/llm/llm_provider_factory.py
+ M backend/providers/llm/openai_provider.py
+ M backend/providers/parallel/parallel_provider.py
+ M backend/pyproject.toml
+ M backend/runtime/context/execution_context.py
+ M backend/runtime/external_runtime_container.py
+ M backend/runtime/models/model_descriptor.py
+ M backend/runtime/runtime_engine.py
+ M backend/scripts/check_beta_database.py
+ M backend/scripts/create_beta_demo_users.py
+ M backend/scripts/run_telegram_runtime.py
+ M backend/services/companion_service.py
+ M backend/services/external_runtime_service.py
+ M backend/services/llm_service.py
+ M backend/services/runtime/runtime_application_service.py
+ M backend/skills/cybersecurity/executive_security_summary.py
+ M backend/skills/cybersecurity/security_signal_analysis.py
+ M backend/skills/cybersecurity/threat_prioritisation.py
+ M backend/skills/discovery/content_product_discovery.py
+ M backend/skills/discovery/discovery_quality_verification.py
+ M backend/skills/discovery/hackathon_preference_source.py
+ M backend/skills/discovery/parallel_gateway.py
+ M backend/skills/discovery/personalised_content_adaptation.py
+ M backend/skills/discovery/preference_understanding.py
+ M backend/skills/discovery/query_generation.py
+ M backend/skills/discovery/recommendation_explanation.py
+ M backend/skills/discovery/recommendation_ranking.py
+ M backend/skills/discovery/relevance_matching.py
+ M backend/skills/discovery/user_choice_handoff.py
+ M backend/skills/skill.py
+ M backend/tests/ai_runtime/voice/test_voice_call_execution_runtime.py
+ M backend/tests/ai_runtime/voice/test_voice_call_runtime.py
+ M backend/tests/ai_runtime/voice/test_voice_character_agent.py
+ M backend/tests/ai_runtime/voice/test_voice_character_runtime.py
+ M backend/tests/ai_runtime/voice/test_voice_speech_runtime.py
+ M backend/tests/announcement/test_announcement_composer.py
+ M backend/tests/announcement/test_announcement_policy.py
+ M backend/tests/announcement/test_announcement_publisher.py
+ M backend/tests/announcement_operations/test_ws22_3_1_publication_execution.py
+ M backend/tests/announcements/test_announcement_operations_foundation.py
+ M backend/tests/announcements/test_ws22_0x_publication_lifecycle_alignment.py
+ M backend/tests/announcements/test_ws22_1_template_publication_model.py
+ M backend/tests/announcements/test_ws22_2x_template_editor_integration.py
+ M backend/tests/announcements/test_ws22_3_1_publication_execution_contract.py
+ M backend/tests/announcements/test_ws22_3_2_durable_execution.py
+ M backend/tests/announcements/test_ws22_3_2x_1_postgresql_restart_idempotency.py
+ M backend/tests/announcements/test_ws22_3_2x_persistence_integration.py
+ M backend/tests/announcements/test_ws22_3_3_telegram_execution_integration.py
+ M backend/tests/announcements/test_ws22_3_3x_publisher_contract_consolidation.py
+ M backend/tests/announcements/test_ws22_3_4_1_execution_audit_adapter.py
+ M backend/tests/announcements/test_ws22_3_4_2_durable_audit_repository.py
+ M backend/tests/announcements/test_ws22_3_5_2_shared_async_persistence.py
+ M backend/tests/announcements/test_ws22_3_5_3_durable_execution_composition.py
+ M backend/tests/announcements/test_ws22_3_5_4_composition_execution.py
+ M backend/tests/announcements/test_ws22_3_5_5_failure_retry_integration.py
+ M backend/tests/announcements/test_ws22_3_5_6_terminal_idempotency.py
+ M backend/tests/announcements/test_ws23_1_3_api_integration.py
+ M backend/tests/announcements/test_ws23_1_3_approval_service.py
+ M backend/tests/announcements/test_ws23_1_3_composition.py
+ M backend/tests/announcements/test_ws23_1_3_persistence_composition.py
+ M backend/tests/announcements/test_ws23_1_4_approved_publication_execution.py
+ M backend/tests/announcements/test_ws23_1_4_telegram_composition_adapter.py
+ M backend/tests/api/test_announcement_controls.py
+ M backend/tests/api/test_voice_reconnect.py
+ M backend/tests/application/composition/test_voice_call_acceptance_composition.py
+ M backend/tests/application/composition/test_voice_call_event_composition.py
+ M backend/tests/application/composition/test_voice_call_invitation_composition.py
+ M backend/tests/application/composition/test_voice_call_management_composition.py
+ M backend/tests/application/composition/test_voice_call_notification_composition.py
+ M backend/tests/application/composition/test_voice_call_trigger_composition.py
+ M backend/tests/application/composition/test_voice_composition.py
+ M backend/tests/application/composition/test_voice_connection_composition.py
+ M backend/tests/application/composition/test_voice_event_composition.py
+ M backend/tests/application/composition/test_voice_execution_composition.py
+ M backend/tests/application/composition/test_voice_execution_coordinator_composition.py
+ M backend/tests/application/composition/test_voice_lifecycle_composition.py
+ M backend/tests/application/composition/test_voice_lifecycle_dependency.py
+ M backend/tests/application/uai/character/test_character_resolver.py
+ M backend/tests/application/uai/context/test_interaction_context_builder.py
+ M backend/tests/application/uai/notifications/test_voice_call_notification_repository.py
+ M backend/tests/application/uai/voice/test_voice_call_acceptance_service.py
+ M backend/tests/application/uai/voice/test_voice_call_context_factory.py
+ M backend/tests/application/uai/voice/test_voice_call_end_service.py
+ M backend/tests/application/uai/voice/test_voice_call_event_repository.py
+ M backend/tests/application/uai/voice/test_voice_call_event_service.py
+ M backend/tests/application/uai/voice/test_voice_call_execution_coordinator.py
+ M backend/tests/application/uai/voice/test_voice_call_execution_service.py
+ M backend/tests/application/uai/voice/test_voice_call_invitation_repository.py
+ M backend/tests/application/uai/voice/test_voice_call_invitation_service.py
+ M backend/tests/application/uai/voice/test_voice_call_lifecycle_connection.py
+ M backend/tests/application/uai/voice/test_voice_call_lifecycle_events.py
+ M backend/tests/application/uai/voice/test_voice_call_lifecycle_service.py
+ M backend/tests/application/uai/voice/test_voice_call_management_service.py
+ M backend/tests/application/uai/voice/test_voice_call_orchestrator.py
+ M backend/tests/application/uai/voice/test_voice_call_orchestrator_runtime.py
+ M backend/tests/application/uai/voice/test_voice_call_reconnect_event.py
+ M backend/tests/application/uai/voice/test_voice_call_reconnect_flow.py
+ M backend/tests/application/uai/voice/test_voice_call_repository.py
+ M backend/tests/application/uai/voice/test_voice_call_room_service.py
+ M backend/tests/application/uai/voice/test_voice_call_service.py
+ M backend/tests/application/uai/voice/test_voice_call_session_service.py
+ M backend/tests/application/uai/voice/test_voice_call_start_event.py
+ M backend/tests/application/uai/voice/test_voice_call_trigger_service.py
+ M backend/tests/application/uai/voice/test_voice_character_session_service.py
+ M backend/tests/application/uai/voice/test_voice_connection_service.py
+ D backend/tests/application/uai/voice/test_voice_interaction_context_service.py
+ M backend/tests/application/uai/voice/test_voice_room_service.py
+ M backend/tests/application/uai/voice/test_voice_runtime_contract.py
+ M backend/tests/application/uai/voice/test_voice_session_orchestrator.py
+ M backend/tests/application/uai/voice/test_voice_session_service.py
+ M backend/tests/application/uai/world/test_world_resolver.py
+ M backend/tests/beta_access/test_beta_access_security.py
+ M backend/tests/beta_access/test_beta_connection_token_service.py
+ M backend/tests/beta_access/test_phase_b1_telegram_transport.py
+ M backend/tests/beta_access/test_private_chat_gate.py
+ M backend/tests/beta_access/test_telegram_composition.py
+ M backend/tests/beta_access/test_telegram_conversation_service.py
+ M backend/tests/beta_access/test_ws04_private_classroom_conversation.py
+ M backend/tests/beta_access/test_ws05_conversation_persistence.py
+ M backend/tests/beta_access/test_ws06_telegram_error_resilience.py
+ M backend/tests/beta_access/test_ws07_private_classroom_response_delivery.py
+ M backend/tests/beta_access/test_ws08_private_classroom_session_continuity.py
+ M backend/tests/beta_access/test_ws09_telegram_classroom_security.py
+ M backend/tests/beta_access/test_ws10_telegram_classroom_input_controls.py
+ M backend/tests/beta_access/test_ws11_telegram_classroom_rate_limiting.py
+ M backend/tests/beta_access/test_ws12_telegram_classroom_abuse_protection.py
+ M backend/tests/beta_access/test_ws13_telegram_classroom_observability.py
+ M backend/tests/beta_access/test_ws14_telegram_classroom_policy_controls.py
+ M backend/tests/beta_access/test_ws15_beta_telegram_end_to_end_integration.py
+ M backend/tests/beta_access/test_ws16_beta_telegram_production_smoke.py
+ M backend/tests/beta_access/test_ws17_telegram_policy_wiring.py
+ M backend/tests/beta_access/test_ws18_production_session_continuity.py
+ M backend/tests/beta_access/test_ws19_production_telegram_full_stack.py
+ M backend/tests/beta_access/test_ws21_3_operational_failure_resilience.py
+ M backend/tests/beta_access/test_ws21_4_failure_recovery.py
+ M backend/tests/conftest.py
+ M backend/tests/health/test_ws21_14_real_backend_wiring.py
+ M backend/tests/infrastructure/voice/test_livekit_realtime_agent.py
+ M backend/tests/infrastructure/voice/test_livekit_token_service.py
+ M backend/tests/infrastructure/worlds/test_yaml_world_repository.py
+ M backend/tests/operations_center/test_ws21_18_announcement_group_api.py
+ M backend/tests/security/test_authorization_service.py
+ M backend/tests/security/test_password_hasher.py
+ M backend/tests/security/test_postgresql_auth_repository_contract.py
+ M backend/tests/security/test_principal.py
+ M backend/tests/unit/operations_center/test_email_workflow_status_service.py
+ M beta_telegram_composition.py
+ M data/memory.db
+ M demo_companion.py
+ M demo_parallel_search.py
+ M docs/architecture/EasyChatBot_Beta_Telegram_1_5_Privacy_Governance/tests/application/test_privacy_identifier.py
+ M examples/flashcard_personalisation_demo.py
+ M fix_alembic_version.py
+ M frontend/app/operations-center/governance/page.tsx
+ D frontend/dist/assets/index-BA-MgUFa.css
+ D frontend/dist/assets/index-CdPAv7aD.js
+ M frontend/dist/index.html
+ M frontend/main.tsx
+ M frontend/node_modules/.tmp/tsconfig.app.tsbuildinfo
+ M frontend/node_modules/.vite/deps/_metadata.json
+ M frontend/node_modules/.vite/vitest/da39a3ee5e6b4b0d3255bfef95601890afd80709/results.json
+ M frontend/pages/operations-center/GovernanceOperationsCenter.tsx
+ M frontend/src/main.tsx
+ M frontend/src/router.tsx
+ M frontend/tsconfig.app.json
+ M frontend/vite.config.ts
+ M g2_grounding_test.py
+ M g2_parallel_research_smoke_test.py
+ M g2_parallel_to_gemini_e2e_test.py
+ M g2_source_attribution_test.py
+ M g3_2_conciseness_test.py
+ M g3_full_learning_journey_test.py
+ M g3_gemini_challenge_e2e_test.py
+ M g3_parallel_gemini_intelligence_test.py
+ M g4_memory_personalisation_test.py
+ M g5_complete_hackathon_demo_flow.py
+ M g5_final_hackathon_demo.py
+ M g5_final_hackathon_demo_resilient.py
+ M g6_final_hackathon_demo_hardened.py
+ M g7_judge_demo_validation.py
+ M gemini_factory_smoke_test.py
+ M gemini_provider_smoke_test.py
+ M pytest.ini
+ M run_server.py
+ M scripts/send_privacy_governance_reminder_test.py
+ M scripts/sync_privacy_governance_tracker.py
+ M sprint_0_1_repository_tree.txt
+ M src/ai_agents/live_intelligence_agent/composition.py
+ D src/ai_agents/live_intelligence_agent/gemini_intelligence_processor.py
+ M src/ai_agents/live_intelligence_agent/gemini_processor.py
+ M src/ai_runtime/capabilities/models.py
+ M src/ai_runtime/composition.py
+ M src/ai_runtime/memory/mapper.py
+ M src/ai_runtime/providers/cost/models.py
+ M src/ai_runtime/providers/cost/service.py
+ M src/ai_runtime/providers/usage/models.py
+ M src/challenge_engine/gemini_content_generator.py
+ M src/providers/search_provider/parallel_adapter.py
+ M tests/agents/discovery/test_discovery_agent.py
+ M tests/agents/discovery/test_discovery_agent_pipeline.py
+ M tests/agents/test_cybersecurity_intelligence_agent.py
+ M tests/ai_runtime/memory/test_memory_context_builder.py
+ M tests/ai_runtime/memory/test_memory_mapper.py
+ M tests/api/conftest.py
+ M tests/api/test_chat.py
+ M tests/api/test_operations_center_http_bootstrap.py
+ M tests/api/test_podcast_discovery_endpoint.py
+ M tests/api/test_privacy_governance_api.py
+ M tests/api/test_privacy_governance_api_excel_sync.py
+ M tests/api/test_privacy_governance_decisions_api.py
+ M tests/api/test_routes.py
+ M tests/api/test_routes_runtime_boundary.py
+ M tests/application/privacy/test_privacy_governance_decision_hardening.py
+ M tests/application/provider_management/test_ollama_cloud_health_probe.py
+ M tests/application/test_application_factory.py
+ M tests/application/test_data_processing_map.py
+ M tests/application/test_external_runtime_composition.py
+ M tests/application/test_external_runtime_factory_integration.py
+ M tests/application/test_external_runtime_service.py
+ M tests/application/test_learning_service.py
+ M tests/application/test_memory_approval_service.py
+ M tests/application/test_memory_extraction_service.py
+ M tests/application/test_memory_policy.py
+ M tests/application/test_privacy_approval_email_service.py
+ M tests/application/test_privacy_change_control.py
+ M tests/application/test_privacy_governance_6g_lifecycle.py
+ M tests/application/test_privacy_governance_api_excel_consistency.py
+ M tests/application/test_privacy_governance_cascade.py
+ M tests/application/test_privacy_governance_case_change_link.py
+ M tests/application/test_privacy_governance_case_registry.py
+ M tests/application/test_privacy_governance_case_service.py
+ M tests/application/test_privacy_governance_composition.py
+ M tests/application/test_privacy_governance_composition_shared_state.py
+ M tests/application/test_privacy_governance_dashboard_service.py
+ M tests/application/test_privacy_governance_decision_service.py
+ M tests/application/test_privacy_governance_excel_full_lifecycle_e2e.py
+ M tests/application/test_privacy_governance_excel_projection_lifecycle.py
+ M tests/application/test_privacy_governance_excel_sync.py
+ M tests/application/test_privacy_governance_flow_service.py
+ M tests/application/test_privacy_governance_gate.py
+ M tests/application/test_privacy_governance_gate_integration.py
+ M tests/application/test_privacy_governance_operational_followup.py
+ M tests/application/test_privacy_governance_reminder_scheduler.py
+ M tests/application/test_privacy_governance_runtime_api_consistency.py
+ M tests/application/test_privacy_governance_runtime_e2e.py
+ M tests/application/test_privacy_governance_runtime_shared_instance.py
+ M tests/application/test_privacy_governance_runtime_sync.py
+ M tests/application/test_privacy_identifier.py
+ M tests/application/test_privacy_validation.py
+ M tests/application/test_processing_registry.py
+ M tests/application/test_runtime_api_route.py
+ M tests/application/test_runtime_application_factory.py
+ M tests/application/test_runtime_application_flow.py
+ M tests/application/test_runtime_bootstrap_flow.py
+ M tests/application/test_runtime_container.py
+ M tests/application/test_runtime_end_to_end_flow.py
+ M tests/application/test_runtime_execution_flow.py
+ M tests/application/test_runtime_startup_composition.py
+ M tests/application/test_telegram_memory_isolation.py
+ M tests/beta_access/test_beta_telegram_access_e2e.py
+ M tests/conversation/test_conversation_request.py
+ M tests/cybersecurity/test_apscheduler_adapter.py
+ M tests/cybersecurity/test_cybersecurity_email_generator.py
+ M tests/cybersecurity/test_cybersecurity_email_service.py
+ M tests/cybersecurity/test_cybersecurity_notification_policy.py
+ M tests/cybersecurity/test_cybersecurity_privacy_governance_reminder_scheduler.py
+ M tests/cybersecurity/test_cybersecurity_report_scheduler.py
+ M tests/cybersecurity/test_cybersecurity_reports.py
+ M tests/cybersecurity/test_dashboard_data_source.py
+ M tests/cybersecurity/test_decision_support_agent.py
+ M tests/cybersecurity/test_delivery_control.py
+ M tests/cybersecurity/test_demo_data_source.py
+ M tests/cybersecurity/test_email_circuit_breaker.py
+ M tests/cybersecurity/test_email_provider_manager.py
+ M tests/cybersecurity/test_intelligence_service.py
+ M tests/cybersecurity/test_live_report_service.py
+ M tests/cybersecurity/test_live_reporting_service.py
+ M tests/cybersecurity/test_priority_engine.py
+ M tests/cybersecurity/test_privacy_governance_case_url.py
+ M tests/cybersecurity/test_privacy_governance_reminder_email_service.py
+ M tests/cybersecurity/test_privacy_governance_reminder_history.py
+ M tests/cybersecurity/test_privacy_governance_scheduler_registration.py
+ M tests/cybersecurity/test_privacy_governance_scheduler_regression.py
+ M tests/cybersecurity/test_production_scheduler.py
+ M tests/cybersecurity/test_real_scheduler_adapter.py
+ M tests/cybersecurity/test_report_orchestrator.py
+ M tests/cybersecurity/test_resend_email_provider.py
+ M tests/cybersecurity/test_runtime_integration.py
+ M tests/cybersecurity/test_scheduler_email_integration.py
+ M tests/cybersecurity/test_scheduler_email_workflow.py
+ M tests/cybersecurity/test_scheduler_lifespan_integration.py
+ M tests/cybersecurity/test_scheduler_runtime.py
+ M tests/cybersecurity/test_scheduler_workflow_execution.py
+ M tests/cybersecurity/test_yeti_governance_service.py
+ M tests/demo/test_demo_runner.py
+ M tests/demo/test_operations_center_demo.py
+ M tests/e2e/test_privacy_governance_resend_e2e.py
+ M tests/governance/governance/test_audit_events.py
+ M tests/governance/governance/test_control_audit_integration.py
+ M tests/governance/test_approval_change_lifecycle.py
+ M tests/governance/test_approval_workflow.py
+ M tests/governance/test_change_audit_bridge.py
+ M tests/governance/test_change_management.py
+ M tests/governance/test_change_management_core.py
+ M tests/governance/test_governance_audit_api.py
+ M tests/governance/test_governance_change_api.py
+ M tests/governance/test_governance_evidence_api.py
+ M tests/governance/test_governance_timeline.py
+ M tests/governance/test_governance_timeline_api.py
+ M tests/governance/test_operations_center_governance_api.py
+ M tests/governance/test_timeline_dashboard.py
+ M tests/infrastructure/telegram/test_telegram_bot_runtime.py
+ M tests/infrastructure/test_resend_approval_email_sender.py
+ M tests/integration/test_api_chat_flow.py
+ M tests/integration/test_api_provider_wiring.py
+ M tests/integration/test_conversation_agent_provider_integration.py
+ M tests/integration/test_hackathon_runtime_flow.py
+ M tests/integration/test_memory_context_security_bounds.py
+ M tests/integration/test_memory_flashcard_learning_flow.py
+ M tests/integration/test_memory_live_intelligence_flow.py
+ M tests/integration/test_memory_persistence_isolation.py
+ M tests/integration/test_memory_personalisation_flow.py
+ M tests/integration/test_memory_security_boundaries.py
+ M tests/integration/test_parallel_runtime_flow.py
+ M tests/integration/test_real_llm_service_flow.py
+ M tests/intelligence/test_intelligence_context.py
+ M tests/intelligence/test_research_service.py
+ M tests/interfaces/telegram/test_beta_private_chat_gate.py
+ M tests/interfaces/telegram/test_beta_start_handler.py
+ M tests/interfaces/telegram/test_beta_telegram_adapter.py
+ M tests/providers/test_llm_provider_factory.py
+ M tests/providers/test_openai_provider.py
+ M tests/providers/test_parallel_client.py
+ M tests/providers/test_parallel_provider.py
+ M tests/runtime/test_character_behaviour.py
+ M tests/runtime/test_character_profile.py
+ M tests/runtime/test_character_registry.py
+ M tests/runtime/test_companion_intelligence.py
+ M tests/runtime/test_companion_memory.py
+ M tests/runtime/test_conversation_agent.py
+ M tests/runtime/test_conversation_agent_provider.py
+ M tests/runtime/test_execution_context.py
+ M tests/runtime/test_external_runtime_container.py
+ M tests/runtime/test_memory_service.py
+ M tests/runtime/test_model_descriptor.py
+ M tests/runtime/test_provider_contracts.py
+ M tests/runtime/test_quality_agent.py
+ M tests/runtime/test_quality_integration.py
+ M tests/runtime/test_research_agent.py
+ M tests/services/test_companion_service.py
+ M tests/services/test_llm_service.py
+ M tests/services/test_runtime_application_service.py
+ M tests/skills/discovery/test_content_product_discovery.py
+ M tests/skills/discovery/test_discovery_quality_verification.py
+ M tests/skills/discovery/test_parallel_gateway.py
+ M tests/skills/discovery/test_query_generation.py
+ M tests/skills/discovery/test_recommendation_explanation.py
+ M tests/skills/discovery/test_recommendation_ranking.py
+ M tests/skills/discovery/test_relevance_matching.py
+ M tests/skills/discovery/test_user_choice_handoff.py
+?? ._investigation/
+?? .agent_runtime_package/
+?? .m2.2x-backup-20260907-200116/
+?? .m2.2x-backup-20260907-200133/
+?? .m24_backups/
+?? A1_ACADEMY_SCHEDULER_TEST_INSPECTION.txt
+?? AUTH_ACCOUNT_INSPECTION.txt
+?? AUTH_BACKEND_TRACE.txt
+?? AUTH_FINAL_TRACE.txt
+?? AUTH_PROJECT_CONTROL_CURRENT_INSPECTION.txt
+?? AUTH_SESSION_FLOW_INSPECTION.txt
+?? AUTH_SESSION_M1_CURRENT_INSPECTION.txt
+?? AVW01-PASSWORD-RESET-BACKEND-INSPECTION.txt
+?? AVW01-PASSWORD-RESET-INTEGRATION-CONTEXT.txt
+?? AVW01-PASSWORD-RESET-TEST-CONTEXT.txt
+?? AVW01-VERIFY-CURRENT-INSPECTION.txt
+?? AVW01-auth-email-tests-inspection.txt
+?? AVW01-current-auth-inspection.txt
+?? AVW01-registration-frontend-inspection.txt
+?? AVW01-registration-integration-inspection.txt
+?? AVW01/
+?? AVW01_AUTH_EMAIL_INSPECTION.txt
+?? AVW01_AUTH_FAILURE_INSPECTION.txt
+?? AVW01_EMAIL_PROVIDER_INSPECTION.txt
+?? AVW01_FRONTEND_RESET_CURRENT_STATE.txt
+?? AVW01_FRONTEND_RESET_INSPECTION.txt
+?? AVW01_INSPECTION.txt
+?? BACKEND_DATABASE_PRODUCTION_INSPECTION.txt
+?? BACKEND_PRODUCTION_READINESS_INSPECTION.txt
+?? BETA_BACKEND_COMPOSITION_INSPECTION.txt
+?? BETA_DEPLOYMENT_ARCHITECTURE_INSPECTION.txt
+?? BETA_FRONTEND_ENTRYPOINT_FINAL_INSPECTION.txt
+?? CINEMA_INTEGRATION_INSPECTION.txt
+?? EXISTING_FRONTEND_FILES.txt
+?? EasyChatBot_Compliance_Repository_Inspection.txt
+?? EasyChatBot_Web_Screens_Inspection.txt
+?? FRONTEND_AGENTIC_CINEMA_INTEGRATION_INSPECTION.txt
+?? FRONTEND_BETA_INTEGRATION_INSPECTION.txt
+?? FRONTEND_FULL_INSPECTION.txt
+?? FRONTEND_ROUTER_INSPECTION.txt
+?? FUNCTIONALITY_CONTROL_INSPECTION.txt
+?? FUNCTIONALITY_HEALTH_CONTRACT_INSPECTION.txt
+?? FUNCTIONALITY_HEALTH_KIDS_ADULTS_INSPECTION.txt
+?? FUNCTIONALITY_RUNTIME_CONTROL_INSPECTION.txt
+?? G5_FRONTEND_WIRING_INSPECTION.txt
+?? G5_ROUTE_WIRING.txt
+?? HACKATHON_AUTH_FRONTEND_INSPECTION.txt
+?? HACKATHON_FRONTEND_AUTH_TRACE.txt
+?? HACKATHON_FRONTEND_ROUTING_INSPECTION.txt
+?? HACKATHON_PASSWORD_RESET_AUTH_TESTS_INSPECTION.txt
+?? HACKATHON_PASSWORD_RESET_BACKEND_INSPECTION.txt
+?? HACKATHON_PASSWORD_RESET_FINAL_SOURCE_INSPECTION.txt
+?? HACKATHON_PASSWORD_RESET_MIGRATION_INSPECTION.txt
+?? IDENTITY_IMPORT_REMEDIATION_INSPECTION.txt
+?? M0F-S02-inspection.txt
+?? M0F_APPLICATION_ENTRYPOINT_INSPECTION.txt
+?? M0F_ENTRYPOINT_DEEP_INSPECTION.txt
+?? M0F_ENTRYPOINT_FILES.txt
+?? M0F_ENTRYPOINT_NAMESPACE_INSPECTION.txt
+?? M0F_ENTRYPOINT_REFERENCES.txt
+?? M0F_M1_FINAL_REVIEW.txt
+?? M0F_NAMESPACE_MAPPING_INSPECTION.txt
+?? M0F_PYTHON_SRC_PACKAGING_INSPECTION.txt
+?? M0F_RUNTIME_COMPOSITION_INSPECTION.txt
+?? M0F_RUNTIME_NAMESPACE_BOUNDARIES.txt
+?? M0F_SRC_IMPORT_MAP.txt
+?? M0F_TELEGRAM_COMPOSITION_FAILURE_INSPECTION.txt
+?? M0F_TELEGRAM_COMPOSITION_TEST_INSPECTION.txt
+?? M0_AUTH_COMPOSITION_INSPECTION.txt
+?? M0_AUTH_TEST_CONTRACT_INSPECTION.txt
+?? M0_COMPOSITION_TESTS.txt
+?? M0_D1_ACADEMY_DATABASE_OWNERSHIP_INSPECTION.txt
+?? M0_D2_PERSISTENCE_OWNERSHIP_INSPECTION.txt
+?? M0_D_LIFECYCLE_INSPECTION.txt
+?? M0_E_AUTH_COMPOSITION_VERIFICATION_INSPECTION.txt
+?? M0_FAILURE_ROOT_CAUSE.txt
+?? M0_F_APPLICATION_COMPOSITION_INSPECTION.txt
+?? M0_F_BOOTSTRAP_REFERENCE_INSPECTION.txt
+?? M0_F_ENTRYPOINT_BOUNDARY_INSPECTION.txt
+?? M0_F_LAUNCH_CONTRACT_INSPECTION.txt
+?? M0_F_PROVIDER_USAGE_IMPORT_INSPECTION.txt
+?? M0_F_STEP4_TEST_INVENTORY.txt
+?? M0_MAIN_PY_DIFF.txt
+?? M0_bulk_composition_source_inspection.txt
+?? M10_REPOSITORY_DISCOVERY_20260905_092818.txt
+?? M1_2_Backend_Exact_Inspection.txt
+?? M1_2_Beta_Domain_Exposure_Inspection.txt
+?? M1_2_CLOUDFLARE_BETA_GATE_CURRENT.txt
+?? M1_2_Cloudflare_Beta_Domain_Inspection.txt
+?? M1_2_FULL_REPOSITORY_INSPECTION.txt
+?? M1_3_FINAL_DIFF.txt
+?? M1_3_router_diff.txt
+?? M1_BETA_ACCESS_COMPOSITION_REVIEW.txt
+?? M1_PYTHON_PACKAGE_MARKERS.txt
+?? M1_TELEGRAM_COMPOSITION_FAILURE_INSPECTION.txt
+?? M1_TELEGRAM_COMPOSITION_ROOT_CAUSE_INSPECTION.txt
+?? M1_TELEGRAM_IMPORT_BOUNDARY_INSPECTION.txt
+?? M1_WORLD_CANONICAL_INSPECTION.txt
+?? M1_WORLD_COMPATIBILITY_INSPECTION.txt
+?? M1_WORLD_COMPATIBILITY_TEST_INSPECTION.txt
+?? M1_WORLD_CURRENT_BUILD_REVIEW.txt
+?? M1_WORLD_IDENTITY_BUILD_INSPECTION.txt
+?? M1_WORLD_IDENTITY_USAGE_REVIEW.txt
+?? M1_WORLD_MAPPING_FOCUSED_INSPECTION.txt
+?? M1_WORLD_MAPPING_ORM_REPOSITORY_INSPECTION.txt
+?? M1_WORLD_MAPPING_PERSISTENCE_INSPECTION.txt
+?? M1_WORLD_REPOSITORY_FINAL_INSPECTION.txt
+?? M1_WORLD_RESOLVER_COMPOSITION_REVIEW.txt
+?? M2.1_ENVIRONMENT_INSPECTION.txt
+?? M2.1_FUNCTIONALITY_HEALTH_EXISTING_IMPLEMENTATION.txt
+?? M2.2_AUTH_IMPLEMENTATION_DISCOVERY.txt
+?? M2.2_AUTH_SESSION_ACTOR_CONTRACT_INSPECTION.txt
+?? M2.2_CONTROL_AUTH_AUDIT_FINAL_PRECHECK.txt
+?? M2.2_CONTROL_PERSISTENCE_AUDIT_INSPECTION.txt
+?? M2.2_DATABASE_IMPLEMENTATION_FINAL.txt
+?? M2.2_DATABASE_MIGRATION_COMPOSITION_INSPECTION.txt
+?? M2.2_DATABASE_MODULE_AND_REPOSITORY_PATTERN.txt
+?? M2.2_EXISTING_AUTHORIZATION_CONTRACT_INSPECTION.txt
+?? M2.2_FUNCTIONALITY_CONTROL_IMPLEMENTATION_INSPECTION.txt
+?? M2.2_FUNCTIONALITY_OPERATIONAL_CONTROLS_PRECHECK.txt
+?? M2.2_PERMISSION_PRINCIPAL_CONTRACT.txt
+?? M2.2_SESSION_REPOSITORY_FINAL_INSPECTION.txt
+?? M2.2x_FunctionalityHealthDashboard.txt
+?? M2.2x_active_functionality_health.txt
+?? M2.2x_control_ui_css_tests.txt
+?? M2.3_FINAL_DIFF_INSPECTION.txt
+?? M2.3_character_voice_mapping_inspection.txt
+?? M2.3_voice_profile_contract_inspection.txt
+?? M2.3_voice_profile_language_bulk_inspection.txt
+?? M2.3_voice_tts_final_review.txt
+?? M2.3_voice_tts_inspection.txt
+?? M2.4_CONVERSATION_INTEGRATION_INSPECTION.txt
+?? M2.4_CONVERSATION_SESSION_INSPECTION.txt
+?? M2.4_R6.1_CANONICAL_VOICE_COMPOSITION_INSPECTION.txt
+?? M2.4_R6.1_VOICE_TEST_INSPECTION.txt
+?? M2.4_R6.2_PROVIDER_PORT_CALLER_MAP.txt
+?? M2.4_R6.2_PROVIDER_PORT_INSPECTION.txt
+?? M2.4_R6.3_PROVIDER_PORT_BUILD_PRECHECK.txt
+?? M2.4_R6.4_COMPOSITION_INSPECTION.txt
+?? M2.4_R6.5_IMPORT_ROOT_DIAGNOSTIC.txt
+?? M2.4_SESSION_RUNTIME_INSPECTION.txt
+?? M2.4_SESSION_SERVICES_INSPECTION.txt
+?? M2.4_execution_bridge_inspection.txt
+?? M2.4_voice_r4_use_case_topology.txt
+?? M20_1_AUTHORIZATION_REMEDIATION_INSPECTION.txt
+?? M20_1_Academy_Namespace_Inspection.txt
+?? M20_1_EXTERNAL_RUNTIME_CONTRACT.txt
+?? M20_1_IMPORT_REMEDIATION_INSPECTION.txt
+?? M20_1_MISSING_MODULES_INSPECTION.txt
+?? M20_1_NAMESPACE_AUDIT.txt
+?? M20_1_NAMESPACE_DEEP_INSPECTION.txt
+?? M20_1_REMEDIATION_INSPECTION.txt
+?? M21_1_architecture_inspection.txt
+?? M21_1_architecture_reconciliation.txt
+?? M2A1_1_LEARNING_WORLD_DB_CONTRACT.txt
+?? M2A1_CATALOGUE_IDENTITY_RECONCILIATION.txt
+?? M2A_CATALOGUE_RECONCILIATION.txt
+?? M2A_WORLD_LANGUAGE_PORTFOLIO_PREBUILD_INSPECTION.txt
+?? M7_2_COMPOSITION_AND_PRIVACY_INSPECTION.txt
+?? M7_2_COMPOSITION_RESTORE_VALIDATION.txt
+?? M7_2_IMPORT_NAMESPACE_AND_COMPOSITION_DIAGNOSTIC.txt
+?? MIGRATION_GRAPH_RECONCILIATION.txt
+?? P0.2.2_COMPOSITION_GOVERNANCE_INSPECTION.txt
+?? P0.2.2_INTERNAL_DATA_AUTHORIZATION_INSPECTION.txt
+?? P0.2.2_RUNTIME_ACTOR_FLOW_INSPECTION.txt
+?? P0.2.3_ACTOR_PROPAGATION_CONTRACT_INSPECTION.txt
+?? P0.2.4_APPLICATION_ACTOR_BOUNDARY_INSPECTION.txt
+?? P0.2.5_INTERNAL_DATA_GOVERNANCE_CONTRACT_INSPECTION.txt
+?? P0.2.6_INTERNAL_DATA_EXECUTION_BOUNDARY_INSPECTION.txt
+?? P0.2.7_ACTOR_PROPAGATION_AUTHORIZATION_INSPECTION.txt
+?? P0.2.9B_INTERNAL_DATA_PRODUCTION_WIRING_INSPECTION.txt
+?? P0.2.9C.txt
+?? P0.2.9D.2_Governance_API_Composition_Inspection.txt
+?? P0.2.9D.2_Governance_Authorization_Inspection.txt
+?? P0.2.9D3_secure_governance_and_api_actor.patch
+?? P0.2.9D_ACTOR_GOVERNANCE_IMPLEMENTATION_INSPECTION.txt
+?? P0.2.9E_Composition_Inspection.txt
+?? P0.2.9E_Composition_Test_Inspection.txt
+?? P0.2.9E_Production_Composition_Callers.txt
+?? P0.2.9E_Runtime_Callsite_Inspection.txt
+?? P0.2.9F_Application_Startup_Architecture.txt
+?? P0.2.9G_Application_Entrypoint_Inspection.txt
+?? P0.2.9H.txt
+?? P0.2.9H_Entrypoint_Direct_Inspection.txt
+?? P0.2.9H_Production_Entrypoint_Inspection.txt
+?? P0.2.9J_Production_Launcher_Inspection.txt
+?? P0.2.9K_Import_Namespace_Inspection.txt
+?? P0.2.9L_Application_Surface_Reconciliation.txt
+?? P0.2.9_INTERNAL_DATA_REGISTRATION_INSPECTION.txt
+?? P1.2.1_live_provider_wiring.txt
+?? P1.2.2_provider_result_usage_audit.txt
+?? P1.2.3_live_beta_provider_path_audit.txt
+?? P1.2.4_ollama_usage_contract_audit.txt
+?? P1.2_provider_execution_audit.txt
+?? P1.4.2_migration_audit.txt
+?? P1.4.3R1_MIGRATION_OWNERSHIP_AUDIT.txt
+?? P1.4.3_FINAL_MIGRATION_RECONCILIATION.tmp
+?? P1.4.3_FINAL_MIGRATION_RECONCILIATION.txt
+?? P1.5.2_PRODUCTION_BOOTSTRAP_WIRING_AUDIT.txt
+?? P1.5.3_DURABLE_USAGE_LEDGER_WIRING_AUDIT.txt
+?? P1.5.4_PROVIDER_TO_DURABLE_LEDGER_AUDIT.txt
+?? P1.5.5_DURABLE_USAGE_PRODUCTION_VERIFICATION.txt
+?? P1.6.1_ADDITIONAL_BULK_INSPECTION.txt
+?? P1.6.1_BULK_RUNTIME_USAGE_INSPECTION.txt
+?? P1.6.2B_DURABLE_LEDGER_AUDIT.txt
+?? P1.6.2B_provider_usage_schema_handoff/
+?? P1.6.3E_PRICING_CONFIGURATION_INSPECTION.txt
+?? P1.6.4D_COMPOSITION_CONTRACT_INSPECTION.txt
+?? P1.6.4D_HACKATHON_BOOTSTRAP_INSPECTION.txt
+?? P1.6.4D_OPERATIONAL_EVENTS_CONTRACT_INSPECTION.txt
+?? P1.6.4D_OPERATIONAL_EVENTS_SERIALIZATION_INSPECTION.txt
+?? P1.6.5_PROVIDER_USAGE_DASHBOARD_INSPECTION.txt
+?? P1.6.5_PROVIDER_USAGE_UI_INSPECTION.txt
+?? P1.6_USAGE_LEDGER_COMPLETENESS_AUDIT.txt
+?? PACKAGE_STATUS.txt
+?? PASSWORD_RESET_EXISTING_IMPLEMENTATION_INSPECTION.txt
+?? PASSWORD_RESET_FRONTEND_FINAL_INSPECTION.txt
+?? PASSWORD_RESET_FULL_IMPLEMENTATION_INSPECTION.txt
+?? PASSWORD_RESET_IMPLEMENTATION_FINAL_AUTH_INSPECTION.txt
+?? PCD-2_authoritative_sources_inspection.txt
+?? PCD_5_3B_contract_inspection.txt
+?? PCD_5_3C_frontend_inspection.txt
+?? PCD_5_3_production_composition_inspection.txt
+?? PCD_authoritative_composition_inspection.txt
+?? PCD_composition_contracts.txt
+?? PCD_health_composition_review.txt
+?? PCD_runtime_composition_final.txt
+?? PERSISTENCE_SCHEMA_DIAGNOSTIC_TEST_INSPECTION.txt
+?? PI1_APPLICATION_COMPOSITION_INSPECTION.txt
+?? PI1_FINAL_COMPOSITION_RECONCILIATION.txt
+?? PROJECT_CONTROL_AUTH_INSPECTION.txt
+?? PROJECT_CONTROL_BACKEND_IMPORT_STANDARDIZATION_20260911_081011.txt
+?? PROJECT_CONTROL_BACKEND_ROOT_TEST_20260911_080712.txt
+?? PROJECT_CONTROL_CANONICAL_BOUNDARY_20260911_075858.txt
+?? PROJECT_CONTROL_CHANGE_SCOPE_REVIEW_20260911_081348.txt
+?? PROJECT_CONTROL_DIAGNOSTIC_20260911_075541.txt
+?? PROJECT_CONTROL_FINAL_REVIEW_20260911_081955.txt
+?? PROJECT_CONTROL_FINAL_SCOPE_CHECK_20260911_081613.txt
+?? PROJECT_CONTROL_FRONTEND_DESIGN_INSPECTION.txt
+?? PROJECT_CONTROL_FRONTEND_NEXT_INSPECTION.txt
+?? PROJECT_CONTROL_IMPORT_BACKUP_20260911_081012/
+?? PROJECT_CONTROL_IMPORT_BOUNDARY_20260911_075803.txt
+?? PROJECT_CONTROL_IMPORT_FIX_20260911_080852.txt
+?? PROJECT_CONTROL_IMPORT_REMEDIATION_TEST_20260911_080520.txt
+?? PROJECT_CONTROL_PYTEST_BOUNDARY_FIX_TEST_20260911_080743.txt
+?? PROJECT_CONTROL_PYTEST_PERMANENT_FIX_20260911_080817.txt
+?? PROJECT_CONTROL_ROOT_CAUSE_20260911_075710.txt
+?? PROJECT_CONTROL_TEST_SUITE_20260911_080925.txt
+?? PROJECT_CONTROL_THREE_DEPENDENCY_REVIEW_20260911_081649.txt
+?? PROJECT_CONTROL_VENV_FINAL_DIAGNOSTIC_20260911_080025.txt
+?? PROVIDER_MIGRATION_DIFF.txt
+?? Project_Control_Inspection_20260911_074752.txt
+?? QUESTIONNAIRE_FRAMEWORK_MAP.txt
+?? QUESTIONNAIRE_ONLY_INSPECTION.txt
+?? QUESTIONNAIRE_RECOVERY_REPORT.txt
+?? REMOTE_BACKEND_MAIN.txt
+?? W15.6.2_4-Eyes_Review_Input.txt
+?? W15.6.2_Authentication_Assurance_Contract_Hardened.py.txt
+?? W15.6.3_Authentication_Assurance_Contract_Freeze.txt
+?? W15.6.4.1_Implementation_Specification.txt
+?? W15.6.4_Authentication_Assurance_PreImplementation_Inspection.txt
+?? W15.6_Pre_Hardening_Auth_Diff_Inspection.txt
+?? W15.6_Worktree_Scope_Diagnostic.txt
+?? W15.7.0.1_Transaction_Authorization_Contract_Specification.txt
+?? W15.7.0.2_Transaction_Authorization_Contract_Hardening.txt
+?? W15.7.0.3_4-Eyes_Review_Input.txt
+?? W15.7.0.4_Transaction_Authorization_Contract_Freeze.txt
+?? W15.7.1.1_Transaction_Authorization_Implementation_Specification_Hardening.txt
+?? W15.7.1.2_Transaction_Authorization_Implementation_Specification_Freeze.txt
+?? W15.7.1_Transaction_Authorization_Implementation_Specification.txt
+?? W15.7.2.0_Transaction_Authorization_Domain_PreBuild_Inspection.txt
+?? W15.7.2.1_Transaction_Authorization_4_Eyes_Review_Output.txt
+?? W15.7.2.2_Current_Source_For_Remediation.txt
+?? W15.7.2.2_Domain_Security_Remediation_Build_Input.txt
+?? W15.7.2.2_Domain_Security_Remediation_Build_Output.txt
+?? W15.7.2.2_Domain_Security_Remediation_Build_Plan.txt
+?? W15.7.2.2_Domain_Security_Remediation_Implementation_Output.txt
+?? W15.7.2.2_Domain_Security_Remediation_Output.txt
+?? W15.7.2.2_Domain_Security_Remediation_Verification.txt
+?? W15.7.2.2_remediation_backup/
+?? W15.7.2.3_Transaction_Authorization_4_Eyes_Review_Output.txt
+?? W15.7.2.4R.1_ACTUAL_REMEDIATION_OUTPUT.txt
+?? W15.7.2.4R.1_Actual_Source_Remediation_Output.txt
+?? W15.7.2.4R.1_CURRENT_SOURCE_EXACT_INSPECTION.txt
+?? W15.7.2.4R.1_IMPORT_FIX_VALIDATION_OUTPUT.txt
+?? W15.7.2.4R.1_Real_W15.6_Context_Consumption_Output.txt
+?? W15.7.2.4R.1_VALIDATION_OUTPUT.txt
+?? W15.7.2.4R.1_actual_backup_20260913_222833/
+?? W15.7.2.4R.1_actual_remediation_backup/
+?? W15.7.2.4R.1_actual_remediation_backup_v2/
+?? W15.7.2.4R.1_backup/
+?? W15.7.2.4R.2_TEST_BOUNDARY_MIGRATION_OUTPUT.txt
+?? W15.7.2.4R.2_test_backup/
+?? W15.7.2.4R.3_ASSURANCE_TEST_FIX_OUTPUT.txt
+?? W15.7.2.4R.3_backup/
+?? W15.7.2.4R.3_patch.py
+?? W15.7.2.4R_W15.6_Assurance_Trust_Boundary_Inspection.txt
+?? W15.7.2.4_Authentication_Assurance_Trust_Boundary_Remediation_Output.txt
+?? W15.7.2.4_remediation_backup/
+?? W15.7.2_Transaction_Authorization_Domain_Implementation_Output.txt
+?? W15.7.3.4_4_Eyes_Review_Output.txt
+?? W15.7_VALIDATED_ASSURANCE_SYMBOL_DIAGNOSTIC.txt
+?? W15.8.1.1_4_Eyes_Architecture_Review_Output.txt
+?? W15.8.1.1_PRECISE_4_EYES_REVIEW.txt
+?? W15.8.1_NEXT_GATE_INSPECTION.txt
+?? W15.8.1_Transaction_Authorization_Integration_Architecture_Specification.txt
+?? W15_SECURITY_GATE_STATUS_INSPECTION.txt
+?? WEB_SCREEN_BUILD_CURRENT.txt
+?? WEB_UI_INSPECTION.txt
+?? WELCOME_REUSE_INSPECTION.txt
+?? _AUDIT_01_FILE_INVENTORY.txt
+?? _AUDIT_02_PYTHON_SOURCE.txt
+?? _AUDIT_03_DEPENDENCIES_CONFIG.txt
+?? _AUDIT_04_TESTS.txt
+?? _AUDIT_05_ARCHITECTURE_DOCUMENTATION.txt
+?? _AUDIT_05_DOCUMENTATION.txt
+?? _AUDIT_05_DOCUMENTATION_CLEAN.txt
+?? _AUDIT_07_GIT_ENVIRONMENT.txt
+?? _academy_composition_backup/
+?? _academy_composition_import_fix_backup/
+?? _academy_delivery_pre_integration_backup/
+?? _academy_final_vertical_input/
+?? _academy_formatter_asset_path_backup/
+?? _academy_main_integration_backup/
+?? _academy_pytest_config_backup/
+?? _backup_password_reset_20260912_125621/
+?? _backup_password_reset_20260912_130027/
+?? _backup_password_reset_email_20260912_130812/
+?? _backup_password_reset_fix_20260913_142659/
+?? _backup_password_reset_service_20260912_130638/
+?? _backup_password_reset_tests_20260912_131806
+?? _backup_telegram_functionality_control_20260907_185416/
+?? _inspection_avw01_auth_api.txt
+?? _inspection_avw01_email_configuration.txt
+?? _inspection_avw01_email_provider_manager.txt
+?? _inspection_avw01_resend_provider.txt
+?? _inspection_password_reset_frontend.txt
+?? _integration_staging/
+?? _investigation/
+?? _m1_2_import_boundary_backup/
+?? _m1_2_import_boundary_backup_v2/
+?? _m7_2_incorrect_main_backup/
+?? _migration_backup_20260911_103056/
+?? academy-import-inspection.txt
+?? academy_actual_interfaces.txt
+?? academy_alembic_graph_analysis.txt
+?? academy_alembic_migration_chain_inspection.txt
+?? academy_alembic_scheduler_compatibility.txt
+?? academy_automatic_email_final_composition_inspection.txt
+?? academy_automatic_email_final_implementation_inspection.txt
+?? academy_automatic_email_full_architecture_package.txt
+?? academy_automatic_email_full_source_review.txt
+?? academy_automatic_email_gap_analysis.txt
+?? academy_automatic_email_next_source_inspection.txt
+?? academy_automatic_email_relevant_files.txt
+?? academy_automatic_trigger_dependency_review.txt
+?? academy_automatic_trigger_source_review.txt
+?? academy_database_environment_diagnostic.txt
+?? academy_database_migration_state.txt
+?? academy_durable_delivery_copy.log
+?? academy_durable_delivery_copy_diagnostic.txt
+?? academy_durable_delivery_integration.log
+?? academy_durable_delivery_integration.txt
+?? academy_durable_delivery_persistence_readiness.txt
+?? academy_email_logo_asset_discovery.txt
+?? academy_final_architecture_security_gate.txt
+?? academy_final_regression_output.txt
+?? academy_final_vertical_inspection.txt
+?? academy_final_wiring_inspection.txt
+?? academy_formatter_asset_path_fix.txt
+?? academy_integration_compatibility_report.txt
+?? academy_lifespan_final_context.txt
+?? academy_lifespan_scheduler_startup_context.txt
+?? academy_main_academy_integration_context.txt
+?? academy_main_scheduler_lifecycle_context.txt
+?? academy_migration_final_chain_inspection.txt
+?? academy_migration_parent_remediation.txt
+?? academy_persistence_migration_execution.txt
+?? academy_postgresql_clean_gate.txt
+?? academy_postgresql_connection_verification.txt
+?? academy_postgresql_integration_execution.txt
+?? academy_postgresql_integration_real_execution.txt
+?? academy_postgresql_integration_real_execution_copy.txt
+?? academy_postgresql_integration_test_results.txt
+?? academy_postgresql_test_integration.txt
+?? academy_postgresql_test_integration_process.txt
+?? academy_postgresql_test_package_integration.txt
+?? academy_postgresql_tests_integration.txt
+?? academy_postgresql_tests_process.txt
+?? academy_production_composition_implementation.txt
+?? academy_production_composition_inspection.txt
+?? academy_production_config_location.txt
+?? academy_production_first_run_evidence.txt
+?? academy_production_readiness_final.txt
+?? academy_production_readiness_regression.txt
+?? academy_project_pytest_config.txt
+?? academy_pytest_configuration_inspection.txt
+?? academy_pytest_environment_boundary.txt
+?? academy_pytest_marker_encoding_remediation.txt
+?? academy_pytest_marker_remediation.txt
+?? academy_pytest_marker_test_output.txt
+?? academy_questionnaire_files.txt
+?? academy_questionnaire_routes.txt
+?? academy_real_workflow_test_context.txt
+?? academy_relevant_full_source_review.txt
+?? academy_runtime_wiring_focused_inspection.txt
+?? academy_scheduler_email_contract_inspection.txt
+?? academy_scheduler_factory_startup_context.txt
+?? academy_scheduler_registration_context.txt
+?? academy_scheduler_registration_inspection.txt
+?? academy_scheduler_registration_inspection_full.txt
+?? academy_test_environment_diagnosis.txt
+?? academy_test_package_location.txt
+?? academy_trigger_architecture_review.txt
+?? academy_users_schema_context.txt
+?? academy_wiring_files_inspection.txt
+?? academy_workflow_run_contract.txt
+?? academy_world_frontend_map.txt
+?? agent_runtime_dependency_inspection.txt
+?? agent_runtime_deployment_inspection.txt
+?? agentic_cinema_live_inspection.txt
+?? app/interfaces/provider_management/operations_center_dashboard_router.py.m1_2_backup
+?? apply_p0.2.9D3.ps1
+?? available_ui_tests.txt
+?? backend/.namespace_backups/
+?? backend/AI_Runtime_Usage_Boundary_Inspection.txt
+?? backend/AUTH_EMAIL_COMPOSITION_INSPECTION.txt
+?? backend/AUTH_EMAIL_PROVIDER_INSPECTION.txt
+?? backend/AUTH_PERSISTENCE_DETAILED_INSPECTION.txt
+?? backend/AUTH_PERSISTENCE_INSPECTION.txt
+?? backend/AUTH_REGISTRATION_COMPOSITION_INSPECTION.txt
+?? backend/AUTH_VERIFICATION_FLOW_INSPECTION.txt
+?? backend/AVW01-academy-config.txt
+?? backend/AVW01-auth-composition-index.txt
+?? backend/AVW01-auth-config-index.txt
+?? backend/AVW01-auth-email-service-inspection.txt
+?? backend/AVW01-auth-email-test-search.txt
+?? backend/AVW01-auth-test-index.txt
+?? backend/AVW01-authoritative-inspection.txt
+?? backend/AVW01-bootstrap-index.txt
+?? backend/AVW01-email-provider-contract-index.txt
+?? backend/AVW01-email-provider-index.txt
+?? backend/AVW01-email-provider-inspection.txt
+?? backend/AVW01-inspection-index.txt
+?? backend/AVW01-integration-inspection.txt
+?? backend/AVW01-main-composition.txt
+?? backend/AVW01-privacy-url-index.txt
+?? backend/AVW01-provider-inspection.txt
+?? backend/AVW01-safe-email-diagnostic.py
+?? backend/AVW01-test-index.txt
+?? backend/AVW_FINAL_INSPECTION.txt
+?? backend/AVW_PROVIDER_COMPOSITION_INSPECTION.txt
+?? backend/AVW_REPOSITORY_INSPECTION.txt
+?? backend/Academy_namespace_deep_dive.txt
+?? backend/Authorization_ProviderManagement_namespace_deep_dive.txt
+?? backend/Cybersecurity_Email_full_deep_dive.txt
+?? backend/Cybersecurity_Email_namespace_deep_dive.txt
+?? backend/FUNCTIONALITY_CONTROL_API_INSPECTION.txt
+?? backend/Health_namespace_deep_dive.txt
+?? backend/M0_backend_startup_inspection.txt
+?? backend/M18_4_4_ACTIVE_RUNTIME_SKILL_INSERTION_INSPECTION.txt
+?? backend/M1_2_Backend_Diagnosis.txt
+?? backend/M1_2_Backend_Implementation_Inspection.txt
+?? backend/M1_2_COMPOSITION_INSPECTION.txt
+?? backend/Operations_Center_namespace_deep_dive.txt
+?? backend/PCD-2A_health_contract_inspection.txt
+?? backend/PCD-2A_pcd_contract_inspection.txt
+?? backend/PCD-2B_operations_contract_inspection.txt
+?? backend/PCD-2C_FINAL_RISK_CONTRACT_INSPECTION.txt
+?? backend/PCD-2C_PCD_RISK_MODEL_INSPECTION.txt
+?? backend/PCD-2C_governance_risk_contract_inspection.txt
+?? backend/PCD-3_1_COMPOSITION_INSPECTION.txt
+?? backend/PCD-3_COMPOSITION_INSPECTION.txt
+?? backend/PCD-4_AGENT_INSPECTION.txt
+?? backend/PCD-5_API_INSPECTION.txt
+?? backend/PCD-5_UI_INSPECTION.txt
+?? backend/PCD_namespace_inspection.txt
+?? backend/PROJECT_CONTROL_CANONICAL_BOUNDARY_20260911_075858.txt
+?? backend/ProviderManagement_Runtime_namespace_deep_dive.txt
+?? backend/README_PERSISTENCE_OPS.md
+?? backend/SCHEMA_COMPARATOR_INSPECTION.txt
+?? backend/SCHEMA_ORM_CONTRACT_INSPECTION.txt
+?? backend/W15.6.1_Authentication_Assurance_Contract_Hardening_Package/
+?? backend/W15.6_Authentication_Assurance_Contract_Package/
+?? backend/W15.6_Environment_and_Worktree_Diagnostic.txt
+?? backend/W15.6_Pre_Hardening_Baseline.txt
+?? backend/W15_4_Existing_Code_Mapping_Inspection.txt
+?? backend/W15_5_IAM_PoC_Integration_Boundary_Inspection.txt
+?? backend/_inspection_avw01_auth_email_sender.txt
+?? backend/_inspection_avw01_auth_email_service.txt
+?? backend/_inspection_avw01_provider_tests.txt
+?? backend/_inspection_password_reset_email_runtime.txt
+?? backend/_inspection_password_reset_provider_runtime.txt
+?? backend/alembic/versions/20260830_g84324l_report_execution_audit.py
+?? backend/alembic/versions/20260830_g84328_cmp_authoritative_controls.py
+?? backend/alembic/versions/20260901_cmp_monitoring_plan_items.py
+?? backend/alembic/versions/20260902_m2_3_authoritative_world_catalogue.py
+?? backend/alembic/versions/20260902_m4_0_document_foundation.py
+?? backend/alembic/versions/20260902_m4_1_document_security_versioning.py
+?? backend/alembic/versions/20260902_m4_2_r2_document_markup_persistence.py
+?? backend/alembic/versions/20260903_m4_2_r4_user_role.py
+?? backend/alembic/versions/20260907_provider_usage_events.py
+?? backend/alembic/versions/20260910_functionality_operational_control.py
+?? backend/alembic/versions/20260912_auth_password_reset.py
+?? backend/alembic/versions/3ab2941f5340_create_compliance_execution_tables.py
+?? backend/alembic/versions/50cff2b5eb93_merge_cmp_and_report_execution_audit_.py
+?? backend/alembic/versions/6c7d8e9f0a1b_create_compliance_report_snapshots.py
+?? backend/alembic/versions/9f4b2a6d7c8a_add_compliance_findings_table.py
+?? backend/alembic/versions/ACADEMY_NOTIFICATION_DELIVERY_TEMPLATE.py
+?? backend/alembic/versions/b05eeafe5f14_add_compliance_finding_remediation_.py
+?? backend/api/cinema_agent.py
+?? backend/api/routes.py.p0.2.9d3.bak
+?? backend/app/ai_runtime/voice/functionality_control_port.py
+?? backend/app/ai_runtime/voice/voice_speech_runtime.py.m2.3-backup
+?? backend/app/api/academy_questionnaires.py
+?? backend/app/api/authentication.py.backup_before_fix
+?? backend/app/api/authentication.py.m1-backup
+?? backend/app/api/privacy_screening.py
+?? backend/app/api/routes/
+?? backend/app/application/academy/
+?? backend/app/application/academy_notification_formatters.py
+?? backend/app/application/academy_notification_formatters.py.pre_branding_v1
+?? backend/app/application/academy_notification_formatters.py.pre_center_heading
+?? backend/app/application/academy_notification_ports.py
+?? backend/app/application/academy_notification_service.py
+?? backend/app/application/beta_access/beta_telegram_conversation_boundary.py.bak
+?? backend/app/application/composition/academy_production.py
+?? backend/app/application/composition/beta_telegram_composition.py.bak
+?? backend/app/application/composition/voice_call_acceptance_composition.py.r6_7.bak
+?? backend/app/application/composition/voice_composition.py.m2.3-backup
+?? backend/app/application/identity/__init__.py
+?? backend/app/application/identity/authentication_assurance.py
+?? backend/app/application/internal_data/
+?? backend/app/application/persistence_operations/
+?? backend/app/application/privacy/beta1_processing_catalog.py
+?? backend/app/application/privacy/screening/
+?? backend/app/application/provider_management/
+?? backend/app/application/providers/
+?? backend/app/application/uai/voice/voice_call_acceptance_service.py.r6_7.bak
+?? backend/app/application/uai/voice/voice_call_context_factory.py.r6_7.bak
+?? backend/app/application/uai/voice/voice_connection_port.py
+?? backend/app/application/uai/voice/voice_room_port.py
+?? backend/app/assets/email/easychatbot-mascot.png
+?? backend/app/assets/email/easychatbot-password-reset.png
+?? backend/app/domain/academy_notification.py
+?? backend/app/domain/identity/authentication_assurance.py
+?? backend/app/infrastructure/academy/
+?? backend/app/infrastructure/email/academy_email_notification_sender.py
+?? backend/app/infrastructure/email/authentication_email_sender.py
+?? backend/app/infrastructure/persistence/functionality_control_records.py
+?? backend/app/infrastructure/persistence/model_registry.py
+?? backend/app/infrastructure/persistence/postgresql_functionality_control_repository.py
+?? backend/app/infrastructure/persistence/postgresql_provider_usage_repository.py
+?? backend/app/infrastructure/persistence/provider_usage_records.py
+?? backend/app/infrastructure/persistence_operations/
+?? backend/app/infrastructure/telegram/academy_notification_telegram.py
+?? backend/app/infrastructure/voice/livekit_realtime_agent.py.m2.3.bak
+?? backend/app/infrastructure/voice/livekit_stt_adapter.py
+?? backend/app/infrastructure/voice/livekit_stt_adapter.py.m2.3.bak
+?? backend/app/infrastructure/voice/livekit_tts_adapter.py
+?? backend/app/infrastructure/voice/livekit_tts_adapter.py.m2.3.bak
+?? backend/app/infrastructure/voice/livekit_voice_worker.py.m2.3.bak
+?? backend/app/main.core.remote.py
+?? backend/app/main.py.avw01.bak
+?? backend/app/main.py.before-academy-composition
+?? backend/app/main.py.before-m72-academy-activation
+?? backend/app/main.py.before-m72-screening
+?? backend/app/main.py.before_core_restore
+?? backend/app/main.py.before_m1_3
+?? backend/app/main.py.m1_2_before_composition_fix
+?? backend/app/main.py.m1_3_backup
+?? backend/app/main.py.m7-2-working-backup
+?? backend/app/providers/provider_result.py
+?? backend/app/providers/speech/openai_speech_provider.py.m2.3.bak
+?? backend/application/bootstrap.py.p0.2.9d3.bak
+?? backend/application/factory.py.pi1-before
+?? backend/application/internal_documentation_composition.py
+?? backend/application/runtime/
+?? backend/architecture_import_inspection.txt
+?? backend/backend/
+?? backend/cybersecurity/email/resend_email_provider.py.before_auth_password_reset_fix.bak
+?? backend/cybersecurity/email/resend_email_provider.py.pre_academy_backup
+?? backend/live-session.txt
+?? backend/login.json
+?? backend/m24_10_current_voice_composition.txt
+?? backend/m24_event_contract.txt
+?? backend/m24_import_configuration_inspection.txt
+?? backend/m24_voice_call_contract.txt
+?? backend/m24_voice_contract_inspection.txt
+?? backend/m24_voice_contract_tests.txt
+?? backend/openapi-live.json
+?? backend/pcd53_frontend_files.txt
+?? backend/pcd_auth_test_inspection.txt
+?? backend/pi1_live_runtime_instantiation_map.txt
+?? backend/pi1_skills_architecture_inspection.txt
+?? backend/project_control_center/
+?? backend/pyproject.toml.m1_2_backup
+?? backend/pytest.ini
+?? backend/schema_live_verify_inspection.txt
+?? backend/services/external_runtime_service.py.pi1-before
+?? backend/services/runtime/runtime_application_service.py.pi1-before
+?? backend/tests/academy/
+?? backend/tests/ai_runtime/voice/test_voice_speech_runtime.py.m2.3-backup
+?? backend/tests/application/composition/test_p1_5_3_durable_usage_wiring.py
+?? backend/tests/application/composition/test_p1_6_1_durable_usage_capture.py
+?? backend/tests/application/composition/test_p1_6_4d_composition.py
+?? backend/tests/application/composition/test_voice_composition.py.m2.3-backup
+?? backend/tests/application/operations_center/
+?? backend/tests/application/persistence_operations/
+?? backend/tests/application/provider_management/
+?? backend/tests/application/providers/
+?? backend/tests/application/uai/voice/test_voice_ai_dependencies.py
+?? backend/tests/architecture/
+?? backend/tests/beta_access/test_beta_access_world_assignment.py
+?? backend/tests/beta_access/test_conversation_runtime_provider_result.py
+?? backend/tests/beta_access/test_conversation_runtime_usage_capture.py
+?? backend/tests/beta_access/test_telegram_classroom_policy_controls.py
+?? backend/tests/cybersecurity/
+?? backend/tests/infrastructure/persistence/test_p1_6_2b_durable_usage_completeness.py
+?? backend/tests/infrastructure/persistence/test_postgresql_functionality_control_repository.py
+?? backend/tests/infrastructure/persistence/test_postgresql_provider_usage_repository.py
+?? backend/tests/infrastructure/persistence/test_provider_usage_migration_definition.py
+?? backend/tests/infrastructure/voice/test_livekit_speech_adapters.py
+?? backend/tests/infrastructure/voice/test_livekit_voice_worker.py
+?? backend/tests/integration/
+?? backend/tests/operations_center/test_functionality_control_api.py
+?? backend/tests/operations_center/test_m2_1_functionality_control_api.py
+?? backend/tests/operations_center/test_m2_1_functionality_health_api.py
+?? backend/tests/operations_center/test_p1_6_4d_operational_events_api.py
+?? backend/tests/operations_center/test_persistence_operations_api.py
+?? backend/tests/providers/test_app_provider_result_contract.py
+?? backend/tests/security/test_authentication_application_composition.py
+?? backend/tests/security/test_authentication_application_composition.py.before_password_reset_contract
+?? backend/tests/security/test_authentication_assurance.py
+?? backend/tests/test_academy_email_branding_navigation.py
+?? backend/tests/unit/application/
+?? backend/tests/unit/infrastructure/
+?? backend/tests/unit/privacy/
+?? backend_agentic_cinema_inspection.txt
+?? build_runtime_package_current_inspection.txt
+?? chat_regression_inspection.txt
+?? chat_regression_src_inspection.txt
+?? cinema_frontend_backend_inspection.txt
+?? cinema_full_integration_inspection.txt
+?? conftest.py
+?? database/
+?? demo_search.txt
+?? deploy_agent_current_inspection.txt
+?? diagnose_remote_agent.py
+?? docs/M7_2_BACKEND_SCREENING_INSPECTION.txt
+?? docs/M7_2_FRONTEND_INSPECTION.txt
+?? docs/M7_2_SCREENING_INSPECTION.txt
+?? docs/P1.2.4_CANONICAL_PROVIDER_RESULT_CONTRACT.md
+?? docs/P1.3.1_LIVE_PROVIDER_USAGE_CAPTURE.md
+?? docs/P1.3_PROVIDER_USAGE_CAPTURE_BOUNDARY.md
+?? docs/P1.4.1_DURABLE_USAGE_REPOSITORY.md
+?? docs/P1.4.2_USAGE_LEDGER_MIGRATION.md
+?? docs/P1.5.3_DURABLE_USAGE_LEDGER_WIRING.md
+?? docs/P1.5.4_PROVIDER_TO_DURABLE_LEDGER_E2E.md
+?? docs/STEP16_ACCEPTANCE_EVIDENCE.md
+?? docs/migration-handoff/
+?? docs/privacy-governance/CODEX_M0_ARCHITECTURE_DISCOVERY.md
+?? docs/privacy-governance/m7_inspection/
+?? docs/privacy/M7.2_BACKEND_INTEGRATION.md
+?? email_workflow_architecture_inspection.txt
+?? frontend-agentic-cinema-test/
+?? frontend/AUTH_BUILD_INSPECTION.txt
+?? frontend/app/components/operations-center/OperationsCenterLayout.module.css
+?? frontend/app/components/operations-center/OperationsCenterLayout.tsx
+?? frontend/app/components/operations-center/OperationsCenterShell.module.css
+?? frontend/app/components/operations-center/OperationsCenterShell.tsx
+?? frontend/app/components/operations-center/OperationsCenterSidebar.tsx
+?? frontend/app/components/operations-center/functionality-health/
+?? frontend/app/components/operations-center/navigation/
+?? frontend/app/forgot-password/
+?? frontend/app/lib/api/functionalityHealth.ts
+?? frontend/app/lib/api/functionalityHealthControls.ts
+?? frontend/app/lib/api/projectControl.ts
+?? frontend/app/lib/api/riskIntelligence.ts
+?? frontend/app/login/
+?? frontend/app/operations-center/compliance/
+?? frontend/app/operations-center/functionality-health/
+?? frontend/app/operations-center/risk-intelligence/
+?? frontend/app/project-control/
+?? frontend/app/register/
+?? frontend/app/reset-password/
+?? frontend/app/verify-email/
+?? frontend/app/welcome/
+?? frontend/available_ui_tests.txt
+?? frontend/dist/assets/auth/
+?? frontend/dist/assets/index-CeiVACeX.js
+?? frontend/dist/assets/index-DjLPzKUt.css
+?? frontend/dist/assets/mascot/
+?? frontend/dist/assets/project-control-hero.png
+?? frontend/dist/characters/
+?? frontend/dist/cinema/
+?? frontend/frontend/public/
+?? frontend/frontend/src/
+?? frontend/frontend_bulk_inspection.txt
+?? frontend/frontend_compliance_bulk_inspection.txt
+?? frontend/frontend_operations_center_architecture_inspection.txt
+?? frontend/frontend_router_authoritative_inspection.txt
+?? frontend/navigation/
+?? frontend/navigation_inspection.txt
+?? frontend/pages/operations-center/GovernanceOperationsCenter.module.css
+?? frontend/public/assets/auth/
+?? frontend/public/assets/project-control-hero.png
+?? frontend/public/characters/
+?? frontend/public/cinema/
+?? frontend/risk_intelligence_bulk_inspection.txt
+?? frontend/router_inspection.txt
+?? frontend/src/academy/
+?? frontend/src/agentic-cinema/
+?? frontend/src/auth/
+?? frontend/src/router.tsx.avw01-backup
+?? frontend/src/router.tsx.m1_3_backup
+?? frontend/test-results/
+?? frontend/tests/frontend/auth-password-reset.spec.tsx
+?? frontend/tests/frontend/auth-registration-verification.spec.tsx
+?? frontend/tests/frontend/auth.spec.tsx
+?? frontend/tests/frontend/functionality-health.spec.tsx
+?? frontend/tests/frontend/project-control.spec.tsx
+?? frontend/tests/frontend/risk-intelligence.spec.tsx
+?? frontend_structure.txt
+?? functionality_dashboard_actual_backend.txt
+?? functionality_dashboard_architecture_review.txt
+?? functionality_dashboard_contract_review.txt
+?? functionality_dashboard_review.txt
+?? functionality_health_frontend_inspection.txt
+?? functionality_health_inspection.txt
+?? hackathon_frontend_inspection.txt
+?? internal_doc_search_targeted.txt
+?? m1_3_frontend_architecture_review.txt
+?? m1_backend_regression_report.txt
+?? m24_01_inspection.txt
+?? m24_10_lifecycle_inspection.txt
+?? m24_10_persistence_entry_inspection.txt
+?? m2_1_world_instruction_inspection.txt
+?? m2_4_08_inspection.txt
+?? m2_4_09_context_bridge_inspection.txt
+?? m2_4_09_dependency_cleanup.txt
+?? m2_4_09_inspection.txt
+?? m2_4_09_runtime_files.txt
+?? m2_4_09_worker_test.txt
+?? m2_4_10_bridge_inspection.txt
+?? m2_4_10_context_factory_callers.txt
+?? m2_4_10_orchestration_inspection.txt
+?? m2_4_10_persistence_seam.txt
+?? m2_4_10_real_inspection.txt
+?? m2_runtime_boundary_inspection.txt
+?? m2_world_conversation_seam.txt
+?? m2a_contract_test_discovery.txt
+?? m72_architecture_investigation.txt
+?? m72_telegram_and_composition.txt
+?? m7_2_FINAL_RUNTIME_COMPOSITION_INSPECTION.txt
+?? m7_2_backend_IMPLEMENTATION_PRECHECK.txt
+?? m7_2_backend_screening_inspection.txt
+?? m7_2_backend_wiring_inspection.txt
+?? migration_dependency_audit.py
+?? parallel_hosted_diagnosis.txt
+?? pcd53_auth_architecture_inspection.txt
+?? pcd53_backend_composition_inspection.txt
+?? pcd53_frontend_files.txt
+?? pcd53_frontend_inspection.txt
+?? pcd53_permission_inspection.txt
+?? pi1_runtime_bulk_inspection.txt
+?? provider_usage_import_inspection.txt
+?? questionnaire_active_tests.txt
+?? questionnaire_and_cinema_source_map.txt
+?? questionnaire_contract_archaeology.txt
+?? questionnaire_frontend_contract.txt
+?? questionnaire_git_history.txt
+?? questionnaire_real_test_search.txt
+?? questionnaire_test_inventory.txt
+?? r6_6_voice_architecture_review.txt
+?? r6_7_acceptance_build_inspection.txt
+?? reminder_backend.txt
+?? resend-openapi.json
+?? runtime_architecture_inspection.txt
+?? scripts/m20_1_converge_verified_namespace.py
+?? scripts/m20_1_reachable_namespace_audit.py
+?? search_backend.txt
+?? shop_backend_inspection.txt
+?? spotify_youtube_integration_search.txt
+?? sprint_0_1_git_branch.txt
+?? sprint_0_1_git_log.txt
+?? sprint_0_1_git_status.txt
+?? sprint_0_5_active_path_verification.txt
+?? src/ai_agents/internal_documentation_agent/
+?? src/ai_runtime/capabilities/actor_context.py
+?? src/ai_runtime/capabilities/internal_data_read_executor.py
+?? src/ai_runtime/capabilities/internal_documentation_executor.py
+?? src/ai_runtime/providers/cost/pricing.py
+?? src/ai_runtime/providers/cost/usage_adapter.py
+?? src/ai_runtime/providers/usage/aggregation.py
+?? step14_canonical_search_provider_inspection.txt
+?? step14_hackathon_canonical_search_inspection.txt
+?? step15_integration_inspection.txt
+?? step15_runtime_integration_inspection.txt
+?? step16_architecture_inspection.txt
+?? step16_package/
+?? step16_readiness_inspection.txt
+?? step16_wp162_knowledge_contract.txt
+?? step16_wp162_recon.txt
+?? step16_wp165_bootstrap_inspection.txt
+?? step16_wp165a_knowledge_source_inspection.txt
+?? step16_wp165b_configuration_inspection.txt
+?? step16_wp165d_docs_inventory.txt
+?? step16_wp166_diagnostic.txt
+?? step16_wp168_architecture_security_review.txt
+?? telegram_control_architecture_inspection.txt
+?? telegram_control_tests_inventory.txt
+?? telegram_control_wiring_inspection.txt
+?? telegram_environment_control_inspection.txt
+?? telegram_functionality_control_api_inspection.txt
+?? telegram_functionality_control_remediation/
+?? telegram_functionality_control_tests_inspection.txt
+?? telegram_private_chat_world_slice.txt
+?? telegram_runtime_control_boundary_inspection.txt
+?? telegram_runtime_inspection.txt
+?? telegram_startup_wiring_inspection.txt
+?? tests/integration/test_authentication_password_reset_api.py
+?? tests/integration/test_internal_documentation_runtime_e2e.py
+?? tests/providers/cost/test_p1_6_3a_cost_boundary.py
+?? tests/providers/cost/test_p1_6_3b_unknown_usage.py
+?? tests/providers/cost/test_p1_6_3c_usage_adapter.py
+?? tests/providers/cost/test_p1_6_3d_cost_attribution.py
+?? tests/providers/cost/test_p1_6_3e_pricing_registry.py
+?? tests/providers/cost/test_p1_6_3f_pricing_cost_integration.py
+?? tests/providers/usage/test_p1_6_4a_usage_aggregation.py
+?? tests/providers/usage/test_p1_6_4b_aggregation_service.py
+?? tests/security/
+?? tests/unit/
+?? tmp_list_gemini_models.py
+?? tmp_parallel_smoke.py
+?? tmp_test_adk_models.py
+?? verify_new_agent.py
+?? verify_remote_agent.py
+?? vitest_test_config_inspection.txt
+
+============================================================
+5. RECENT COMMITS
+============================================================
+03283d8 feat(security): implement transaction authorization
+0a8377f feat(project-control): add governed project control center
+ec94bc0 feat: deploy Agentic Cinema intelligence agent
+4d7fa34 feat: reconcile PI-1 runtime composition
+678d299 Complete M1.3 email workflow operations center
+debf78c Complete registration email verification flow
+e463ba7 feat(telegram): complete WS17 classroom policy hardening
+450857a feat(beta-telegram): complete conversation resilience
+
+============================================================
+END
+============================================================
+
+

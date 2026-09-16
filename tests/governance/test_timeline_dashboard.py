@@ -1,4 +1,4 @@
-from backend.governance.operations_center.governance_timeline_dashboard_service import (
+﻿from governance.operations_center.governance_timeline_dashboard_service import (
     GovernanceTimelineDashboardService,
 )
 
@@ -19,3 +19,4 @@ def test_dashboard_summary():
 
     assert result["total_events"] == 1
     assert result["evidence_available"] == 1
+

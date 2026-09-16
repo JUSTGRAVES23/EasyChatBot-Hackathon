@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the Podcast Discovery API endpoint.
 
 The API endpoint must remain a thin transport boundary.
@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
-from backend.api.main import app
+from api.main import app
 
 from src.ai_runtime.capabilities.models import (
     CapabilityExecutionStatus,

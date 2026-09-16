@@ -1,0 +1,407 @@
+﻿====================================================================================================
+EASYCHATBOT ACADEMY
+FINAL FASTAPI LIFESPAN INTEGRATION CONTEXT
+====================================================================================================
+
+READ-ONLY
+NO SOURCE MODIFICATION
+NO DATABASE WRITE
+NO MIGRATION
+NO EMAIL
+NO TELEGRAM
+NO SCHEDULER START
+
+====================================================================================================
+1. LIFESPAN IMPLEMENTATION
+====================================================================================================
+
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Announcement configuration
+#
+
+def _announcement_publishing_enabled() -> bool:
+    """
+    Resolve the explicit Beta 1 announcement publication switch.
+
+    Publication is disabled by default.
+
+    Accepted truthy values:
+    - true
+    - 1
+    - yes
+    - on
+    """
+
+    value = os.getenv(
+        "EASYCHATBOT_ANNOUNCEMENT_PUBLISHING_ENABLED",
+        "false",
+    )
+
+    return value.strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+
+
+#
+# Administrator authorization
+#
+
+async def _default_announcement_admin_authorizer() -> bool:
+    """
+    Fail-closed administrator authorization.
+
+    The repository does not yet expose a real authenticated
+    operator identity dependency.
+
+    Therefore announcement publication MUST remain denied
+    until the real authentication/authorization boundary is
+    connected.
+
+    This is intentional security behavior.
+    """
+
+    return False
+
+
+#
+# Announcement composition
+#
+
+def _create_announcement_components() -> tuple[
+    TelegramAnnouncementClient,
+    ControlledAnnouncementPublisher,
+]:
+    """
+    Compose the outbound announcement publication infrastructure.
+
+    This function creates an outbound-only Telegram client.
+
+    It does NOT:
+    - start Telegram polling;
+    - create Telegram handlers;
+    - create the classroom Telegram runtime;
+    - call getUpdates();
+    """
+
+    telegram_client = TelegramAnnouncementClient()
+
+    telegram_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    controlled_publisher = ControlledAnnouncementPublisher(
+        publisher=telegram_publisher,
+        publishing_enabled=_announcement_publishing_enabled(),
+    )
+
+    return (
+        telegram_client,
+        controlled_publisher,
+    )
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    Starts:
+    - cybersecurity scheduler runtime.
+
+    Stops:
+    - cybersecurity scheduler runtime;
+    - outbound announcement Telegram client.
+
+    IMPORTANT:
+
+    The classroom Telegram polling runtime is NOT started here.
+
+    It remains owned by:
+
+        backend/scripts/run_telegram_runtime.py
+
+    This prevents multiple getUpdates consumers.
+    """
+
+    try:
+        await application.state.scheduler_runtime.start()
+
+    except Exception as exc:
+        logger.exception(
+            "Cybersecurity scheduler startup failed: %s",
+            exc,
+        )
+
+    try:
+        yield
+
+    finally:
+
+        #
+        # Scheduler shutdown
+        #
+
+        try:
+            await application.state.scheduler_runtime.stop()
+
+        except Exception as exc:
+            logger.exception(
+                "Cybersecurity scheduler shutdown failed: %s",
+                exc,
+            )
+
+        #
+        # Announcement Telegram client shutdown
+        #
+        # The client is outbound-only and does not own Telegram
+        # polling.
+        #
+
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+
+        if telegram_client is not None:
+
+            try:
+                await telegram_client.close()
+
+            except Exception as exc:
+                logger.exception(
+                    "Announcement Telegram client shutdown failed: %s",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+    """
+
+    #
+    # Announcement dependency composition.
+    #
+    # This creates only the outbound Telegram client.
+
+====================================================================================================
+2. SCHEDULER RUNTIME START / STOP REFERENCES
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\main.py:55: async def lifespan(
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\main.py:112: lifespan=lifespan,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:56: create_cybersecurity_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:396: async def lifespan(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:421: await application.state.scheduler_runtime.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:439: await application.state.scheduler_runtime.stop()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:530: scheduler_runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:538: lifespan=lifespan,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:544: # Lifespan closes it during application shutdown.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:567: # Lifespan owns scheduler startup and shutdown.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:570: application.state.scheduler_runtime = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:571: scheduler_runtime
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:192: await self._application.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:213: await self._application.updater.stop()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:215: await self._application.stop()
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:70: await runtime.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:85: await _telegram_production.beta_telegram.runtime.stop()
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:140: self.scheduler.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:14: from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:39: def create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:79: "create_cybersecurity_scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_runtime.py:39: FastAPI lifespan
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_runtime.py:100: self.scheduler_adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_runtime.py:102: self.scheduler_adapter.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:29: fake_scheduler_runtime = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:30: name="scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:33: fake_scheduler_runtime.scheduler_adapter = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:37: fake_scheduler_runtime.scheduler_adapter.scheduler = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:41: fake_scheduler_runtime.scheduler_adapter.academy_one_week_workflow = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:55: "backend.app.main.create_cybersecurity_scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:56: return_value=fake_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:112: create_cybersecurity_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:115: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:14: create_cybersecurity_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:44: fake_scheduler_runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:75: "backend.app.main.create_cybersecurity_scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:76: return_value=fake_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:103: application.state.scheduler_runtime
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:104: is fake_scheduler_runtime
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:131: fake_scheduler_runtime = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:132: name="scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:162: "backend.app.main.create_cybersecurity_scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:163: return_value=fake_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:171: application.state.scheduler_runtime
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:172: is fake_scheduler_runtime
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:175: fake_scheduler_runtime.start.assert_not_called()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:176: fake_scheduler_runtime.stop.assert_not_called()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:195: scheduler_runtime = MagicMock()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:221: "backend.app.main.create_cybersecurity_scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:222: return_value=scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:254: scheduler_runtime = MagicMock()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:283: "backend.app.main.create_cybersecurity_scheduler_runtime",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:284: return_value=scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:32: create_cybersecurity_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:261: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:283: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:317: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:50: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:106: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:152: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:181: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:7: from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:39: await runtime.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:43: await runtime.stop()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:84: await runtime.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:85: await runtime.stop()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:90: def test_scheduler_runtime_uses_existing_adapter():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:8: create_cybersecurity_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:42: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:76: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:85: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:156: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:165: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:4: create_cybersecurity_scheduler_runtime,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:11: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:24: runtime = create_cybersecurity_scheduler_runtime(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:57: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:87: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:109: adapter.register_jobs()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:132: adapter.register_jobs()
+
+====================================================================================================
+3. ACADEMY SCHEDULER REGISTRATION REFERENCES
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:60: create_academy_one_week_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:518: academy_one_week_workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:531: academy_one_week_workflow=academy_one_week_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:17: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:71: def create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:151: "create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:47: academy_one_week_workflow=None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:82: self.academy_one_week_workflow = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:83: academy_one_week_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:119: if self.academy_one_week_workflow is not None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:121: self.academy_one_week_workflow.run,
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py:125: id="academy_one_week_milestone",
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:35: create_academy_one_week_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:42: academy_one_week_workflow=None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:70: academy_one_week_workflow=academy_one_week_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:26: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:41: fake_scheduler_runtime.scheduler_adapter.academy_one_week_workflow = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:49: "backend.app.application.composition.academy_production.create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:52: "backend.cybersecurity.scheduler.cybersecurity_scheduler_factory.create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:103: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:119: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_composition.py:127: adapter.academy_one_week_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:7: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:46: academy_one_week_workflow=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:72: "backend.app.main.create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:93: scheduler_kwargs["academy_one_week_workflow"]
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:156: "backend.app.main.create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:218: "backend.app.main.create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:277: "backend.app.main.create_academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_one_week_workflow.py:6: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_one_week_workflow_failure.py:6: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:8: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:16: create_academy_one_week_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:66: workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:121: workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:154: workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:189: workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:219: workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:258: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:263: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:269: .academy_one_week_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:280: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:285: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:305: academy_workflow = create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:319: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:329: adapter.academy_one_week_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:358: create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:383: create_academy_one_week_workflow(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:9: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:9: from backend.app.application.academy.academy_one_week_workflow import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:30: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:47: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:55: if call.kwargs.get("id") == "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:86: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:103: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:111: if call.kwargs.get("id") == "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:143: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:149: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:172: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:178: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py:191: "academy_one_week_milestone",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:62: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py:70: adapter.academy_one_week_workflow = academy_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:34: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:46: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:54: adapter.academy_one_week_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:68: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:80: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:91: == "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:120: == "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:148: name="academy_one_week_workflow",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:158: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py:183: "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:13: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:18: assert adapter.academy_one_week_workflow is academy_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:26: academy_one_week_workflow=academy_workflow,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py:32: assert adapter.academy_one_week_workflow is academy_workflow
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:54: academy_one_week_workflow=academy,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:64: if job["id"] == "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:84: academy_one_week_workflow=FakeAcademyWorkflow(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:97: "academy_one_week_milestone",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:118: assert "academy_one_week_milestone" not in job_ids
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:127: academy_one_week_workflow=FakeAcademyWorkflow(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:137: if job["id"] == "academy_one_week_milestone"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:151: academy_one_week_workflow=FakeAcademyWorkflow(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py:167: academy_one_week_workflow=FakeAcademyWorkflow(),
+
+====================================================================================================
+4. EXISTING LIFECYCLE TESTS
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:21: def test_create_application_composes_academy_into_shared_scheduler():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:23: create_application() must compose Academy into the existing
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:79: from backend.app.main import create_application
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:81: application = create_application()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:108: def test_create_application_does_not_start_scheduler():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:166: from backend.app.main import create_application
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:168: application = create_application()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:175: fake_scheduler_runtime.start.assert_not_called()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:176: fake_scheduler_runtime.stop.assert_not_called()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:179: def test_create_application_reuses_existing_telegram_client():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:225: from backend.app.main import create_application
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:227: application = create_application()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:242: def test_create_application_does_not_create_second_scheduler():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:287: from backend.app.main import create_application
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:289: application = create_application()
+
+====================================================================================================
+INSPECTION COMPLETE
+====================================================================================================
+
+NEXT GATE:
+Implement only the minimum FastAPI lifespan Academy integration.
+Reuse the existing scheduler runtime.
+Reuse the existing Telegram boundary.
+Do NOT create another scheduler.
+Do NOT modify scheduler internals.
+Do NOT send email.
+Do NOT send Telegram.
+Do NOT start the production scheduler during this inspection.

@@ -1,12 +1,12 @@
 ﻿import pytest
 
-from backend.cybersecurity.demo_data_source import (
+from cybersecurity.demo_data_source import (
     DemoCybersecurityDataSource,
 )
-from backend.cybersecurity.intelligence_service import (
+from cybersecurity.intelligence_service import (
     CybersecurityIntelligenceService,
 )
-from backend.runtime.runtime_engine import RuntimeEngine
+from runtime.runtime_engine import RuntimeEngine
 
 
 @pytest.mark.asyncio
@@ -26,3 +26,4 @@ async def test_cybersecurity_intelligence_uses_runtime_boundary():
     assert result.output["signal_count"] == 5
     assert result.output["critical_count"] == 1
     assert result.output["high_count"] == 2
+

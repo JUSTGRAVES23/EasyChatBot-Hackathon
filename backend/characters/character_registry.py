@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot Character Registry.
 
 The registry provides the approved characters available
@@ -15,7 +15,7 @@ A character without approved EasyChatBot artwork is not
 selectable from the character selection experience.
 """
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 

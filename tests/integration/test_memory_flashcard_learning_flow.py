@@ -1,4 +1,4 @@
-"""
+﻿"""
 Memory to Flashcard Learning Integration Test.
 
 Proves the end-to-end learner personalisation flow:
@@ -43,11 +43,11 @@ from pathlib import Path
 
 import pytest
 
-from backend.memory.memory_service import (
+from memory.memory_service import (
     MemoryService,
 )
 
-from backend.services.learning_service import (
+from services.learning_service import (
     LearningService,
 )
 

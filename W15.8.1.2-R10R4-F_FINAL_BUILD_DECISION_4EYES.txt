@@ -1,0 +1,349 @@
+﻿============================================================
+W15.8.1.2-R10R4-F
+FINAL BUILD DECISION & 4-EYES SIGN-OFF
+============================================================
+
+Repository:
+C:\AI Folder\EasyChatBot-Hackathon
+
+Purpose:
+Freeze the smallest authorized implementation boundary for the
+canonical Announcement Operations vertical slice.
+
+INSPECTION / DECISION ONLY.
+NO SOURCE CHANGES ARE AUTHORIZED BY THIS FILE.
+
+============================================================
+1. CONFIRMED ARCHITECTURAL FACTS
+============================================================
+
+Authentication:
+- get_current_principal() is the authenticated application boundary.
+- Identity is resolved from the easychatbot_session HttpOnly session.
+- Missing/inactive principal fails with HTTP 401.
+
+Authorization:
+- require_permission() obtains the authenticated principal.
+- AuthorizationService.require_permission() is the canonical
+  business-permission boundary.
+- Permission.ANNOUNCEMENT_PUBLISH exists.
+- Beta users do not receive ANNOUNCEMENT_PUBLISH.
+- Operator/Admin receive ANNOUNCEMENT_PUBLISH.
+
+Canonical announcement aggregate:
+- Publication is authoritative.
+- Canonical persistence table: announcement_publications.
+- Canonical lifecycle:
+  DRAFT -> PENDING_APPROVAL -> APPROVED
+  -> PUBLISHING -> PUBLISHED / FAILED
+
+Existing controlled execution:
+- ApprovedPublicationExecutionService
+- DurablePublicationExecutionService
+- ControlledAnnouncementPublisher
+- Telegram publication infrastructure
+- publication/audit persistence
+
+Production gap confirmed:
+- Announcement production API is not currently registered in
+  backend/app/main.py.
+- Frontend currently reaches draft creation but not the complete
+  production approval/publication flow.
+
+Legacy gap confirmed:
+- announcement_controls.py still contains AdminAuthorizer.
+- announcement_operations_approval.py still contains AdminAuthorizer.
+- Existing approval request contains caller-supplied actor.
+- Legacy direct publication path must not become the authoritative
+  production path.
+
+============================================================
+2. REQUIRED TARGET PATH
+============================================================
+
+Operations Center UI
+  ->
+Canonical Announcement API
+  ->
+get_current_principal()
+  ->
+require_permission(Permission.ANNOUNCEMENT_PUBLISH)
+  ->
+Publication / AnnouncementPublicationService
+  ->
+Approval workflow
+  ->
+APPROVED
+  ->
+ApprovedPublicationExecutionService
+  ->
+DurablePublicationExecutionService
+  ->
+ControlledAnnouncementPublisher
+  ->
+Telegram
+  ->
+Audit
+
+Actor identity MUST come from the authenticated principal.
+
+Caller-supplied actor MUST NOT be authoritative.
+
+============================================================
+3. ANNOUNCEMENT SECURITY SCOPE
+============================================================
+
+IN SCOPE:
+- authentication
+- operator authorization
+- ANNOUNCEMENT_PUBLISH
+- authenticated-principal actor provenance
+- approval workflow
+- durable execution
+- controlled Telegram publication
+- auditability
+- Beta denial
+- protection against direct/bypass publication
+
+EXPLICITLY OUT OF SCOPE FOR ANNOUNCEMENTS:
+- MFA
+- WebAuthn/passkeys step-up
+- W15.6 authentication freshness requirement
+- W15.7 transaction authorization
+- new identity provider
+- new publication architecture
+- unrelated refactoring
+
+============================================================
+4. PROPOSED IMPLEMENTATION ALLOWLIST
+============================================================
+
+Implementation may modify ONLY the files required to create the
+canonical vertical slice, subject to final reviewer confirmation.
+
+Expected production files:
+
+backend/app/interfaces/announcements/template_editor_router.py
+backend/app/api/announcement_operations_approval.py
+backend/app/api/announcement_controls.py
+backend/app/application/announcements/approval/composition.py
+backend/app/main.py
+
+Expected frontend files:
+
+frontend/app/lib/api/announcementTemplateEditor.ts
+frontend/app/components/operations-center/announcement-operations/TemplateDrivenPublicationEditor.tsx
+
+Expected tests:
+
+backend/tests/announcements/test_ws23_1_3_api_integration.py
+backend/tests/announcements/test_ws23_1_3_composition.py
+backend/tests/api/test_announcement_controls.py
+
+Additional files may be added ONLY if an implementation dependency
+is proven necessary during the build and explicitly recorded.
+
+Existing Publication, persistence, approval, durable execution and
+Telegram components should be reused rather than duplicated.
+
+============================================================
+5. REQUIRED IMPLEMENTATION RULES
+============================================================
+
+1. One canonical production announcement API.
+2. Every production announcement mutation requiring publication
+   authority must enforce ANNOUNCEMENT_PUBLISH.
+3. Authentication must use the existing authenticated-principal
+   dependency.
+4. Authorization must use AuthorizationService.
+5. Actor must be derived from the authenticated principal.
+6. Request-body actor cannot override authenticated identity.
+7. Publication must use the canonical Publication aggregate.
+8. Approval must precede execution.
+9. Durable execution must remain the final publication execution
+   boundary.
+10. ControlledAnnouncementPublisher must remain in the Telegram
+    publication path.
+11. No direct Telegram call from API/application code.
+12. Beta users must receive denial.
+13. Existing unrelated worktree modifications must remain untouched.
+14. No dependency changes unless proven necessary.
+15. No MFA/W15.6/W15.7 expansion for announcements.
+
+============================================================
+6. LEGACY MIGRATION DECISION
+============================================================
+
+Legacy AdminAuthorizer MUST NOT remain an alternate authoritative
+production authorization path.
+
+Before implementation, reviewers must choose ONE:
+
+A) Replace the legacy production announcement route with the
+   canonical AuthorizationService boundary and isolate/remove the
+   obsolete route safely.
+
+OR
+
+B) Retain the legacy route only as an explicitly non-production /
+   compatibility surface that cannot bypass the canonical production
+   path and is covered by regression tests.
+
+The implementation MUST NOT leave two equally authoritative
+production publication paths.
+
+============================================================
+7. REQUIRED TEST CONTRACT
+============================================================
+
+Required security tests:
+
+- unauthenticated request -> 401
+- authenticated Beta user -> 403
+- authenticated Operator -> permitted
+- authenticated Admin -> permitted where applicable
+- missing ANNOUNCEMENT_PUBLISH -> denied
+- request actor cannot impersonate authenticated principal
+- approval requires authenticated authorized actor
+- non-approved publication cannot execute
+- approved publication reaches durable execution
+- direct Telegram bypass is impossible
+- direct publisher bypass is impossible
+- legacy route cannot bypass canonical authorization
+- audit records preserve authenticated actor provenance
+
+Required integration/smoke validation:
+
+- API starts successfully
+- announcement router is registered
+- Operations Center can reach the production API
+- draft -> approval -> approved execution path is reachable
+- Telegram publication remains controlled
+- existing announcement regression tests pass
+
+============================================================
+8. DIRTY WORKTREE RULE
+============================================================
+
+The worktree is already heavily modified.
+
+The implementation MUST:
+- preserve unrelated existing changes
+- never reset/clean the worktree
+- never use git reset --hard
+- never use git clean
+- never revert unrelated files
+- review the exact diff before completion
+- test only the authorized workstream plus required regressions
+
+Current worktree contains many unrelated modified/untracked files.
+Those are NOT part of this workstream unless explicitly added to the
+allowlist with justification.
+
+============================================================
+9. REVIEWER 1 — INDEPENDENT REVIEW
+============================================================
+
+Reviewer:
+Name:
+Role:
+
+Architecture: PASS / FAIL / BLOCKED
+Security: PASS / FAIL / BLOCKED
+Authorization boundary: PASS / FAIL / BLOCKED
+Actor provenance: PASS / FAIL / BLOCKED
+Publication lifecycle: PASS / FAIL / BLOCKED
+Execution boundary: PASS / FAIL / BLOCKED
+Legacy-path isolation: PASS / FAIL / BLOCKED
+Tests: PASS / FAIL / BLOCKED
+Scope control: PASS / FAIL / BLOCKED
+
+Reviewer 1 decision:
+PASS / FAIL / BLOCKED
+
+Comments:
+
+
+============================================================
+10. REVIEWER 2 — INDEPENDENT REVIEW
+============================================================
+
+Reviewer:
+Name:
+Role:
+
+Architecture: PASS / FAIL / BLOCKED
+Security: PASS / FAIL / BLOCKED
+Authorization boundary: PASS / FAIL / BLOCKED
+Actor provenance: PASS / FAIL / BLOCKED
+Publication lifecycle: PASS / FAIL / BLOCKED
+Execution boundary: PASS / FAIL / BLOCKED
+Legacy-path isolation: PASS / FAIL / BLOCKED
+Tests: PASS / FAIL / BLOCKED
+Scope control: PASS / FAIL / BLOCKED
+
+Reviewer 2 decision:
+PASS / FAIL / BLOCKED
+
+Comments:
+
+
+============================================================
+11. FINAL DECISION
+============================================================
+
+FINAL W15.8.1.2-R10R4-F VERDICT:
+
+PASS / FAIL / BLOCKED
+
+IMPLEMENTATION AUTHORIZATION:
+
+AUTHORIZED / NOT AUTHORIZED
+
+Conditions / exceptions:
+
+
+============================================================
+12. STOP RULE
+============================================================
+
+If either reviewer is FAIL or BLOCKED:
+    STOP.
+    Do not modify source.
+
+If the exact implementation allowlist is disputed:
+    STOP.
+
+If the canonical production route is disputed:
+    STOP.
+
+If actor provenance is caller-controlled:
+    STOP.
+
+If Beta denial is not enforceable/testable:
+    STOP.
+
+If legacy publication can bypass canonical authorization:
+    STOP.
+
+If approval can be bypassed:
+    STOP.
+
+If durable execution can be bypassed:
+    STOP.
+
+If direct Telegram publication exists:
+    STOP.
+
+If unrelated worktree changes cannot be safely isolated:
+    STOP.
+
+Only an explicit:
+
+IMPLEMENTATION AUTHORIZATION: AUTHORIZED
+
+from the completed 4-eyes decision permits the build.
+
+============================================================
+END
+============================================================

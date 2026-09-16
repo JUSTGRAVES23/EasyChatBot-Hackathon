@@ -4,7 +4,7 @@ Tests for the cybersecurity email provider manager.
 
 import pytest
 
-from backend.cybersecurity.email.email_provider_manager import (
+from cybersecurity.email.email_provider_manager import (
     EmailProviderManager,
 )
 

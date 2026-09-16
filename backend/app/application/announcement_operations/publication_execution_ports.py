@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from backend.app.domain.announcement_publication.execution import (
+from app.domain.announcement_publication.execution import (
     PublishAnnouncementCommand,
     PublicationExecutionResult,
 )
@@ -89,3 +89,4 @@ __all__ = [
     "PublicationIdempotencyStore",
     "PublicationPublisher",
 ]
+

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Notification Acceptance API.
 
 HTTP boundary for accepting
@@ -25,12 +25,12 @@ from fastapi import (
 )
 
 
-from backend.app.application.composition.voice_call_acceptance_composition import (
+from app.application.composition.voice_call_acceptance_composition import (
     build_voice_call_acceptance_service,
 )
 
 
-from backend.app.application.uai.voice.voice_call_acceptance_service import (
+from app.application.uai.voice.voice_call_acceptance_service import (
     VoiceCallAcceptanceService,
 )
 
@@ -156,4 +156,5 @@ def accept_voice_notification(
 __all__ = [
     "router",
 ]
+
 

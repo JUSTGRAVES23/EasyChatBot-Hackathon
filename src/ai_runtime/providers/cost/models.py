@@ -15,23 +15,8 @@ Responsibilities:
 - represent cost calculation inputs;
 - represent calculated provider costs.
 
-Architecture:
-
-ProviderUsageEvent
-        |
-        v
-CostCalculationInput
-        |
-        v
-ProviderCostResult
-
-Future pricing sources:
-
-- OpenAI pricing configuration;
-- Gemini pricing configuration;
-- Ollama infrastructure cost;
-- Parallel Search pricing;
-- enterprise provider contracts.
+Unknown token usage is represented by None and must not be
+silently converted into zero cost.
 """
 
 from __future__ import annotations
@@ -45,23 +30,23 @@ class CostCalculationInput:
     """
     Input required to calculate provider cost.
 
-    This represents already captured usage data.
+    Token values may be None when the provider did not supply
+    the corresponding telemetry.
 
-    It does not know how pricing is obtained.
+    None means unknown.
+    0 means the provider explicitly reported zero.
     """
 
     provider: str
 
     model: str
 
-    input_tokens: int
+    input_tokens: int | None
 
-    output_tokens: int
+    output_tokens: int | None
 
     def __post_init__(self) -> None:
-        """
-        Validate cost calculation input.
-        """
+        """Validate cost calculation input."""
 
         if not self.provider.strip():
             raise ValueError(
@@ -73,12 +58,18 @@ class CostCalculationInput:
                 "Model cannot be empty."
             )
 
-        if self.input_tokens < 0:
+        if (
+            self.input_tokens is not None
+            and self.input_tokens < 0
+        ):
             raise ValueError(
                 "Input tokens cannot be negative."
             )
 
-        if self.output_tokens < 0:
+        if (
+            self.output_tokens is not None
+            and self.output_tokens < 0
+        ):
             raise ValueError(
                 "Output tokens cannot be negative."
             )
@@ -89,35 +80,36 @@ class ProviderCostResult:
     """
     Result of provider cost calculation.
 
-    Used later by:
+    If either token value is unknown, the corresponding cost
+    cannot be calculated reliably and is represented as None.
 
-    - analytics;
-    - dashboards;
-    - operations centre;
-    - governance reports.
+    This prevents unknown usage from being reported as zero cost.
     """
 
     provider: str
 
     model: str
 
-    input_tokens: int
+    input_tokens: int | None
 
-    output_tokens: int
+    output_tokens: int | None
 
-    input_cost: Decimal
+    input_cost: Decimal | None
 
-    output_cost: Decimal
+    output_cost: Decimal | None
 
     @property
-    def total_cost(
-        self,
-    ) -> Decimal:
+    def total_cost(self) -> Decimal | None:
         """
         Return total calculated cost.
+
+        Returns None when either required token cost is unknown.
         """
 
-        return (
-            self.input_cost
-            + self.output_cost
-        )
+        if (
+            self.input_cost is None
+            or self.output_cost is None
+        ):
+            return None
+
+        return self.input_cost + self.output_cost

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Executive Security Summary Skill.
 
 Produces a concise decision-support summary from
@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from collections import Counter
 
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
 
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

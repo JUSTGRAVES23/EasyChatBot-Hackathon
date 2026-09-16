@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from backend.app.infrastructure.announcements.publication_audit_repository import (
+from app.infrastructure.announcements.publication_audit_repository import (
     PublicationAuditEventModel,
     SqlAlchemyPublicationAuditRepository,
 )

@@ -1,0 +1,1453 @@
+============================================================
+M1.2 FUNCTIONALITY HEALTH - BACKEND DIAGNOSIS
+Generated: 2026-09-05 09:31:46
+============================================================
+
+### 1. FUNCTIONALITY HEALTH TEST FILES
+------------------------------------------------------------
+
+
+Name     : test_functionality_health_service.py
+FullName : C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_
+           health_service.py
+
+
+
+
+
+### 2. FUNCTIONALITY HEALTH TEST CONTENT
+------------------------------------------------------------
+
+========== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py ==========
+from datetime import datetime, timezone
+
+from app.application.provider_management.functionality_health_service import (
+    FunctionalityHealthService,
+)
+from app.application.provider_management.provider_health_models import (
+    ProviderHealthObservation,
+    ProviderHealthStatus,
+)
+from app.application.provider_management.provider_health_monitor_service import (
+    ProviderHealthMonitorService,
+)
+
+
+def test_live_provider_observation_reaches_functionality_health() -> None:
+    """A live provider observation must be reflected by the read model."""
+    monitor = ProviderHealthMonitorService()
+
+    monitor.observe(
+        ProviderHealthObservation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.HEALTHY,
+            observed_at=datetime.now(timezone.utc),
+            latency_ms=240,
+            consecutive_successes=1,
+        )
+    )
+
+    payload = FunctionalityHealthService(
+        health_monitor=monitor,
+    ).get_health()
+
+    conversation = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "conversation"
+    )
+
+    assert conversation["status"] == "healthy"
+    assert conversation["provider"] == "openai"
+    assert conversation["model"] == "gpt-5-mini"
+    assert conversation["latency_ms"] == 240
+
+
+def test_unobserved_functionality_is_unknown() -> None:
+    """Missing telemetry must never be presented as healthy."""
+    monitor = ProviderHealthMonitorService()
+
+    payload = FunctionalityHealthService(
+        health_monitor=monitor,
+    ).get_health()
+
+    voice = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "voice_tts"
+    )
+
+    assert voice["status"] == "unknown"
+    assert voice["health_score"] is None
+
+
+def test_health_payload_contains_required_dashboard_fields() -> None:
+    """Protect the API/read-model contract consumed by the frontend."""
+    monitor = ProviderHealthMonitorService()
+
+    payload = FunctionalityHealthService(
+        health_monitor=monitor,
+    ).get_health()
+
+    assert "generated_at" in payload
+    assert "platform_health" in payload
+    assert "user_impact" in payload
+    assert "counts" in payload
+    assert "functionalities" in payload
+    assert "attention" in payload
+
+    assert isinstance(payload["functionalities"], list)
+    assert isinstance(payload["attention"], list)
+    assert isinstance(payload["counts"], dict)
+
+
+def test_degraded_provider_is_reported_as_degraded() -> None:
+    """Degraded live telemetry must create an operational attention signal."""
+    monitor = ProviderHealthMonitorService()
+
+    monitor.observe(
+        ProviderHealthObservation(
+            provider="openai",
+            model="gpt-5-mini",
+            capability="conversation",
+            status=ProviderHealthStatus.DEGRADED,
+            observed_at=datetime.now(timezone.utc),
+            latency_ms=1800,
+            consecutive_successes=0,
+        )
+    )
+
+    payload = FunctionalityHealthService(
+        health_monitor=monitor,
+    ).get_health()
+
+    conversation = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "conversation"
+    )
+
+    assert conversation["status"] == "degraded"
+    assert conversation["risk_level"] == "medium"
+    assert conversation in payload["attention"]
+
+
+def test_health_service_requires_a_health_monitor() -> None:
+    """Fail fast instead of silently creating an unconnected health source."""
+    try:
+        FunctionalityHealthService(health_monitor=None)
+    except ValueError as exc:
+        assert "health_monitor" in str(exc)
+    else:
+        raise AssertionError(
+            "FunctionalityHealthService must reject a missing health monitor."
+        )
+
+### 3. PROVIDER HEALTH TEST FILES
+------------------------------------------------------------
+
+
+### 4. PROVIDER HEALTH TEST CONTENT
+------------------------------------------------------------
+
+### 5. HEALTH APPLICATION CONFIGURATION
+------------------------------------------------------------
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from app.infrastructure.health.llm_provider_health_check import (
+    LLMProviderHealthCheck,
+)
+from app.infrastructure.health.postgresql_health_check import (
+    PostgreSQLHealthCheck,
+)
+from app.infrastructure.health.telegram_health_check import (
+    TelegramHealthCheck,
+)
+
+
+@dataclass(frozen=True)
+class ProductionHealthConfiguration:
+    """
+    Composition configuration for production health monitoring.
+
+    Keeps dependency creation outside the readiness service.
+    """
+
+    database_engine: Any | None = None
+
+    telegram_bot_factory: Any | None = None
+
+    llm_provider: str | None = None
+
+    llm_request_get: Any | None = None
+
+    def build_checks(self) -> tuple:
+        """
+        Build production dependency health checks.
+        """
+
+        return (
+            PostgreSQLHealthCheck(
+                engine=self.database_engine,
+            ),
+            LLMProviderHealthCheck(
+                provider=self.llm_provider,
+                request_get=self.llm_request_get,
+            ),
+            TelegramHealthCheck(
+                bot_factory=self.telegram_bot_factory,
+            ),
+        )
+
+
+__all__ = [
+    "ProductionHealthConfiguration",
+]
+
+
+### 6. LLM PROVIDER HEALTH INFRASTRUCTURE
+------------------------------------------------------------
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Any
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+
+
+class LLMProviderHealthCheck:
+    """Read-only health probe for the configured LLM provider.
+
+    Ollama uses /api/tags.
+
+    OpenAI uses the models endpoint.
+
+    Neither probe generates a learner response or sends
+    learner content to the provider.
+    """
+
+    name = "llm_provider"
+
+    def __init__(
+        self,
+        *,
+        provider: str | None = None,
+        request_get: Any | None = None,
+        openai_client_factory: Any | None = None,
+    ) -> None:
+        self._provider = (
+            provider
+            or os.getenv(
+                "LLM_PROVIDER",
+                "ollama",
+            )
+        ).strip().lower()
+
+        self._request_get = request_get
+        self._openai_client_factory = (
+            openai_client_factory
+        )
+
+    async def check(self) -> HealthCheckResult:
+        if self._provider == "ollama":
+            return await self._check_ollama()
+
+        if self._provider == "openai":
+            return await self._check_openai()
+
+        return HealthCheckResult(
+            name=self.name,
+            status=HealthStatus.UNHEALTHY,
+            details={
+                "reason": "unsupported_provider",
+            },
+        )
+
+    async def _check_ollama(
+        self,
+    ) -> HealthCheckResult:
+        base_url = os.getenv(
+            "OLLAMA_BASE_URL",
+            "http://localhost:11434",
+        ).rstrip("/")
+
+        try:
+            if self._request_get is not None:
+                response = await self._request_get(
+                    f"{base_url}/api/tags"
+                )
+
+                status_code = getattr(
+                    response,
+                    "status_code",
+                    200,
+                )
+
+                if status_code >= 400:
+                    raise RuntimeError(
+                        "Ollama health request failed."
+                    )
+
+            else:
+                import requests
+
+                response = await asyncio.to_thread(
+                    requests.get,
+                    f"{base_url}/api/tags",
+                    timeout=10,
+                )
+
+                response.raise_for_status()
+
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "ollama",
+                    "reachable": True,
+                },
+            )
+
+        except Exception:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "provider": "ollama",
+                    "reason": "provider_unavailable",
+                },
+            )
+
+    async def _check_openai(
+        self,
+    ) -> HealthCheckResult:
+        if not os.getenv(
+            "OPENAI_API_KEY"
+        ):
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.NOT_CONFIGURED,
+                details={
+                    "provider": "openai",
+                    "configured": False,
+                },
+            )
+
+        try:
+            if self._openai_client_factory is None:
+                from openai import AsyncOpenAI
+
+                client = AsyncOpenAI(
+                    api_key=os.environ[
+                        "OPENAI_API_KEY"
+                    ],
+                )
+
+            else:
+                client = (
+                    self._openai_client_factory()
+                )
+
+            await client.models.list()
+
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "openai",
+                    "reachable": True,
+                },
+            )
+
+        except Exception:
+            return HealthCheckResult(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "provider": "openai",
+                    "reason": "provider_unavailable",
+                },
+            )
+
+
+__all__ = [
+    "LLMProviderHealthCheck",
+]
+
+
+
+### 7. ALL HEALTH/PROVIDER-HEALTH IMPLEMENTATION FILES
+------------------------------------------------------------
+
+FullName                                                                                                       
+--------                                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\provider_management_controls.py                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\health_result.py                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py.ws21_14_backup
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\production_health_configuration.py           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\production_health_service.py                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\identity\identity_provider.py                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\configuration\providers\speech_provider_config.py               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\session_identity_provider.py                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\postgresql_health_check.py                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\telegram_health_check.py                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider.py                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\speech_provider.py                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\speech_provider_factory.py                     
+
+
+
+
+### 8. ALL REFERENCES TO FUNCTIONALITY HEALTH
+------------------------------------------------------------
+
+Path                                                                                                           
+----                                                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                          
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI                                                                                                          
+Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+
+
+
+
+### 9. ALL REFERENCES TO PROVIDER HEALTH
+------------------------------------------------------------
+
+Path                                                                                                 LineNumber
+----                                                                                                 ----------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\production_health_configuration.py          6
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\production_health_configuration.py          7
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\production_health_configuration.py         42
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py            13
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py           169
+
+
+
+
+### 10. API/ROUTER FILE INVENTORY
+------------------------------------------------------------
+
+FullName                                                                                                       
+--------                                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authentication_reference.py                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py.pre_auth_router_registration.bak                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\announcement_group_operations_a...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_api.py                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_ap...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_api.py         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\announcements\template_editor_router.py              
+
+
+
+
+### 11. APP MAIN.PY
+------------------------------------------------------------
+"""
+===============================================================================
+
+EasyChatBot Academy
+Application Entry Point
+
+Purpose
+-------
+Creates and composes the EasyChatBot Academy FastAPI application.
+
+Responsibilities
+----------------
+- Create the FastAPI application.
+- Compose repositories.
+- Compose runtime services.
+- Register application API routers.
+- Expose the application health endpoint.
+- Store the composed runtime services on application state.
+- Compose the dedicated AI Operations Center presentation boundary.
+- Compose the Academy Questionnaire runtime.
+
+Does NOT
+--------
+- Contain business logic.
+- Execute AI workflows directly.
+- Implement Academy business rules.
+- Construct repositories inside API routes.
+- Implement authentication logic.
+- Implement authorization logic.
+- Contain provider-specific AI logic.
+- Define hard-coded Agents or Skills.
+
+Architecture
+------------
+
+FastAPI Application
+        |
+        v
+API Routers
+        |
+        +------------------------------+
+        |                              |
+        v                              v
+Runtime Services                AI Operations Center
+        |                              |
+        v                              v
+Academy Services                I14.1 -> I14.6
+        |                              |
+        v                              v
+Repositories / Infrastructure   Read-only operational view
+
+Questionnaire:
+
+FastAPI Application
+        |
+        v
+Questionnaire Router
+        |
+        v
+QuestionnaireRuntime
+        |
+        v
+Questionnaire Persistence
+
+The application entry point is a composition root only.
+
+===============================================================================
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.dependencies.academy_authentication import (
+    get_authenticated_academy_user,
+)
+
+from app.api.routes.academy_routes import (
+    router as academy_router,
+)
+
+from app.api.routes.authentication_routes import (
+    router as authentication_router,
+)
+
+from app.api.routes.operations_center_routes import (
+    router as cmp_operations_center_router,
+)
+
+from app.api.routes.cmp_population_routes import (
+    router as cmp_population_router,
+)
+
+from app.api.routes.questionnaire_routes import (
+    router as questionnaire_router,
+)
+
+from app.api.routes.world_questionnaire_routes import (
+    router as world_questionnaire_router,
+)
+
+from app.application.questionnaire.runtime_source import (
+    QuestionnaireRuntime,
+)
+
+from app.bootstrap.compositions.runtime_composition import (
+    create_runtime_services,
+)
+
+from app.bootstrap.repositories import (
+    create_repositories,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# AI OPERATIONS CENTER UI
+# =============================================================================
+
+
+def _load_ai_operations_center_ui() -> str:
+    """
+    Load the EasyChatBot Academy AI Operations Center UI.
+
+    UI assets remain presentation concerns.
+
+    Agent and Skill definitions are deliberately not stored here.
+    """
+
+    ui_path = (
+        Path(__file__).resolve().parent
+        / "static"
+        / "operations_center"
+        / "index.html"
+    )
+
+    if not ui_path.is_file():
+        raise RuntimeError(
+            "AI Operations Center UI asset was not found: "
+            f"{ui_path}"
+        )
+
+    return ui_path.read_text(
+        encoding="utf-8",
+    )
+
+
+# =============================================================================
+# I14 OPERATIONS CENTER COMPOSITION
+# =============================================================================
+
+
+def _create_ai_operations_center_service(
+    *,
+    repositories,
+    runtime_services,
+):
+    """
+    Compose the verified I14 Operations Center service.
+
+    This function is intentionally kept inside the application composition
+    boundary.
+
+    The Operations Center remains a read-only administrative/control surface.
+
+    It does NOT:
+    - execute Agents
+    - execute Skills
+    - create a second runtime
+    - create a second repository bundle
+    - define Agents
+    - define Skills
+    - bypass RuntimeServices
+    """
+
+    from i14_1_registry.discovery_registry import (
+        DynamicCapabilityRegistry,
+    )
+
+    from i14_4_application.capability_graph_service import (
+        CapabilityGraphService,
+    )
+
+    from i14_5_application.operational_detail_service import (
+        OperationalDetailService,
+    )
+
+    from i14_6_application.operations_center_service import (
+        OperationsCenterService,
+    )
+
+    # -------------------------------------------------------------------------
+    # I14 application capability composition
+    #
+    # This factory is the integration boundary for the existing I14
+    # discovery/registry implementation.
+    #
+    # No Agent or Skill definitions are hard-coded here.
+    # -------------------------------------------------------------------------
+
+    from app.bootstrap.compositions.i14_capability_composition import (
+        create_i14_capability_services,
+    )
+
+    i14_services = create_i14_capability_services(
+        repositories=repositories,
+        runtime_services=runtime_services,
+    )
+
+    if i14_services is None:
+        raise RuntimeError(
+            "I14 capability services composition returned None."
+        )
+
+    snapshot = i14_services.snapshot
+
+    # -------------------------------------------------------------------------
+    # I14.1 registry remains the discovery boundary.
+    #
+    # The registry itself does not define application Agents/Skills here.
+    # -------------------------------------------------------------------------
+
+    registry = DynamicCapabilityRegistry()
+
+    del registry
+
+    # -------------------------------------------------------------------------
+    # I14.4 / I14.5 are read-only projections over the authoritative
+    # I14.1 application snapshot.
+    # -------------------------------------------------------------------------
+
+    snapshot_provider = lambda: snapshot
+
+    capability_graph = CapabilityGraphService(
+        snapshot_provider=snapshot_provider,
+    )
+
+    operational_detail = OperationalDetailService(
+        snapshot_provider=snapshot_provider,
+    )
+
+    return OperationsCenterService(
+        capability_graph=capability_graph,
+        operational_detail=operational_detail,
+    )
+
+
+# =============================================================================
+# APPLICATION COMPOSITION
+# =============================================================================
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure the EasyChatBot Academy application.
+
+    Composition happens here only.
+
+    Business logic remains inside the application/domain layers.
+
+    Returns
+    -------
+    FastAPI
+        Configured EasyChatBot Academy application.
+
+    Raises
+    ------
+    Exception
+        Propagates composition failures so application startup fails closed
+        rather than running with incomplete dependencies.
+    """
+
+    logger.info(
+        "Creating EasyChatBot Academy application."
+    )
+
+    try:
+        # =====================================================================
+        # Repository Composition
+        #
+        # Infrastructure implementations are composed behind repository
+        # contracts.
+        # =====================================================================
+
+        repositories = create_repositories()
+
+        if repositories is None:
+            raise RuntimeError(
+                "Repository composition returned None."
+            )
+
+        # =====================================================================
+        # Runtime Composition
+        #
+        # Runtime owns orchestration and application lifecycle concerns.
+        # =====================================================================
+
+        runtime_services = create_runtime_services(
+            repositories=repositories,
+        )
+
+        if runtime_services is None:
+            raise RuntimeError(
+                "Runtime services composition returned None."
+            )
+
+        # =====================================================================
+        # Questionnaire Runtime Composition
+        #
+        # Compose the existing QuestionnaireRuntime once at the application
+        # boundary. The HTTP router resolves this instance from application
+        # state.
+        #
+        # This does not create another FastAPI application.
+        # =====================================================================
+
+        questionnaire_runtime = QuestionnaireRuntime()
+
+        # =====================================================================
+        # FastAPI Application
+        # =====================================================================
+
+        application = FastAPI(
+            title="EasyChatBot Academy",
+            version="0.1.0-beta",
+            description=(
+                "AI-powered learning platform runtime."
+            ),
+        )
+
+        # =====================================================================
+        # Browser CORS Boundary
+        #
+        # The frontend runs as a separate origin during local development.
+        #
+        # Keep the trust boundary explicit. Do not use:
+        #
+        #     allow_origins=["*"]
+        #
+        # This middleware belongs at the application composition boundary,
+        # rather than inside CMP routers or application services.
+        # =====================================================================
+
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        # =====================================================================
+        # Application State
+        #
+        # Store the already-composed boundaries.
+        #
+        # No duplicate repositories or services are created by API routes.
+        # =====================================================================
+
+        application.state.repositories = repositories
+
+        application.state.runtime_services = runtime_services
+
+        application.state.questionnaire_runtime = (
+            questionnaire_runtime
+        )
+
+        # =====================================================================
+        # M2.2 World Questionnaire repository boundary
+        # =====================================================================
+
+        learning_world_repository = getattr(
+            repositories,
+            "learning_world_repository",
+            None,
+        )
+
+        if learning_world_repository is None:
+            raise RuntimeError(
+                "LearningWorldRepository was not composed."
+            )
+
+        application.state.learning_world_repository = (
+            learning_world_repository
+        )
+
+        # =====================================================================
+        # Authentication API
+        #
+        # Authentication implementation remains behind the existing Academy
+        # application/infrastructure boundaries.
+        # =====================================================================
+
+        application.include_router(
+            authentication_router,
+        )
+
+        # =====================================================================
+        # Academy API
+        # =====================================================================
+
+        application.include_router(
+            academy_router,
+        )
+
+        # =====================================================================
+        # QUESTIONNAIRE API
+        #
+        # Existing QuestionnaireRuntime is exposed through its thin Academy
+        # HTTP presentation boundary.
+        #
+        # Exact frontend contract:
+        #
+        # GET
+        # /api/academy/questionnaires/{questionnaire_id}
+        #
+        # POST
+        # /api/academy/questionnaires/{questionnaire_id}/answers
+        #
+        # POST
+        # /api/academy/questionnaires/{questionnaire_id}/complete
+        #
+        # GET
+        # /api/academy/questionnaire-results/{result_id}
+        # =====================================================================
+
+        application.include_router(
+            questionnaire_router,
+        )
+
+        # =====================================================================
+        # M2.2 WORLD QUESTIONNAIRE API
+        # =====================================================================
+
+        application.include_router(
+            world_questionnaire_router,
+        )
+
+        # =====================================================================
+        # CMP OPERATIONS CENTER API
+        #
+        # Existing Compliance Framework Operations Center remains separate
+        # from the AI Operations Center.
+        #
+        # Do NOT merge these two bounded contexts.
+        # =====================================================================
+
+        application.include_router(
+            cmp_operations_center_router,
+        )
+
+        application.include_router(
+            cmp_population_router,
+        )
+
+        # =====================================================================
+        # AI OPERATIONS CENTER
+        #
+        # I14.1 -> I14.6
+        #
+        # Dedicated EasyChatBot Academy administrative/control presentation
+        # boundary.
+        #
+        # The existing Academy authentication dependency is injected.
+        #
+        # No second authentication system is created.
+        # =====================================================================
+
+        from app.api.routes.ai_operations_center_routes import (
+            create_ai_operations_center_router,
+        )
+
+        ai_operations_center_service = (
+            _create_ai_operations_center_service(
+                repositories=repositories,
+                runtime_services=runtime_services,
+            )
+        )
+
+        ai_operations_center_ui = (
+            _load_ai_operations_center_ui()
+        )
+
+        application.state.ai_operations_center_service = (
+            ai_operations_center_service
+        )
+
+        application.include_router(
+            create_ai_operations_center_router(
+                service=ai_operations_center_service,
+                authenticated_user_dependency=(
+                    get_authenticated_academy_user
+                ),
+                ui_html=ai_operations_center_ui,
+            )
+        )
+
+        logger.info(
+            "AI Operations Center composed successfully."
+        )
+
+        # =====================================================================
+        # Health Endpoint
+        # =====================================================================
+
+        @application.get(
+            "/health",
+        )
+        def health_check() -> dict[str, str]:
+            """
+            Return application liveness status.
+            """
+
+            return {
+                "status": "healthy",
+                "service": "easychatbot-academy",
+            }
+
+        logger.info(
+            "EasyChatBot Academy application created successfully."
+        )
+
+        return application
+
+    except Exception:
+        logger.exception(
+            "Failed creating EasyChatBot Academy application."
+        )
+        raise
+
+
+# =============================================================================
+# ASGI APPLICATION
+# =============================================================================
+#
+# Canonical ASGI target:
+#     app.main:application
+#
+# Backwards-compatible alias:
+#     app.main:app
+# =============================================================================
+
+application = create_application()
+
+app = application
+
+### 12. ROUTER REGISTRATION REFERENCES IN MAIN.PY
+------------------------------------------------------------
+
+IgnoreCase LineNumber Line                                                                        Filename Path
+---------- ---------- ----                                                                        -------- ----
+      True         16 - Register application API routers.                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         39 API Routers                                                                 main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         57 Questionnaire Router                                                        main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         83     router as academy_router,                                               main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         87     router as authentication_router,                                        main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         91     router as cmp_operations_center_router,                                 main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         95     router as cmp_population_router,                                        main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True         99     router as questionnaire_router,                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        103     router as world_questionnaire_router,                                   main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        317         # boundary. The HTTP router resolves this instance from application main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        347         # rather than inside CMP routers or application services.           main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        403         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        404             authentication_router,                                          main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        411         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        412             academy_router,                                                 main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        436         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        437             questionnaire_router,                                           main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        444         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        445             world_questionnaire_router,                                     main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        457         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        458             cmp_operations_center_router,                                   main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        461         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        462             cmp_population_router,                                          main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        479             create_ai_operations_center_router,                             main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        497         application.include_router(                                         main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+      True        498             create_ai_operations_center_router(                             main.py  C:\A
+                                                                                                           I Fo
+                                                                                                           lder
+                                                                                                           \Eas
+                                                                                                           yCha
+                                                                                                           tBot
+                                                                                                           -Hac
+                                                                                                           kath
+                                                                                                           on\b
+                                                                                                           acke
+                                                                                                           nd\a
+                                                                                                           pp\m
+                                                                                                           ain.
+                                                                                                           py  
+
+
+
+
+### 13. CURRENT OPENAPI HEALTH/OPERATIONS ROUTES
+------------------------------------------------------------
+
+Name                                                                                                           
+----                                                                                                           
+/api/operations-center/dashboard                                                                               
+/api/operations-center/cmp/lifecycle-dashboard                                                                 
+/api/operations-center/cmp/lifecycles/{lifecycle_id}                                                           
+/api/operations-center/controls                                                                                
+/api/operations-center/controls/search                                                                         
+/api/operations-center/controls/{control_id}                                                                   
+/api/operations-center/operations                                                                              
+/api/operations-center/evidence-requests                                                                       
+/api/operations-center/reviews                                                                                 
+/api/operations-center/change-reviews                                                                          
+/api/operations-center/audit                                                                                   
+/api/operations-center/cmp/population                                                                          
+/api/operations-center/compliance/documents                                                                    
+/api/operations-center/compliance/documents/{document_id}                                                      
+/api/operations-center/compliance/documents/{document_id}/versions/{version_number}/markups                    
+/api/operations-center/compliance/documents/{document_id}/versions/{version_number}/markups/{markup_id}/resolve
+/api/operations-center/compliance/documents/{document_id}/versions/{version_number}/markups/{markup_id}/reopen 
+/health                                                                                                        
+
+
+
+
+### 14. DIRECT FUNCTIONALITY HEALTH ENDPOINT CHECK
+------------------------------------------------------------
+ERROR: The remote server returned an error: (404) Not Found.
+
+### END OF DIAGNOSIS
+============================================================

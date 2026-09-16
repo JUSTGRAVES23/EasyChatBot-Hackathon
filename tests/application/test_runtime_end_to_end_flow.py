@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime application end-to-end tests.
 
 Validates the complete application boundary:
@@ -34,16 +34,16 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 
-from backend.api.main import (
+from api.main import (
     create_app,
 )
 
-from backend.runtime.external_runtime_container import (
+from runtime.external_runtime_container import (
     configure_external_runtime_service,
     reset_runtime_container,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 

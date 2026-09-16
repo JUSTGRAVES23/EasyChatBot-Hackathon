@@ -1,21 +1,21 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 
 import pytest
 
-from backend.app.application.privacy.privacy_approval_record import (
+from app.application.privacy.privacy_approval_record import (
     ApprovalDecision,
     PrivacyApprovalRecord,
 )
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_governance_decision_service import (
+from app.application.privacy.privacy_governance_decision_service import (
     PrivacyGovernanceDecisionService,
 )
 

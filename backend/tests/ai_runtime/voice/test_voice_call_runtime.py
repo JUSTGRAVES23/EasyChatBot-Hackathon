@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Runtime.
 
 Validates voice call lifecycle
@@ -141,3 +141,5 @@ def test_activate_without_ready_state_is_rejected():
     except ValueError:
 
         assert True
+
+

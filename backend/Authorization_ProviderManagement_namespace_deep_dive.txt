@@ -1,0 +1,809 @@
+﻿
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\authorization\authorization_service.py
+============================================================
+from __future__ import annotations
+
+from app.domain.authorization.permissions import Permission, has_permission
+from app.domain.identity.principal import Principal
+
+
+class AuthenticationRequiredError(PermissionError):
+    """No valid authenticated principal exists."""
+
+
+class PermissionDeniedError(PermissionError):
+    """Authenticated principal lacks a permission."""
+
+
+class AuthorizationService:
+    """Provider-neutral authorization boundary."""
+
+    def require_authenticated(
+        self,
+        principal: Principal | None,
+    ) -> Principal:
+        if principal is None or not principal.is_active:
+            raise AuthenticationRequiredError(
+                "Authenticated application identity is required."
+            )
+        return principal
+
+    def require_permission(
+        self,
+        *,
+        principal: Principal | None,
+        permission: Permission,
+    ) -> Principal:
+        authenticated = self.require_authenticated(principal)
+
+        if not has_permission(
+            roles=authenticated.roles,
+            permission=permission,
+        ):
+            raise PermissionDeniedError(
+                f"Permission required: {permission.value}."
+            )
+
+        return authenticated
+
+
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\environment.py
+============================================================
+from __future__ import annotations
+
+from enum import Enum
+
+
+class OperationsEnvironment(str, Enum):
+    KIDS = "kids"
+    ADULTS = "adults"
+
+
+DEFAULT_OPERATIONS_ENVIRONMENT = OperationsEnvironment.ADULTS
+
+
+def resolve_environment(
+    environment: OperationsEnvironment | None,
+) -> OperationsEnvironment:
+    return environment or DEFAULT_OPERATIONS_ENVIRONMENT
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_authorizer.py
+============================================================
+from __future__ import annotations
+
+from backend.app.application.authorization.authorization_service import (
+    AuthorizationService,
+    PermissionDeniedError,
+)
+from backend.app.domain.authorization.permissions import Permission
+from backend.app.domain.identity.principal import Principal
+
+
+class AuthorizationFunctionalityControlAuthorizer:
+    """Application adapter for functionality-control authorization."""
+
+    def __init__(
+        self,
+        authorization_service: AuthorizationService | None = None,
+    ) -> None:
+        self._authorization_service = (
+            authorization_service or AuthorizationService()
+        )
+
+    def can_control_functionality(
+        self,
+        *,
+        actor: object,
+        environment: str,
+        functionality_id: str,
+    ) -> bool:
+        if not isinstance(actor, Principal):
+            return False
+
+        try:
+            self._authorization_service.require_permission(
+                principal=actor,
+                permission=Permission.FUNCTIONALITY_CONTROL,
+            )
+        except PermissionDeniedError:
+            return False
+
+        return True
+
+
+__all__ = ["AuthorizationFunctionalityControlAuthorizer"]
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py
+============================================================
+from __future__ import annotations
+
+from backend.app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from backend.app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from backend.app.infrastructure.persistence.postgresql_functionality_control_repository import (
+    PostgreSQLFunctionalityControlRepository,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+
+
+def create_functionality_control_service(
+    *,
+    session_factory,
+) -> FunctionalityOperationalControlService:
+    """Create the approved functionality-control application service.
+
+    The caller owns the database engine/session lifecycle.
+    This helper only composes the application service boundary.
+    """
+
+    repository = PostgreSQLFunctionalityControlRepository(
+        session_factory,
+    )
+
+    authorizer = AuthorizationFunctionalityControlAuthorizer()
+
+    return FunctionalityOperationalControlService(
+        authorizer=authorizer,
+        repository=repository,
+    )
+
+
+def create_standalone_functionality_control_service() -> tuple[
+    FunctionalityOperationalControlService,
+    object,
+]:
+    """Create a control service for a standalone runtime process.
+
+    Returns both the service and its synchronous database engine so
+    the caller can dispose the engine during shutdown.
+    """
+
+    engine = create_database_engine()
+    session_factory = create_session_factory(engine)
+
+    service = create_functionality_control_service(
+        session_factory=session_factory,
+    )
+
+    return service, engine
+
+
+__all__ = [
+    "create_functionality_control_service",
+    "create_standalone_functionality_control_service",
+]
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_health_service.py
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from backend.app.application.provider_management.environment import (
+    OperationsEnvironment,
+    resolve_environment,
+)
+from backend.app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+
+
+class FunctionalityHealthService:
+    _FUNCTIONALITIES = (
+        ("conversation", "AI Conversation"),
+        ("telegram", "Telegram"),
+        ("voice_tts", "Voice / TTS"),
+        ("lessons", "Lessons"),
+        ("review", "Review / Spaced Repetition"),
+        ("pdf_presentation", "PDF / Presentation"),
+        ("email_workflows", "Email Workflows"),
+        ("payments", "Payments"),
+        ("authentication", "Authentication"),
+        ("scheduler", "Scheduler"),
+        ("provider_runtime", "Provider / LLM Runtime"),
+        ("database", "Database"),
+    )
+
+    _CHECK_TO_FUNCTIONALITIES = {
+        "llm_provider": {"conversation", "provider_runtime"},
+        "telegram": {"telegram"},
+        "postgresql": {"database"},
+    }
+
+    _CATEGORY_BY_FUNCTIONALITY = {
+        "conversation": "AI",
+        "telegram": "Communication",
+        "voice_tts": "AI",
+        "lessons": "Learning",
+        "review": "Learning",
+        "pdf_presentation": "Content",
+        "email_workflows": "Communication",
+        "payments": "Platform",
+        "authentication": "Platform",
+        "scheduler": "Platform",
+        "provider_runtime": "Infrastructure",
+        "database": "Infrastructure",
+    }
+
+    def __init__(
+        self,
+        *,
+        readiness_service: ProductionReadinessService,
+        functionality_control_service: FunctionalityOperationalControlService | None = None,
+    ) -> None:
+        if readiness_service is None:
+            raise ValueError("readiness_service cannot be None.")
+        self._readiness_service = readiness_service
+        self._functionality_control_service = functionality_control_service
+
+    async def get_health(
+        self,
+        *,
+        environment: OperationsEnvironment | None = None,
+    ) -> dict[str, Any]:
+        resolved_environment = resolve_environment(environment)
+        readiness = await self._readiness_service.check()
+        checks_by_name = {check.name: check for check in readiness.checks}
+        generated_at = datetime.now(timezone.utc).isoformat()
+
+        functionalities = [
+            self._build_functionality(
+                functionality_id=functionality_id,
+                name=name,
+                check=self._resolve_check(
+                    functionality_id=functionality_id,
+                    checks_by_name=checks_by_name,
+                ),
+                environment=resolved_environment,
+                checked_at=generated_at,
+                availability=self._get_availability(
+                    functionality_id=functionality_id,
+                    environment=resolved_environment,
+                ),
+            )
+            for functionality_id, name in self._FUNCTIONALITIES
+        ]
+
+        attention = [
+            item for item in functionalities
+            if item["status"] in {"degraded", "unavailable"}
+        ]
+
+        counts = {
+            "total": len(functionalities),
+            "healthy": sum(item["status"] == "healthy" for item in functionalities),
+            "degraded": sum(item["status"] == "degraded" for item in functionalities),
+            "incident": sum(item["status"] == "unavailable" for item in functionalities),
+            "maintenance": 0,
+            "disabled": 0,
+            "unknown": sum(item["status"] == "unknown" for item in functionalities),
+        }
+
+        if counts["incident"] > 0:
+            platform_health, score, impact = "incident", 0.0, "high"
+        elif counts["degraded"] > 0:
+            platform_health, score, impact = "degraded", 50.0, "medium"
+        elif counts["healthy"] > 0:
+            platform_health, score, impact = "healthy", 100.0, "low"
+        else:
+            platform_health, score, impact = "unknown", None, "unknown"
+
+        return {
+            "generated_at": generated_at,
+            "environment": resolved_environment.value,
+            "platform_health": platform_health,
+            "platform_health_score": score,
+            "user_impact": impact,
+            "counts": counts,
+            "functionalities": functionalities,
+            "attention": attention,
+        }
+
+    @classmethod
+    def _resolve_check(
+        cls,
+        *,
+        functionality_id: str,
+        checks_by_name: dict[str, HealthCheckResult],
+    ) -> HealthCheckResult | None:
+        for check_name, functionality_ids in cls._CHECK_TO_FUNCTIONALITIES.items():
+            if functionality_id in functionality_ids:
+                return checks_by_name.get(check_name)
+        return None
+
+    @classmethod
+    def _build_functionality(
+        cls,
+        *,
+        functionality_id: str,
+        name: str,
+        check: HealthCheckResult | None,
+        environment: OperationsEnvironment,
+        checked_at: str,
+        availability: str,
+    ) -> dict[str, Any]:
+        if check is None:
+            status = "unknown"
+            health_score = None
+            risk_level = "unknown"
+            provider = model = latency_ms = None
+            reason = "No dedicated health check is currently available."
+        else:
+            status = cls._map_status(check.status)
+            health_score = (
+                100.0 if status == "healthy"
+                else 50.0 if status == "degraded"
+                else 0.0 if status == "unavailable"
+                else None
+            )
+            risk_level = {
+                "healthy": "low",
+                "degraded": "medium",
+                "unavailable": "high",
+                "unknown": "unknown",
+            }[status]
+            provider = check.details.get("provider")
+            model = check.details.get("model")
+            latency_ms = check.details.get("latency_ms")
+            reason = check.details.get("reason", "Health check completed.")
+
+        return {
+            "functionality_id": functionality_id,
+            "name": name,
+            "category": cls._CATEGORY_BY_FUNCTIONALITY[functionality_id],
+            "description": f"Operational health for {name}.",
+            "status": status,
+            "health_score": health_score,
+            "latency_ms": latency_ms,
+            "provider": provider,
+            "model": model,
+            "capability": functionality_id,
+            "checked_at": checked_at,
+            "controllable": False,
+            "risk_level": risk_level,
+            "reason": reason,
+            "environment": environment.value,
+            "availability": availability,
+            "policy_status": "not_evaluated",
+        }
+
+    def _get_availability(
+        self,
+        *,
+        functionality_id: str,
+        environment: OperationsEnvironment,
+    ) -> str:
+        if self._functionality_control_service is None:
+            return "enabled"
+
+        return self._functionality_control_service.get_availability(
+            environment=environment.value,
+            functionality_id=functionality_id,
+        )
+
+    @staticmethod
+    def _map_status(status: HealthStatus) -> str:
+        if status is HealthStatus.HEALTHY:
+            return "healthy"
+        if status is HealthStatus.UNHEALTHY:
+            return "unavailable"
+        return "unknown"
+
+
+__all__ = ["FunctionalityHealthService"]
+
+
+
+
+
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_operational_control_service.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from threading import RLock
+from typing import Protocol
+
+from backend.app.application.provider_management.functionality_registry import (
+    is_known_functionality,
+)
+
+
+class FunctionalityControlAuthorizer(Protocol):
+    def can_control_functionality(
+        self, *, actor: object, environment: str, functionality_id: str
+    ) -> bool: ...
+
+
+class FunctionalityControlAuditor(Protocol):
+    def record_functionality_control(
+        self,
+        *,
+        actor: object,
+        environment: str,
+        functionality_id: str,
+        action: str,
+        reason: str | None,
+        changed_at: datetime,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class OperationalControlResult:
+    functionality_id: str
+    environment: str
+    availability: str
+    action: str
+    reason: str | None
+    changed_at: datetime
+    changed_by: str
+
+
+class FunctionalityControlRepository(Protocol):
+    def get_availability(
+        self, *, environment: str, functionality_id: str
+    ) -> str: ...
+
+    def get_last_action(
+        self, *, environment: str, functionality_id: str
+    ) -> OperationalControlResult | None: ...
+
+    def record_transition(
+        self,
+        *,
+        functionality_id: str,
+        environment: str,
+        availability: str,
+        action: str,
+        reason: str | None,
+        changed_at: datetime,
+        changed_by: str,
+    ) -> OperationalControlResult: ...
+
+
+class FunctionalityOperationalControlService:
+    VALID_ENVIRONMENTS = {"kids", "adults"}
+
+    def __init__(
+        self,
+        *,
+        authorizer: FunctionalityControlAuthorizer,
+        auditor: FunctionalityControlAuditor | None = None,
+        repository: FunctionalityControlRepository | None = None,
+    ) -> None:
+        if auditor is None and repository is None:
+            raise ValueError("auditor or repository is required.")
+
+        self._authorizer = authorizer
+        self._auditor = auditor
+        self._repository = repository
+        self._lock = RLock()
+
+        # Compatibility fallback for existing unit-test/in-memory usage.
+        self._availability: dict[tuple[str, str], str] = {}
+        self._last_action: dict[
+            tuple[str, str], OperationalControlResult
+        ] = {}
+
+    def stop(
+        self,
+        *,
+        actor: object,
+        actor_name: str,
+        environment: str,
+        functionality_id: str,
+        reason: str,
+    ) -> OperationalControlResult:
+        self._validate(environment, functionality_id)
+
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ValueError("A reason is required to stop a functionality.")
+
+        self._authorize(actor, environment, functionality_id)
+
+        return self._transition(
+            actor=actor,
+            actor_name=actor_name,
+            environment=environment,
+            functionality_id=functionality_id,
+            action="stop",
+            availability="disabled",
+            reason=clean_reason,
+        )
+
+    def resume(
+        self,
+        *,
+        actor: object,
+        actor_name: str,
+        environment: str,
+        functionality_id: str,
+    ) -> OperationalControlResult:
+        self._validate(environment, functionality_id)
+        self._authorize(actor, environment, functionality_id)
+
+        return self._transition(
+            actor=actor,
+            actor_name=actor_name,
+            environment=environment,
+            functionality_id=functionality_id,
+            action="resume",
+            availability="enabled",
+            reason=None,
+        )
+
+    def get_availability(
+        self,
+        *,
+        environment: str,
+        functionality_id: str,
+    ) -> str:
+        self._validate(environment, functionality_id)
+
+        if self._repository is not None:
+            return self._repository.get_availability(
+                environment=environment,
+                functionality_id=functionality_id,
+            )
+
+        with self._lock:
+            return self._availability.get(
+                (environment, functionality_id),
+                "enabled",
+            )
+
+    def get_last_action(
+        self,
+        *,
+        environment: str,
+        functionality_id: str,
+    ) -> OperationalControlResult | None:
+        self._validate(environment, functionality_id)
+
+        if self._repository is not None:
+            return self._repository.get_last_action(
+                environment=environment,
+                functionality_id=functionality_id,
+            )
+
+        with self._lock:
+            return self._last_action.get(
+                (environment, functionality_id)
+            )
+
+    def _authorize(
+        self,
+        actor: object,
+        environment: str,
+        functionality_id: str,
+    ) -> None:
+        if not self._authorizer.can_control_functionality(
+            actor=actor,
+            environment=environment,
+            functionality_id=functionality_id,
+        ):
+            raise PermissionError(
+                "Not authorised to control this functionality."
+            )
+
+    def _transition(
+        self,
+        *,
+        actor: object,
+        actor_name: str,
+        environment: str,
+        functionality_id: str,
+        action: str,
+        availability: str,
+        reason: str | None,
+    ) -> OperationalControlResult:
+        changed_at = datetime.now(timezone.utc)
+
+        if self._repository is not None:
+            return self._repository.record_transition(
+                functionality_id=functionality_id,
+                environment=environment,
+                availability=availability,
+                action=action,
+                reason=reason,
+                changed_at=changed_at,
+                changed_by=actor_name,
+            )
+
+        result = OperationalControlResult(
+            functionality_id=functionality_id,
+            environment=environment,
+            availability=availability,
+            action=action,
+            reason=reason,
+            changed_at=changed_at,
+            changed_by=actor_name,
+        )
+
+        with self._lock:
+            self._availability[
+                (environment, functionality_id)
+            ] = availability
+            self._last_action[
+                (environment, functionality_id)
+            ] = result
+
+        if self._auditor is None:
+            raise RuntimeError(
+                "Control auditor is required for in-memory operation."
+            )
+
+        self._auditor.record_functionality_control(
+            actor=actor,
+            environment=environment,
+            functionality_id=functionality_id,
+            action=action,
+            reason=reason,
+            changed_at=changed_at,
+        )
+
+        return result
+
+    @classmethod
+    def _validate(
+        cls,
+        environment: str,
+        functionality_id: str,
+    ) -> None:
+        if environment not in cls.VALID_ENVIRONMENTS:
+            raise ValueError("environment must be 'kids' or 'adults'")
+
+        if not functionality_id.strip():
+            raise ValueError("functionality_id is required")
+
+        if not is_known_functionality(functionality_id):
+            raise ValueError(
+                f"Unknown functionality_id: {functionality_id}"
+            )
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_registry.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class FunctionalityDefinition:
+    functionality_id: str
+    name: str
+    category: str
+
+
+FUNCTIONALITIES: tuple[FunctionalityDefinition, ...] = (
+    FunctionalityDefinition("conversation", "AI Conversation", "AI"),
+    FunctionalityDefinition("telegram", "Telegram", "Communication"),
+    FunctionalityDefinition("voice_tts", "Voice / TTS", "AI"),
+    FunctionalityDefinition("lessons", "Lessons", "Learning"),
+    FunctionalityDefinition("review", "Review / Spaced Repetition", "Learning"),
+    FunctionalityDefinition("pdf_presentation", "PDF / Presentation", "Presentation"),
+    FunctionalityDefinition("email_workflows", "Email Workflows", "Communication"),
+    FunctionalityDefinition("payments", "Payments", "Platform"),
+    FunctionalityDefinition("authentication", "Authentication", "Platform"),
+    FunctionalityDefinition("scheduler", "Scheduler", "Platform"),
+    FunctionalityDefinition("provider_runtime", "Provider / LLM Runtime", "Infrastructure"),
+    FunctionalityDefinition("database", "Database", "Infrastructure"),
+)
+
+
+_FUNCTIONALITY_BY_ID = {
+    item.functionality_id: item
+    for item in FUNCTIONALITIES
+}
+
+
+def get_functionality(functionality_id: str) -> FunctionalityDefinition:
+    try:
+        return _FUNCTIONALITY_BY_ID[functionality_id]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown functionality_id: {functionality_id}"
+        ) from exc
+
+
+def is_known_functionality(functionality_id: str) -> bool:
+    return functionality_id in _FUNCTIONALITY_BY_ID
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\provider_usage_dashboard_service.py
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from src.ai_runtime.providers.usage.aggregation import (
+    ProviderUsageAggregationService,
+)
+from src.ai_runtime.providers.usage.repository import (
+    ProviderUsageRepository,
+)
+
+
+class ProviderUsageDashboardService:
+    """Build a read-only provider-usage projection for Operations Center."""
+
+    def __init__(
+        self,
+        *,
+        repository: ProviderUsageRepository,
+        aggregation_service: ProviderUsageAggregationService | None = None,
+    ) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+
+        self._repository = repository
+        self._aggregation_service = (
+            aggregation_service
+            or ProviderUsageAggregationService()
+        )
+
+    def get_snapshot(self) -> dict[str, Any]:
+        """Return the current provider-usage aggregation."""
+
+        events = self._repository.get_all()
+
+        aggregation = self._aggregation_service.aggregate(events)
+
+        return {
+            "generated_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
+            "total_requests": aggregation.total_requests,
+            "successful_requests": aggregation.successful_requests,
+            "failed_requests": aggregation.failed_requests,
+            "total_input_tokens": aggregation.total_input_tokens,
+            "total_output_tokens": aggregation.total_output_tokens,
+            "total_tokens": aggregation.total_tokens,
+            "total_estimated_cost": str(
+                aggregation.total_estimated_cost
+            ),
+            "by_provider": aggregation.by_provider,
+            "by_model": aggregation.by_model,
+            "by_capability": aggregation.by_capability,
+            "by_functionality": aggregation.by_functionality,
+            "by_agent": aggregation.by_agent,
+        }
+
+
+__all__ = [
+    "ProviderUsageDashboardService",
+]
+

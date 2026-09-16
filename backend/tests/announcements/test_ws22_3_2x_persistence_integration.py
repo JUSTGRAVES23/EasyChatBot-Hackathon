@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+from app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
     PublicationExecutionRecordModel,
 )
-from backend.app.infrastructure.persistence.database import Base
+from app.infrastructure.persistence.database import Base
 
 
 def test_execution_model_uses_canonical_application_base() -> None:
@@ -35,3 +35,4 @@ def test_idempotency_key_is_primary_key() -> None:
     column = PublicationExecutionRecordModel.__table__.c.idempotency_key
     assert column.primary_key is True
     assert column.nullable is False
+

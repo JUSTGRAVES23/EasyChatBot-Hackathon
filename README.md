@@ -1,21 +1,55 @@
-# EasyChatBot — Authentication Persistence Integration Patch
+# EasyChatBot — P0.2.9D.3 Secure Governance Package
 
-This is the next vertical-slice implementation after the repository inspection.
-It deliberately does **not** introduce a second authentication system, JWTs,
-Supabase authentication, or duplicate user tables.
+## Objective
+Secure the sensitive `internal_data_read` capability before P0.2.9E wires
+the BetaUserReadService into the canonical Runtime.
 
-See `docs/authentication-persistence-integration.md` for integration and
-verification steps.
+## Changes
+1. `BootstrapGovernance` fails closed for `internal_data_read` when:
+   - no Runtime actor is present;
+   - the actor has no `internal_data.read` permission;
+   - the actor only has `beta_user` or an unknown role.
+2. `operator` and `admin` are allowed according to the existing application
+   permission contract.
+3. The `/runtime/execute` API obtains the authenticated `Principal` through
+   the existing identity dependency and converts it to the provider-neutral
+   `RuntimeActorContext`.
+4. Actor identity/roles come from the authenticated Principal, never from the
+   request payload.
+5. Existing non-sensitive hackathon capabilities retain the previous
+   allow behavior.
 
-## Delivery status
+## Files
+- `P0.2.9D3_secure_governance_and_api_actor.patch`
+- `tests/unit/application/test_bootstrap_governance.py`
+- `tests/unit/api/test_runtime_route_actor_propagation.py`
 
-- Architecture review: PASS
-- Security boundary review: PASS
-- Existing schema preservation: PASS
-- Migration chain identified: PASS
-- Unit/static validation in this package: PASS
-- Live PostgreSQL verification: **PENDING — requires the actual project
-  environment/DATABASE_URL**
+## Apply
+Run from:
+`C:\AI Folder\EasyChatBot-Hackathon`
 
-Do not proceed to frontend login/registration integration until the live
-PostgreSQL migration and smoke test pass.
+Inspect the patch first, then apply with:
+
+```powershell
+git apply .\P0.2.9D3_secure_governance_and_api_actor.patch
+```
+
+If the repository's existing working tree prevents a clean patch application,
+STOP. Do not force, reset, or overwrite unrelated changes. Apply the two
+small source edits manually using the exact diff as the change specification.
+
+## Test
+Use the project-local `.venv`:
+
+```powershell
+Set-Location "C:\AI Folder\EasyChatBot-Hackathon"
+.\.venv\Scripts\python.exe -m pytest tests/unit/application/test_bootstrap_governance.py tests/unit/api/test_runtime_route_actor_propagation.py -q
+```
+
+Then run the relevant Runtime/auth regression suite already used for P0.2.9D.
+
+## Acceptance
+P0.2.9D.3 is NOT complete merely because the two new test files pass.
+The existing relevant regression suite must also pass.
+
+No commit is included or requested.

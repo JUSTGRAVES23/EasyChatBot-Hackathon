@@ -1,6 +1,6 @@
 ﻿import asyncio
 
-from backend.intelligence.research_service import ResearchService
+from intelligence.research_service import ResearchService
 
 
 async def main() -> None:
@@ -45,3 +45,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

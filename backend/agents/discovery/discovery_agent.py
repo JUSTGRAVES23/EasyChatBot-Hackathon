@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Agent.
 
 Owns the complete Beta 1 personalised discovery workflow.
@@ -110,60 +110,60 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.agents.agent_manifest import AgentManifest
-from backend.agents.agent_result import AgentResult
-from backend.agents.base_agent import BaseAgent
-from backend.runtime.context.execution_context import (
+from agents.agent_manifest import AgentManifest
+from agents.agent_result import AgentResult
+from agents.base_agent import BaseAgent
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.skills.discovery.hackathon_preference_source import (
+from skills.discovery.hackathon_preference_source import (
     HackathonPreferenceSource,
 )
 
-from backend.skills.discovery.preference_source import (
+from skills.discovery.preference_source import (
     PreferenceContext,
     PreferenceSource,
 )
 
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     DiscoveryProfile,
     PreferenceUnderstandingSkill,
 )
 
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQueryGenerationSkill,
 )
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     ContentProductDiscoverySkill,
 )
 
-from backend.skills.discovery.relevance_matching import (
+from skills.discovery.relevance_matching import (
     RelevanceMatchingSkill,
 )
 
-from backend.skills.discovery.recommendation_ranking import (
+from skills.discovery.recommendation_ranking import (
     RecommendationRankingSkill,
 )
 
-from backend.skills.discovery.recommendation_explanation import (
+from skills.discovery.recommendation_explanation import (
     RecommendationExplanationSkill,
 )
 
-from backend.skills.discovery.personalised_content_adaptation import (
+from skills.discovery.personalised_content_adaptation import (
     PersonalisedContentAdaptationSkill,
 )
 
-from backend.skills.discovery.discovery_quality_verification import (
+from skills.discovery.discovery_quality_verification import (
     DiscoveryQualityVerificationSkill,
 )
 
-from backend.skills.discovery.user_choice_handoff import (
+from skills.discovery.user_choice_handoff import (
     UserChoiceControlledHandoffSkill,
 )
 
-from backend.skills.skill import (
+from skills.skill import (
     SkillInput,
 )
 
@@ -315,29 +315,29 @@ class DiscoveryAgent(BaseAgent):
         Backward-compatible mode:
 
             PreferenceSource
-                ↓
+                â†“
             PreferenceUnderstandingSkill
-                ↓
+                â†“
             DiscoveryProfile
 
         Full Beta 1 mode:
 
             Preference Understanding
-                ↓
+                â†“
             Query Generation
-                ↓
+                â†“
             Content/Product Discovery
-                ↓
+                â†“
             Relevance Matching
-                ↓
+                â†“
             Recommendation Ranking
-                ↓
+                â†“
             Recommendation Explanation
-                ↓
+                â†“
             Personalised Content Adaptation
-                ↓
+                â†“
             Quality Verification
-                ↓
+                â†“
             User Choice / Controlled Handoff
 
         The full pipeline is activated when a
@@ -356,7 +356,7 @@ class DiscoveryAgent(BaseAgent):
         request = context.request.strip()
 
         # ---------------------------------------------------------
-        # Step 1 — Obtain approved learner preferences
+        # Step 1 â€” Obtain approved learner preferences
         # ---------------------------------------------------------
 
         try:
@@ -382,7 +382,7 @@ class DiscoveryAgent(BaseAgent):
             )
 
         # ---------------------------------------------------------
-        # Step 2 — Preference Understanding
+        # Step 2 â€” Preference Understanding
         # ---------------------------------------------------------
 
         preference_result = (
@@ -448,7 +448,7 @@ class DiscoveryAgent(BaseAgent):
             )
 
         # ---------------------------------------------------------
-        # Step 3 — Discovery Query Generation
+        # Step 3 â€” Discovery Query Generation
         # ---------------------------------------------------------
 
         query_result = (
@@ -472,7 +472,7 @@ class DiscoveryAgent(BaseAgent):
         discovery_queries = query_result.output
 
         # ---------------------------------------------------------
-        # Step 4 — Content/Product Discovery
+        # Step 4 â€” Content/Product Discovery
         #
         # External discovery remains behind the injected
         # DiscoveryGateway-backed Skill.
@@ -501,7 +501,7 @@ class DiscoveryAgent(BaseAgent):
         candidates = discovery_result.output
 
         # ---------------------------------------------------------
-        # Step 5 — Relevance Matching
+        # Step 5 â€” Relevance Matching
         # ---------------------------------------------------------
 
         relevance_result = (
@@ -526,7 +526,7 @@ class DiscoveryAgent(BaseAgent):
         relevance_matches = relevance_result.output
 
         # ---------------------------------------------------------
-        # Step 6 — Recommendation Ranking
+        # Step 6 â€” Recommendation Ranking
         # ---------------------------------------------------------
 
         ranking_result = (
@@ -554,7 +554,7 @@ class DiscoveryAgent(BaseAgent):
         )
 
         # ---------------------------------------------------------
-        # Step 7 — Recommendation Explanation
+        # Step 7 â€” Recommendation Explanation
         # ---------------------------------------------------------
 
         explanation_result = (
@@ -582,7 +582,7 @@ class DiscoveryAgent(BaseAgent):
         )
 
         # ---------------------------------------------------------
-        # Step 8 — Personalised Content Adaptation
+        # Step 8 â€” Personalised Content Adaptation
         # ---------------------------------------------------------
 
         adaptation_result = (
@@ -611,7 +611,7 @@ class DiscoveryAgent(BaseAgent):
         )
 
         # ---------------------------------------------------------
-        # Step 9 — Discovery Quality Verification
+        # Step 9 â€” Discovery Quality Verification
         # ---------------------------------------------------------
 
         quality_result = (
@@ -653,7 +653,7 @@ class DiscoveryAgent(BaseAgent):
         )
 
         # ---------------------------------------------------------
-        # Step 10 — User Choice & Controlled Handoff
+        # Step 10 â€” User Choice & Controlled Handoff
         # ---------------------------------------------------------
 
         selected_option_id = (

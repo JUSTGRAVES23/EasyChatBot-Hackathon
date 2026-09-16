@@ -1,4 +1,4 @@
-"""
+﻿"""
 Base AI Agent Contract.
 
 All EasyChatBot AI Agents inherit this contract.
@@ -18,9 +18,9 @@ The AI Runtime controls execution.
 
 from abc import ABC, abstractmethod
 
-from backend.runtime.context.execution_context import ExecutionContext
-from backend.agents.agent_manifest import AgentManifest
-from backend.agents.agent_result import AgentResult
+from runtime.context.execution_context import ExecutionContext
+from agents.agent_manifest import AgentManifest
+from agents.agent_result import AgentResult
 
 
 class BaseAgent(ABC):

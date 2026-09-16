@@ -12,7 +12,7 @@ Does NOT:
 from fastapi import APIRouter
 
 
-from backend.cybersecurity.decision_support.service import (
+from cybersecurity.decision_support.service import (
     CybersecurityDecisionSupportService,
 )
 
@@ -60,3 +60,4 @@ async def create_decision_brief(
 
 
     return result
+

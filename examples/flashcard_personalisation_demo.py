@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot Hackathon Demo.
 
 Flashcard Personalisation Demo.
@@ -60,11 +60,11 @@ if str(PROJECT_ROOT) not in sys.path:
     )
 
 
-from backend.memory.memory_service import (
+from memory.memory_service import (
     MemoryService,
 )
 
-from backend.services.learning_service import (
+from services.learning_service import (
     LearningService,
 )
 

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from backend.app.application.announcement_operations.publication_execution_ports import (
+from app.application.announcement_operations.publication_execution_ports import (
     PublicationAuditSink,
     PublicationExecutionRepository,
     PublicationIdempotencyStore,
     PublicationPublisher,
 )
-from backend.app.domain.announcement_publication.execution import (
+from app.domain.announcement_publication.execution import (
     PublishAnnouncementCommand,
     PublicationAuditEvent,
     PublicationExecutionErrorCode,
@@ -130,3 +130,4 @@ class PublicationExecutionService:
 
 
 __all__ = ["PublicationExecutionService"]
+

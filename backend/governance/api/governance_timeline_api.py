@@ -1,6 +1,6 @@
-from fastapi import APIRouter
+﻿from fastapi import APIRouter
 
-from backend.governance.timeline.governance_timeline_service import (
+from governance.timeline.governance_timeline_service import (
     GovernanceTimelineService,
 )
 
@@ -32,3 +32,4 @@ async def get_timeline():
             for item in timeline_service.list_events()
         ]
     }
+

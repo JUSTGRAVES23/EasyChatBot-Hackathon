@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.app.application.announcements.template_editor_service import (
+from app.application.announcements.template_editor_service import (
     AnnouncementTemplateEditorService,
 )
 
@@ -87,3 +87,4 @@ def create_template_editor_router(
         }
 
     return router
+

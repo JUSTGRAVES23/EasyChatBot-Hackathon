@@ -6,14 +6,14 @@ from os import getenv
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from backend.app.application.announcement.announcement_composer import (
+from app.application.announcement.announcement_composer import (
     AnnouncementComposer,
 )
-from backend.app.application.announcement.announcement_publisher import (
+from app.application.announcement.announcement_publisher import (
     ControlledAnnouncementPublisher,
     PublicationDisabledError,
 )
-from backend.app.application.announcement.models import AnnouncementType
+from app.application.announcement.models import AnnouncementType
 
 
 class AnnouncementPublishRequest(BaseModel):
@@ -190,3 +190,4 @@ __all__ = [
     "AnnouncementPublishResponse",
     "create_announcement_router",
 ]
+

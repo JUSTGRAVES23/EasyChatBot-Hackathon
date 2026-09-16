@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 
-from backend.cybersecurity.report_orchestrator import (
+from cybersecurity.report_orchestrator import (
     CybersecurityReportOrchestrator,
 )
 
@@ -110,3 +110,4 @@ class CybersecurityIntelligenceReportService:
                 event
             )
         )
+

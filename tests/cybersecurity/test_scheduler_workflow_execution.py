@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 
-from backend.cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+from cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
     CybersecuritySchedulerWorkflow,
 )
 
@@ -78,3 +78,4 @@ async def test_critical_workflow_execution():
         result["type"]
         == "critical"
     )
+

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from backend.app.application.announcements.repositories import PublicationRepository
-from backend.app.domain.announcements.publication import Publication
-from backend.app.infrastructure.announcements.sqlalchemy_publication_repository import (
+from app.application.announcements.repositories import PublicationRepository
+from app.domain.announcements.publication import Publication
+from app.infrastructure.announcements.sqlalchemy_publication_repository import (
     SqlAlchemyPublicationRepository,
 )
 
@@ -42,3 +42,4 @@ class AsyncPublicationRepositoryAdapter(PublicationRepository):
     def list_all(self) -> tuple[Publication, ...]:
         self._reject_sync_boundary()
         return ()
+

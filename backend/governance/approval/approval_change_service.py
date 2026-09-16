@@ -1,7 +1,7 @@
-from backend.governance.change_management.change_management_service import (
+﻿from governance.change_management.change_management_service import (
     ChangeManagementService,
 )
-from backend.governance.change_management.change_status import ChangeStatus
+from governance.change_management.change_status import ChangeStatus
 
 
 class ApprovalChangeService:
@@ -38,3 +38,4 @@ class ApprovalChangeService:
             )
 
         return change
+

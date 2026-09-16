@@ -1,12 +1,12 @@
-import pytest
+﻿import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from backend.governance.api.governance_audit_api import (
+from governance.api.governance_audit_api import (
     get_governance_audit_service,
     router,
 )
-from backend.governance.governance_audit_service import (
+from governance.governance_audit_service import (
     GovernanceAuditService,
 )
 
@@ -128,3 +128,4 @@ async def test_governance_audit_api_is_read_only():
     assert audit_service.list_events()[0].event == (
         "CYBERSECURITY_DELIVERY_PAUSED"
     )
+

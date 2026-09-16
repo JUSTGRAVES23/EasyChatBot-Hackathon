@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for LearningService.
 
 Validates:
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.services.learning_service import (
+from services.learning_service import (
     LearningService,
 )
 

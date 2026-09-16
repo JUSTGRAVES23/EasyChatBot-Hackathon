@@ -1,152 +1,81 @@
 ﻿"""
 Cybersecurity Scheduler Factory.
 
-Creates the cybersecurity scheduler runtime stack.
+Creates the single shared scheduler runtime.
 
-Composition:
-
-Factory
-    |
-    +--> APScheduler Infrastructure
-    |
-    +--> APScheduler Adapter
-    |
-    +--> Scheduler Runtime
-    |
-    +--> Workflow
-            |
-            +--> Report Service
-            |
-            +--> Email Service
-
-
-Does NOT:
-- execute cybersecurity decisions;
-- send emails directly;
-- perform remediation.
+Academy is composed as an optional application workflow and
+registered on the existing scheduler. No second scheduler is created.
 """
 
 from __future__ import annotations
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-
-from apscheduler.schedulers.asyncio import (
-    AsyncIOScheduler,
-)
-
-
-
-from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+from cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
     CybersecuritySchedulerRuntime,
 )
 
-
-
-from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
     CybersecurityAPSchedulerAdapter,
 )
 
-
-
-from backend.cybersecurity.scheduler.scheduler_configuration import (
+from cybersecurity.scheduler.scheduler_configuration import (
     SCHEDULER_TIMEZONE,
 )
 
-
-
-from backend.cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+from cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
     CybersecuritySchedulerWorkflow,
 )
 
-
-
-from backend.cybersecurity.email.cybersecurity_email_service import (
+from cybersecurity.email.cybersecurity_email_service import (
     CybersecurityEmailService,
 )
 
+from app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
 
 
 def create_cybersecurity_scheduler_runtime(
     workflow_service=None,
+    *,
+    academy_one_week_workflow=None,
 ) -> CybersecuritySchedulerRuntime:
-    """
-    Create configured cybersecurity scheduler runtime.
-
-    Dependencies can be injected for:
-    - testing;
-    - production providers;
-    - future integrations.
-    """
-
-
-
-    #
-    # Default workflow composition
-    #
+    """Create the single shared scheduler runtime."""
 
     if workflow_service is None:
-
-
-        email_service = (
-            CybersecurityEmailService(
-                recipient=(
-                    "davdbarbero1999@gmail.com"
-                ),
-            )
+        email_service = CybersecurityEmailService(
+            recipient="davdbarbero1999@gmail.com",
         )
 
-
-
-        workflow_service = (
-            CybersecuritySchedulerWorkflow(
-
-                email_service=email_service,
-
-            )
+        workflow_service = CybersecuritySchedulerWorkflow(
+            email_service=email_service,
         )
-
-
-
-    #
-    # APScheduler infrastructure
-    #
 
     scheduler = AsyncIOScheduler(
-
         timezone=SCHEDULER_TIMEZONE,
+    )
 
+    # Academy production composition is explicit and injectable.
+    #
+    # It is deliberately NOT created here automatically because the
+    # application import path must remain safe when PostgreSQL is not
+    # configured in a development/test environment.
+    #
+    # Production composition may inject the completed Academy workflow.
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    return CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
     )
 
 
+__all__ = [
+    "create_cybersecurity_scheduler_runtime",
+]
 
-    #
-    # Infrastructure adapter boundary
-    #
-
-    adapter = (
-        CybersecurityAPSchedulerAdapter(
-
-            scheduler=scheduler,
-
-            workflow_service=workflow_service,
-
-        )
-    )
-
-
-
-    #
-    # Runtime boundary
-    #
-
-    runtime = (
-        CybersecuritySchedulerRuntime(
-
-            scheduler_adapter=adapter,
-
-        )
-    )
-
-
-
-    return runtime

@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from backend.app.application.memory.memory_models import (
+from app.application.memory.memory_models import (
     ConversationMemory,
 )
 
-from backend.app.application.memory.memory_repository import (
+from app.application.memory.memory_repository import (
     ConversationMemoryRepository,
 )
 

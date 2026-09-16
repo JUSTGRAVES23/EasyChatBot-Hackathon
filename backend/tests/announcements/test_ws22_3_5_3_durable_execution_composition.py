@@ -1,24 +1,24 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 
 import pytest
 from dotenv import load_dotenv
 
-from backend.app.application.announcements.execution.audit_adapter import (
+from app.application.announcements.execution.audit_adapter import (
     DurablePublicationExecutionAudit,
 )
-from backend.app.application.announcements.execution.durable_execution_composition import (
+from app.application.announcements.execution.durable_execution_composition import (
     DurablePublicationExecutionComposition,
     create_durable_publication_execution_composition,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
-from backend.app.infrastructure.announcements.publication_audit_repository import (
+from app.infrastructure.announcements.publication_audit_repository import (
     SqlAlchemyPublicationAuditRepository,
 )
-from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+from app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
     SqlAlchemyPublicationExecutionRepository,
 )
 

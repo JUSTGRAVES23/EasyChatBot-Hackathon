@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from backend.app.application.privacy.privacy_governance_reminder_policy import (
+from app.application.privacy.privacy_governance_reminder_policy import (
     GovernanceReminderPolicy,
     build_decision_proposal,
 )
-from backend.app.application.privacy.privacy_governance_reminder_scheduler import (
+from app.application.privacy.privacy_governance_reminder_scheduler import (
     InMemoryGovernanceReminderState,
     PrivacyGovernanceReminderScheduler,
 )
@@ -138,3 +138,4 @@ def test_decision_proposal_is_not_an_automatic_decision():
         "APPROVE", "REJECT", "REQUEST_CHANGES"
     )
     assert "No decision is made by the scheduler" in proposal.summary
+

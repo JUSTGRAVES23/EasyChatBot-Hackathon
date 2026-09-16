@@ -1,16 +1,16 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case import (
+from app.application.privacy.privacy_governance_case import (
     PrivacyGovernanceCase,
     PrivacyTriggerType,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
-from backend.app.application.privacy.privacy_governance_dashboard_service import (
+from app.application.privacy.privacy_governance_dashboard_service import (
     PrivacyGovernanceDashboardService,
 )
 
@@ -84,3 +84,4 @@ def test_dashboard_status_chart_contains_governance_status_counts():
         {"status": "Approved", "count": 1},
         {"status": "Rejected / Blocked", "count": 1},
     )
+

@@ -88,7 +88,7 @@ from app.application.provider_management.provider_operational_event_service impo
     ProviderOperationalEventService,
 )
 
-from backend.providers.health.ollama_cloud_health_probe import (
+from providers.health.ollama_cloud_health_probe import (
     OllamaCloudHealthProbe,
 )
 

@@ -1,4 +1,4 @@
-"""G5 Final Hackathon Demo.
+﻿"""G5 Final Hackathon Demo.
 
 Cost-conscious final demo:
 Parallel live search -> Gemini concise intelligence -> Gemini challenge
@@ -14,10 +14,10 @@ import asyncio
 import json
 from typing import Any
 
-from backend.conversation.conversation_request import ConversationRequest
-from backend.memory.memory_service import MemoryService
-from backend.providers.llm.llm_provider_factory import LLMProviderFactory
-from backend.runtime.context.execution_context import ExecutionContext
+from conversation.conversation_request import ConversationRequest
+from memory.memory_service import MemoryService
+from providers.llm.llm_provider_factory import LLMProviderFactory
+from runtime.context.execution_context import ExecutionContext
 
 from src.ai_agents.live_intelligence_agent.handler import (
     LiveIntelligenceAgent,
@@ -116,7 +116,7 @@ def print_challenge(challenge: LearningChallenge) -> None:
     print(challenge.summary)
     print("\nVocabulary:")
     for i, item in enumerate(challenge.vocabulary, 1):
-        print(f"{i}. {item.term} — {item.definition}")
+        print(f"{i}. {item.term} â€” {item.definition}")
     print("\nDiscussion questions:")
     for i, item in enumerate(challenge.discussion_questions, 1):
         print(f"{i}. {item.question} [{item.difficulty}]")
@@ -263,3 +263,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.app.application.health.operational_dashboard_service import (
+from app.application.health.operational_dashboard_service import (
     OperationalDashboardService,
 )
-from backend.app.application.operations_center.announcement_group_operations_api import (
+from app.application.operations_center.announcement_group_operations_api import (
     AnnouncementGroupOperationsAPI,
 )
-from backend.app.application.operations_center.private_classroom_operations_api import (
+from app.application.operations_center.private_classroom_operations_api import (
     PrivateClassroomOperationsAPI,
 )
 
@@ -54,3 +54,9 @@ class ChatOperationsDashboardAPI:
 
 
 __all__ = ["ChatOperationsDashboardAPI"]
+
+
+
+
+
+

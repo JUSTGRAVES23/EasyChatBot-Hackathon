@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.interfaces.telegram.beta_telegram_private_chat_gate import (
+from app.interfaces.telegram.beta_telegram_private_chat_gate import (
     BetaTelegramPrivateChatGate,
 )
 

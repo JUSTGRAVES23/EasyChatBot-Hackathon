@@ -1,5 +1,4 @@
-
-import sys
+﻿import sys
 
 from pathlib import Path
 
@@ -11,4 +10,3 @@ if str(BACKEND) not in sys.path:
 from app.main import create_application
 
 application = create_application()
-'@ | Set-Content ".\run_server.py" -Encoding utf8

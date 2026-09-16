@@ -15,25 +15,10 @@ Responsibilities:
 
 - calculate input token cost;
 - calculate output token cost;
+- preserve unknown usage as unavailable cost;
 - return provider cost intelligence.
 
-Architecture:
-
-CostCalculationInput
-        |
-        v
-ProviderCostService
-        |
-        v
-ProviderCostResult
-
 Pricing is injected explicitly.
-
-Future pricing sources:
-
-- configuration service;
-- provider pricing registry;
-- enterprise contracts.
 """
 
 from __future__ import annotations
@@ -50,10 +35,10 @@ class ProviderCostService:
     """
     Calculates provider execution costs.
 
-    The service is intentionally provider-independent.
+    The service is provider-independent.
 
-    It receives pricing values instead of
-    embedding provider-specific logic.
+    Pricing is supplied explicitly rather than embedded
+    in provider-specific logic.
     """
 
     def calculate(
@@ -66,18 +51,14 @@ class ProviderCostService:
         """
         Calculate provider execution cost.
 
-        Pricing is expressed as:
+        None token usage means that the corresponding cost
+        cannot be calculated reliably.
 
-            cost per 1 million tokens
+        0 token usage remains a real zero-cost calculation.
 
-        Example:
-
-            input:
-                $1.00 / 1M tokens
-
-            output:
-                $5.00 / 1M tokens
-
+        Raises:
+            ValueError: If usage is None or a supplied price
+                is negative.
         """
 
         if usage is None:
@@ -95,34 +76,31 @@ class ProviderCostService:
                 "Output token price cannot be negative."
             )
 
-        input_cost = (
-            Decimal(
-                usage.input_tokens
-            )
-            / Decimal(
-                "1000000"
-            )
-        ) * input_price_per_million_tokens
+        input_cost: Decimal | None
 
-        output_cost = (
-            Decimal(
-                usage.output_tokens
-            )
-            / Decimal(
-                "1000000"
-            )
-        ) * output_price_per_million_tokens
+        if usage.input_tokens is None:
+            input_cost = None
+        else:
+            input_cost = (
+                Decimal(usage.input_tokens)
+                / Decimal("1000000")
+            ) * input_price_per_million_tokens
+
+        output_cost: Decimal | None
+
+        if usage.output_tokens is None:
+            output_cost = None
+        else:
+            output_cost = (
+                Decimal(usage.output_tokens)
+                / Decimal("1000000")
+            ) * output_price_per_million_tokens
 
         return ProviderCostResult(
             provider=usage.provider,
-
             model=usage.model,
-
             input_tokens=usage.input_tokens,
-
             output_tokens=usage.output_tokens,
-
             input_cost=input_cost,
-
             output_cost=output_cost,
         )

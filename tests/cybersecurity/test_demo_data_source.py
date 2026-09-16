@@ -1,6 +1,6 @@
-import pytest
+﻿import pytest
 
-from backend.cybersecurity.demo_data_source import (
+from cybersecurity.demo_data_source import (
     DemoCybersecurityDataSource,
 )
 
@@ -14,3 +14,4 @@ async def test_demo_source_returns_normalized_signals():
     assert len(signals) == 5
     assert all(signal.source for signal in signals)
     assert all(signal.severity in {"critical", "high", "medium", "low", "info"} for signal in signals)
+

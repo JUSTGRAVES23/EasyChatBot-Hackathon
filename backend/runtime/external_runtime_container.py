@@ -1,33 +1,33 @@
-"""
+﻿"""
 External Runtime Container.
 
-Owns the configured ExternalRuntimeService instance.
+Stores the application-configured ExternalRuntimeService.
 
-Responsibilities:
+The container:
 
-- store configured runtime service;
-- provide runtime dependency access;
-- reset runtime state for controlled tests.
+- stores the already-composed service;
+- exposes the configured service;
+- supports controlled test reset.
 
-Does NOT:
+The container does NOT:
 
+- compose Runtime dependencies;
 - create providers;
-- create executors;
-- build gateways;
+- create gateways;
 - execute capabilities;
 - implement governance.
 
-Composition belongs to:
-
-    backend.application.bootstrap
-
+Composition remains the responsibility of application bootstrap.
 """
 
 from __future__ import annotations
 
-from backend.services.external_runtime_service import (
-    ExternalRuntimeService,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.external_runtime_service import (
+        ExternalRuntimeService,
+    )
 
 
 _runtime_service: ExternalRuntimeService | None = None
@@ -37,29 +37,16 @@ def configure_external_runtime_service(
     service: ExternalRuntimeService,
 ) -> None:
     """
-    Register configured ExternalRuntimeService.
+    Register the application-configured Runtime service.
 
-    Called by application bootstrap.
-
-    The container only stores the already-created
-    service instance.
-
-    It does not perform composition.
-
-    Args:
-        service:
-            Configured ExternalRuntimeService.
-
-    Raises:
-        ValueError:
-            If service is None.
+    The service must already be fully composed.
     """
 
     global _runtime_service
 
     if service is None:
         raise ValueError(
-            "ExternalRuntimeService cannot be None."
+            "ExternalRuntimeService cannot be None"
         )
 
     _runtime_service = service
@@ -67,14 +54,11 @@ def configure_external_runtime_service(
 
 def get_external_runtime_service() -> ExternalRuntimeService:
     """
-    Retrieve configured ExternalRuntimeService.
-
-    Used by application boundaries requiring
-    Runtime capability execution.
+    Return the configured Runtime service.
 
     Raises:
         RuntimeError:
-            If bootstrap has not completed.
+            If the application has not been bootstrapped.
     """
 
     if _runtime_service is None:
@@ -87,23 +71,9 @@ def get_external_runtime_service() -> ExternalRuntimeService:
 
 def reset_runtime_container() -> None:
     """
-    Reset configured ExternalRuntimeService.
+    Reset the configured service.
 
-    Test utility only.
-
-    Production lifecycle:
-
-        bootstrap
-            |
-            v
-        configure service
-
-    This function does not:
-
-    - create Runtime services;
-    - create providers;
-    - create gateways;
-    - execute capabilities.
+    Intended for controlled test lifecycle management.
     """
 
     global _runtime_service

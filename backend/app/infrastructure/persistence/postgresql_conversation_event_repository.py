@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from backend.app.application.conversation.conversation_event_models import (
+from app.application.conversation.conversation_event_models import (
     ConversationEvent,
 )
 
-from backend.app.application.conversation.conversation_event_repository import (
+from app.application.conversation.conversation_event_repository import (
     ConversationEventRepository,
 )
 

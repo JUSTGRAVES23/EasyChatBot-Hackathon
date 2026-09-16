@@ -16,33 +16,39 @@ CybersecurityIntelligenceAgent
         ↓
 AgentResult
 
-Does NOT:
+This is currently a compatibility path for the existing
+Cybersecurity Intelligence integration.
+
+It does NOT:
+
 - call provider SDKs;
 - execute remediation;
 - send email;
 - modify production systems;
-- bypass the Runtime.
+- bypass the supplied Runtime boundary.
 """
 
 from __future__ import annotations
 
-from backend.agents.agent_result import (
+from uuid import uuid4
+
+from agents.agent_result import (
     AgentResult,
 )
 
-from backend.agents.cybersecurity_intelligence_agent import (
+from agents.cybersecurity_intelligence_agent import (
     CybersecurityIntelligenceAgent,
 )
 
-from backend.cybersecurity.data_source import (
+from cybersecurity.data_source import (
     CybersecurityDataSource,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.runtime.runtime_engine import (
+from runtime.runtime_engine import (
     RuntimeEngine,
 )
 
@@ -53,6 +59,10 @@ class CybersecurityIntelligenceService:
 
     The service acquires normalized signals and delegates
     agent execution to the existing RuntimeEngine.
+
+    The legacy RuntimeEngine remains isolated here until a
+    dedicated cybersecurity migration to the canonical Runtime
+    contract is completed and verified.
     """
 
     def __init__(
@@ -87,15 +97,15 @@ class CybersecurityIntelligenceService:
     ) -> AgentResult:
         """
         Acquire cybersecurity signals and execute
-        Agent 1 through Runtime.
+        Agent 1 through the current Runtime boundary.
         """
 
-        if not user_id.strip():
+        if not isinstance(user_id, str) or not user_id.strip():
             raise ValueError(
                 "user_id cannot be empty."
             )
 
-        if not request.strip():
+        if not isinstance(request, str) or not request.strip():
             raise ValueError(
                 "request cannot be empty."
             )
@@ -105,6 +115,7 @@ class CybersecurityIntelligenceService:
         )
 
         context = ExecutionContext(
+            execution_id=str(uuid4()),
             user_id=user_id,
             request=request,
             metadata={
@@ -120,3 +131,4 @@ class CybersecurityIntelligenceService:
             agent=self.agent,
             context=context,
         )
+

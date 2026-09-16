@@ -1,34 +1,36 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from httpx import ASGITransport, AsyncClient
 
-from backend.app.api.announcement_operations_approval import (
+from app.api.announcement_operations_approval import (
+    announcement_publish_permission,
     create_announcement_operations_approval_router,
 )
-from backend.app.application.announcements.approval.async_approval_service import (
+from app.application.announcements.approval.async_approval_service import (
     AsyncAnnouncementPublicationApprovalService,
 )
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import (
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import (
     PublicationStatus,
     PublicationType,
-)
-from backend.app.infrastructure.announcements.in_memory_repositories import (
-    InMemoryPublicationRepository,
 )
 
 
 class FakeAsyncRepository:
     def __init__(self, publication: Publication | None) -> None:
         self.publication = publication
-        self.saved = []
+        self.saved: list[Publication] = []
 
-    async def get_async(self, publication_id: str):
-        if self.publication and self.publication.publication_id == publication_id:
+    async def get_async(self, publication_id: str) -> Publication | None:
+        if (
+            self.publication is not None
+            and self.publication.publication_id == publication_id
+        ):
             return self.publication
         return None
 
@@ -39,7 +41,7 @@ class FakeAsyncRepository:
 
 class AuditRecorder:
     def __init__(self) -> None:
-        self.events = []
+        self.events: list[dict] = []
 
     async def record_approval(self, **kwargs) -> None:
         self.events.append(kwargs)
@@ -58,10 +60,26 @@ def make_publication() -> Publication:
     )
 
 
+def make_principal(user_id: str = "operator-test") -> SimpleNamespace:
+    return SimpleNamespace(user_id=user_id)
+
+
+async def deny_announcement_publish_permission() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Permission denied.",
+    )
+
+
+async def allow_announcement_publish_permission() -> SimpleNamespace:
+    return make_principal()
+
+
 @pytest.mark.asyncio
 async def test_async_approval_persists_state_and_audit_contract() -> None:
     repository = FakeAsyncRepository(make_publication())
     audit = AuditRecorder()
+
     service = AsyncAnnouncementPublicationApprovalService(
         publications=repository,
         audit=audit,
@@ -82,20 +100,25 @@ async def test_async_approval_persists_state_and_audit_contract() -> None:
 async def test_api_denies_unauthorized_approval() -> None:
     repository = FakeAsyncRepository(make_publication())
     audit = AuditRecorder()
+
     service = AsyncAnnouncementPublicationApprovalService(
         publications=repository,
         audit=audit,
     )
 
-    async def deny() -> bool:
-        return False
-
     app = FastAPI()
-    app.include_router(
-        create_announcement_operations_approval_router(
-            approval_service=service,
-            admin_authorizer=deny,
-        )
+
+    router = create_announcement_operations_approval_router(
+        approval_service=service,
+    )
+
+    app.include_router(router)
+
+    # Override the exact authorization dependency used by the route.
+    # This keeps the test isolated from the application's auth_repository
+    # composition while exercising the production authorization boundary.
+    app.dependency_overrides[announcement_publish_permission] = (
+        deny_announcement_publish_permission
     )
 
     async with AsyncClient(
@@ -109,8 +132,59 @@ async def test_api_denies_unauthorized_approval() -> None:
         )
 
     assert response.status_code == 403
-    assert repository.publication.status is PublicationStatus.PENDING_APPROVAL
+
+    assert repository.publication is not None
+    assert (
+        repository.publication.status
+        is PublicationStatus.PENDING_APPROVAL
+    )
+
+    assert repository.saved == []
     assert audit.events == []
+
+
+@pytest.mark.asyncio
+async def test_api_authorized_approval_uses_authenticated_actor() -> None:
+    repository = FakeAsyncRepository(make_publication())
+    audit = AuditRecorder()
+
+    service = AsyncAnnouncementPublicationApprovalService(
+        publications=repository,
+        audit=audit,
+    )
+
+    app = FastAPI()
+
+    router = create_announcement_operations_approval_router(
+        approval_service=service,
+    )
+
+    app.include_router(router)
+
+    app.dependency_overrides[announcement_publish_permission] = (
+        allow_announcement_publish_permission
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/announcement-operations/publications/"
+            "ws23-1-3-persistence-test/approve",
+            json={"actor": "attacker-controlled-actor"},
+        )
+
+    assert response.status_code == 200
+
+    assert repository.publication is not None
+    assert repository.publication.status is PublicationStatus.APPROVED
+
+    assert len(repository.saved) == 1
+    assert len(audit.events) == 1
+
+    assert audit.events[0]["actor"] == "operator-test"
+    assert audit.events[0]["actor"] != "attacker-controlled-actor"
 
 
 @pytest.mark.asyncio
@@ -120,6 +194,7 @@ async def test_invalid_transition_is_rejected() -> None:
 
     repository = FakeAsyncRepository(publication)
     audit = AuditRecorder()
+
     service = AsyncAnnouncementPublicationApprovalService(
         publications=repository,
         audit=audit,

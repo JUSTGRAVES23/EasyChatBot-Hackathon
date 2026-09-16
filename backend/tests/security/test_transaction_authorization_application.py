@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +24,14 @@ from app.domain.identity.transaction_authorization import (
     TransactionAuthorizationConsumer,
     TransactionAuthorizationRegistry,
     TrustedApprovalEvidence,
+)
+
+TRANSACTION_AUTHORIZATION_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "app"
+    / "application"
+    / "identity"
+    / "transaction_authorization.py"
 )
 
 
@@ -406,8 +415,7 @@ def test_service_keeps_business_authorization_separate() -> None:
 
 
 def test_service_has_no_provider_specific_dependencies() -> None:
-    with open(
-        "backend/app/application/identity/transaction_authorization.py",
+    with TRANSACTION_AUTHORIZATION_SOURCE.open(
         encoding="utf-8",
     ) as handle:
         source = handle.read()
@@ -428,8 +436,7 @@ def test_service_has_no_provider_specific_dependencies() -> None:
 
 
 def test_service_does_not_implement_mfa_or_freshness_policy() -> None:
-    with open(
-        "backend/app/application/identity/transaction_authorization.py",
+    with TRANSACTION_AUTHORIZATION_SOURCE.open(
         encoding="utf-8",
     ) as handle:
         source = handle.read().lower()

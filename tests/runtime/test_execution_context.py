@@ -1,10 +1,10 @@
-import pytest
+﻿import pytest
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

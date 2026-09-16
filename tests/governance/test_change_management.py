@@ -1,4 +1,4 @@
-from backend.governance.change_management.change_management_service import (
+﻿from governance.change_management.change_management_service import (
     ChangeManagementService,
 )
 
@@ -14,3 +14,4 @@ def test_change_record_creation():
     )
 
     assert record.change_id == "CHG-001"
+

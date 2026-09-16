@@ -1,11 +1,11 @@
 ﻿import pytest
 
-from backend.cybersecurity.scheduler.cybersecurity_schedule_configuration import (
+from cybersecurity.scheduler.cybersecurity_schedule_configuration import (
     CybersecurityScheduleConfiguration,
 )
 
 
-from backend.cybersecurity.scheduler.cybersecurity_job_registry import (
+from cybersecurity.scheduler.cybersecurity_job_registry import (
     CybersecurityJobRegistry,
 )
 
@@ -30,4 +30,5 @@ def test_job_registry():
     )
 
     assert len(registry.list_jobs()) == 1
+
 

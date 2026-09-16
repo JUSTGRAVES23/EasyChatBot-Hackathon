@@ -2,7 +2,7 @@
 Tests for Cybersecurity Email Generator.
 """
 
-from backend.cybersecurity.cybersecurity_email_generator import (
+from cybersecurity.cybersecurity_email_generator import (
     CybersecurityEmailGenerator,
 )
 
@@ -47,3 +47,4 @@ def test_generate_critical_alert_email():
         "CRITICAL"
         in result["subject"]
     )
+

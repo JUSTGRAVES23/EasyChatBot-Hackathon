@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -34,16 +34,16 @@ def get_config(name: str, default: str = "") -> str:
     return default
 
 
-from backend.app.application.privacy.email.privacy_governance_reminder_email_service import (
+from app.application.privacy.email.privacy_governance_reminder_email_service import (
     PrivacyGovernanceReminderEmailService,
 )
-from backend.app.application.privacy.privacy_governance_case_url import (
+from app.application.privacy.privacy_governance_case_url import (
     PrivacyGovernanceCaseURLBuilder,
 )
-from backend.app.infrastructure.privacy.privacy_governance_reminder_email_sender import (
+from app.infrastructure.privacy.privacy_governance_reminder_email_sender import (
     ResendGovernanceReminderEmailSender,
 )
-from backend.cybersecurity.email.email_configuration import EMAIL_RECIPIENT
+from cybersecurity.email.email_configuration import EMAIL_RECIPIENT
 
 
 BACKEND_BASE_URL = get_config(

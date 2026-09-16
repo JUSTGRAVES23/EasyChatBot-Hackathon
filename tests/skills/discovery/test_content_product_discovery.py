@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Content/Product Discovery Skill.
 """
 
@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import pytest
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     ContentProductDiscoverySkill,
     DiscoveryCandidate,
 )
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQuery,
 )
-from backend.skills.skill import SkillInput
+from skills.skill import SkillInput
 
 
 class FakeDiscoveryGateway:

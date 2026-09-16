@@ -1,4 +1,4 @@
-"""
+﻿"""
 API route tests.
 
 These tests verify the HTTP/API boundary.
@@ -32,11 +32,11 @@ from httpx import (
     AsyncClient,
 )
 
-from backend.api.main import (
+from api.main import (
     app,
 )
 
-from backend.api import (
+from api import (
     routes,
 )
 

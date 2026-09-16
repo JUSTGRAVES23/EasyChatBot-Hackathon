@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime execution vertical slice test.
 
 Validates:
@@ -31,11 +31,11 @@ from __future__ import annotations
 
 import pytest
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

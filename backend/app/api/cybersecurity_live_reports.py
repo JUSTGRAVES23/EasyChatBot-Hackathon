@@ -8,7 +8,7 @@ intelligence sources.
 from fastapi import APIRouter
 
 
-from backend.cybersecurity.live_report_service import (
+from cybersecurity.live_report_service import (
     CybersecurityLiveReportService,
 )
 
@@ -59,3 +59,4 @@ async def generate_weekly_live_report():
 
 
     return result
+

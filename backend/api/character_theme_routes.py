@@ -1,9 +1,9 @@
-"""
+﻿"""
 EasyChatBot Character Theme API Routes.
 
 Dedicated HTTP boundary for the Character Theme System.
 
-This router is intentionally separate from backend.api.routes
+This router is intentionally separate from api.routes
 and the Character Catalogue API.
 
 Responsibilities:
@@ -28,9 +28,7 @@ from pathlib import Path
 from fastapi import APIRouter
 from fastapi import HTTPException
 
-from backend.api.character_theme import (
-    CharacterThemeService,
-)
+from api.character_theme import CharacterThemeService
 
 
 router = APIRouter(
@@ -43,8 +41,21 @@ router = APIRouter(
 # Character Theme Service
 # =========================================================
 
+# The API package lives under:
+#
+#     backend/api/
+#
+# Therefore parents[1] resolves to:
+#
+#     backend/
+#
+# The active theme configuration is owned by the backend:
+#
+#     backend/app/configuration/character_themes/themes/
+#
+# Do not resolve this from the repository-root app/ directory.
 _theme_directory = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).resolve().parents[1]
     / "app"
     / "configuration"
     / "character_themes"
@@ -60,6 +71,7 @@ character_theme_service = CharacterThemeService(
 # =========================================================
 # Character Theme Endpoint
 # =========================================================
+
 
 @router.get("")
 def get_character_theme(
@@ -78,31 +90,24 @@ def get_character_theme(
     """
 
     if not character_id.strip():
-
         raise HTTPException(
             status_code=400,
             detail="character_id is required",
         )
 
-
     if not world_id.strip():
-
         raise HTTPException(
             status_code=400,
             detail="world_id is required",
         )
 
-
     if not primary_language.strip():
-
         raise HTTPException(
             status_code=400,
             detail="primary_language is required",
         )
 
-
     try:
-
         return character_theme_service.resolve(
             character_id=character_id,
             world_id=world_id,
@@ -110,25 +115,19 @@ def get_character_theme(
             secondary_language=secondary_language,
         )
 
-
     except FileNotFoundError as exc:
-
         raise HTTPException(
             status_code=404,
             detail=str(exc),
         ) from exc
 
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
         ) from exc
 
-
     except Exception as exc:
-
         raise HTTPException(
             status_code=500,
             detail="Unable to resolve character theme.",

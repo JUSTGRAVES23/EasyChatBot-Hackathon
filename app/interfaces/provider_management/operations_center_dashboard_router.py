@@ -2,7 +2,8 @@
 EasyChatBot AI Operations Center HTTP router.
 
 Exposes the existing Platform Overview and the additive
-WS-21 Chat Operations views.
+WS-21 Chat Operations views plus the M1.2 functionality-health
+projection.
 
 HTTP contract:
 
@@ -18,6 +19,12 @@ HTTP contract:
     GET /api/operations-center/chat-operations/private-classroom
         WS-21.17 Private Classroom operational detail.
 
+    GET /api/operations-center/chat-operations/announcement-group
+        WS-21.18 Announcement Group operational detail.
+
+    GET /api/operations-center/functionality-health
+        M1.2 read-only functionality-health projection.
+
 Architecture:
 
     Existing Platform Overview
@@ -26,9 +33,13 @@ Architecture:
     Chat Operations
         remains backed by the WS-21 operational dashboard composition.
 
-    Private Classroom
-        reuses the same Chat Operations application API and therefore
+    Private Classroom and Announcement Group
+        reuse the same Chat Operations application API and therefore
         the same WS-21 dashboard service and operational state.
+
+    Functionality Health
+        reuses the same WS-21/M1.2 composition and its existing
+        FunctionalityHealthService.
 
 This router is an HTTP adapter only. It does not create providers,
 execute agents, modify Runtime state, or perform operational actions.
@@ -57,12 +68,16 @@ from app.application.provider_management.provider_health_refresh_service import 
     ProviderHealthRefreshService,
 )
 
-from backend.app.application.operations_center.chat_operations_dashboard_api import (
+from app.application.operations_center.chat_operations_dashboard_api import (
     ChatOperationsDashboardAPI,
 )
 
-from backend.app.application.operations_center.dashboard_composition import (
+from app.application.operations_center.dashboard_composition import (
     OperationsCenterComposition as WS21OperationsCenterComposition,
+)
+
+from app.application.provider_management.functionality_health_service import (
+    FunctionalityHealthService,
 )
 
 
@@ -96,30 +111,18 @@ _operational_events_api: OperationsCenterOperationalEventsAPI = (
 
 
 # =========================================================
-# WS-21 Chat Operations composition
+# WS-21 / M1.2 composition
 # =========================================================
 #
 # IMPORTANT:
 #
-# Do not use the legacy
-# create_operations_center_dashboard_api() factory here.
+# Use ONE WS21OperationsCenterComposition instance.
 #
-# WS-21.15 and WS-21.17 must use the ChatOperationsDashboardAPI
-# owned by the WS-21 composition.
+# WS-21 Chat Operations and M1.2 Functionality Health are both
+# composed by this application boundary.
 #
-# This guarantees:
-#
-#     Chat Operations overview
-#              +
-#     Private Classroom detail
-#
-# use the same:
-#
-#     OperationalDashboardService
-#     OperationalEventService
-#
-# and therefore observe the same current in-process operational
-# state.
+# This avoids constructing duplicate readiness/health stacks and
+# keeps the related operational views on the same composition.
 # =========================================================
 
 _ws21_composition: WS21OperationsCenterComposition = (
@@ -128,6 +131,10 @@ _ws21_composition: WS21OperationsCenterComposition = (
 
 _ws21_chat_operations_api: ChatOperationsDashboardAPI = (
     _ws21_composition.chat_operations_api
+)
+
+_functionality_health_service: FunctionalityHealthService = (
+    _ws21_composition.functionality_health_service
 )
 
 
@@ -146,7 +153,8 @@ def configure_dashboard_api(
 
     This only replaces the existing HTTP read boundary.
 
-    It does not affect WS-21 Chat Operations.
+    It does not affect WS-21 Chat Operations or M1.2
+    functionality-health.
     """
 
     global _dashboard_api
@@ -191,11 +199,23 @@ def get_ws21_chat_operations_api() -> ChatOperationsDashboardAPI:
     """
     Provide the shared WS-21 Chat Operations application boundary.
 
-    Both the overview and Private Classroom detail endpoint use
-    this exact same application API instance.
+    The overview, Private Classroom, and Announcement Group
+    endpoints use this exact same application API instance.
     """
 
     return _ws21_chat_operations_api
+
+
+def get_functionality_health_service() -> FunctionalityHealthService:
+    """
+    Provide the M1.2 read-only functionality-health application
+    service.
+
+    This dependency is intentionally read-only and does not expose
+    administrative control operations.
+    """
+
+    return _functionality_health_service
 
 
 # =========================================================
@@ -300,6 +320,34 @@ async def get_operations_center_announcement_group(
 
     return await dashboard_api.get_announcement_group_details()
 
+
+# =========================================================
+# M1.2 Functionality Health
+# =========================================================
+
+@router.get("/functionality-health")
+async def get_operations_center_functionality_health(
+    functionality_health_service: FunctionalityHealthService = Depends(
+        get_functionality_health_service
+    ),
+) -> dict[str, Any]:
+    """
+    Return the M1.2 read-only functionality-health projection.
+
+    This endpoint:
+
+    - executes the existing health checks;
+    - aggregates their results into functionality-level status;
+    - exposes health, risk and dependency information;
+    - does not perform administrative actions;
+    - does not enable or disable functionality;
+    - does not modify Runtime state;
+    - does not call providers directly.
+    """
+
+    return await functionality_health_service.get_health()
+
+
 # =========================================================
 # Existing operational events
 # =========================================================
@@ -326,4 +374,5 @@ __all__ = [
     "get_health_refresh_service",
     "get_operational_events_api",
     "get_ws21_chat_operations_api",
+    "get_functionality_health_service",
 ]

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -12,17 +12,17 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionRequest,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_contracts import (
+from app.application.announcements.execution.durable_contracts import (
     DurableExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
-from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+from app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
     PublicationExecutionRecordModel,
     SqlAlchemyPublicationExecutionRepository,
 )
@@ -198,6 +198,7 @@ async def test_success_survives_new_repository_and_service_instance() -> None:
         )
 
         request = PublicationExecutionRequest(
+            publication_id=publication_id,
             idempotency_key=key,
             correlation_id=correlation_id,
             actor="integration-test",
@@ -329,6 +330,7 @@ async def test_failure_survives_restart_and_remains_retryable() -> None:
     correlation_id = f"corr-{uuid4()}"
 
     request = PublicationExecutionRequest(
+        publication_id=publication_id,
         idempotency_key=key,
         correlation_id=correlation_id,
         actor="integration-test",
@@ -336,7 +338,7 @@ async def test_failure_survives_restart_and_remains_retryable() -> None:
 
     try:
         # ---------------------------------------------------------
-        # Initial execution — failure
+        # Initial execution â€” failure
         # ---------------------------------------------------------
 
         repository_1 = (
@@ -485,3 +487,4 @@ async def test_failure_survives_restart_and_remains_retryable() -> None:
         )
 
         await engine.dispose()
+

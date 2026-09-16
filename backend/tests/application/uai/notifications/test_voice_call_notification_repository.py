@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Notification Repository.
 
 Validates the repository contract.
@@ -213,3 +213,4 @@ def test_repository_is_abstract():
     ):
 
         VoiceCallNotificationRepository()
+

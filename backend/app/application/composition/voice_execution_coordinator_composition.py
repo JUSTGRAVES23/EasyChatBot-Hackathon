@@ -1,63 +1,53 @@
-﻿"""
+"""
 Voice Execution Coordinator Composition.
 
-Composition root for complete
+Shared composition root for the canonical
 voice call execution workflow.
 
 Responsibilities:
-- Build room services.
-- Build runtime services.
-- Wire execution coordinator.
+- Build the provider implementation for the room boundary.
+- Build the application room service.
+- Build the voice execution runtime.
+- Wire the execution coordinator.
 
 Does NOT:
 - Handle HTTP.
 - Execute calls.
-- Manage providers.
-- Store data.
+- Persist data.
+- Own business workflows.
 """
 
 from __future__ import annotations
 
-
-from backend.app.application.uai.voice.voice_call_execution_coordinator import (
+from app.application.uai.voice.voice_call_execution_coordinator import (
     VoiceCallExecutionCoordinator,
 )
-
-
-from backend.app.application.uai.voice.voice_room_service import (
+from app.application.uai.voice.voice_room_service import (
     VoiceRoomService,
 )
-
-
 from app.infrastructure.voice.voice_room_adapter import (
     VoiceRoomAdapter,
 )
-
-
 from app.ai_runtime.voice.voice_call_execution_runtime import (
     VoiceCallExecutionRuntime,
 )
 
 
-
 def create_voice_call_execution_coordinator(
 ) -> VoiceCallExecutionCoordinator:
     """
-    Create configured voice execution coordinator.
+    Create the canonical voice execution coordinator.
+
+    Provider-specific construction remains in the
+    composition root while the application service
+    depends only on the VoiceRoomPort contract.
     """
 
-
     room_service = VoiceRoomService(
-        room_adapter=(
-            VoiceRoomAdapter()
-        ),
+        room_adapter=VoiceRoomAdapter(),
     )
 
-
-    execution_runtime = (
-        VoiceCallExecutionRuntime()
-    )
-
+    execution_runtime = VoiceCallExecutionRuntime()
 
     return VoiceCallExecutionCoordinator(
         room_service=room_service,
@@ -65,7 +55,7 @@ def create_voice_call_execution_coordinator(
     )
 
 
-
 __all__ = [
     "create_voice_call_execution_coordinator",
 ]
+

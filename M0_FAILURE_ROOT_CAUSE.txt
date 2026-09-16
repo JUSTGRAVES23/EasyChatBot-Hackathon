@@ -1,0 +1,1084 @@
+===== M0 FAILURE ROOT-CAUSE INSPECTION =====
+
+===== FILE: backend\app\application\announcements\execution\contracts.py =====
+"""Provider-independent WS-22.3.1 publication execution contracts."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol
+from uuid import UUID
+
+
+class PublicationExecutionStatus(str, Enum):
+    """Outcome of a publication execution attempt."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    IDEMPOTENT_REPLAY = "idempotent_replay"
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationExecutionRequest:
+    """Immutable command to execute an already-approved publication."""
+
+    publication_id: UUID
+    idempotency_key: str
+    actor: str
+    correlation_id: str
+
+    def __post_init__(self) -> None:
+        if not self.idempotency_key.strip():
+            raise ValueError("idempotency_key cannot be empty.")
+        if not self.actor.strip():
+            raise ValueError("actor cannot be empty.")
+        if not self.correlation_id.strip():
+            raise ValueError("correlation_id cannot be empty.")
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationExecutionResult:
+    """Provider-neutral result returned by the execution service."""
+
+    publication_id: UUID
+    status: PublicationExecutionStatus
+    idempotency_key: str
+    correlation_id: str
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class AnnouncementPublisher(Protocol):
+    """Port implemented by infrastructure/channel adapters.
+
+    No Telegram, Discord, email, or other provider types belong here.
+    """
+
+    async def publish(
+        self,
+        *,
+        publication_id: UUID,
+        title: str,
+        content: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> str | None:
+        """Publish and return an optional provider message identifier."""
+
+===== FILE: backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py =====
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from backend.app.application.announcements.execution.contracts import (
+    PublicationExecutionRequest,
+    PublicationExecutionStatus,
+)
+from backend.app.application.announcements.execution.durable_contracts import (
+    DurableExecutionStatus,
+)
+from backend.app.application.announcements.execution.durable_execution_service import (
+    DurablePublicationExecutionService,
+)
+from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+    PublicationExecutionRecordModel,
+    SqlAlchemyPublicationExecutionRepository,
+)
+
+
+def _async_database_url() -> str:
+    value = os.getenv("DATABASE_URL")
+
+    if not value:
+        pytest.skip(
+            "DATABASE_URL is not configured for PostgreSQL integration tests."
+        )
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    pytest.skip("DATABASE_URL is not a PostgreSQL URL.")
+
+
+def _create_database():
+    """
+    Create the existing PostgreSQL connection infrastructure for this
+    integration test.
+
+    No pytest fixture is involved.
+    """
+
+    engine = create_async_engine(
+        _async_database_url(),
+        pool_pre_ping=True,
+    )
+
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    return engine, session_factory
+
+
+class RecordingPublisher:
+    """Test-only provider boundary."""
+
+    def __init__(
+        self,
+        *,
+        result: str = "provider-message-1",
+        fail: bool = False,
+    ) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[dict[str, object]] = []
+
+    async def publish(self, **kwargs) -> str:
+        self.calls.append(kwargs)
+
+        if self.fail:
+            error = RuntimeError(
+                "simulated provider timeout"
+            )
+            error.error_code = "PROVIDER_TIMEOUT"
+            raise error
+
+        return self.result
+
+
+class RecordingAudit:
+    """Test-only implementation of the existing audit contract."""
+
+    def __init__(self) -> None:
+        self.successes: list[dict[str, object]] = []
+        self.failures: list[dict[str, object]] = []
+
+    async def record_success(self, **kwargs) -> None:
+        self.successes.append(kwargs)
+
+    async def record_failure(self, **kwargs) -> None:
+        self.failures.append(kwargs)
+
+
+@dataclass
+class ApprovedPublication:
+    """Minimal publication test double."""
+
+    id: object
+    title: str = "Beta release"
+    content: str = "EasyChatBot Beta release."
+    status: str = "approved"
+
+    def begin_publish(self) -> None:
+        self.status = "publishing"
+
+    def publish_success(
+        self,
+        provider_message_id: str | None = None,
+    ) -> None:
+        self.status = "published"
+
+    def mark_failure(
+        self,
+        error_code: str,
+    ) -> None:
+        self.status = "failed"
+
+
+async def _delete_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    key: str,
+) -> None:
+    """Delete only the execution record created by the test."""
+
+    async with session_factory() as session:
+        await session.execute(
+            delete(
+                PublicationExecutionRecordModel
+            ).where(
+                PublicationExecutionRecordModel.idempotency_key
+                == key
+            )
+        )
+
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_success_survives_new_repository_and_service_instance() -> None:
+    """
+    Verify:
+
+    1. Execution persists in PostgreSQL.
+    2. A new repository/service instance can recover it.
+    3. Duplicate execution is detected after restart.
+    4. Provider message ID survives restart.
+    5. Correlation ID survives restart.
+    6. Provider is not called twice.
+    """
+
+    engine, session_factory = _create_database()
+
+    key = f"ws22-3-2x1-success-{uuid4()}"
+    publication_id = uuid4()
+    correlation_id = f"corr-{uuid4()}"
+
+    try:
+        # ---------------------------------------------------------
+        # Application instance #1
+        # ---------------------------------------------------------
+
+        publisher_1 = RecordingPublisher(
+            result="provider-message-123"
+        )
+
+        audit_1 = RecordingAudit()
+
+        repository_1 = (
+            SqlAlchemyPublicationExecutionRepository(
+                session_factory
+            )
+        )
+
+        service_1 = DurablePublicationExecutionService(
+            publisher=publisher_1,
+            execution_repository=repository_1,
+            audit=audit_1,
+        )
+
+        request = PublicationExecutionRequest(
+            idempotency_key=key,
+            correlation_id=correlation_id,
+            actor="integration-test",
+        )
+
+        publication = ApprovedPublication(
+            id=publication_id
+        )
+
+        result = await service_1.execute(
+            publication=publication,
+            request=request,
+        )
+
+        assert result.status is (
+            PublicationExecutionStatus.SUCCEEDED
+        )
+
+        assert result.provider_message_id == (
+            "provider-message-123"
+        )
+
+        assert len(publisher_1.calls) == 1
+        assert len(audit_1.successes) == 1
+
+        # ---------------------------------------------------------
+        # Simulated application restart
+        # ---------------------------------------------------------
+
+        publisher_2 = RecordingPublisher(
+            result="SHOULD-NOT-BE-SENT"
+        )
+
+        audit_2 = RecordingAudit()
+
+        repository_2 = (
+            SqlAlchemyPublicationExecutionRepository(
+                session_factory
+            )
+        )
+
+        service_2 = DurablePublicationExecutionService(
+            publisher=publisher_2,
+            execution_repository=repository_2,
+            audit=audit_2,
+        )
+
+        replay = await service_2.execute(
+            publication=ApprovedPublication(
+                id=publication_id
+            ),
+            request=request,
+        )
+
+        assert replay.status is (
+            PublicationExecutionStatus.IDEMPOTENT_REPLAY
+        )
+
+        assert replay.provider_message_id == (
+            "provider-message-123"
+        )
+
+        # Critical guarantee.
+        assert publisher_2.calls == []
+
+        # Replay must not generate another success audit.
+        assert audit_2.successes == []
+
+        # ---------------------------------------------------------
+        # Verify PostgreSQL persistence
+        # ---------------------------------------------------------
+
+        persisted = (
+            await repository_2.get_by_idempotency_key(
+                key
+            )
+        )
+
+        assert persisted is not None
+
+        assert persisted.status is (
+            DurableExecutionStatus.SUCCEEDED
+        )
+
+        assert persisted.publication_id == (
+            publication_id
+        )
+
+        assert persisted.idempotency_key == key
+
+        assert persisted.correlation_id == (
+            correlation_id
+        )
+
+        assert persisted.attempt == 1
+
+        assert persisted.provider_message_id == (
+            "provider-message-123"
+        )
+
+        assert persisted.error_code is None
+
+    finally:
+        await _delete_execution(
+            session_factory,
+            key,
+        )
+
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failure_survives_restart_and_remains_retryable() -> None:
+    """
+    Verify:
+
+    1. Failure persists in PostgreSQL.
+    2. Failure survives a new repository instance.
+    3. Error code persists.
+    4. Correlation ID persists.
+    5. Failed execution can be retried.
+    6. Successful retry persists.
+    """
+
+    engine, session_factory = _create_database()
+
+    key = f"ws22-3-2x1-failure-{uuid4()}"
+    publication_id = uuid4()
+    correlation_id = f"corr-{uuid4()}"
+
+    request = PublicationExecutionRequest(
+        idempotency_key=key,
+        correlation_id=correlation_id,
+        actor="integration-test",
+    )
+
+    try:
+        # ---------------------------------------------------------
+        # Initial execution — failure
+        # ---------------------------------------------------------
+
+        repository_1 = (
+            SqlAlchemyPublicationExecutionRepository(
+                session_factory
+            )
+        )
+
+        publisher_1 = RecordingPublisher(
+            fail=True
+        )
+
+        audit_1 = RecordingAudit()
+
+        service_1 = DurablePublicationExecutionService(
+            publisher=publisher_1,
+            execution_repository=repository_1,
+            audit=audit_1,
+        )
+
+        result = await service_1.execute(
+            publication=ApprovedPublication(
+                id=publication_id
+            ),
+            request=request,
+        )
+
+        assert result.status is (
+            PublicationExecutionStatus.FAILED
+        )
+
+        assert result.error_code == (
+            "PROVIDER_TIMEOUT"
+        )
+
+        assert len(publisher_1.calls) == 1
+        assert len(audit_1.failures) == 1
+
+        # ---------------------------------------------------------
+        # Simulated restart
+        # ---------------------------------------------------------
+
+        repository_2 = (
+            SqlAlchemyPublicationExecutionRepository(
+                session_factory
+            )
+        )
+
+        persisted = (
+            await repository_2.get_by_idempotency_key(
+                key
+            )
+        )
+
+        assert persisted is not None
+
+        assert persisted.status is (
+            DurableExecutionStatus.FAILED
+        )
+
+        assert persisted.publication_id == (
+            publication_id
+        )
+
+        assert persisted.correlation_id == (
+            correlation_id
+        )
+
+        assert persisted.attempt == 1
+
+        assert persisted.error_code == (
+            "PROVIDER_TIMEOUT"
+        )
+
+        assert persisted.provider_message_id is None
+
+        # ---------------------------------------------------------
+        # Retry
+        # ---------------------------------------------------------
+
+        publisher_2 = RecordingPublisher(
+            result="provider-after-retry"
+        )
+
+        audit_2 = RecordingAudit()
+
+        service_2 = DurablePublicationExecutionService(
+            publisher=publisher_2,
+            execution_repository=repository_2,
+            audit=audit_2,
+        )
+
+        retry = await service_2.execute(
+            publication=ApprovedPublication(
+                id=publication_id
+            ),
+            request=request,
+        )
+
+        assert retry.status is (
+            PublicationExecutionStatus.SUCCEEDED
+        )
+
+        assert retry.provider_message_id == (
+            "provider-after-retry"
+        )
+
+        assert len(publisher_2.calls) == 1
+        assert len(audit_2.successes) == 1
+
+        # ---------------------------------------------------------
+        # Verify final PostgreSQL state
+        # ---------------------------------------------------------
+
+        persisted_after_retry = (
+            await repository_2.get_by_idempotency_key(
+                key
+            )
+        )
+
+        assert persisted_after_retry is not None
+
+        assert persisted_after_retry.status is (
+            DurableExecutionStatus.SUCCEEDED
+        )
+
+        assert (
+            persisted_after_retry.provider_message_id
+            == "provider-after-retry"
+        )
+
+        assert (
+            persisted_after_retry.correlation_id
+            == correlation_id
+        )
+
+        assert (
+            persisted_after_retry.publication_id
+            == publication_id
+        )
+
+    finally:
+        await _delete_execution(
+            session_factory,
+            key,
+        )
+
+        await engine.dispose()
+
+===== FILE: backend\app\main.py =====
+"""
+EasyChatBot FastAPI Application.
+
+Application entry point.
+
+Responsibilities:
+- Create FastAPI application.
+- Register active API routers.
+- Configure application metadata.
+- Manage application lifecycle.
+
+Does NOT:
+- Execute AI agents.
+- Handle business logic.
+- Manage voice sessions.
+- Call external providers directly.
+- Implement individual application services.
+- Execute cybersecurity workflows.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+
+#
+# Academy activation
+#
+
+from backend.app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+#
+# Existing authentication persistence boundary
+#
+
+from backend.app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+
+
+#
+# Existing canonical async PostgreSQL persistence boundary
+#
+
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+
+
+#
+# Existing outbound-only Telegram announcement boundary
+#
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+
+
+#
+# Scheduler lifecycle boundary
+#
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+#
+# Governance APIs
+#
+
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+
+
+#
+# Provider Management Controls
+#
+
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+
+
+#
+# Privacy Governance
+#
+
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+
+
+#
+# M7.2 Privacy Screening
+#
+
+from backend.app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+
+from backend.app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+
+from backend.app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+
+from backend.app.application.privacy.screening.service import (
+    ScreeningService,
+)
+
+
+#
+# M1.3 Email Workflows
+#
+# Read-only Operations Center visibility.
+#
+# Does NOT:
+# - start workflows;
+# - stop workflows;
+# - modify schedules;
+# - expose provider credentials.
+#
+
+from backend.app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+
+
+#
+# Voice APIs
+#
+
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+
+
+#
+# AI Operations Center
+#
+
+from app.api.operations_center import (
+    router as operations_center_router,
+)
+
+
+#
+# Cybersecurity APIs
+#
+
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Announcement composition boundary
+#
+
+def _create_announcement_components():
+    """
+    Compose the existing outbound-only Telegram announcement boundary.
+
+    This creates an outbound Telegram client only.
+
+    It does NOT:
+    - poll Telegram;
+    - register handlers;
+    - start polling;
+    - create a second Telegram bot runtime.
+    """
+
+    telegram_client = TelegramAnnouncementClient()
+
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    return (
+        telegram_client,
+        announcement_publisher,
+    )
+
+
+#
+# FastAPI lifecycle
+#
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    The scheduler is composed once per application and stored on
+    application.state.
+
+    FastAPI only controls scheduler lifecycle.
+    """
+
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+
+    Academy production composition is explicitly activated only when
+    both Academy activation flags are enabled.
+    """
+
+    #
+    # Academy production composition
+    #
+
+    academy_config = AcademyActivationConfig.from_environment()
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+
+        academy_engine = create_async_database_engine()
+
+        academy_session_factory = create_async_session_factory(
+            academy_engine,
+        )
+
+        #
+        # Preserve existing authentication repository boundary.
+        #
+
+        PostgreSQLAuthenticationRepository(
+            academy_session_factory,
+        )
+
+        #
+        # Existing outbound Telegram announcement boundary.
+        #
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        #
+        # Compose Academy using existing boundaries.
+        #
+
+        academy_one_week_workflow = create_academy_one_week_workflow(
+            session_factory=academy_session_factory,
+            telegram_bot=announcement_telegram_client,
+        )
+
+    #
+    # Shared scheduler
+    #
+    # Exactly one scheduler runtime is composed.
+    #
+
+    scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    #
+    # Application state
+    #
+
+    application.state.scheduler_runtime = scheduler_runtime
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    #
+    # CORS
+    #
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=[
+            "*",
+        ],
+        allow_headers=[
+            "*",
+        ],
+    )
+
+    #
+    # Voice APIs
+    #
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    #
+    # AI Operations Center
+    #
+
+    application.include_router(
+        operations_center_router,
+    )
+
+    #
+    # M1.3 Email Workflows
+    #
+    # Read-only visibility only.
+    #
+
+    application.include_router(
+        create_email_workflows_router(),
+    )
+
+    #
+    # Privacy Governance Operations Center
+    #
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    #
+    # M7.2 Privacy Screening
+    #
+
+    processing_registry = create_beta1_processing_registry()
+
+    screening_service = ScreeningService()
+
+    screening_adapter = ProcessingActivityScreeningAdapter(
+        screening_service,
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    #
+    # Provider Management Controls
+    #
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    #
+    # Governance Audit API
+    #
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    #
+    # Governance Operations API
+    #
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    #
+    # Governance Evidence Timeline API
+    #
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    #
+    # Governance Change Lifecycle API
+    #
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    #
+    # Cybersecurity Intelligence
+    #
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    #
+    # Cybersecurity Decision Support
+    #
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    #
+    # Cybersecurity Reports
+    #
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    #
+    # Cybersecurity Live Reports
+    #
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]

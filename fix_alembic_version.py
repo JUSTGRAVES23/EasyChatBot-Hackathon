@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from backend.app.infrastructure.persistence.database import (
+from app.infrastructure.persistence.database import (
     create_database_engine,
 )
 

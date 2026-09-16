@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot API Routes.
 
 Application HTTP boundary.
@@ -37,13 +37,18 @@ CapabilityGateway
 from __future__ import annotations
 
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi import HTTPException
 
-from backend.agents.conversation_agent import (
+from app.api.dependencies.identity import (
+    get_current_principal,
+)
+
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.api.schemas import (
+from api.schemas import (
     ChatRequest,
     ChatResponse,
     FlashDealActionsResponse,
@@ -57,40 +62,48 @@ from backend.api.schemas import (
     RuntimeExecuteResponse,
 )
 
-from backend.application.factory import (
+from application.factory import (
     ApplicationFactory,
 )
 
-from backend.characters.character_registry import (
+from characters.character_registry import (
     CharacterRegistry,
 )
 
-from backend.providers.llm.llm_provider_factory import (
+from app.domain.identity.principal import (
+    Principal,
+)
+
+from providers.llm.llm_provider_factory import (
     LLMProviderFactory,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.runtime.external_runtime_container import (
+from runtime.external_runtime_container import (
     get_external_runtime_service,
 )
 
-from backend.services.companion_service import (
+from services.companion_service import (
     CompanionService,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.services.llm_service import (
+from services.llm_service import (
     LLMService,
 )
 
-from backend.services.runtime.runtime_application_service import (
+from services.runtime.runtime_application_service import (
     RuntimeApplicationService,
+)
+
+from src.ai_runtime.capabilities.actor_context import (
+    RuntimeActorContext,
 )
 
 from src.ai_runtime.composition import (
@@ -497,9 +510,14 @@ async def chat(
 )
 async def execute_runtime(
     payload: RuntimeExecuteRequest,
+    principal: Principal = Depends(get_current_principal),
 ) -> RuntimeExecuteResponse:
     """
     Execute an approved Runtime capability.
+
+    The API boundary authenticates the caller and converts the
+    application Principal into the provider-independent
+    RuntimeActorContext.
 
     HTTP concerns remain here.
 
@@ -508,12 +526,18 @@ async def execute_runtime(
         RuntimeApplicationService
     """
 
+    actor = RuntimeActorContext(
+        actor_id=principal.user_id,
+        roles=principal.roles,
+    )
+
     service = create_runtime_application_service()
 
     try:
         result = await service.execute(
             capability=payload.capability,
             payload=payload.payload,
+            actor=actor,
         )
 
     except ValueError as exc:
@@ -826,3 +850,4 @@ def hackathon_flash_deal() -> FlashDealResponse:
             ),
         ),
     )
+

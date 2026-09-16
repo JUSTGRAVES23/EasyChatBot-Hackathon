@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from uuid import UUID
 
 import pytest
 
-from backend.app.application.announcements.announcement_operations_service import AnnouncementOperationsService
-from backend.app.application.announcements.in_memory_repositories import InMemoryAnnouncementRepository, InMemoryPublicationEventRepository
-from backend.app.domain.announcements.publication_event import PublicationEventType
-from backend.app.domain.announcements.publication_status import PublicationStatus
+from app.application.announcements.announcement_operations_service import AnnouncementOperationsService
+from app.application.announcements.in_memory_repositories import InMemoryAnnouncementRepository, InMemoryPublicationEventRepository
+from app.domain.announcements.publication_event import PublicationEventType
+from app.domain.announcements.publication_status import PublicationStatus
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,8 @@ async def test_failed_publication_is_recorded() -> None:
 
 
 def test_invalid_transition_is_rejected() -> None:
-    from backend.app.domain.announcements.announcement import Announcement
+    from app.domain.announcements.announcement import Announcement
     item = Announcement(title="A", body="B", created_by="admin")
     with pytest.raises(ValueError):
         item.mark_published()
+

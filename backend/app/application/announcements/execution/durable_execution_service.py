@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     AnnouncementPublisher,
     PublicationExecutionRequest,
     PublicationExecutionResult,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_contracts import (
+from app.application.announcements.execution.durable_contracts import (
     DurableExecutionStatus,
     PublicationExecutionRepository,
 )

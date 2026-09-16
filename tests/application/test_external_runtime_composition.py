@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for application composition of the external AI Runtime.
 
 These tests verify that the application composition layer:
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 

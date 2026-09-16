@@ -1,4 +1,4 @@
-"""
+﻿"""
 Research Service.
 
 Coordinates the Research Agent and exposes a
@@ -25,15 +25,15 @@ The service does not know about Parallel SDK details.
 
 from __future__ import annotations
 
-from backend.agents.research_agent import (
+from agents.research_agent import (
     ResearchAgent,
 )
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

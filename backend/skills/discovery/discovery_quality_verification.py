@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Quality Verification Skill.
 
 Validates recommendations before they are presented
@@ -44,14 +44,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.skills.discovery.personalised_content_adaptation import (
+from skills.discovery.personalised_content_adaptation import (
     PersonalisedRecommendation,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

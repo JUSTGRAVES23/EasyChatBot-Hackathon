@@ -1,4 +1,4 @@
-"""
+﻿"""
 Integration tests for application factory + external Runtime.
 
 Verifies the complete dependency wiring path:
@@ -19,11 +19,11 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
-from backend.application.factory import (
+from application.factory import (
     ApplicationFactory,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 

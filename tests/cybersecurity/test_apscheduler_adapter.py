@@ -7,7 +7,7 @@ Uses fake scheduler to avoid infrastructure dependency.
 import pytest
 
 
-from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
     CybersecurityAPSchedulerAdapter,
 )
 
@@ -68,7 +68,7 @@ async def test_runtime_with_scheduler_adapter():
         workflow_service=FakeWorkflow(),
     )
 
-    from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    from cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
         CybersecuritySchedulerRuntime,
     )
 
@@ -83,4 +83,5 @@ async def test_runtime_with_scheduler_adapter():
     await runtime.stop()
 
     assert runtime.status()["started"] is False
+
 

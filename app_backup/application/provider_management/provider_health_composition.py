@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot provider health composition.
 
 Builds the provider-health application graph used by the
@@ -53,7 +53,7 @@ from app.application.provider_management.provider_incident_service import (
     InMemoryProviderIncidentRepository,
     ProviderIncidentService,
 )
-from backend.providers.health.ollama_cloud_health_probe import (
+from providers.health.ollama_cloud_health_probe import (
     OllamaCloudHealthProbe,
 )
 

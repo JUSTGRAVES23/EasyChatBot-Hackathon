@@ -20,24 +20,21 @@ Does NOT:
 
 from __future__ import annotations
 
-
+import logging
 from dataclasses import dataclass
-
 
 from app.domain.uai.voice.voice_call_execution_context import (
     VoiceCallExecutionContext,
 )
-
-
 from app.domain.uai.voice.voice_call_session import (
     VoiceCallSession,
 )
-
-
 from app.domain.uai.voice.voice_call_state import (
     VoiceCallState,
 )
 
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(
@@ -48,8 +45,6 @@ class VoiceCallExecutionRuntime:
     """
     Executes prepared voice calls.
     """
-
-
 
     def start(
         self,
@@ -67,30 +62,21 @@ class VoiceCallExecutionRuntime:
         ACTIVE
         """
 
+        session = context.session
 
-        session = (
-            context.session
-        )
-
-
-        if session.state != (
-            VoiceCallState.READY
-        ):
+        if session.state != VoiceCallState.READY:
             raise ValueError(
                 "Voice call must be READY "
                 "before execution."
             )
 
-
         if not context.room.has_character():
-
             raise ValueError(
                 "Voice call room requires "
                 "a character participant."
             )
 
-
-        return VoiceCallSession(
+        active_session = VoiceCallSession(
             session_id=session.session_id,
             learner_id=session.learner_id,
             character_id=session.character_id,
@@ -99,7 +85,18 @@ class VoiceCallExecutionRuntime:
             state=VoiceCallState.ACTIVE,
         )
 
+        logger.info(
+            "Voice call execution started",
+            extra={
+                "session_id": active_session.session_id,
+                "learner_id": active_session.learner_id,
+                "character_id": active_session.character_id,
+                "world_id": active_session.world_id,
+                "state": active_session.state.value,
+            },
+        )
 
+        return active_session
 
     def stop(
         self,
@@ -117,22 +114,15 @@ class VoiceCallExecutionRuntime:
         ENDED
         """
 
+        session = context.session
 
-        session = (
-            context.session
-        )
-
-
-        if session.state != (
-            VoiceCallState.ACTIVE
-        ):
+        if session.state != VoiceCallState.ACTIVE:
             raise ValueError(
                 "Only ACTIVE voice calls "
                 "can be stopped."
             )
 
-
-        return VoiceCallSession(
+        ended_session = VoiceCallSession(
             session_id=session.session_id,
             learner_id=session.learner_id,
             character_id=session.character_id,
@@ -141,7 +131,18 @@ class VoiceCallExecutionRuntime:
             state=VoiceCallState.ENDED,
         )
 
+        logger.info(
+            "Voice call execution ended",
+            extra={
+                "session_id": ended_session.session_id,
+                "learner_id": ended_session.learner_id,
+                "character_id": ended_session.character_id,
+                "world_id": ended_session.world_id,
+                "state": ended_session.state.value,
+            },
+        )
 
+        return ended_session
 
     def fail(
         self,
@@ -152,13 +153,9 @@ class VoiceCallExecutionRuntime:
         Mark execution as failed.
         """
 
+        session = context.session
 
-        session = (
-            context.session
-        )
-
-
-        return VoiceCallSession(
+        failed_session = VoiceCallSession(
             session_id=session.session_id,
             learner_id=session.learner_id,
             character_id=session.character_id,
@@ -166,3 +163,17 @@ class VoiceCallExecutionRuntime:
             language_code=session.language_code,
             state=VoiceCallState.FAILED,
         )
+
+        logger.error(
+            "Voice call execution failed",
+            extra={
+                "session_id": failed_session.session_id,
+                "learner_id": failed_session.learner_id,
+                "character_id": failed_session.character_id,
+                "world_id": failed_session.world_id,
+                "state": failed_session.state.value,
+            },
+        )
+
+        return failed_session
+

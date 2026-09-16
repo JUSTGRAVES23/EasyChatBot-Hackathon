@@ -1,72 +1,61 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
-from backend.app.ai_runtime.conversation.conversation_runtime import (
+from app.ai_runtime.conversation.conversation_runtime import (
     ConversationRuntime,
 )
-from backend.app.application.composition.beta_telegram_composition import (
+from app.application.composition.beta_telegram_composition import (
     BetaTelegramComposition,
     create_beta_telegram_composition,
 )
-from backend.app.application.conversation_quality.conversation_event_validator import (
+from app.application.conversation_quality.conversation_event_validator import (
     ConversationEventValidator,
 )
-from backend.app.application.privacy.privacy_identifier_service import (
+from app.application.privacy.privacy_identifier_service import (
     PrivacyIdentifierService,
 )
-from backend.app.infrastructure.persistence.database import (
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.infrastructure.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
-from backend.app.infrastructure.persistence.postgresql_beta_access_repository import (
+from app.infrastructure.persistence.postgresql_beta_access_repository import (
     PostgreSQLBetaTokenRepository,
     PostgreSQLBetaUserRepository,
     PostgreSQLTelegramBindingRepository,
 )
-from backend.app.infrastructure.persistence.postgresql_conversation_event_repository import (
+from app.infrastructure.persistence.postgresql_conversation_event_repository import (
     PostgreSQLConversationEventRepository,
 )
-
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.application.uai.language.language_detector import LanguageDetector
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.application.world_catalogue.service import LearningWorldCatalogueService
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class BetaTelegramProductionComposition:
-    """
-    Production infrastructure composition for the Beta Telegram
-    classroom.
-
-    Dependency graph:
-
-        DATABASE_URL
-            ↓
-        SQLAlchemy engine
-            ↓
-        session factory
-            ↓
-        PostgreSQL repositories
-            ↓
-        privacy / validation services
-            ↓
-        conversation runtime
-            ↓
-        Beta Telegram application composition
-            ↓
-        Telegram adapter
-            ↓
-        Telegram runtime
-
-    This class composes dependencies only.
-    It does not start Telegram polling.
-    """
-
     beta_telegram: BetaTelegramComposition
     database_engine: Any
     session_factory: Any
+    catalogue_service: LearningWorldCatalogueService
 
     @property
     def runtime(self) -> Any:
@@ -109,35 +98,35 @@ def create_production_beta_telegram_composition(
     database_engine_factory: Callable[[], Any] | None = None,
     session_factory_factory: Callable[[Any], Any] | None = None,
     conversation_runtime: ConversationRuntime | None = None,
-    conversation_runtime_factory: (
-        Callable[[], ConversationRuntime] | None
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
     ) = None,
+    language_detector: LanguageDetector | None = None,
 ) -> BetaTelegramProductionComposition:
-    """
-    Build the production Beta Telegram dependency graph.
+    """Create the production Beta Telegram composition.
 
-    All infrastructure dependencies remain injectable.
-
-    Production:
-
-        DATABASE_URL
-            ↓
-        SQLAlchemy
-            ↓
-        PostgreSQL repositories
-            ↓
-        Beta Telegram application graph
-
-    Tests may inject:
-
-        database_engine_factory
-        session_factory_factory
-        conversation_runtime_factory
+    Production Telegram processing requires the operational
+    functionality-control service. The service is injected from
+    the application composition; this factory never creates a
+    second control service or control repository.
     """
 
     if expiration_minutes <= 0:
         raise ValueError(
             "expiration_minutes must be greater than zero."
+        )
+
+    if functionality_control_service is None:
+        raise ValueError(
+            "functionality_control_service is required "
+            "for production Telegram composition."
+        )
+
+    if language_detector is None:
+        raise ValueError(
+            "language_detector is required "
+            "for production Telegram composition."
         )
 
     if (
@@ -167,71 +156,65 @@ def create_production_beta_telegram_composition(
             "conversation_runtime_factory, not both."
         )
 
-    # =========================================================
-    # DATABASE ENGINE
-    # =========================================================
-
     if database_engine is None:
-        resolved_engine_factory = (
+        database_engine = (
             database_engine_factory
             or create_database_engine
-        )
-
-        database_engine = resolved_engine_factory()
-
-    # =========================================================
-    # SESSION FACTORY
-    # =========================================================
+        )()
 
     if session_factory is None:
-        resolved_session_factory = (
+        session_factory = (
             session_factory_factory
             or create_session_factory
-        )
-
-        session_factory = resolved_session_factory(
-            database_engine,
-        )
-
-    # =========================================================
-    # PERSISTENCE
-    # =========================================================
+        )(database_engine)
 
     beta_user_repository = PostgreSQLBetaUserRepository(
         session_factory,
     )
-
     beta_token_repository = PostgreSQLBetaTokenRepository(
         session_factory,
     )
-
     telegram_binding_repository = (
         PostgreSQLTelegramBindingRepository(
             session_factory,
         )
     )
-
     conversation_event_repository = (
         PostgreSQLConversationEventRepository(
             session_factory,
         )
     )
 
-    # =========================================================
-    # PRIVACY / VALIDATION
-    # =========================================================
-
-    privacy_identifier_service = (
-        PrivacyIdentifierService()
+    # Durable provider usage ledger.
+    # Accounting remains outside the Operations Center.
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            session_factory,
+        )
     )
 
+    privacy_identifier_service = PrivacyIdentifierService()
     conversation_event_validator = (
         ConversationEventValidator()
     )
 
-    # =========================================================
-    # APPLICATION COMPOSITION
-    # =========================================================
+    # One authoritative WorldResolver is shared by Beta access and
+    # Learning World catalogue resolution.
+    app_root = Path(__file__).resolve().parents[2]
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds"
+    )
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = PostgreSQLLearningWorldCatalogueRepository(
+        session_factory
+    )
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
 
     beta_telegram = create_beta_telegram_composition(
         user_repository=beta_user_repository,
@@ -251,16 +234,27 @@ def create_production_beta_telegram_composition(
         conversation_runtime_factory=(
             conversation_runtime_factory
         ),
+        provider_usage_repository=(
+            provider_usage_repository
+        ),
+        functionality_control_service=(
+            functionality_control_service
+        ),
+        world_resolver=world_resolver,
+        language_response_policy=LanguageResponsePolicy(),
+        language_detector=language_detector,
     )
 
     logger.info(
-        "Production Beta Telegram composition created."
+        "Production Beta Telegram composition created "
+        "with durable usage ledger and functionality control."
     )
 
     return BetaTelegramProductionComposition(
         beta_telegram=beta_telegram,
         database_engine=database_engine,
         session_factory=session_factory,
+        catalogue_service=catalogue_service,
     )
 
 
@@ -268,3 +262,5 @@ __all__ = [
     "BetaTelegramProductionComposition",
     "create_production_beta_telegram_composition",
 ]
+
+

@@ -1,0 +1,641 @@
+﻿===== MAIN APPLICATION =====
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+from backend.app.application.operations_center.dashboard_composition import (
+    create_operations_center_composition,
+)
+from backend.app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+from backend.app.api.authentication import (
+    router as authentication_router,
+)
+from backend.app.api.operations_center import (
+    create_operations_center_router,
+)
+from backend.app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from backend.app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+
+# Existing imports below remain unchanged.
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+from backend.app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+from backend.app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+from backend.app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+from backend.app.application.privacy.screening.service import (
+    ScreeningService,
+)
+from backend.app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+from app.api.voice_calls import router as voice_calls_router
+from app.api.voice_reconnect_router import router as voice_reconnect_router
+from app.api.voice_call_trigger import router as voice_call_trigger_router
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+# This package intentionally provides the complete file so the change is
+# copy-safe. Only the production usage composition/router wiring differs
+# from the existing file.
+
+
+def _create_announcement_components():
+    telegram_client = TelegramAnnouncementClient()
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+    return telegram_client, announcement_publisher
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+    except Exception as exc:
+        print("Cybersecurity scheduler startup failed:", exc)
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+    except Exception as exc:
+        print("Cybersecurity scheduler shutdown failed:", exc)
+    finally:
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+        if telegram_client is not None:
+            try:
+                await telegram_client.close()
+            except Exception as exc:
+                print(
+                    "Telegram announcement client shutdown failed:",
+                    exc,
+                )
+
+        auth_engine = getattr(application.state, "auth_engine", None)
+        if auth_engine is not None:
+            try:
+                await auth_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL authentication engine shutdown failed:",
+                    exc,
+                )
+
+        provider_usage_engine = getattr(
+            application.state,
+            "provider_usage_engine",
+            None,
+        )
+        if provider_usage_engine is not None:
+            try:
+                provider_usage_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL provider-usage engine shutdown failed:",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    academy_config = AcademyActivationConfig.from_environment()
+
+    auth_engine = create_async_database_engine()
+    auth_session_factory = create_async_session_factory(auth_engine)
+    auth_repository = PostgreSQLAuthenticationRepository(
+        auth_session_factory,
+    )
+
+    # Provider-usage repository is synchronous by contract. It therefore
+    # receives a synchronous engine/session factory. It must not receive
+    # the async authentication session factory.
+    provider_usage_engine = create_database_engine()
+    provider_usage_session_factory = create_session_factory(
+        provider_usage_engine,
+    )
+    provider_usage_repository = PostgreSQLProviderUsageRepository(
+        provider_usage_session_factory,
+    )
+    provider_usage_dashboard_service = ProviderUsageDashboardService(
+        repository=provider_usage_repository,
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = auth_session_factory
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = create_academy_one_week_workflow(
+            session_factory=academy_session_factory,
+            telegram_bot=announcement_telegram_client,
+        )
+
+    scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = scheduler_runtime
+    application.state.auth_repository = auth_repository
+    application.state.auth_engine = auth_engine
+    application.state.provider_usage_engine = provider_usage_engine
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.include_router(authentication_router)
+    application.include_router(voice_calls_router)
+    application.include_router(voice_reconnect_router)
+    application.include_router(voice_call_trigger_router)
+    application.include_router(voice_notification_acceptance_router)
+
+    operations_center_composition = create_operations_center_composition(
+        provider_usage_dashboard_service=provider_usage_dashboard_service,
+    )
+    application.include_router(
+        create_operations_center_router(
+            composition=operations_center_composition,
+        ),
+    )
+
+    application.include_router(create_email_workflows_router())
+    application.include_router(privacy_governance_router)
+
+    processing_registry = create_beta1_processing_registry()
+    screening_service = ScreeningService()
+    screening_adapter = ProcessingActivityScreeningAdapter(screening_service)
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    application.include_router(provider_management_controls_router)
+    application.include_router(governance_audit_router)
+    application.include_router(governance_operations_router)
+    application.include_router(governance_evidence_router)
+    application.include_router(governance_change_lifecycle_router)
+    application.include_router(cybersecurity_intelligence_router)
+    application.include_router(cybersecurity_decision_support_router)
+    application.include_router(cybersecurity_reports_router)
+    application.include_router(cybersecurity_live_reports_router)
+
+    return application
+
+
+app = create_application()
+
+__all__ = ["app", "create_application"]
+===== DATABASE MODULE FILES =====
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_orchestrator.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\__pycache__\voice_call_session_service.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\__pycache__\voice_character_session_service.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\__pycache__\voice_session_orchestrator.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\__pycache__\voice_session_service.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\__pycache__\voice_call_session.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\__pycache__\voice_session.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\session_identity_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\__pycache__\session_identity_provider.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_beta_access_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_event_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_notification_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_connection_token_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\voice_call_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\beta_access_models.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\beta_connection_token_models.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\conversation_event_records.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\database.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\in_memory_beta_access_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\in_memory_voice_call_event_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\in_memory_voice_call_invitation_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\in_memory_voice_call_notification_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\memory_records.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\postgresql_beta_access_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\postgresql_beta_connection_token_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\postgresql_conversation_event_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\postgresql_memory_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\postgresql_provider_usage_repository.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\provider_usage_records.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\__pycache__\voice_call_repository.cpython-313.pyc
+===== ALEMBIC ENVIRONMENT =====
+from __future__ import annotations
+
+import os
+import sys
+from logging.config import fileConfig
+
+from alembic import context
+from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
+
+# Load the repository-level .env before accessing DATABASE_URL.
+# Repository root:
+# C:\AI Folder\EasyChatBot-Hackathon\.env
+load_dotenv(
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+    )
+)
+
+# Make backend/ importable so Alembic can load the application modules.
+sys.path.insert(
+    0,
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")
+    ),
+)
+
+from app.infrastructure.persistence.database import Base, database_url
+from app.infrastructure.persistence import beta_access_models  # noqa: F401
+
+
+config = context.config
+
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
+
+
+def get_database_url() -> str:
+    """Return the configured database URL."""
+    return database_url()
+
+
+def run_migrations_offline() -> None:
+    """Run migrations without creating a database connection."""
+    url = get_database_url()
+
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations using a live database connection."""
+    configuration = config.get_section(config.config_ini_section) or {}
+    configuration["sqlalchemy.url"] = get_database_url()
+
+    connectable = engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+===== RECENT PERSISTENCE MIGRATION =====
+"""Create durable provider usage event ledger.
+
+Revision ID is intentionally independent of the repository's currently
+divergent Alembic chain. Do not execute this revision with `alembic upgrade`
+until the shared database migration graph has been reconciled.
+"""
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "20260906_provider_usage_events"
+down_revision = None
+branch_labels = ("provider_usage_ledger",)
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "provider_usage_events",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("provider", sa.String(length=64), nullable=False),
+        sa.Column("model", sa.String(length=128), nullable=False),
+        sa.Column("capability", sa.String(length=128), nullable=False),
+        sa.Column("functionality", sa.String(length=128), nullable=False),
+        sa.Column("agent", sa.String(length=128), nullable=False),
+        sa.Column("input_tokens", sa.Integer(), nullable=False),
+        sa.Column("output_tokens", sa.Integer(), nullable=False),
+        sa.Column("latency_ms", sa.Integer(), nullable=False),
+        sa.Column(
+            "estimated_cost",
+            sa.Numeric(precision=18, scale=8),
+            nullable=False,
+        ),
+        sa.Column(
+            "quality_score",
+            sa.Numeric(precision=5, scale=2),
+            nullable=False,
+        ),
+        sa.Column("success", sa.Boolean(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    op.create_index(
+        "ix_provider_usage_events_provider",
+        "provider_usage_events",
+        ["provider"],
+    )
+    op.create_index(
+        "ix_provider_usage_events_model",
+        "provider_usage_events",
+        ["model"],
+    )
+    op.create_index(
+        "ix_provider_usage_events_capability",
+        "provider_usage_events",
+        ["capability"],
+    )
+    op.create_index(
+        "ix_provider_usage_events_functionality",
+        "provider_usage_events",
+        ["functionality"],
+    )
+    op.create_index(
+        "ix_provider_usage_events_agent",
+        "provider_usage_events",
+        ["agent"],
+    )
+    op.create_index(
+        "ix_provider_usage_events_success",
+        "provider_usage_events",
+        ["success"],
+    )
+    op.create_index(
+        "ix_provider_usage_events_created_at",
+        "provider_usage_events",
+        ["created_at"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "ix_provider_usage_events_created_at",
+        table_name="provider_usage_events",
+    )
+    op.drop_index(
+        "ix_provider_usage_events_success",
+        table_name="provider_usage_events",
+    )
+    op.drop_index(
+        "ix_provider_usage_events_agent",
+        table_name="provider_usage_events",
+    )
+    op.drop_index(
+        "ix_provider_usage_events_functionality",
+        table_name="provider_usage_events",
+    )
+    op.drop_index(
+        "ix_provider_usage_events_capability",
+        table_name="provider_usage_events",
+    )
+    op.drop_index(
+        "ix_provider_usage_events_model",
+        table_name="provider_usage_events",
+    )
+    op.drop_index(
+        "ix_provider_usage_events_provider",
+        table_name="provider_usage_events",
+    )
+    op.drop_table("provider_usage_events")
+===== PUBLICATION AUDIT MIGRATION =====
+"""WS-22.3.4.2 durable publication audit events.
+
+Revision ID: 20260826_ws22_3_4_2
+Revises: 20260826_ws22_3_2x
+"""
+
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision: str = "20260826_ws22_3_4_2"
+down_revision: Union[str, None] = "20260826_ws22_3_2x"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "announcement_publication_audit_events",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("publication_id", sa.String(length=36), nullable=False),
+        sa.Column("event_type", sa.String(length=64), nullable=False),
+        sa.Column("actor", sa.String(length=255), nullable=False),
+        sa.Column("correlation_id", sa.String(length=255), nullable=False),
+        sa.Column("provider_message_id", sa.String(length=255), nullable=True),
+        sa.Column("error_code", sa.String(length=100), nullable=True),
+        sa.Column("details", sa.Text(), nullable=True),
+        sa.Column(
+            "occurred_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_announcement_publication_audit_events_publication_id",
+        "announcement_publication_audit_events",
+        ["publication_id"],
+    )
+    op.create_index(
+        "ix_announcement_publication_audit_events_correlation_id",
+        "announcement_publication_audit_events",
+        ["correlation_id"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "ix_announcement_publication_audit_events_correlation_id",
+        table_name="announcement_publication_audit_events",
+    )
+    op.drop_index(
+        "ix_announcement_publication_audit_events_publication_id",
+        table_name="announcement_publication_audit_events",
+    )
+    op.drop_table("announcement_publication_audit_events")
+===== PUBLICATION STATE MIGRATION =====
+"""WS-23.1.3 durable publication state.
+
+Revision ID: 20260826_ws23_1_3
+Revises: 20260826_ws22_3_4_2
+"""
+
+from alembic import op
+import sqlalchemy as sa
+
+revision = "20260826_ws23_1_3"
+down_revision = "20260826_ws22_3_4_2"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "announcement_publications",
+        sa.Column("publication_id", sa.String(length=255), primary_key=True),
+        sa.Column("template_id", sa.String(length=255), nullable=False),
+        sa.Column("template_version", sa.Integer(), nullable=False),
+        sa.Column("publication_type", sa.String(length=64), nullable=False),
+        sa.Column("title", sa.String(length=120), nullable=False),
+        sa.Column("content", sa.Text(), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("failure_reason", sa.Text(), nullable=True),
+    )
+    op.create_index(
+        "ix_announcement_publications_status",
+        "announcement_publications",
+        ["status"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "ix_announcement_publications_status",
+        table_name="announcement_publications",
+    )
+    op.drop_table("announcement_publications")
+===== ALEMBIC CONFIG =====
+===== DATABASE CONFIG REFERENCES =====

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Hackathon Vertical Slice Runtime Integration Test.
 
 WS-2 Sprint H2
@@ -30,11 +30,11 @@ import pytest
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.services.runtime.runtime_application_service import (
+from services.runtime.runtime_application_service import (
     RuntimeApplicationService,
 )
 

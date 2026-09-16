@@ -1,0 +1,144 @@
+# W15.6.2 CONTRACT-ONLY REFERENCE — NOT PRODUCTION CODE
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum, IntEnum
+from typing import Protocol
+
+
+class AuthenticationAssuranceLevel(IntEnum):
+    A0 = 0
+    A1 = 1
+    A2 = 2
+    A3 = 3
+
+
+# Contract invariant:
+# A3 > A2 > A1 > A0
+
+
+class AuthenticationAssuranceDecision(str, Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+class AuthenticationAssuranceFailure(str, Enum):
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    INVALID_AUTHENTICATION_EVIDENCE = "INVALID_AUTHENTICATION_EVIDENCE"
+    INVALID_PRINCIPAL_BINDING = "INVALID_PRINCIPAL_BINDING"
+    INVALID_AUDIENCE = "INVALID_AUDIENCE"
+    STALE_AUTHENTICATION_ASSURANCE = "STALE_AUTHENTICATION_ASSURANCE"
+    INSUFFICIENT_AUTHENTICATION_ASSURANCE = (
+        "INSUFFICIENT_AUTHENTICATION_ASSURANCE"
+    )
+
+
+class TrustedClock(Protocol):
+    """
+    Trusted application/server-side clock.
+
+    Freshness evaluation MUST use this clock.
+    Caller-controlled timestamps MUST NOT determine current time.
+    """
+
+    def now(self) -> datetime:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedAuthenticationEvidence:
+    """
+    Trusted internal authentication evidence.
+
+    This object is created only after the Identity Adapter has validated
+    the external identity-provider evidence.
+
+    Callers must not be able to self-assert assurance properties such as
+    A3, phishing resistance, user verification, or audience validity.
+    """
+
+    principal_id: str
+    issuer: str
+    subject: str
+    audience: str
+    authentication_time: datetime
+    authentication_method: str
+    authentication_strength: str
+    user_verified: bool
+    phishing_resistant: bool
+    evidence_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticationAssuranceContext:
+    """
+    Immutable authentication-assurance result.
+
+    Assurance is derived from validated evidence and centrally controlled
+    policy. Callers cannot mutate assurance-relevant fields after validation.
+    """
+
+    principal_id: str
+    assurance_level: AuthenticationAssuranceLevel
+    authentication_time: datetime
+    assurance_time: datetime
+    authentication_method: str
+    authentication_strength: str
+    user_verified: bool
+    phishing_resistant: bool
+    issuer: str
+    subject: str
+    audience: str
+    evidence_id: str
+    policy_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticationAssuranceDecisionResult:
+    """
+    Structured assurance-policy decision.
+
+    ALLOW means the requested assurance level has been satisfied.
+
+    DENY means the requested assurance level has not been satisfied.
+    The failure field identifies the deterministic reason when applicable.
+    """
+
+    decision: AuthenticationAssuranceDecision
+    context: AuthenticationAssuranceContext | None
+    failure: AuthenticationAssuranceFailure | None
+
+
+class AuthenticationAssuranceServiceContract:
+    """
+    Contract-only reference.
+
+    This is NOT production implementation.
+
+    Requirements:
+
+    - Freshness MUST use TrustedClock.now().
+    - Caller-controlled timestamps MUST NOT determine current time.
+    - The implementation MUST accept only validated internal evidence
+      produced by the Identity Adapter.
+    - Evidence MUST be bound to the requested principal.
+    - Evidence MUST contain a validated audience.
+    - Invalid or missing audience MUST result in DENY.
+    - Validated evidence MUST be immutable.
+    - Assurance MUST NOT be caller-forgeable.
+    - Assurance ordering is A3 > A2 > A1 > A0.
+    - Higher authentication assurance does NOT imply authorization.
+    - Authorization remains a separate application security decision.
+    """
+
+    def require(
+        self,
+        *,
+        principal_id: str,
+        required_level: AuthenticationAssuranceLevel,
+        expected_audience: str,
+        evidence: ValidatedAuthenticationEvidence,
+        clock: TrustedClock,
+    ) -> AuthenticationAssuranceDecisionResult:
+        raise NotImplementedError

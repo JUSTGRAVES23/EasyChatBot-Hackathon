@@ -1,4 +1,4 @@
-"""EasyChatBot AI Operations Center composition root.
+﻿"""EasyChatBot AI Operations Center composition root.
 
 The same ProviderHealthHistoryRepository instance is shared by:
 - provider-health observation ingestion;
@@ -65,7 +65,7 @@ from app.application.provider_management.provider_incident_service import (
 from app.application.provider_management.provider_operational_event_service import (
     ProviderOperationalEventService,
 )
-from backend.providers.health.ollama_cloud_health_probe import (
+from providers.health.ollama_cloud_health_probe import (
     OllamaCloudHealthProbe,
 )
 
@@ -181,3 +181,4 @@ __all__ = [
     "create_operations_center_composition",
     "create_operations_center_dashboard_api",
 ]
+

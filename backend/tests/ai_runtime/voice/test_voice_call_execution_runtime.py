@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Execution Runtime.
 
 Validates execution lifecycle
@@ -234,3 +234,81 @@ def test_start_without_character_is_rejected():
     except ValueError:
 
         assert True
+
+def test_start_logs_structured_lifecycle_context(caplog):
+
+    runtime = VoiceCallExecutionRuntime()
+
+    with caplog.at_level("INFO"):
+        session = runtime.start(
+            context=create_context(
+                state=VoiceCallState.READY,
+            )
+        )
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "Voice call execution started"
+    )
+
+    assert session.state == VoiceCallState.ACTIVE
+    assert record.session_id == "call-001"
+    assert record.learner_id == "learner-001"
+    assert record.character_id == "yeti"
+    assert record.world_id == "french_world"
+    assert record.state == VoiceCallState.ACTIVE.value
+
+
+def test_stop_logs_structured_lifecycle_context(caplog):
+
+    runtime = VoiceCallExecutionRuntime()
+
+    with caplog.at_level("INFO"):
+        session = runtime.stop(
+            context=create_context(
+                state=VoiceCallState.ACTIVE,
+            )
+        )
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "Voice call execution ended"
+    )
+
+    assert session.state == VoiceCallState.ENDED
+    assert record.session_id == "call-001"
+    assert record.learner_id == "learner-001"
+    assert record.character_id == "yeti"
+    assert record.world_id == "french_world"
+    assert record.state == VoiceCallState.ENDED.value
+
+
+def test_fail_logs_structured_lifecycle_context(caplog):
+
+    runtime = VoiceCallExecutionRuntime()
+
+    with caplog.at_level("ERROR"):
+        session = runtime.fail(
+            context=create_context(
+                state=VoiceCallState.ACTIVE,
+            )
+        )
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "Voice call execution failed"
+    )
+
+    assert session.state == VoiceCallState.FAILED
+    assert record.session_id == "call-001"
+    assert record.learner_id == "learner-001"
+    assert record.character_id == "yeti"
+    assert record.world_id == "french_world"
+    assert record.state == VoiceCallState.FAILED.value
+
+
+
+

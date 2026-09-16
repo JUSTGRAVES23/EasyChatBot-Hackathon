@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Lifecycle Service.
 
 Validates the application facade
@@ -193,3 +193,6 @@ def test_lifecycle_preserves_learner():
     assert result["session"].learner_id == (
         "learner-001"
     )
+
+
+

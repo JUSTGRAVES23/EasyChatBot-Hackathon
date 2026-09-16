@@ -19,7 +19,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.cybersecurity.scheduler.cybersecurity_job_registry import (
+from cybersecurity.scheduler.cybersecurity_job_registry import (
     CybersecurityJobRegistry,
 )
 
@@ -215,3 +215,4 @@ class CybersecuritySchedulerRuntime:
                 jobs,
 
         }
+

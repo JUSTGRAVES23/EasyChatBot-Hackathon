@@ -4,33 +4,33 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_change_registry import (
+from app.application.privacy.privacy_change_registry import (
     PrivacyChangeRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case_service import (
+from app.application.privacy.privacy_governance_case_service import (
     PrivacyGovernanceCaseService,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
-from backend.app.application.privacy.privacy_governance_decision_service import (
+from app.application.privacy.privacy_governance_decision_service import (
     PrivacyGovernanceDecisionService,
 )
-from backend.app.application.privacy.privacy_governance_flow_service import (
+from app.application.privacy.privacy_governance_flow_service import (
     PrivacyGovernanceFlowService,
 )
-from backend.app.application.privacy.privacy_governance_gate import (
+from app.application.privacy.privacy_governance_gate import (
     PrivacyGovernanceGate,
 )
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case_url import (
+from app.application.privacy.privacy_governance_case_url import (
     PrivacyGovernanceCaseURLBuilder,
 )
 
@@ -194,7 +194,7 @@ async def test_privacy_reminder_preserves_case_and_change_identity():
         app_base_url="http://127.0.0.1:5173",
     )
 
-    from backend.app.application.privacy.email.privacy_governance_reminder_email_service import (
+    from app.application.privacy.email.privacy_governance_reminder_email_service import (
         PrivacyGovernanceReminderEmailService,
     )
 

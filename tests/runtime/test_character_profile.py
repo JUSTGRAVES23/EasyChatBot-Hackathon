@@ -1,4 +1,4 @@
-from backend.characters.character_profile import (
+﻿from characters.character_profile import (
     CharacterProfile,
 )
 

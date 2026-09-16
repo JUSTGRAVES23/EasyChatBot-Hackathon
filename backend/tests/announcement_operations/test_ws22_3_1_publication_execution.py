@@ -1,13 +1,13 @@
-import pytest
+﻿import pytest
 
-from backend.app.application.announcement_operations.publication_execution_service import (
+from app.application.announcement_operations.publication_execution_service import (
     PublicationExecutionService,
 )
 from app.domain.announcement_publication.execution import (
     PublishAnnouncementCommand,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcement_operations.publication_execution_ports import (
+from app.application.announcement_operations.publication_execution_ports import (
     PublicationForExecution,
 )
 
@@ -201,4 +201,5 @@ async def test_ws22_3_1_does_not_put_content_or_secrets_in_audit_event():
     assert "private content" not in audit_payload
     assert "secret" not in audit_payload
     assert "api_key" not in audit_payload
+
 

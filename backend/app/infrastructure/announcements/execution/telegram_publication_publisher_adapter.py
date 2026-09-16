@@ -28,10 +28,10 @@ from __future__ import annotations
 from os import getenv
 from uuid import UUID
 
-from backend.app.application.announcement.announcement_publisher import (
+from app.application.announcement.announcement_publisher import (
     ControlledAnnouncementPublisher,
 )
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     AnnouncementPublisher,
 )
 

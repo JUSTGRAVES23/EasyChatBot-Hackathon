@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.app.application.privacy.privacy_identifier_service import (
+from app.application.privacy.privacy_identifier_service import (
     PrivacyIdentifierService,
 )
 
@@ -71,3 +71,4 @@ class LoggingTelegramObservability:
 
 
 __all__ = ["LoggingTelegramObservability"]
+

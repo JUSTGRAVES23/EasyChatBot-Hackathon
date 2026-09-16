@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Execution Service.
 
 Validates the application boundary
@@ -136,3 +136,6 @@ def test_start_call_requires_ready_session():
     except ValueError:
 
         assert True
+
+
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Interaction Context Builder.
 """
 
@@ -156,3 +156,4 @@ def test_build_interaction_context():
     assert context.voice.voice_profile == (
         "verse"
     )
+

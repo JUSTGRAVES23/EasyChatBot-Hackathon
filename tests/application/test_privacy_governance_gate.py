@@ -1,22 +1,22 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.app.application.privacy.privacy_approval_email_service import (
+from app.application.privacy.privacy_approval_email_service import (
     PrivacyApprovalEmailService,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_change_registry import (
+from app.application.privacy.privacy_change_registry import (
     PrivacyChangeRegistry,
 )
-from backend.app.application.privacy.privacy_governance_gate import (
+from app.application.privacy.privacy_governance_gate import (
     PrivacyGovernanceGate,
 )
 

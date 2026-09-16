@@ -1,0 +1,1480 @@
+﻿===== BACKEND FUNCTIONALITY HEALTH =====
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from backend.app.application.provider_management.environment import (
+    OperationsEnvironment,
+    resolve_environment,
+)
+
+
+class FunctionalityHealthService:
+    _FUNCTIONALITIES = (
+        ("conversation", "AI Conversation"),
+        ("telegram", "Telegram"),
+        ("voice_tts", "Voice / TTS"),
+        ("lessons", "Lessons"),
+        ("review", "Review / Spaced Repetition"),
+        ("pdf_presentation", "PDF / Presentation"),
+        ("email_workflows", "Email Workflows"),
+        ("payments", "Payments"),
+        ("authentication", "Authentication"),
+        ("scheduler", "Scheduler"),
+        ("provider_runtime", "Provider / LLM Runtime"),
+        ("database", "Database"),
+    )
+
+    _CHECK_TO_FUNCTIONALITIES = {
+        "llm_provider": {"conversation", "provider_runtime"},
+        "telegram": {"telegram"},
+        "postgresql": {"database"},
+    }
+
+    _CATEGORY_BY_FUNCTIONALITY = {
+        "conversation": "AI",
+        "telegram": "Communication",
+        "voice_tts": "AI",
+        "lessons": "Learning",
+        "review": "Learning",
+        "pdf_presentation": "Content",
+        "email_workflows": "Communication",
+        "payments": "Platform",
+        "authentication": "Platform",
+        "scheduler": "Platform",
+        "provider_runtime": "Infrastructure",
+        "database": "Infrastructure",
+    }
+
+    def __init__(self, *, readiness_service: ProductionReadinessService) -> None:
+        if readiness_service is None:
+            raise ValueError("readiness_service cannot be None.")
+        self._readiness_service = readiness_service
+
+    async def get_health(
+        self,
+        *,
+        environment: OperationsEnvironment | None = None,
+    ) -> dict[str, Any]:
+        resolved_environment = resolve_environment(environment)
+        readiness = await self._readiness_service.check()
+        checks_by_name = {check.name: check for check in readiness.checks}
+        generated_at = datetime.now(timezone.utc).isoformat()
+
+        functionalities = [
+            self._build_functionality(
+                functionality_id=functionality_id,
+                name=name,
+                check=self._resolve_check(
+                    functionality_id=functionality_id,
+                    checks_by_name=checks_by_name,
+                ),
+                environment=resolved_environment,
+                checked_at=generated_at,
+            )
+            for functionality_id, name in self._FUNCTIONALITIES
+        ]
+
+        attention = [
+            item for item in functionalities
+            if item["status"] in {"degraded", "unavailable"}
+        ]
+
+        counts = {
+            "total": len(functionalities),
+            "healthy": sum(item["status"] == "healthy" for item in functionalities),
+            "degraded": sum(item["status"] == "degraded" for item in functionalities),
+            "incident": sum(item["status"] == "unavailable" for item in functionalities),
+            "maintenance": 0,
+            "disabled": 0,
+            "unknown": sum(item["status"] == "unknown" for item in functionalities),
+        }
+
+        if counts["incident"] > 0:
+            platform_health, score, impact = "incident", 0.0, "high"
+        elif counts["degraded"] > 0:
+            platform_health, score, impact = "degraded", 50.0, "medium"
+        elif counts["healthy"] > 0:
+            platform_health, score, impact = "healthy", 100.0, "low"
+        else:
+            platform_health, score, impact = "unknown", None, "unknown"
+
+        return {
+            "generated_at": generated_at,
+            "environment": resolved_environment.value,
+            "platform_health": platform_health,
+            "platform_health_score": score,
+            "user_impact": impact,
+            "counts": counts,
+            "functionalities": functionalities,
+            "attention": attention,
+        }
+
+    @classmethod
+    def _resolve_check(
+        cls,
+        *,
+        functionality_id: str,
+        checks_by_name: dict[str, HealthCheckResult],
+    ) -> HealthCheckResult | None:
+        for check_name, functionality_ids in cls._CHECK_TO_FUNCTIONALITIES.items():
+            if functionality_id in functionality_ids:
+                return checks_by_name.get(check_name)
+        return None
+
+    @classmethod
+    def _build_functionality(
+        cls,
+        *,
+        functionality_id: str,
+        name: str,
+        check: HealthCheckResult | None,
+        environment: OperationsEnvironment,
+        checked_at: str,
+    ) -> dict[str, Any]:
+        if check is None:
+            status = "unknown"
+            health_score = None
+            risk_level = "unknown"
+            provider = model = latency_ms = None
+            reason = "No dedicated health check is currently available."
+        else:
+            status = cls._map_status(check.status)
+            health_score = (
+                100.0 if status == "healthy"
+                else 50.0 if status == "degraded"
+                else 0.0 if status == "unavailable"
+                else None
+            )
+            risk_level = {
+                "healthy": "low",
+                "degraded": "medium",
+                "unavailable": "high",
+                "unknown": "unknown",
+            }[status]
+            provider = check.details.get("provider")
+            model = check.details.get("model")
+            latency_ms = check.details.get("latency_ms")
+            reason = check.details.get("reason", "Health check completed.")
+
+        return {
+            "functionality_id": functionality_id,
+            "name": name,
+            "category": cls._CATEGORY_BY_FUNCTIONALITY[functionality_id],
+            "description": f"Operational health for {name}.",
+            "status": status,
+            "health_score": health_score,
+            "latency_ms": latency_ms,
+            "provider": provider,
+            "model": model,
+            "capability": functionality_id,
+            "checked_at": checked_at,
+            "controllable": False,
+            "risk_level": risk_level,
+            "reason": reason,
+            "environment": environment.value,
+            "availability": "enabled",
+            "policy_status": "not_evaluated",
+        }
+
+    @staticmethod
+    def _map_status(status: HealthStatus) -> str:
+        if status is HealthStatus.HEALTHY:
+            return "healthy"
+        if status is HealthStatus.UNHEALTHY:
+            return "unavailable"
+        return "unknown"
+
+
+__all__ = ["FunctionalityHealthService"]
+
+
+
+
+
+===== BACKEND OPERATIONS CENTER API =====
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter
+
+from backend.app.application.operations_center.dashboard_composition import (
+    OperationsCenterComposition,
+    create_operations_center_composition,
+)
+from backend.app.application.provider_management.environment import OperationsEnvironment
+
+
+def create_operations_center_router(
+    *,
+    composition: OperationsCenterComposition | None = None,
+) -> APIRouter:
+    resolved_composition = composition or create_operations_center_composition()
+
+    dashboard_api = resolved_composition.dashboard_api
+    chat_operations_api = resolved_composition.chat_operations_api
+    functionality_health_service = resolved_composition.functionality_health_service
+    event_service = resolved_composition.event_service
+    provider_usage_dashboard_service = resolved_composition.provider_usage_dashboard_service
+
+    router = APIRouter(prefix="/api/operations-center", tags=["operations-center"])
+
+    @router.get("/dashboard")
+    async def get_dashboard() -> dict[str, Any]:
+        return await dashboard_api.get_dashboard()
+
+    @router.get("/chat-operations")
+    async def get_chat_operations_dashboard() -> dict[str, Any]:
+        return await chat_operations_api.get_dashboard()
+
+    @router.get("/chat-operations/private-classroom")
+    async def get_private_classroom_operations() -> dict[str, Any]:
+        return await chat_operations_api.get_private_classroom_details()
+
+    @router.get("/chat-operations/announcement-group")
+    async def get_announcement_group_operations() -> dict[str, Any]:
+        return await chat_operations_api.get_announcement_group_details()
+
+    @router.get("/functionality-health")
+    async def get_functionality_health(
+        environment: OperationsEnvironment | None = None,
+    ) -> dict[str, Any]:
+        return await functionality_health_service.get_health(environment=environment)
+
+    @router.get("/operational-events")
+    def get_operational_events() -> list[dict[str, Any]]:
+        incidents = event_service.list_incidents()
+        return [
+            event.as_dict()
+            for incident in incidents
+            for event in incident.events
+        ]
+
+    @router.get("/provider-usage")
+    def get_provider_usage() -> dict[str, Any]:
+        if provider_usage_dashboard_service is None:
+            return {
+                "status": "not_configured",
+                "reason": "provider_usage_dashboard_service_not_configured",
+            }
+        return provider_usage_dashboard_service.get_snapshot()
+
+    return router
+
+
+router = create_operations_center_router()
+
+__all__ = ["router", "create_operations_center_router"]
+===== BACKEND PROVIDER MANAGEMENT TREE =====
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\environment.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_health_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_operational_control_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\provider_usage_dashboard_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\environment.cpython-312.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\environment.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\functionality_health_service.cpython-312.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\functionality_health_service.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\functionality_operational_control_service.cpython-313.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\provider_usage_dashboard_service.cpython-312.pyc
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\__pycache__\provider_usage_dashboard_service.cpython-313.pyc
+===== EXISTING FUNCTIONALITY CONTROL REFERENCES =====
+===== EXISTING AUTHORIZATION REFERENCES =====
+===== EXISTING AUDIT / OPERATIONAL EVENT CONTRACTS =====
+===== FRONTEND FUNCTIONALITY HEALTH =====
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  getFunctionalityHealth,
+  type FunctionalityHealth,
+  type FunctionalityHealthPayload,
+  type OperationsEnvironment,
+} from "@/app/lib/api/functionalityHealth";
+import styles from "./FunctionalityHealthDashboard.module.css";
+
+const statusText: Record<FunctionalityHealth["status"], string> = {
+  healthy: "Healthy",
+  degraded: "Degraded",
+  unavailable: "Unavailable",
+  maintenance: "Maintenance",
+  disabled: "Disabled",
+  unknown: "Unknown",
+};
+
+const statusClass: Record<FunctionalityHealth["status"], string> = {
+  healthy: styles.statusHealthy,
+  degraded: styles.statusDegraded,
+  unavailable: styles.statusIncident,
+  maintenance: styles.statusMaintenance,
+  disabled: styles.statusDisabled,
+  unknown: styles.statusUnknown,
+};
+
+function Icon({
+  type,
+}: {
+  type:
+    | "health"
+    | "check"
+    | "warning"
+    | "incident"
+    | "maintenance"
+    | "search"
+    | "refresh"
+    | "download"
+    | "close";
+}) {
+  const common = {
+    width: 18,
+    height: 18,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  if (type === "check") {
+    return (
+      <svg {...common}>
+        <path d="m5 12 4 4L19 6" />
+      </svg>
+    );
+  }
+
+  if (type === "warning") {
+    return (
+      <svg {...common}>
+        <path d="M10.3 3.6 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.6a2 2 0 0 0-3.4 0Z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </svg>
+    );
+  }
+
+  if (type === "incident") {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5" />
+        <path d="M12 16h.01" />
+      </svg>
+    );
+  }
+
+  if (type === "maintenance") {
+    return (
+      <svg {...common}>
+        <path d="m14.7 6.3 3 3" />
+        <path d="m3 21 7.8-7.8" />
+        <path d="M14 4a5 5 0 0 0 6 6l-4 4-6-6 4-4Z" />
+      </svg>
+    );
+  }
+
+  if (type === "search") {
+    return (
+      <svg {...common}>
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-4-4" />
+      </svg>
+    );
+  }
+
+  if (type === "refresh") {
+    return (
+      <svg {...common}>
+        <path d="M20 11a8.1 8.1 0 0 0-14.8-4L3 10" />
+        <path d="M3 5v5h5" />
+        <path d="M4 13a8.1 8.1 0 0 0 14.8 4L21 14" />
+        <path d="M21 19v-5h-5" />
+      </svg>
+    );
+  }
+
+  if (type === "download") {
+    return (
+      <svg {...common}>
+        <path d="M12 3v12" />
+        <path d="m7 10 5 5 5-5" />
+        <path d="M5 21h14" />
+      </svg>
+    );
+  }
+
+  if (type === "close") {
+    return (
+      <svg {...common}>
+        <path d="m6 6 12 12" />
+        <path d="m18 6-12 12" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg {...common}>
+      <path d="M4 17V9" />
+      <path d="M9 17V5" />
+      <path d="M14 17v-7" />
+      <path d="M19 17V3" />
+    </svg>
+  );
+}
+
+function StatusBadge({
+  status,
+}: {
+  status: FunctionalityHealth["status"];
+}) {
+  const icon =
+    status === "healthy"
+      ? "check"
+      : status === "degraded"
+        ? "warning"
+        : status === "unavailable"
+          ? "incident"
+          : status === "maintenance"
+            ? "maintenance"
+            : "incident";
+
+  return (
+    <span className={`${styles.statusBadge} ${statusClass[status]}`}>
+      <Icon type={icon} />
+      {statusText[status]}
+    </span>
+  );
+}
+
+function HealthRing({ score }: { score: number | null }) {
+  const safeScore = score == null ? 0 : Math.max(0, Math.min(100, score));
+  const circumference = 2 * Math.PI * 42;
+  const offset = circumference - (safeScore / 100) * circumference;
+
+  return (
+    <div className={styles.healthRing}>
+      <svg viewBox="0 0 100 100" className={styles.healthRingSvg}>
+        <circle
+          cx="50"
+          cy="50"
+          r="42"
+          className={styles.healthRingTrack}
+        />
+        <circle
+          cx="50"
+          cy="50"
+          r="42"
+          className={styles.healthRingValue}
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+        />
+      </svg>
+      <div className={styles.healthRingLabel}>
+        <strong>{score == null ? "—" : `${score}%`}</strong>
+        <span>Health</span>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({
+  label,
+  value,
+  icon,
+  tone,
+}: {
+  label: string;
+  value: string | number;
+  icon: "check" | "warning" | "incident" | "maintenance";
+  tone: string;
+}) {
+  return (
+    <div className={styles.summaryCard}>
+      <div className={`${styles.summaryIcon} ${tone}`}>
+        <Icon type={icon} />
+      </div>
+      <div>
+        <div className={styles.summaryValue}>{value}</div>
+        <div className={styles.summaryLabel}>{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function CategoryChart({
+  functionalities,
+}: {
+  functionalities: FunctionalityHealth[];
+}) {
+  const categories = useMemo(() => {
+    const grouped = new Map<string, number>();
+
+    functionalities.forEach((item) => {
+      grouped.set(
+        item.category,
+        (grouped.get(item.category) ?? 0) + 1,
+      );
+    });
+
+    return Array.from(grouped.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+  }, [functionalities]);
+
+  const max = Math.max(...categories.map(([, count]) => count), 1);
+
+  return (
+    <div className={styles.chartCard}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2>Status by Category</h2>
+          <p>Current functionality distribution</p>
+        </div>
+      </div>
+
+      <div className={styles.barChart}>
+        {categories.map(([category, count]) => (
+          <div className={styles.barColumn} key={category}>
+            <div className={styles.barValue}>{count}</div>
+            <div className={styles.barTrack}>
+              <div
+                className={styles.barFill}
+                style={{
+                  height: `${Math.max(12, (count / max) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className={styles.barLabel}>{category}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StatusDistribution({
+  counts,
+  functionalities,
+}: {
+  counts: FunctionalityHealthPayload["counts"];
+  functionalities: FunctionalityHealth[];
+}) {
+  const total = functionalities.length;
+
+  const healthy = counts.healthy ?? 0;
+  const degraded = counts.degraded ?? 0;
+  const incident = counts.incident ?? 0;
+
+  const healthyPct = total ? (healthy / total) * 100 : 0;
+  const degradedPct = total ? (degraded / total) * 100 : 0;
+  const incidentPct = total ? (incident / total) * 100 : 0;
+
+  const gradient = `conic-gradient(
+    #10b981 0 ${healthyPct}%,
+    #f59e0b ${healthyPct}% ${healthyPct + degradedPct}%,
+    #ef4444 ${healthyPct + degradedPct}% ${healthyPct + degradedPct + incidentPct}%,
+    #e2e8f0 ${healthyPct + degradedPct + incidentPct}% 100%
+  )`;
+
+  return (
+    <div className={styles.chartCard}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2>Functionality Status</h2>
+          <p>Live operational distribution</p>
+        </div>
+      </div>
+
+      <div className={styles.statusDistribution}>
+        <div
+          className={styles.donut}
+          style={{ background: gradient }}
+          aria-label={`${total} total functionalities`}
+        >
+          <div className={styles.donutInner}>
+            <strong>{total}</strong>
+            <span>Total</span>
+          </div>
+        </div>
+
+        <div className={styles.legend}>
+          <div>
+            <span className={`${styles.legendDot} ${styles.dotHealthy}`} />
+            <span>Healthy</span>
+            <strong>{healthy}</strong>
+          </div>
+          <div>
+            <span className={`${styles.legendDot} ${styles.dotDegraded}`} />
+            <span>Degraded</span>
+            <strong>{degraded}</strong>
+          </div>
+          <div>
+            <span className={`${styles.legendDot} ${styles.dotIncident}`} />
+            <span>Incident</span>
+            <strong>{incident}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FunctionalityTable({
+  functionalities,
+  onSelect,
+  selectedId,
+}: {
+  functionalities: FunctionalityHealth[];
+  onSelect: (id: string) => void;
+  selectedId: string | null;
+}) {
+  return (
+    <div className={styles.tableCard}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2>Functionality Overview</h2>
+          <p>
+            All EasyChatBot capabilities and their current operational
+            status.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          className={styles.secondaryButton}
+          onClick={() => {
+            const headers = [
+              "Functionality",
+              "Category",
+              "Status",
+              "Health",
+              "Latency",
+              "Provider",
+              "Risk",
+            ];
+
+            const rows = functionalities.map((item) => [
+              item.name,
+              item.category,
+              statusText[item.status],
+              item.health_score == null ? "" : `${item.health_score}%`,
+              item.latency_ms == null ? "" : `${item.latency_ms} ms`,
+              item.provider ?? "",
+              item.risk_level,
+            ]);
+
+            const csv = [headers, ...rows]
+              .map((row) =>
+                row
+                  .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+                  .join(","),
+              )
+              .join("\n");
+
+            const blob = new Blob([csv], {
+              type: "text/csv;charset=utf-8;",
+            });
+
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = "easychatbot-functionality-health.csv";
+            anchor.click();
+            URL.revokeObjectURL(url);
+          }}
+        >
+          <Icon type="download" />
+          Export
+        </button>
+      </div>
+
+      <div className={styles.tableFilters}>
+        <div className={styles.searchBox}>
+          <Icon type="search" />
+          <input
+            aria-label="Search functionalities"
+            placeholder="Search functionalities..."
+            onChange={() => undefined}
+          />
+        </div>
+
+        <button type="button" className={styles.filterButton}>
+          All categories
+          <span>⌄</span>
+        </button>
+
+        <button type="button" className={styles.filterButton}>
+          All statuses
+          <span>⌄</span>
+        </button>
+      </div>
+
+      <div className={styles.tableWrapper}>
+        <table className={styles.healthTable}>
+          <thead>
+            <tr>
+              <th>Functionality</th>
+              <th>Category</th>
+              <th>Status</th>
+              <th>Health</th>
+              <th>Latency</th>
+              <th>Provider</th>
+              <th>Last Checked</th>
+            </tr>
+          </thead>
+          <tbody>
+            {functionalities.map((item) => (
+              <tr
+                key={item.functionality_id}
+                className={
+                  selectedId === item.functionality_id
+                    ? styles.selectedRow
+                    : ""
+                }
+                onClick={() => onSelect(item.functionality_id)}
+              >
+                <td>
+                  <div className={styles.functionalityName}>
+                    <span className={styles.functionalityIcon}>◉</span>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <span>{item.capability ?? item.description}</span>
+                    </div>
+                  </div>
+                </td>
+                <td>{item.category}</td>
+                <td>
+                  <StatusBadge status={item.status} />
+                </td>
+                <td>
+                  <strong
+                    className={
+                      item.status === "unavailable"
+                        ? styles.valueIncident
+                        : item.status === "degraded"
+                          ? styles.valueDegraded
+                          : styles.valueNormal
+                    }
+                  >
+                    {item.health_score == null
+                      ? "—"
+                      : `${item.health_score}%`}
+                  </strong>
+                </td>
+                <td>
+                  <span
+                    className={
+                      item.latency_ms != null && item.latency_ms > 1000
+                        ? styles.latencyWarning
+                        : ""
+                    }
+                  >
+                    {item.latency_ms == null
+                      ? "—"
+                      : `${item.latency_ms} ms`}
+                  </span>
+                </td>
+                <td>{item.provider ?? "—"}</td>
+                <td>
+                  {item.checked_at
+                    ? new Date(item.checked_at).toLocaleString()
+                    : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className={styles.tableFooter}>
+        Showing {functionalities.length} functionality
+        {functionalities.length === 1 ? "" : "ies"}
+      </div>
+    </div>
+  );
+}
+
+export default function FunctionalityHealthDashboard() {
+  const [data, setData] = useState<FunctionalityHealthPayload | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [environment, setEnvironment] = useState<OperationsEnvironment>("adults");
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+
+    try {
+      const next = await getFunctionalityHealth(environment);
+
+      setData(next);
+      setError(null);
+
+      setSelectedId((current) =>
+        current &&
+        next.functionalities.some(
+          (item) => item.functionality_id === current,
+        )
+          ? current
+          : next.functionalities[0]?.functionality_id ?? null,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to load live health.",
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  }, [environment]);
+
+  useEffect(() => {
+    void refresh();
+
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 15_000);
+
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  const selected = useMemo(
+    () =>
+      data?.functionalities.find(
+        (item) => item.functionality_id === selectedId,
+      ) ?? null,
+    [data, selectedId],
+  );
+
+  if (!data) {
+    return (
+      <main className={styles.loadingPage}>
+        <div className={styles.loadingCard}>
+          {error ? (
+            <div role="alert" className={styles.error}>
+              {error}
+            </div>
+          ) : (
+            <div className={styles.loadingText} aria-live="polite">
+              Loading Functionality Health...
+            </div>
+          )}
+        </div>
+      </main>
+    );
+  }
+
+  const counts = data.counts;
+
+  return (
+    <main className={styles.page}>
+      <div className={styles.content}>
+        <header className={styles.pageHeader}>
+          <div>
+            <div className={styles.breadcrumb}>
+              Operations Center <span>›</span>{" "}
+              <strong>Functionality Health</strong>
+            </div>
+
+            <h1>Functionality Health</h1>
+
+            <p>
+              Real-time operational health across all EasyChatBot
+              capabilities.
+            </p>
+          </div>
+
+          <div className={styles.headerActions}>
+            <div role="group" aria-label="Operations Center environment" className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 p-1">
+              {(["kids", "adults"] as const).map((option) => (
+                <button key={option} type="button" aria-pressed={environment === option} onClick={() => setEnvironment(option)} className={`rounded-md px-3 py-2 text-sm font-semibold transition ${environment === option ? "bg-white text-slate-900" : "text-slate-300 hover:bg-white/10"}`}>
+                  {option === "kids" ? "Kids" : "Adults"}
+                </button>
+              ))}
+            </div>
+            <div className={styles.updated}>
+              <span>Last updated</span>
+              <strong>
+                {new Date(data.generated_at).toLocaleString()}
+              </strong>
+            </div>
+
+            <button
+              type="button"
+              className={styles.primaryButton}
+              onClick={() => void refresh()}
+              disabled={refreshing}
+            >
+              <Icon type="refresh" />
+              {refreshing ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+        </header>
+
+        <section className={styles.summaryGrid}>
+          <div className={styles.platformHealthCard}>
+            <HealthRing score={data.platform_health_score} />
+            <div>
+              <span>Platform Health</span>
+              <strong>Overall platform status</strong>
+              <small>User impact: {data.user_impact}</small>
+            </div>
+          </div>
+
+          <SummaryCard
+            label="Healthy"
+            value={counts.healthy ?? 0}
+            icon="check"
+            tone={styles.iconGreen}
+          />
+
+          <SummaryCard
+            label="Degraded"
+            value={counts.degraded ?? 0}
+            icon="warning"
+            tone={styles.iconAmber}
+          />
+
+          <SummaryCard
+            label="Incident"
+            value={counts.incident ?? 0}
+            icon="incident"
+            tone={styles.iconRed}
+          />
+
+          <SummaryCard
+            label="Maintenance"
+            value={counts.maintenance ?? 0}
+            icon="maintenance"
+            tone={styles.iconBlue}
+          />
+        </section>
+
+        {data.attention.length > 0 && (
+          <section className={styles.attentionBanner}>
+            <div className={styles.attentionIcon}>
+              <Icon type="warning" />
+            </div>
+            <div>
+              <strong>
+                {data.attention.length} functionality
+                {data.attention.length === 1 ? "" : "ies"} require attention
+              </strong>
+              <span>
+                Review the exception before taking operational action.
+              </span>
+            </div>
+          </section>
+        )}
+
+        <section className={styles.chartGrid}>
+          <StatusDistribution
+            counts={counts}
+            functionalities={data.functionalities}
+          />
+          <CategoryChart functionalities={data.functionalities} />
+        </section>
+
+        <section className={styles.workspace}>
+          <FunctionalityTable
+            functionalities={data.functionalities}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+
+          {selected && (
+            <aside className={styles.detailsPanel}>
+              <div className={styles.detailsHeader}>
+                <div>
+                  <span>Functionality Details</span>
+                  <h2>{selected.name}</h2>
+                </div>
+
+                <button
+                  type="button"
+                  aria-label="Close functionality details"
+                  className={styles.iconButton}
+                  onClick={() => setSelectedId(null)}
+                >
+                  <Icon type="close" />
+                </button>
+              </div>
+
+              <StatusBadge status={selected.status} />
+
+              <p className={styles.detailsDescription}>
+                {selected.description}
+              </p>
+
+              <div className={styles.detailsGrid}>
+                <div>
+                  <span>Functionality ID</span>
+                  <strong>{selected.functionality_id}</strong>
+                </div>
+                <div>
+                  <span>Category</span>
+                  <strong>{selected.category}</strong>
+                </div>
+                <div>
+                  <span>Health Score</span>
+                  <strong>{selected.health_score ?? "—"}%</strong>
+                </div>
+                <div>
+                  <span>Latency</span>
+                  <strong>{selected.latency_ms ?? "—"} ms</strong>
+                </div>
+                <div>
+                  <span>Provider</span>
+                  <strong>{selected.provider ?? "—"}</strong>
+                </div>
+                <div>
+                  <span>Model</span>
+                  <strong>{selected.model ?? "—"}</strong>
+                </div>
+                <div>
+                  <span>Risk Level</span>
+                  <strong>{selected.risk_level}</strong>
+                </div>
+                <div>
+                  <span>Last Checked</span>
+                  <strong>
+                    {selected.checked_at
+                      ? new Date(selected.checked_at).toLocaleString()
+                      : "—"}
+                  </strong>
+                </div>
+              </div>
+
+              <div className={styles.assessment}>
+                <span>Current assessment</span>
+                <p>{selected.reason}</p>
+              </div>
+
+              <div className={styles.controlNotice}>
+                <strong>Operational controls</strong>
+                <span>
+                  M1 is read-only. Operational actions will be introduced
+                  through backend-authorised controls with confirmation and
+                  audit logging.
+                </span>
+              </div>
+            </aside>
+          )}
+        </section>
+
+        <footer className={styles.footer}>
+          <span>EasyChatBot Operations Center</span>
+          <span>Read-only operational visibility</span>
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+
+
+
+===== FRONTEND CONTROL API =====
+import type { OperationsEnvironment } from "./functionalityHealth";
+
+export interface FunctionalityControlResult {
+  functionality_id: string;
+  environment: OperationsEnvironment;
+  availability: "enabled" | "disabled";
+  action: "stop" | "resume";
+  reason: string | null;
+  changed_at: string;
+  changed_by: string;
+}
+
+async function postControl(
+  functionalityId: string,
+  action: "stop" | "resume",
+  payload: { environment: OperationsEnvironment; reason?: string },
+): Promise<FunctionalityControlResult> {
+  const response = await fetch(
+    `/api/operations-center/functionality/${encodeURIComponent(functionalityId)}/${action}`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  if (!response.ok) {
+    let message = `Functionality ${action} failed: ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // Preserve the safe status-based error.
+    }
+    throw new Error(message);
+  }
+  return (await response.json()) as FunctionalityControlResult;
+}
+
+export function stopFunctionality(
+  functionalityId: string,
+  environment: OperationsEnvironment,
+  reason: string,
+) {
+  return postControl(functionalityId, "stop", { environment, reason });
+}
+
+export function resumeFunctionality(
+  functionalityId: string,
+  environment: OperationsEnvironment,
+) {
+  return postControl(functionalityId, "resume", { environment });
+}
+===== FUNCTIONALITY HEALTH TESTS =====
+from unittest.mock import AsyncMock
+
+import pytest
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+    ProductionReadinessResult,
+)
+from backend.app.application.provider_management.functionality_health_service import (
+    FunctionalityHealthService,
+)
+
+
+def _readiness_service(
+    checks: tuple[HealthCheckResult, ...],
+) -> AsyncMock:
+    service = AsyncMock()
+
+    service.check.return_value = ProductionReadinessResult(
+        status=HealthStatus.HEALTHY,
+        checks=checks,
+    )
+
+    return service
+
+
+@pytest.mark.asyncio
+async def test_llm_provider_health_reaches_conversation_functionality() -> None:
+    """An existing LLM health result reaches the functionality projection."""
+
+    readiness_service = _readiness_service(
+        (
+            HealthCheckResult(
+                name="llm_provider",
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "openai",
+                    "model": "gpt-5-mini",
+                    "reachable": True,
+                },
+            ),
+        )
+    )
+
+    payload = await FunctionalityHealthService(
+        readiness_service=readiness_service,
+    ).get_health()
+
+    conversation = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "conversation"
+    )
+
+    assert conversation["status"] == "healthy"
+    assert conversation["provider"] == "openai"
+    assert conversation["model"] == "gpt-5-mini"
+
+
+@pytest.mark.asyncio
+async def test_unobserved_functionality_is_unknown() -> None:
+    """Missing health telemetry must never be presented as healthy."""
+
+    readiness_service = _readiness_service(())
+
+    payload = await FunctionalityHealthService(
+        readiness_service=readiness_service,
+    ).get_health()
+
+    voice = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "voice_tts"
+    )
+
+    assert voice["status"] == "unknown"
+    assert voice["health_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_health_payload_contains_required_dashboard_fields() -> None:
+    """Protect the read-only dashboard contract consumed by the frontend."""
+
+    readiness_service = _readiness_service(())
+
+    payload = await FunctionalityHealthService(
+        readiness_service=readiness_service,
+    ).get_health()
+
+    assert "generated_at" in payload
+    assert "platform_health" in payload
+    assert "user_impact" in payload
+    assert "counts" in payload
+    assert "functionalities" in payload
+    assert "attention" in payload
+
+    assert isinstance(payload["functionalities"], list)
+    assert isinstance(payload["attention"], list)
+    assert isinstance(payload["counts"], dict)
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_provider_is_reported_as_incident() -> None:
+    """An unhealthy provider creates an operational attention signal."""
+
+    readiness_service = _readiness_service(
+        (
+            HealthCheckResult(
+                name="llm_provider",
+                status=HealthStatus.UNHEALTHY,
+                details={
+                    "provider": "openai",
+                    "reason": "provider_unavailable",
+                },
+            ),
+        )
+    )
+
+    payload = await FunctionalityHealthService(
+        readiness_service=readiness_service,
+    ).get_health()
+
+    conversation = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "conversation"
+    )
+
+    assert conversation["status"] == "unavailable"
+    assert conversation["health_score"] == 0.0
+    assert conversation["risk_level"] == "high"
+    assert conversation in payload["attention"]
+
+    assert payload["platform_health"] == "incident"
+    assert payload["user_impact"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_telegram_health_reaches_telegram_functionality() -> None:
+    """Telegram dependency health maps to the Telegram functionality."""
+
+    readiness_service = _readiness_service(
+        (
+            HealthCheckResult(
+                name="telegram",
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "telegram",
+                    "reachable": True,
+                },
+            ),
+        )
+    )
+
+    payload = await FunctionalityHealthService(
+        readiness_service=readiness_service,
+    ).get_health()
+
+    telegram = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "telegram"
+    )
+
+    assert telegram["status"] == "healthy"
+    assert telegram["health_score"] == 100.0
+    assert telegram["risk_level"] == "low"
+    assert telegram["provider"] == "telegram"
+
+
+@pytest.mark.asyncio
+async def test_database_health_reaches_database_functionality() -> None:
+    """PostgreSQL dependency health maps to the database functionality."""
+
+    readiness_service = _readiness_service(
+        (
+            HealthCheckResult(
+                name="postgresql",
+                status=HealthStatus.HEALTHY,
+                details={
+                    "provider": "postgresql",
+                    "reachable": True,
+                },
+            ),
+        )
+    )
+
+    payload = await FunctionalityHealthService(
+        readiness_service=readiness_service,
+    ).get_health()
+
+    database = next(
+        item
+        for item in payload["functionalities"]
+        if item["functionality_id"] == "database"
+    )
+
+    assert database["status"] == "healthy"
+    assert database["health_score"] == 100.0
+    assert database["risk_level"] == "low"
+    assert database["provider"] == "postgresql"
+
+
+def test_health_service_requires_a_readiness_service() -> None:
+    """Fail fast instead of creating an unconnected health source."""
+
+    with pytest.raises(
+        ValueError,
+        match="readiness_service",
+    ):
+        FunctionalityHealthService(
+            readiness_service=None,
+        )
+===== ENVIRONMENT TESTS =====
+from unittest.mock import AsyncMock
+
+import pytest
+
+from backend.app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+    ProductionReadinessResult,
+)
+from backend.app.application.provider_management.environment import OperationsEnvironment
+from backend.app.application.provider_management.functionality_health_service import FunctionalityHealthService
+
+
+def service(*checks: HealthCheckResult) -> AsyncMock:
+    result = AsyncMock()
+    result.check.return_value = ProductionReadinessResult(
+        status=HealthStatus.HEALTHY,
+        checks=checks,
+    )
+    return result
+
+
+@pytest.mark.asyncio
+async def test_legacy_call_defaults_to_adults() -> None:
+    payload = await FunctionalityHealthService(
+        readiness_service=service(),
+    ).get_health()
+    assert payload["environment"] == "adults"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("environment", [OperationsEnvironment.KIDS, OperationsEnvironment.ADULTS])
+async def test_environment_is_propagated(environment: OperationsEnvironment) -> None:
+    payload = await FunctionalityHealthService(
+        readiness_service=service(),
+    ).get_health(environment=environment)
+    assert payload["environment"] == environment.value
+    assert all(item["environment"] == environment.value for item in payload["functionalities"])
+
+
+@pytest.mark.asyncio
+async def test_existing_frontend_contract_fields_are_present() -> None:
+    payload = await FunctionalityHealthService(
+        readiness_service=service(
+            HealthCheckResult(
+                name="llm_provider",
+                status=HealthStatus.HEALTHY,
+                details={"provider": "openai", "model": "gpt-5-mini"},
+            )
+        ),
+    ).get_health(environment=OperationsEnvironment.KIDS)
+
+    item = next(
+        x for x in payload["functionalities"]
+        if x["functionality_id"] == "conversation"
+    )
+
+    assert item["category"] == "AI"
+    assert item["description"]
+    assert item["capability"] == "conversation"
+    assert item["checked_at"] == payload["generated_at"]
+    assert item["controllable"] is False
+    assert item["reason"]
+    assert item["environment"] == "kids"
+    assert item["availability"] == "enabled"
+    assert item["policy_status"] == "not_evaluated"
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_provider_is_an_incident() -> None:
+    payload = await FunctionalityHealthService(
+        readiness_service=service(
+            HealthCheckResult(
+                name="llm_provider",
+                status=HealthStatus.UNHEALTHY,
+                details={"provider": "openai"},
+            )
+        ),
+    ).get_health()
+
+    item = next(x for x in payload["functionalities"] if x["functionality_id"] == "conversation")
+    assert item["status"] == "unavailable"
+    assert payload["platform_health"] == "incident"
+    assert payload["platform_health_score"] == 0.0
+
+===== M2.1 API TESTS =====
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from backend.app.api.operations_center import create_operations_center_router
+from backend.app.application.operations_center.dashboard_composition import OperationsCenterComposition
+
+
+def client() -> TestClient:
+    app = FastAPI()
+    app.include_router(create_operations_center_router(composition=OperationsCenterComposition()))
+    return TestClient(app)
+
+
+def test_legacy_endpoint_defaults_to_adults() -> None:
+    response = client().get("/api/operations-center/functionality-health")
+    assert response.status_code == 200
+    assert response.json()["environment"] == "adults"
+
+
+def test_kids_environment() -> None:
+    response = client().get("/api/operations-center/functionality-health?environment=kids")
+    assert response.status_code == 200
+    assert response.json()["environment"] == "kids"
+
+
+def test_adults_environment() -> None:
+    response = client().get("/api/operations-center/functionality-health?environment=adults")
+    assert response.status_code == 200
+    assert response.json()["environment"] == "adults"
+
+
+def test_unknown_environment_is_rejected() -> None:
+    response = client().get("/api/operations-center/functionality-health?environment=unknown")
+    assert response.status_code == 422

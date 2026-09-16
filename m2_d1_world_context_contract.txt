@@ -1,0 +1,711 @@
+﻿===== WORLD CONTEXT =====
+"""
+World Context.
+
+Represents the active learning world
+for an AI interaction.
+
+Examples:
+
+- French World
+- Spanish World
+- Business French World
+
+The world determines:
+- language
+- learning environment
+- available experience rules
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class WorldContext:
+    """
+    Immutable learning world context.
+    """
+
+    world_id: str
+
+    name: str
+
+    language_code: str
+
+    available_characters: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """
+        Validate world context.
+        """
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        if not self.name.strip():
+            raise ValueError(
+                "world name cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+===== WORLD REPOSITORY =====
+"""
+YAML World Repository.
+
+Infrastructure implementation for loading
+World configurations from YAML files.
+
+Implements:
+
+WorldRepository
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+class WorldConfiguration:
+    """
+    Infrastructure representation of a world.
+
+    Validates the shape and required values of the
+    loaded YAML configuration before it can be consumed
+    by the application layer.
+    """
+
+    def __init__(
+        self,
+        data: dict[str, Any],
+    ) -> None:
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "World configuration must be a mapping."
+            )
+
+        self.id = self._required_string(
+            data,
+            "id",
+            "World id cannot be empty.",
+        )
+
+        self.name = self._required_string(
+            data,
+            "name",
+            "World name cannot be empty.",
+        )
+
+        self.language_code = self._required_string(
+            data,
+            "language_code",
+            "Language code cannot be empty.",
+        )
+
+        available_characters = data.get(
+            "available_characters",
+            [],
+        )
+
+        if not isinstance(
+            available_characters,
+            list,
+        ):
+            raise ValueError(
+                "available_characters must be a list."
+            )
+
+        validated_characters: list[str] = []
+
+        for character_id in available_characters:
+
+            if not isinstance(
+                character_id,
+                str,
+            ):
+                raise ValueError(
+                    "Character id must be a string."
+                )
+
+            if not character_id.strip():
+                raise ValueError(
+                    "Character id cannot be empty."
+                )
+
+            validated_characters.append(
+                character_id
+            )
+
+        self.available_characters = (
+            validated_characters
+        )
+
+    @staticmethod
+    def _required_string(
+        data: dict[str, Any],
+        field_name: str,
+        error_message: str,
+    ) -> str:
+        """
+        Return a required non-empty string field.
+        """
+
+        value = data.get(field_name)
+
+        if not isinstance(value, str):
+            raise ValueError(error_message)
+
+        if not value.strip():
+            raise ValueError(error_message)
+
+        return value
+
+
+class YamlWorldRepository:
+    """
+    Loads worlds from YAML files.
+    """
+
+    def __init__(
+        self,
+        *,
+        worlds_path: Path,
+    ) -> None:
+
+        self._worlds_path = worlds_path
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ) -> WorldConfiguration | None:
+        """
+        Load a world configuration by its identifier.
+        """
+
+        file_path = (
+            self._worlds_path.resolve()
+            / f"{world_id}.yaml"
+        )
+
+        if not file_path.exists():
+            return None
+
+        with file_path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = yaml.safe_load(file)
+
+        return WorldConfiguration(data)
+
+===== WORLD RESOLVER =====
+"""
+World Resolver.
+
+Application service responsible for resolving
+the learner's active AI learning world.
+
+Responsibilities
+----------------
+
+- Retrieve world configuration.
+- Validate world availability.
+- Create WorldContext.
+
+Does NOT
+--------
+
+- Execute AI models.
+- Manage characters.
+- Create conversations.
+- Handle persistence directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Protocol
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class WorldRepository(Protocol):
+    """
+    Repository contract for world retrieval.
+    """
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ):
+        """
+        Retrieve a world configuration.
+        """
+        ...
+
+
+class WorldResolver:
+    """
+    Resolves a learning world into runtime context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_repository: WorldRepository,
+    ) -> None:
+        self._world_repository = world_repository
+
+    def resolve(
+        self,
+        world_id: str,
+    ) -> WorldContext:
+        """
+        Resolve world configuration.
+
+        Returns
+        -------
+        WorldContext
+            Validated world interaction context.
+        """
+
+        logger.info(
+            "Resolving world context",
+            extra={
+                "world_id": world_id,
+            },
+        )
+
+        world = (
+            self._world_repository
+            .get_by_id(world_id)
+        )
+
+        if world is None:
+            raise ValueError(
+                f"World not found: {world_id}"
+            )
+
+        return WorldContext(
+            world_id=world.id,
+            name=world.name,
+            language_code=world.language_code,
+            available_characters=(
+                tuple(
+                    world.available_characters
+                )
+            ),
+        )
+
+
+===== WORLD CATALOGUE MODELS =====
+"""Application model for the authoritative Learning World catalogue."""
+from __future__ import annotations
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class LearningWorldCatalogueEntry:
+    identifier: str
+    name: str
+    description: str
+    language: str
+    version: str
+    status: str
+    enabled: bool
+    world_type: str
+    learning_domain: str
+    runtime_world_id: str | None
+
+    def __post_init__(self) -> None:
+        for field_name in ("identifier", "name", "version", "status", "world_type", "learning_domain"):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"Learning World catalogue {field_name} cannot be empty.")
+        if self.runtime_world_id is not None and not self.runtime_world_id.strip():
+            raise ValueError("runtime_world_id cannot be blank when provided.")
+
+
+===== WORLD CATALOGUE SERVICE =====
+"""Application service for catalogue-to-runtime World resolution."""
+from __future__ import annotations
+from app.application.uai.world.world_resolver import WorldResolver
+from .repositories import LearningWorldCatalogueRepository
+
+class LearningWorldCatalogueService:
+    """Apply catalogue policy and delegate runtime resolution to WorldResolver."""
+    def __init__(self, *, repository: LearningWorldCatalogueRepository, world_resolver: WorldResolver) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+        if world_resolver is None:
+            raise ValueError("world_resolver cannot be None.")
+        self._repository = repository
+        self._world_resolver = world_resolver
+
+    def get_by_identifier(self, identifier: str):
+        if not identifier or not identifier.strip():
+            raise ValueError("catalogue identifier is required.")
+        return self._repository.get_by_identifier(identifier.strip())
+
+    def resolve_runtime_world(self, catalogue_identifier: str):
+        entry = self.get_by_identifier(catalogue_identifier)
+        if entry is None:
+            raise ValueError(f"Learning World not found: {catalogue_identifier.strip()}")
+        if not entry.enabled:
+            raise ValueError(f"Learning World is disabled: {entry.identifier}")
+        if not entry.runtime_world_id:
+            raise ValueError(f"Learning World has no runtime configuration: {entry.identifier}")
+        return self._world_resolver.resolve(entry.runtime_world_id)
+
+
+===== WORLD YAML TESTS =====
+"""
+Tests for YAML World Repository.
+"""
+
+from pathlib import Path
+
+import pytest
+
+from app.infrastructure.worlds.yaml_world_repository import (
+    WorldConfiguration,
+    YamlWorldRepository,
+)
+
+
+BACKEND_APP_PATH = (
+    Path(__file__)
+    .resolve()
+    .parents[3]
+    / "app"
+)
+
+
+WORLDS_PATH = (
+    BACKEND_APP_PATH
+    / "configuration"
+    / "worlds"
+)
+
+
+def test_load_french_world():
+
+    repository = YamlWorldRepository(
+        worlds_path=WORLDS_PATH
+    )
+
+    world = repository.get_by_id(
+        "french_world"
+    )
+
+    assert world is not None
+
+    assert world.id == "french_world"
+
+    assert world.language_code == "fr"
+
+    assert "yeti" in (
+        world.available_characters
+    )
+
+    assert "alix" in (
+        world.available_characters
+    )
+
+
+def test_load_polish_world():
+
+    repository = YamlWorldRepository(
+        worlds_path=WORLDS_PATH
+    )
+
+    world = repository.get_by_id(
+        "polish_world"
+    )
+
+    assert world is not None
+
+    assert world.id == "polish_world"
+
+    assert world.language_code == "pl"
+
+    assert "yeti" in (
+        world.available_characters
+    )
+
+    assert "alix" in (
+        world.available_characters
+    )
+
+
+def test_unknown_world_returns_none():
+
+    repository = YamlWorldRepository(
+        worlds_path=WORLDS_PATH
+    )
+
+    world = repository.get_by_id(
+        "unknown_world"
+    )
+
+    assert world is None
+
+
+def test_world_configuration_rejects_missing_id():
+
+    with pytest.raises(
+        ValueError,
+        match="World id cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "name": "French World",
+                "language_code": "fr",
+            }
+        )
+
+
+def test_world_configuration_rejects_empty_id():
+
+    with pytest.raises(
+        ValueError,
+        match="World id cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "id": " ",
+                "name": "French World",
+                "language_code": "fr",
+            }
+        )
+
+
+def test_world_configuration_rejects_missing_name():
+
+    with pytest.raises(
+        ValueError,
+        match="World name cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "language_code": "fr",
+            }
+        )
+
+
+def test_world_configuration_rejects_empty_name():
+
+    with pytest.raises(
+        ValueError,
+        match="World name cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "name": " ",
+                "language_code": "fr",
+            }
+        )
+
+
+def test_world_configuration_rejects_missing_language_code():
+
+    with pytest.raises(
+        ValueError,
+        match="Language code cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "name": "French World",
+            }
+        )
+
+
+def test_world_configuration_rejects_empty_language_code():
+
+    with pytest.raises(
+        ValueError,
+        match="Language code cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "name": "French World",
+                "language_code": " ",
+            }
+        )
+
+
+def test_world_configuration_rejects_invalid_characters():
+
+    with pytest.raises(
+        ValueError,
+        match="available_characters must be a list.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "name": "French World",
+                "language_code": "fr",
+                "available_characters": "yeti",
+            }
+        )
+
+
+def test_world_configuration_rejects_empty_character_id():
+
+    with pytest.raises(
+        ValueError,
+        match="Character id cannot be empty.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "name": "French World",
+                "language_code": "fr",
+                "available_characters": [
+                    "yeti",
+                    " ",
+                ],
+            }
+        )
+
+
+def test_world_configuration_rejects_non_string_character_id():
+
+    with pytest.raises(
+        ValueError,
+        match="Character id must be a string.",
+    ):
+        WorldConfiguration(
+            {
+                "id": "french_world",
+                "name": "French World",
+                "language_code": "fr",
+                "available_characters": [
+                    "yeti",
+                    123,
+                ],
+            }
+        )
+
+===== WORLD RESOLVER TESTS =====
+"""
+Tests for World Resolver.
+"""
+
+from pathlib import Path
+
+import pytest
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+
+BACKEND_PATH = (
+    Path(__file__)
+    .resolve()
+    .parents[4]
+)
+
+
+WORLDS_PATH = (
+    BACKEND_PATH
+    / "app"
+    / "configuration"
+    / "worlds"
+)
+
+
+def make_resolver() -> WorldResolver:
+
+    repository = YamlWorldRepository(
+        worlds_path=WORLDS_PATH
+    )
+
+    return WorldResolver(
+        world_repository=repository
+    )
+
+
+def test_resolve_french_world():
+
+    resolver = make_resolver()
+
+    context = resolver.resolve(
+        "french_world"
+    )
+
+    assert context.world_id == (
+        "french_world"
+    )
+
+    assert context.language_code == "fr"
+
+    assert "yeti" in (
+        context.available_characters
+    )
+
+    assert "alix" in (
+        context.available_characters
+    )
+
+
+def test_resolve_polish_world():
+
+    resolver = make_resolver()
+
+    context = resolver.resolve(
+        "polish_world"
+    )
+
+    assert context.world_id == (
+        "polish_world"
+    )
+
+    assert context.language_code == "pl"
+
+    assert "yeti" in (
+        context.available_characters
+    )
+
+    assert "alix" in (
+        context.available_characters
+    )
+
+
+def test_resolve_unknown_world_raises():
+
+    resolver = make_resolver()
+
+    with pytest.raises(
+        ValueError,
+        match="World not found: unknown_world",
+    ):
+        resolver.resolve(
+            "unknown_world"
+        )

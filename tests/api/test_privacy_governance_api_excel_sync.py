@@ -1,19 +1,19 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.api.privacy_governance import router
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.api.privacy_governance import router
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
     reset_privacy_governance_composition_for_tests,
 )
-from backend.app.application.privacy.privacy_governance_api_sync import (
+from app.application.privacy.privacy_governance_api_sync import (
     PrivacyGovernanceAPIEvidenceSync,
 )
-from backend.app.application.privacy.privacy_governance_excel_runtime_config import (
+from app.application.privacy.privacy_governance_excel_runtime_config import (
     get_privacy_governance_workbook_path,
 )
 
@@ -177,3 +177,4 @@ def test_api_rejection_and_request_changes_sync_excel(
     assert response.status_code == 200
     assert response.json()["case"]["governance_status"] == "BLOCKED"
     assert response.json()["excel_sync"]["status"] == "SYNCED"
+

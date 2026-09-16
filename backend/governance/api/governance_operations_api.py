@@ -1,4 +1,4 @@
-"""
+﻿"""
 Operations Center Governance API.
 
 Read-only governance visibility API.
@@ -13,11 +13,11 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi import Depends
 
-from backend.governance.operations_center.governance_dashboard_service import (
+from governance.operations_center.governance_dashboard_service import (
     GovernanceDashboardService,
 )
 
-from backend.governance.operations_center.governance_runtime import (
+from governance.operations_center.governance_runtime import (
     governance_dashboard_service,
 )
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Hackathon Preference Source.
 
 Provides Discovery preferences from the EasyChatBot onboarding
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from backend.skills.discovery.preference_source import (
+from skills.discovery.preference_source import (
     PreferenceContext,
 )
 

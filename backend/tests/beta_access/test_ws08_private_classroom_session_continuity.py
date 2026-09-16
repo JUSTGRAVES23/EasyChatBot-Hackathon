@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -240,7 +240,7 @@ async def test_ws08_message_order_is_preserved():
     messages = [
         "Bonjour",
         "Comment allez-vous ?",
-        "Je voudrais pratiquer le français.",
+        "Je voudrais pratiquer le franÃ§ais.",
     ]
 
     for message in messages:
@@ -402,3 +402,4 @@ async def test_ws08_history_limit_is_applied_per_user():
         "three",
         "four",
     ]
+

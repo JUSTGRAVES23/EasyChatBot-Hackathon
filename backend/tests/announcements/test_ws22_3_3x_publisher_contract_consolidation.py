@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from uuid import uuid4
 
 import pytest
 
-from backend.app.application.announcements.execution.legacy_publisher_bridge import (
+from app.application.announcements.execution.legacy_publisher_bridge import (
     LegacyAnnouncementPublisherBridge,
 )
 

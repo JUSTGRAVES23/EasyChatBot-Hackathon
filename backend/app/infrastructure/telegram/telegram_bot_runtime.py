@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from backend.app.interfaces.telegram.beta_telegram_adapter import (
+from app.interfaces.telegram.beta_telegram_adapter import (
     BetaTelegramAdapter,
 )
 

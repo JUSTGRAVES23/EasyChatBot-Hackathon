@@ -12,7 +12,7 @@ Does NOT:
 from datetime import datetime
 
 
-from backend.cybersecurity.notifications.policy import (
+from cybersecurity.notifications.policy import (
     CybersecurityNotificationPolicy,
 )
 
@@ -98,3 +98,4 @@ class CybersecurityReportScheduler:
                 self.policy.weekly_report_enabled,
 
         }
+

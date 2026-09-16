@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot Character Catalogue API.
 
 Dedicated HTTP boundary for the character catalogue
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from backend.characters.character_registry import (
+from characters.character_registry import (
     CharacterRegistry,
 )
 

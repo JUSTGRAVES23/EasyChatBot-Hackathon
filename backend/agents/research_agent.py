@@ -1,4 +1,4 @@
-"""
+﻿"""
 Research Agent.
 
 Retrieves external information through approved
@@ -21,20 +21,20 @@ IntelligenceContext
 
 from __future__ import annotations
 
-from backend.agents.agent_manifest import AgentManifest
-from backend.agents.agent_result import AgentResult
-from backend.agents.base_agent import BaseAgent
+from agents.agent_manifest import AgentManifest
+from agents.agent_result import AgentResult
+from agents.base_agent import BaseAgent
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
 )
 
-from backend.providers.parallel.parallel_provider import (
+from providers.parallel.parallel_provider import (
     ParallelSearchProvider,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

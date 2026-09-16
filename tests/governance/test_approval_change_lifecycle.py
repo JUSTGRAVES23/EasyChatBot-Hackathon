@@ -1,9 +1,9 @@
-from backend.governance.change_management.change_management_service import (
+﻿from governance.change_management.change_management_service import (
     ChangeManagementService,
 )
-from backend.governance.change_management.change_type import ChangeType
-from backend.governance.change_management.change_risk import ChangeRisk
-from backend.governance.approval.approval_change_service import (
+from governance.change_management.change_type import ChangeType
+from governance.change_management.change_risk import ChangeRisk
+from governance.approval.approval_change_service import (
     ApprovalChangeService,
 )
 
@@ -31,3 +31,4 @@ def test_approval_changes_lifecycle():
     )
 
     assert result.status.value == "APPROVED"
+

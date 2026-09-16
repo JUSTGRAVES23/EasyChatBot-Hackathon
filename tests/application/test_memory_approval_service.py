@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 from datetime import datetime, timezone
@@ -7,17 +7,17 @@ from datetime import datetime, timezone
 import pytest
 
 
-from backend.app.application.memory.memory_approval_service import (
+from app.application.memory.memory_approval_service import (
     MemoryApprovalService,
 )
 
 
-from backend.app.application.memory.memory_candidate import (
+from app.application.memory.memory_candidate import (
     MemoryCandidate,
 )
 
 
-from backend.app.application.memory.memory_policy import (
+from app.application.memory.memory_policy import (
     MemoryPolicy,
 )
 

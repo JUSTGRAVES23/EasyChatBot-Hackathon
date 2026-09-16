@@ -8,6 +8,14 @@ The provider supports multiple controlled email contracts:
 - Cybersecurity notifications:
   rendered by the existing cybersecurity HTML renderer.
 
+- Authentication verification emails:
+  application service supplies the authoritative HTML and
+  plain-text content.
+
+- Authentication password-reset emails:
+  application service supplies the authoritative HTML and
+  plain-text content.
+
 - Privacy Governance reminders:
   the application service supplies the authoritative HTML and
   plain-text content. The provider delivers that content without
@@ -30,12 +38,13 @@ The provider does not:
 from __future__ import annotations
 
 import base64
+import mimetypes
 from pathlib import Path
 from typing import Any
 
 import resend
 
-from backend.cybersecurity.email.email_configuration import (
+from cybersecurity.email.email_configuration import (
     EMAIL_FROM,
     RESEND_API_KEY,
 )
@@ -46,6 +55,15 @@ class ResendEmailProvider:
     Provider adapter for Resend email delivery.
 
     Routing rule:
+
+        authentication_verification
+            -> supplied html
+
+        authentication_password_reset
+            -> supplied html
+
+        academy_notification
+            -> supplied html
 
         privacy_governance_reminder
             -> supplied html_body
@@ -126,6 +144,7 @@ class ResendEmailProvider:
 
         if email_type in {
             "authentication_verification",
+            "authentication_password_reset",
             "academy_notification",
         }:
             supplied_html = content.get("html")
@@ -169,6 +188,7 @@ class ResendEmailProvider:
 
         if email_type in {
             "authentication_verification",
+            "authentication_password_reset",
             "academy_notification",
         }:
             supplied_sender = content.get("from")
@@ -307,6 +327,13 @@ class ResendEmailProvider:
         """
         Convert local application attachment metadata into the
         Resend attachment representation.
+
+        Inline images use the application-level ``inline`` flag as a
+        validation/control signal and the provider-level ``content_id``
+        to match a ``cid:...`` reference in the supplied HTML.
+
+        The MIME content type is preserved explicitly because email
+        clients use it when deciding how to render an inline resource.
         """
 
         if not isinstance(attachments, list):
@@ -373,9 +400,24 @@ class ResendEmailProvider:
                 path.read_bytes()
             ).decode("ascii")
 
+            content_type = attachment.get("content_type")
+
+            if content_type:
+                resolved_content_type = str(
+                    content_type
+                ).strip()
+            else:
+                resolved_content_type = (
+                    mimetypes.guess_type(
+                        resolved_filename
+                    )[0]
+                    or "application/octet-stream"
+                )
+
             resend_attachment: dict[str, Any] = {
                 "filename": resolved_filename,
                 "content": encoded_content,
+                "content_type": resolved_content_type,
             }
 
             if content_id:
@@ -397,7 +439,7 @@ class ResendEmailProvider:
         Existing Cybersecurity HTML renderer.
 
         This remains the Cybersecurity fallback and is intentionally
-        not used for Privacy Governance reminders.
+        not used for authentication or Privacy Governance emails.
         """
 
         posture = str(

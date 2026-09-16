@@ -1,6 +1,6 @@
-import pytest
+﻿import pytest
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 

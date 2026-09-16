@@ -1,4 +1,4 @@
-"""
+﻿"""
 Parallel Search Provider Adapter.
 
 Bridges the provider-independent SearchProvider contract
@@ -30,7 +30,7 @@ directly.
 
 from typing import Any
 
-from backend.providers.parallel.parallel_client import (
+from providers.parallel.parallel_client import (
     ParallelClientWrapper,
 )
 

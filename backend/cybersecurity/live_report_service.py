@@ -27,17 +27,17 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.cybersecurity.dashboard_data_source import (
+from cybersecurity.dashboard_data_source import (
     DashboardCybersecurityDataSource,
 )
 
 
-from backend.cybersecurity.intelligence_service import (
+from cybersecurity.intelligence_service import (
     CybersecurityIntelligenceService,
 )
 
 
-from backend.cybersecurity.report_orchestrator import (
+from cybersecurity.report_orchestrator import (
     CybersecurityReportOrchestrator,
 )
 
@@ -116,3 +116,4 @@ class CybersecurityLiveReportService:
         return await (
             self.generate_daily_report()
         )
+

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.cybersecurity.email.resend_email_provider import (
+from cybersecurity.email.resend_email_provider import (
     ResendEmailProvider,
 )
 
@@ -116,3 +116,4 @@ class EmailProviderManager:
 __all__ = [
     "EmailProviderManager",
 ]
+

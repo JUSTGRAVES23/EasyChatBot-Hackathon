@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
 
+from src.ai_runtime.capabilities.actor_context import RuntimeActorContext
+
 
 class CapabilityType(StrEnum):
     """
@@ -76,6 +78,14 @@ class CapabilityType(StrEnum):
 
     FLASHCARD_GENERATION = (
         "flashcard_generation"
+    )
+
+    INTERNAL_DOCUMENTATION_SEARCH = (
+        "internal_documentation_search"
+    )
+
+    INTERNAL_DATA_READ = (
+        "internal_data_read"
     )
 
     EVALUATION = (
@@ -127,6 +137,11 @@ class CapabilityRequest:
     - string capability values.
 
     Strings are normalised to CapabilityType internally.
+
+    Actor context is optional for backward compatibility.
+
+    When present, RuntimeActorContext provides the authenticated
+    actor context required for governed capability execution.
     """
 
     capability: CapabilityType
@@ -140,6 +155,8 @@ class CapabilityRequest:
     )
 
     requested_by: str = "application"
+
+    actor: RuntimeActorContext | None = None
 
     def __post_init__(self) -> None:
         """
@@ -186,6 +203,15 @@ class CapabilityRequest:
         ):
             raise ValueError(
                 "Capability metadata must be a mapping."
+            )
+
+        if self.actor is not None and not isinstance(
+            self.actor,
+            RuntimeActorContext,
+        ):
+            raise ValueError(
+                "Capability actor must be a valid "
+                "RuntimeActorContext."
             )
 
         if isinstance(

@@ -286,6 +286,7 @@ class OpenAISpeechProvider(
                 ),
                 voice=voice,
                 input=text,
+                response_format="pcm",
             )
         )
 

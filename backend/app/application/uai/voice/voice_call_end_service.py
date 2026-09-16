@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call End Service.
 
 Application workflow responsible
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 
 
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
 
@@ -108,3 +108,5 @@ class VoiceCallEndService:
 __all__ = [
     "VoiceCallEndService",
 ]
+
+

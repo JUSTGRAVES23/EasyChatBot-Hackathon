@@ -5,12 +5,12 @@ Tests for live reporting workflow.
 import pytest
 
 
-from backend.cybersecurity.cybersecurity_live_reporting_service import (
+from cybersecurity.cybersecurity_live_reporting_service import (
     CybersecurityLiveReportingService,
 )
 
 
-from backend.cybersecurity.cybersecurity_notification_audit import (
+from cybersecurity.cybersecurity_notification_audit import (
     CybersecurityNotificationAudit,
 )
 
@@ -74,3 +74,4 @@ async def test_live_reporting_creates_critical_notification():
         ==
         1
     )
+

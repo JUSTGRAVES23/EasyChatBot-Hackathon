@@ -1,0 +1,1419 @@
+﻿===== deploy_agent.py =====
+"""
+Deploy the EasyChatBot Cinema Intelligence Agent to Google Agent Runtime.
+
+IMPORTANT DEPLOYMENT DESIGN
+---------------------------
+The runtime package is intentionally isolated.
+
+The deployment package must contain these import roots at its archive root:
+
+    adk_cinema/
+    backend/
+    src/
+    g5_final_hackathon_demo.py
+
+We deliberately pass RELATIVE paths to Agent Runtime from inside the
+runtime package directory. This prevents Windows absolute paths such as:
+
+    C:/AI Folder/EasyChatBot-Hackathon/.agent_runtime_package/...
+
+from leaking into dependencies.tar.gz.
+
+Workflow:
+
+    1. python .\\build_runtime_package.py
+    2. python .\\deploy_agent.py --preflight
+    3. python .\\deploy_agent.py --dry-run
+    4. python .\\deploy_agent.py
+
+A real deployment is only performed after all local preflight checks pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import importlib
+import io
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import vertexai
+from vertexai import agent_engines
+
+from adk_cinema.agent import root_agent
+
+
+# ============================================================================
+# Google Cloud configuration
+# ============================================================================
+
+PROJECT_ID = "demoeasyworld-2026"
+
+LOCATION = "europe-west1"
+
+STAGING_BUCKET = (
+    "gs://demoeasyworld-2026-agent-staging-eu"
+)
+
+
+# ============================================================================
+# Local paths
+# ============================================================================
+
+ROOT = Path(
+    __file__
+).resolve().parent
+
+RUNTIME_PACKAGE = (
+    ROOT.parent / "EasyChatBot-AgentRuntime"
+)
+
+RUNTIME_REQUIREMENTS = (
+    ROOT
+    / "adk_cinema"
+    / "requirements-runtime.txt"
+)
+
+
+# ============================================================================
+# Deployment metadata
+# ============================================================================
+
+DISPLAY_NAME = (
+    "EasyChatBot Cinema Intelligence Agent"
+)
+
+DESCRIPTION = (
+    "Hackathon cinema intelligence agent using Google ADK, "
+    "Gemini, live Parallel research, learner memory, "
+    "and personalisation."
+)
+
+
+# ============================================================================
+# Required runtime files
+# ============================================================================
+
+REQUIRED_FILES = {
+    "adk_cinema/__init__.py",
+    "adk_cinema/agent.py",
+    "adk_cinema/tools.py",
+    "backend/conversation/conversation_request.py",
+    "backend/memory/memory_service.py",
+    "backend/providers/llm/llm_provider_factory.py",
+    "backend/providers/parallel/parallel_client.py",
+    "g5_final_hackathon_demo.py",
+}
+
+
+# ============================================================================
+# Runtime deployment inputs
+#
+# These MUST remain relative to RUNTIME_PACKAGE.
+# ============================================================================
+
+RELATIVE_DEPLOYMENT_INPUTS = (
+    "./adk_cinema",
+    "./backend",
+    "./src",
+    "./g5_final_hackathon_demo.py",
+)
+
+
+# ============================================================================
+# Secret Manager mappings
+# ============================================================================
+
+SECRET_ENV_VARS = {
+    "GEMINI_API_KEY": {
+        "secret": "gemini-api-key",
+        "version": "latest",
+    },
+    "PARALLEL_API_KEY": {
+        "secret": "parallel-api-key",
+        "version": "latest",
+    },
+}
+
+
+# ============================================================================
+# Utility
+# ============================================================================
+
+
+def run_command(
+    command: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run a local command and return its completed process."""
+
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+
+# ============================================================================
+# Validation: Google configuration
+# ============================================================================
+
+
+def validate_configuration() -> None:
+    """Validate static Google Cloud configuration."""
+
+    if not PROJECT_ID:
+        raise RuntimeError(
+            "PROJECT_ID is empty."
+        )
+
+    if not LOCATION:
+        raise RuntimeError(
+            "LOCATION is empty."
+        )
+
+    if not STAGING_BUCKET.startswith(
+        "gs://"
+    ):
+        raise RuntimeError(
+            "STAGING_BUCKET must start with gs://"
+        )
+
+    if not DISPLAY_NAME.strip():
+        raise RuntimeError(
+            "DISPLAY_NAME is empty."
+        )
+
+
+# ============================================================================
+# Validation: runtime requirements
+# ============================================================================
+
+
+def parse_requirement_name(
+    line: str,
+) -> str:
+    """Extract a normalized Python package name."""
+
+    value = line.strip()
+
+    for separator in (
+        "==",
+        ">=",
+        "<=",
+        "~=",
+        ">",
+        "<",
+        "!=",
+        "[",
+    ):
+        value = value.split(
+            separator,
+            1,
+        )[0]
+
+    return value.strip().lower()
+
+
+def read_runtime_requirements() -> list[str]:
+    """Read and validate runtime requirements."""
+
+    if not RUNTIME_REQUIREMENTS.exists():
+        raise FileNotFoundError(
+            "Missing runtime requirements file:\n"
+            f"{RUNTIME_REQUIREMENTS}"
+        )
+
+    raw = RUNTIME_REQUIREMENTS.read_bytes()
+
+    # UTF-8 BOM
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise RuntimeError(
+            "requirements-runtime.txt contains a UTF-8 BOM."
+        )
+
+    # UTF-8 BOM incorrectly decoded as Latin-1/Windows text.
+    if raw.startswith(
+        b"\xc3\xaf\xc2\xbb\xc2\xbf"
+    ):
+        raise RuntimeError(
+            "requirements-runtime.txt contains a malformed UTF-8 BOM."
+        )
+
+    text = raw.decode(
+        "utf-8"
+    )
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("#")
+    ]
+
+    if not lines:
+        raise RuntimeError(
+            "requirements-runtime.txt is empty."
+        )
+
+    names = {
+        parse_requirement_name(line)
+        for line in lines
+    }
+
+    required = {
+        "google-adk",
+        "google-cloud-aiplatform",
+        "parallel-web",
+        "python-dotenv",
+    }
+
+    missing = required - names
+
+    if missing:
+        raise RuntimeError(
+            "Runtime requirements missing:\n"
+            + "\n".join(
+                f"  - {item}"
+                for item in sorted(missing)
+            )
+        )
+
+    return lines
+
+
+# ============================================================================
+# Validation: installed local versions
+# ============================================================================
+
+
+def validate_local_versions() -> None:
+    """
+    Validate the local serialization/runtime versions.
+
+    Agent Runtime automatically appends the local versions of
+    pydantic/cloudpickle during deployment. We therefore verify them
+    explicitly before spending time on a remote build.
+    """
+
+    import cloudpickle
+    import pydantic
+
+    print()
+    print("Local serialization versions:")
+    print(
+        f"  pydantic:    {pydantic.__version__}"
+    )
+    print(
+        f"  cloudpickle: {cloudpickle.__version__}"
+    )
+
+    if pydantic.__version__ != "2.13.4":
+        raise RuntimeError(
+            "Unexpected local pydantic version. "
+            f"Expected 2.13.4, got {pydantic.__version__}"
+        )
+
+    if cloudpickle.__version__ != "3.1.2":
+        raise RuntimeError(
+            "Unexpected local cloudpickle version. "
+            f"Expected 3.1.2, got {cloudpickle.__version__}"
+        )
+
+
+# ============================================================================
+# Validation: local imports
+# ============================================================================
+
+
+def validate_local_imports() -> None:
+    """
+    Verify every application package required by the agent can be imported.
+
+    This catches missing modules before serialization/deployment.
+    """
+
+    modules = [
+        "adk_cinema",
+        "adk_cinema.agent",
+        "adk_cinema.tools",
+        "backend",
+        "backend.memory.memory_service",
+        "backend.providers.llm.llm_provider_factory",
+        "backend.providers.parallel.parallel_client",
+        "src",
+        "src.ai_agents.live_intelligence_agent.handler",
+        "src.challenge_engine.generator",
+        "src.challenge_engine.gemini_content_generator",
+        "src.providers.search_provider.parallel_adapter",
+        "g5_final_hackathon_demo",
+    ]
+
+    print()
+    print("Validating local imports:")
+
+    for module_name in modules:
+
+        importlib.import_module(
+            module_name
+        )
+
+        print(
+            f"  PASS {module_name}"
+        )
+
+
+# ============================================================================
+# Validation: runtime package
+# ============================================================================
+
+
+def validate_runtime_package() -> list[Path]:
+    """Validate the isolated runtime package."""
+
+    if not RUNTIME_PACKAGE.exists():
+        raise FileNotFoundError(
+            "Runtime package does not exist:\n"
+            f"{RUNTIME_PACKAGE}\n\n"
+            "Build it first with:\n"
+            "  python .\\build_runtime_package.py"
+        )
+
+    if not RUNTIME_PACKAGE.is_dir():
+        raise RuntimeError(
+            f"Runtime package is not a directory: "
+            f"{RUNTIME_PACKAGE}"
+        )
+
+    files = sorted(
+        path
+        for path in RUNTIME_PACKAGE.rglob("*")
+        if path.is_file()
+    )
+
+    if not files:
+        raise RuntimeError(
+            "Runtime package is empty."
+        )
+
+    relative_files = {
+        path.relative_to(
+            RUNTIME_PACKAGE
+        ).as_posix()
+        for path in files
+    }
+
+    missing = (
+        REQUIRED_FILES
+        - relative_files
+    )
+
+    if missing:
+        raise RuntimeError(
+            "Required runtime files are missing:\n"
+            + "\n".join(
+                f"  - {item}"
+                for item in sorted(missing)
+            )
+        )
+
+    return files
+
+
+# ============================================================================
+# Validation: package roots
+# ============================================================================
+
+
+def validate_package_roots() -> None:
+    """Ensure all Python import roots are physically present."""
+
+    required_roots = (
+        "adk_cinema",
+        "backend",
+        "src",
+    )
+
+    for name in required_roots:
+
+        path = (
+            RUNTIME_PACKAGE / name
+        )
+
+        if not path.is_dir():
+            raise RuntimeError(
+                "Missing runtime package root:\n"
+                f"  {path}"
+            )
+
+        init_file = (
+            path / "__init__.py"
+        )
+
+        # backend/src may be namespace packages in the source tree.
+        # adk_cinema must explicitly be a package.
+        if name == "adk_cinema" and not init_file.exists():
+            raise RuntimeError(
+                "adk_cinema is missing __init__.py."
+            )
+
+
+# ============================================================================
+# Validation: deployment inputs
+# ============================================================================
+
+
+def validate_relative_deployment_inputs() -> None:
+    """
+    Validate the exact relative inputs that will be handed to Agent Runtime.
+
+    This is deliberately done while the working directory is the isolated
+    runtime package.
+    """
+
+    print()
+    print(
+        "Validating Agent Runtime package inputs:"
+    )
+
+    for relative_input in RELATIVE_DEPLOYMENT_INPUTS:
+
+        path = (
+            RUNTIME_PACKAGE
+            / relative_input.removeprefix("./")
+        )
+
+        if not path.exists():
+            raise RuntimeError(
+                "Deployment input does not exist:\n"
+                f"  {relative_input}\n"
+                f"  resolved: {path}"
+            )
+
+        print(
+            f"  PASS {relative_input}"
+        )
+
+
+# ============================================================================
+# Validation: forbidden artifacts
+# ============================================================================
+
+
+def validate_forbidden_artifacts(
+    files: list[Path],
+) -> None:
+    """Reject secrets, databases, backups, logs, and inspection files."""
+
+    forbidden_patterns = (
+        ".env",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
+        "backup",
+        "inspection",
+        ".log",
+        ".pkl",
+        ".tar",
+        ".gz",
+    )
+
+    forbidden = []
+
+    for path in files:
+
+        name = path.name.lower()
+
+        if any(
+            pattern in name
+            for pattern in forbidden_patterns
+        ):
+            forbidden.append(path)
+
+    if forbidden:
+
+        details = "\n".join(
+            f"  - {path.relative_to(RUNTIME_PACKAGE)}"
+            for path in forbidden
+        )
+
+        raise RuntimeError(
+            "Forbidden deployment artifacts detected:\n"
+            f"{details}"
+        )
+
+
+# ============================================================================
+# Validation: environment
+# ============================================================================
+
+
+def validate_cloud_environment() -> None:
+    """Verify local gcloud project configuration when gcloud is available."""
+
+    gcloud = (
+        Path(os.environ.get(
+            "LOCALAPPDATA",
+            "",
+        ))
+        / "Google"
+        / "Cloud SDK"
+        / "google-cloud-sdk"
+        / "bin"
+        / "gcloud.cmd"
+    )
+
+    if not gcloud.exists():
+        print()
+        print(
+            "WARNING: gcloud.cmd not found at expected path."
+        )
+        print(
+            "Continuing because Vertex AI SDK authentication "
+            "is already available."
+        )
+        return
+
+    result = subprocess.run(
+        [
+            str(gcloud),
+            "config",
+            "get-value",
+            "project",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    configured_project = (
+        result.stdout.strip()
+    )
+
+    print()
+    print(
+        f"gcloud configured project: "
+        f"{configured_project}"
+    )
+
+    if (
+        configured_project
+        and configured_project != PROJECT_ID
+    ):
+        raise RuntimeError(
+            "gcloud project mismatch.\n"
+            f"Expected: {PROJECT_ID}\n"
+            f"Actual:   {configured_project}"
+        )
+
+
+# ============================================================================
+# Deployment plan
+# ============================================================================
+
+
+def print_deployment_plan(
+    files: list[Path],
+) -> None:
+    """Print a deterministic deployment plan."""
+
+    print()
+    print("=" * 70)
+    print(
+        "GOOGLE AGENT RUNTIME DEPLOYMENT PLAN"
+    )
+    print("=" * 70)
+
+    print(
+        f"Project:           {PROJECT_ID}"
+    )
+
+    print(
+        f"Location:          {LOCATION}"
+    )
+
+    print(
+        f"Staging bucket:    {STAGING_BUCKET}"
+    )
+
+    print(
+        f"Display name:      {DISPLAY_NAME}"
+    )
+
+    print()
+    print(
+        f"Requirements:      {RUNTIME_REQUIREMENTS}"
+    )
+
+    print(
+        f"Runtime package:   {RUNTIME_PACKAGE}"
+    )
+
+    print()
+    print(
+        "Deployment archive roots:"
+    )
+
+    for item in RELATIVE_DEPLOYMENT_INPUTS:
+        print(
+            f"  - {item}"
+        )
+
+    print()
+    print(
+        f"Deployment files:  {len(files)}"
+    )
+
+    print()
+    print(
+        "Secret-backed environment variables:"
+    )
+
+    for variable in sorted(
+        SECRET_ENV_VARS
+    ):
+
+        secret = (
+            SECRET_ENV_VARS[variable]["secret"]
+        )
+
+        version = (
+            SECRET_ENV_VARS[variable]["version"]
+        )
+
+        print(
+            f"  - {variable} -> "
+            f"{secret}:{version}"
+        )
+
+    print()
+    print("Agent:")
+
+    print(
+        f"  Name:   {root_agent.name}"
+    )
+
+    print(
+        f"  Model:  {root_agent.model}"
+    )
+
+    print(
+        f"  Tools:  {len(root_agent.tools)}"
+    )
+
+    print()
+    print(
+        "DEPLOYMENT_PLAN_VALIDATED"
+    )
+
+    print("=" * 70)
+
+
+# ============================================================================
+# Complete preflight
+# ============================================================================
+
+
+def run_preflight() -> list[Path]:
+    """Run every local check that can reasonably be done before deployment."""
+
+    print()
+    print("=" * 70)
+    print(
+        "AGENT RUNTIME PRE-FLIGHT"
+    )
+    print("=" * 70)
+
+    validate_configuration()
+
+    requirements = (
+        read_runtime_requirements()
+    )
+
+    print()
+    print("Runtime requirements:")
+
+    for requirement in requirements:
+        print(
+            f"  - {requirement}"
+        )
+
+    validate_local_versions()
+
+    validate_local_imports()
+
+    files = validate_runtime_package()
+
+    validate_package_roots()
+
+    validate_relative_deployment_inputs()
+
+    validate_forbidden_artifacts(
+        files
+    )
+
+    validate_cloud_environment()
+
+    print_deployment_plan(
+        files
+    )
+
+    print()
+    print("=" * 70)
+    print(
+        "AGENT_RUNTIME_PREFLIGHT_PASS"
+    )
+    print("=" * 70)
+
+    return files
+
+
+# ============================================================================
+# Deployment
+# ============================================================================
+
+
+def deploy() -> None:
+    """Create the remote Agent Runtime deployment."""
+
+    files = run_preflight()
+
+    print()
+    print(
+        "Initialising Vertex AI..."
+    )
+
+    vertexai.init(
+        project=PROJECT_ID,
+        location=LOCATION,
+        staging_bucket=STAGING_BUCKET,
+    )
+
+    app = agent_engines.AdkApp(
+        agent=root_agent,
+    )
+
+    print()
+    print(
+        "Starting Agent Runtime deployment..."
+    )
+
+    print()
+    print(
+        "CRITICAL:"
+    )
+    print(
+        "The following paths are passed as RELATIVE paths"
+    )
+    print(
+        "from the isolated runtime package directory:"
+    )
+
+    for item in RELATIVE_DEPLOYMENT_INPUTS:
+        print(
+            f"  {item}"
+        )
+
+    print()
+
+    # ------------------------------------------------------------------
+    # The SDK packages extra_packages relative to its current working
+    # directory. Therefore we intentionally execute create() while the
+    # working directory is RUNTIME_PACKAGE.
+    #
+    # This prevents Windows absolute repository paths from becoming
+    # archive members.
+    # ------------------------------------------------------------------
+
+    original_cwd = Path.cwd()
+
+    try:
+
+        os.chdir(
+            RUNTIME_PACKAGE
+        )
+
+        print(
+            "Agent Runtime packaging working directory:"
+        )
+
+        print(
+            f"  {Path.cwd()}"
+        )
+
+        remote_agent = agent_engines.create(
+            agent_engine=app,
+            requirements=str(
+                RUNTIME_REQUIREMENTS
+            ),
+            extra_packages=list(
+                RELATIVE_DEPLOYMENT_INPUTS
+            ),
+            env_vars=SECRET_ENV_VARS,
+            display_name=DISPLAY_NAME,
+            description=DESCRIPTION,
+        )
+
+    finally:
+
+        os.chdir(
+            original_cwd
+        )
+
+    print()
+    print("=" * 70)
+    print(
+        "AGENT_RUNTIME_DEPLOYMENT_SUCCESS"
+    )
+    print("=" * 70)
+
+    print()
+
+    print(
+        f"Resource: {remote_agent.resource_name}"
+    )
+
+    print()
+
+    print(
+        "The Agent Runtime resource was created successfully."
+    )
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+
+def main() -> None:
+    """CLI entrypoint."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Deploy the EasyChatBot Cinema Intelligence "
+            "Agent to Google Agent Runtime."
+        )
+    )
+
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "Run complete local validation without creating "
+            "a remote resource."
+        ),
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run validation and print the deployment plan "
+            "without creating a remote resource."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if (
+        args.preflight
+        or args.dry_run
+    ):
+
+        run_preflight()
+
+        print()
+
+        if args.dry_run:
+            print(
+                "DRY RUN: no Agent Runtime resource was created."
+            )
+            print(
+                "DEPLOYMENT_DRY_RUN_PASS"
+            )
+
+        return
+
+    deploy()
+
+
+if __name__ == "__main__":
+    main()
+===== backend/providers/parallel/parallel_client.py =====
+"""
+Parallel Search API Client Wrapper.
+
+This module isolates the official Parallel SDK.
+
+The rest of EasyChatBot does not directly depend on
+the Parallel SDK implementation.
+
+Architecture:
+
+Research Agent
+        |
+        v
+Parallel Provider
+        |
+        v
+Parallel Client Wrapper
+        |
+        v
+Parallel API
+"""
+
+import asyncio
+import os
+from typing import Any
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+class ParallelClientWrapper:
+    """
+    Wrapper around the official Parallel Search SDK.
+
+    Responsibilities:
+    - authenticate with Parallel
+    - execute searches
+    - normalize SDK responses
+
+    Does not:
+    - create learning content
+    - manage agents
+    - decide workflows
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+    ):
+        """
+        Initialise the Parallel SDK client.
+        """
+
+        self.api_key = (
+            api_key
+            or os.getenv("PARALLEL_API_KEY")
+        )
+
+        if not self.api_key:
+            raise ValueError(
+                "PARALLEL_API_KEY environment variable is required"
+            )
+
+        self._client = self._create_client()
+
+
+    def _create_client(self):
+        """
+        Create the official Parallel SDK client.
+
+        SDK:
+            parallel-web 1.1.0
+        """
+
+        from parallel import Parallel
+
+        return Parallel(
+            api_key=self.api_key
+        )
+
+
+    @staticmethod
+    def _normalize_response(
+        response: Any,
+    ) -> Any:
+        """
+        Convert the Parallel SDK response into
+        application-safe data.
+
+        Pydantic SDK models are converted to dictionaries.
+        Other JSON-compatible values are returned unchanged.
+        """
+
+        if hasattr(response, "model_dump"):
+            return response.model_dump()
+
+        if hasattr(response, "dict"):
+            return response.dict()
+
+        return response
+
+
+    async def search(
+        self,
+        query: str,
+    ) -> dict[str, Any]:
+        """
+        Execute a Parallel web search.
+
+        Args:
+            query:
+                Natural-language research objective.
+
+        Returns:
+            Normalized application-level search result.
+        """
+
+        search_query = self._build_search_query(
+            query
+        )
+
+        response = await asyncio.to_thread(
+            self._client.search,
+            search_queries=[
+                search_query
+            ],
+            mode="advanced",
+            objective=query,
+        )
+
+        return {
+            "query": query,
+            "search_queries": [
+                search_query
+            ],
+            "results": self._normalize_response(
+                response
+            ),
+        }
+
+
+    @staticmethod
+    def _build_search_query(
+        query: str,
+    ) -> str:
+        """
+        Build a concise search query from the
+        user's research request.
+
+        The full request remains the Parallel
+        objective while the search query is kept
+        concise.
+        """
+
+        words = query.strip().split()
+
+        if len(words) <= 6:
+            return query.strip()
+
+        return " ".join(words[:6])
+===== src/providers/search_provider/parallel_adapter.py =====
+"""
+Parallel Search Provider Adapter.
+
+Bridges the provider-independent SearchProvider contract
+to the existing EasyChatBot ParallelClientWrapper.
+
+Architecture:
+
+Live Intelligence Agent
+        |
+        v
+SearchProvider Interface
+        |
+        v
+ParallelSearchProvider
+        |
+        v
+Existing ParallelClientWrapper
+        |
+        v
+Parallel Search API
+
+The official Parallel SDK remains isolated inside:
+
+    backend/providers/parallel/parallel_client.py
+
+This adapter must not import or instantiate the Parallel SDK
+directly.
+"""
+
+from typing import Any
+
+from backend.providers.parallel.parallel_client import (
+    ParallelClientWrapper,
+)
+
+from src.providers.search_provider.interface import (
+    SearchProvider,
+    SearchResult,
+)
+
+
+class ParallelSearchProvider(SearchProvider):
+    """
+    SearchProvider implementation backed by the existing
+    ParallelClientWrapper.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        client: ParallelClientWrapper | None = None,
+    ) -> None:
+        """
+        Initialise the provider.
+
+        Args:
+            api_key:
+                Optional Parallel API key.
+
+                If omitted, the existing ParallelClientWrapper
+                loads PARALLEL_API_KEY from the environment/.env.
+
+            client:
+                Optional injected client for testing.
+        """
+
+        self._client = client or ParallelClientWrapper(
+            api_key=api_key
+        )
+
+    async def search(
+        self,
+        query: str,
+        max_results: int = 5,
+    ) -> list[SearchResult]:
+        """
+        Execute a Parallel search and normalise its results.
+
+        Args:
+            query:
+                Natural-language research objective.
+
+            max_results:
+                Maximum number of results returned.
+
+        Returns:
+            Provider-independent SearchResult objects.
+        """
+
+        if not query.strip():
+            raise ValueError(
+                "Search query cannot be empty"
+            )
+
+        if max_results <= 0:
+            raise ValueError(
+                "max_results must be greater than zero"
+            )
+
+        response = await self._client.search(
+            query=query
+        )
+
+        raw_results = self._extract_results(
+            response
+        )
+
+        normalised_results: list[SearchResult] = []
+
+        for raw_result in raw_results[:max_results]:
+            result = self._normalise_result(
+                raw_result
+            )
+
+            if result is not None:
+                normalised_results.append(result)
+
+        return normalised_results
+
+    @staticmethod
+    def _extract_results(
+        response: Any,
+    ) -> list[Any]:
+        """
+        Extract the actual result collection from the
+        ParallelClientWrapper response.
+
+        The existing wrapper returns:
+
+            {
+                "query": "...",
+                "search_queries": [...],
+                "results": <normalised SDK response>
+            }
+
+        The SDK response may itself contain:
+
+            {
+                "results": [...]
+            }
+
+        Therefore this method handles both levels of wrapping.
+        """
+
+        if not isinstance(response, dict):
+            raise TypeError(
+                "Parallel client response must be a dictionary"
+            )
+
+        raw_results = response.get(
+            "results",
+            []
+        )
+
+        # The SDK response itself may contain a nested
+        # "results" collection.
+        if isinstance(raw_results, dict):
+            nested_results = raw_results.get(
+                "results"
+            )
+
+            if isinstance(nested_results, list):
+                return nested_results
+
+            # Some SDK versions may expose the result
+            # collection under another common field.
+            nested_data = raw_results.get(
+                "data"
+            )
+
+            if isinstance(nested_data, list):
+                return nested_data
+
+        if isinstance(raw_results, list):
+            return raw_results
+
+        # If the SDK returned an object that was not converted
+        # to a dictionary, try to inspect its result attribute.
+        nested_results = getattr(
+            raw_results,
+            "results",
+            None,
+        )
+
+        if isinstance(nested_results, list):
+            return nested_results
+
+        raise TypeError(
+            "Parallel search response does not contain "
+            "a supported results collection"
+        )
+
+    @staticmethod
+    def _normalise_result(
+        raw_result: Any,
+    ) -> SearchResult | None:
+        """
+        Convert one Parallel result into SearchResult.
+
+        Parallel results may arrive either as dictionaries
+        or SDK/Pydantic objects.
+        """
+
+        if isinstance(raw_result, dict):
+            title = str(
+                raw_result.get(
+                    "title",
+                    ""
+                )
+            ).strip()
+
+            url = str(
+                raw_result.get(
+                    "url",
+                    ""
+                )
+            ).strip()
+
+            excerpts = raw_result.get(
+                "excerpts",
+                []
+            )
+
+            # Support providers/SDK versions that use
+            # "snippet" or "content" instead.
+            if not excerpts:
+                excerpts = raw_result.get(
+                    "snippet",
+                    raw_result.get(
+                        "content",
+                        []
+                    ),
+                )
+
+        else:
+            title = str(
+                getattr(
+                    raw_result,
+                    "title",
+                    ""
+                )
+            ).strip()
+
+            url = str(
+                getattr(
+                    raw_result,
+                    "url",
+                    ""
+                )
+            ).strip()
+
+            excerpts = getattr(
+                raw_result,
+                "excerpts",
+                None,
+            )
+
+            if not excerpts:
+                excerpts = getattr(
+                    raw_result,
+                    "snippet",
+                    getattr(
+                        raw_result,
+                        "content",
+                        [],
+                    ),
+                )
+
+        if not title or not url:
+            return None
+
+        content = ParallelSearchProvider._normalise_excerpts(
+            excerpts
+        )
+
+        return SearchResult(
+            title=title,
+            url=url,
+            content=content,
+            source="parallel",
+        )
+
+    @staticmethod
+    def _normalise_excerpts(
+        excerpts: Any,
+    ) -> str:
+        """
+        Convert Parallel excerpts/content into a single
+        application-level content string.
+        """
+
+        if excerpts is None:
+            return ""
+
+        if isinstance(excerpts, str):
+            return excerpts.strip()
+
+        if isinstance(excerpts, list):
+            return "\n\n".join(
+                str(excerpt).strip()
+                for excerpt in excerpts
+                if str(excerpt).strip()
+            )
+
+        return str(excerpts).strip()
+===== requirements-runtime.txt =====

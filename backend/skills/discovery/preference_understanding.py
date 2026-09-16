@@ -1,4 +1,4 @@
-"""
+﻿"""
 Preference Understanding Skill.
 
 Transforms explicit learner discovery intent and approved preference
@@ -25,9 +25,9 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from backend.skills.skill import Skill, SkillInput
-from backend.skills.skill_result import SkillResult
-from backend.skills.discovery.preference_source import (
+from skills.skill import Skill, SkillInput
+from skills.skill_result import SkillResult
+from skills.discovery.preference_source import (
     PreferenceContext,
 )
 
@@ -213,11 +213,11 @@ class PreferenceUnderstandingSkill(Skill):
         Precedence:
 
         Current request
-            ↓
+            â†“
         Explicit learner requirements
 
         Approved preference context
-            ↓
+            â†“
         Contextual defaults
 
         The current request is therefore never silently overridden by

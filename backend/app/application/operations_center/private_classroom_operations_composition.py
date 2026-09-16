@@ -31,22 +31,22 @@ The snapshot is generated fresh for every API request.
 
 from __future__ import annotations
 
-from backend.app.application.health.operational_dashboard_service import (
+from app.application.health.operational_dashboard_service import (
     OperationalDashboardService,
 )
-from backend.app.application.health.operational_event_service import (
+from app.application.health.operational_event_service import (
     OperationalEventService,
 )
-from backend.app.application.health.operational_health_snapshot import (
+from app.application.health.operational_health_snapshot import (
     OperationalHealthSnapshotService,
 )
-from backend.app.application.health.production_health_configuration import (
+from app.application.health.production_health_configuration import (
     ProductionHealthConfiguration,
 )
-from backend.app.application.health.production_readiness_service import (
+from app.application.health.production_readiness_service import (
     ProductionReadinessService,
 )
-from backend.app.application.operations_center.private_classroom_operations_api import (
+from app.application.operations_center.private_classroom_operations_api import (
     PrivateClassroomOperationsAPI,
 )
 
@@ -118,3 +118,8 @@ __all__ = [
     "PrivateClassroomOperationsComposition",
     "create_private_classroom_operations_api",
 ]
+
+
+
+
+

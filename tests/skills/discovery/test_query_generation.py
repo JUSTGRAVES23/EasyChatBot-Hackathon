@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Discovery Query Generation Skill.
 """
 
@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import pytest
 
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     DiscoveryProfile,
 )
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQuery,
     DiscoveryQueryGenerationSkill,
 )
-from backend.skills.skill import SkillInput
+from skills.skill import SkillInput
 
 
 @pytest.mark.asyncio

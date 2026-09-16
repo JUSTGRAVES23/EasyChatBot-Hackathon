@@ -108,7 +108,7 @@ def _build_runtime_approval_email_service(
         return None
 
     try:
-        from backend.app.infrastructure.email.resend_approval_email_sender import (
+        from app.infrastructure.email.resend_approval_email_sender import (
             ResendApprovalEmailSender,
         )
     except ImportError:

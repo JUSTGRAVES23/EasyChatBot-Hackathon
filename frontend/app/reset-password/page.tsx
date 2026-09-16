@@ -1,0 +1,368 @@
+import {
+  FormEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  Link,
+  useSearchParams,
+} from "react-router-dom";
+
+import {
+  AuthenticationApiError,
+  confirmPasswordReset,
+} from "../../src/auth/authApi";
+
+type PageState =
+  | "ready"
+  | "submitting"
+  | "success"
+  | "missing"
+  | "failed";
+
+export default function ResetPasswordPage() {
+  const [searchParams] = useSearchParams();
+
+  const [token, setToken] = useState("");
+  const [state, setState] =
+    useState<PageState>("ready");
+
+  const [newPassword, setNewPassword] =
+    useState("");
+
+  const [confirmPassword, setConfirmPassword] =
+    useState("");
+
+  const [error, setError] =
+    useState<string | null>(null);
+
+  const initialized = useRef(false);
+
+  useEffect(() => {
+    if (initialized.current) {
+      return;
+    }
+
+    initialized.current = true;
+
+    const rawToken =
+      searchParams.get("token")?.trim() ?? "";
+
+    if (!rawToken) {
+      setState("missing");
+      return;
+    }
+
+    /*
+     * Capture the token once and immediately remove it
+     * from the visible browser URL.
+     */
+    setToken(rawToken);
+
+    window.history.replaceState(
+      {},
+      document.title,
+      window.location.pathname,
+    );
+  }, [searchParams]);
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    setError(null);
+
+    if (!newPassword) {
+      setError("Please enter a new password.");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setState("submitting");
+
+    try {
+     await confirmPasswordReset({
+  token,
+  new_password: newPassword,
+});
+
+      /*
+       * Clear credentials/token from component state after
+       * successful submission.
+       */
+      setToken("");
+      setNewPassword("");
+      setConfirmPassword("");
+
+      setState("success");
+    } catch (cause) {
+      setState("failed");
+
+      setError(
+        cause instanceof AuthenticationApiError
+          ? cause.message
+          : "This password reset link is invalid or has expired.",
+      );
+    }
+  }
+
+  if (state === "missing") {
+    return (
+      <main
+        aria-label="Password reset"
+        style={styles.page}
+      >
+        <section style={styles.card}>
+          <div style={styles.eyebrow}>
+            EASYCHATBOT ACADEMY
+          </div>
+
+          <h1 style={styles.title}>
+            Reset link missing
+          </h1>
+
+          <p style={styles.text}>
+            This password reset link does not contain
+            the information we need.
+          </p>
+
+          <Link
+            to="/forgot-password"
+            style={styles.primaryLink}
+          >
+            Request a new link
+          </Link>
+        </section>
+      </main>
+    );
+  }
+
+  if (state === "success") {
+    return (
+      <main
+        aria-label="Password updated"
+        style={styles.page}
+      >
+        <section style={styles.card}>
+          <div style={styles.eyebrow}>
+            EASYCHATBOT ACADEMY
+          </div>
+
+          <h1 style={styles.title}>
+            Password updated! 🎉
+          </h1>
+
+          <p style={styles.text}>
+            You're all set.
+          </p>
+
+          <p style={styles.text}>
+            Your password has been changed and your
+            previous sessions have been signed out
+            for security.
+          </p>
+
+          <Link
+            to="/login"
+            style={styles.primaryLink}
+          >
+            Continue to sign in
+          </Link>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main
+      aria-label="Create new password"
+      style={styles.page}
+    >
+      <section style={styles.card}>
+        <div style={styles.eyebrow}>
+          EASYCHATBOT ACADEMY
+        </div>
+
+        <h1 style={styles.title}>
+          Create a new password
+        </h1>
+
+        <p style={styles.text}>
+          Let's get you back into the Academy.
+        </p>
+
+        <form onSubmit={handleSubmit}>
+          <label
+            htmlFor="new-password"
+            style={styles.label}
+          >
+            New password
+          </label>
+
+          <input
+            id="new-password"
+            type="password"
+            autoComplete="new-password"
+            minLength={12}
+            maxLength={256}
+            value={newPassword}
+            onChange={(event) =>
+              setNewPassword(event.target.value)
+            }
+            required
+            style={styles.input}
+          />
+
+          <label
+            htmlFor="confirm-password"
+            style={styles.label}
+          >
+            Confirm new password
+          </label>
+
+          <input
+            id="confirm-password"
+            type="password"
+            autoComplete="new-password"
+            minLength={12}
+            maxLength={256}
+            value={confirmPassword}
+            onChange={(event) =>
+              setConfirmPassword(event.target.value)
+            }
+            required
+            style={styles.input}
+          />
+
+          {error && (
+            <p
+              role="alert"
+              style={styles.error}
+            >
+              {error}
+            </p>
+          )}
+
+          <p style={styles.requirement}>
+            Your password must contain at least
+            12 characters.
+          </p>
+
+          <button
+            type="submit"
+            disabled={
+              state === "submitting" ||
+              !token
+            }
+            style={styles.button}
+          >
+            {state === "submitting"
+              ? "Updating..."
+              : "Set my new password →"}
+          </button>
+        </form>
+
+        <Link
+          to="/login"
+          style={styles.secondaryLink}
+        >
+          Back to sign in
+        </Link>
+      </section>
+    </main>
+  );
+}
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    display: "grid",
+    placeItems: "center",
+    padding: "2rem",
+    boxSizing: "border-box" as const,
+  },
+
+  card: {
+    width: "100%",
+    maxWidth: "560px",
+    padding: "2rem",
+    border: "1px solid rgba(70, 55, 95, 0.18)",
+    borderRadius: "20px",
+    background: "rgba(255, 255, 255, 0.96)",
+    boxShadow: "0 18px 50px rgba(50, 35, 75, 0.12)",
+    boxSizing: "border-box" as const,
+  },
+
+  eyebrow: {
+    fontSize: "0.75rem",
+    fontWeight: 700,
+    letterSpacing: "0.12em",
+    opacity: 0.7,
+    marginBottom: "0.75rem",
+  },
+
+  title: {
+    margin: "0 0 0.75rem",
+  },
+
+  text: {
+    lineHeight: 1.55,
+  },
+
+  label: {
+    display: "block",
+    marginBottom: "0.5rem",
+    fontWeight: 700,
+  },
+
+  input: {
+    width: "100%",
+    minHeight: "44px",
+    padding: "0.7rem",
+    marginBottom: "1rem",
+    boxSizing: "border-box" as const,
+    borderRadius: "10px",
+    border: "1px solid rgba(70, 55, 95, 0.25)",
+  },
+
+  requirement: {
+    fontSize: "0.85rem",
+    opacity: 0.7,
+  },
+
+  error: {
+    color: "#a32929",
+    lineHeight: 1.55,
+  },
+
+  button: {
+    width: "100%",
+    minHeight: "46px",
+    border: 0,
+    borderRadius: "10px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+
+  primaryLink: {
+    display: "inline-flex",
+    marginTop: "1rem",
+    minHeight: "44px",
+    alignItems: "center",
+    fontWeight: 700,
+    textDecoration: "none",
+  },
+
+  secondaryLink: {
+    display: "inline-block",
+    marginTop: "1.25rem",
+    fontWeight: 600,
+    textDecoration: "none",
+  },
+};

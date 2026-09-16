@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from backend.app.application.announcements.repositories import (
+from app.application.announcements.repositories import (
     AnnouncementTemplateRepository,
     PublicationRepository,
 )
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import AnnouncementTemplate
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import AnnouncementTemplate
 
 
 class InMemoryAnnouncementTemplateRepository(AnnouncementTemplateRepository):
@@ -34,3 +34,4 @@ class InMemoryPublicationRepository(PublicationRepository):
 
     def list_all(self) -> tuple[Publication, ...]:
         return tuple(self._items.values())
+

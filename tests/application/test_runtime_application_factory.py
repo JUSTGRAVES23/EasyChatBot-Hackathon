@@ -1,4 +1,4 @@
-"""
+﻿"""
 Application Factory Runtime tests.
 
 Validates:
@@ -31,15 +31,15 @@ from __future__ import annotations
 import pytest
 
 
-from backend.application.factory import (
+from application.factory import (
     ApplicationFactory,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.services.runtime.runtime_application_service import (
+from services.runtime.runtime_application_service import (
     RuntimeApplicationService,
 )
 

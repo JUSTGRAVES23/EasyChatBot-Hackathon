@@ -24,11 +24,11 @@ or other approved providers implementing the same contract.
 
 from __future__ import annotations
 
-from backend.cybersecurity.data_source import (
+from cybersecurity.data_source import (
     CybersecurityDataSource,
 )
 
-from backend.cybersecurity.intelligence_models import (
+from cybersecurity.intelligence_models import (
     CybersecuritySignal,
 )
 

@@ -1,5 +1,5 @@
-from backend.demo.demo_runner import DemoRunner
-from backend.demo.demo_scenarios import PROVIDER_SCENARIO
+﻿from demo.demo_runner import DemoRunner
+from demo.demo_scenarios import PROVIDER_SCENARIO
 
 
 class ProviderDemoRunner:
@@ -10,3 +10,4 @@ class ProviderDemoRunner:
             "provider_management",
             PROVIDER_SCENARIO,
         )
+

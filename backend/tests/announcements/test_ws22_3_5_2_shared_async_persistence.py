@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from uuid import uuid4
@@ -6,15 +6,15 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from backend.app.infrastructure.announcements.publication_audit_repository import (
+from app.infrastructure.announcements.publication_audit_repository import (
     PublicationAuditEventModel,
     SqlAlchemyPublicationAuditRepository,
 )
-from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+from app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
     PublicationExecutionRecordModel,
     SqlAlchemyPublicationExecutionRepository,
 )
-from backend.app.infrastructure.persistence.database import (
+from app.infrastructure.persistence.database import (
     Base,
     create_async_database_engine,
     create_async_session_factory,

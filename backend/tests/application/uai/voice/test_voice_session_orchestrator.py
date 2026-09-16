@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Session Orchestrator.
 """
 
@@ -125,3 +125,6 @@ def test_prepare_voice_session():
     assert configuration["room_name"].startswith(
         "yeti-"
     )
+
+
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Repository contract.
 
 Validates that the repository boundary
@@ -177,3 +177,6 @@ def test_repository_implements_contract():
         repository,
         VoiceCallRepository,
     )
+
+
+

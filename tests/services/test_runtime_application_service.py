@@ -1,40 +1,16 @@
-"""
-Tests for Runtime Application Service.
-
-Validates:
-
-Application Layer
-        |
-        v
-RuntimeApplicationService
-        |
-        v
-ExternalRuntimeService
-        |
-        v
-Capability Result
-
-The tests use controlled fakes.
-
-They do not call:
-
-- Parallel API;
-- Gemini;
-- Google Cloud;
-- external providers.
-"""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.services.runtime.runtime_application_service import (
+from services.runtime.runtime_application_service import (
     RuntimeApplicationService,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
+
+from src.ai_runtime.capabilities.actor_context import RuntimeActorContext
 
 from src.ai_runtime.capabilities.models import (
     CapabilityExecutionStatus,
@@ -48,6 +24,9 @@ class FakeRuntimeGateway:
     Controlled Runtime gateway fake.
     """
 
+    def __init__(self):
+        self.last_request = None
+
     async def execute(
         self,
         request,
@@ -55,6 +34,8 @@ class FakeRuntimeGateway:
         """
         Return deterministic Runtime result.
         """
+
+        self.last_request = request
 
         return CapabilityResult(
             request_id=request.request_id,
@@ -146,3 +127,41 @@ async def test_runtime_application_service_requires_payload():
             capability="live_intelligence",
             payload=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_runtime_application_service_propagates_actor():
+    """
+    Authenticated Runtime actor context must be propagated
+    into the provider-independent CapabilityRequest.
+    """
+
+    gateway = FakeRuntimeGateway()
+
+    runtime_service = ExternalRuntimeService(
+        gateway=gateway,
+    )
+
+    service = RuntimeApplicationService(
+        runtime_service=runtime_service,
+    )
+
+    actor = RuntimeActorContext(
+        actor_id="user-123",
+        roles=frozenset({"ADMIN"}),
+    )
+
+    await service.execute(
+        capability="internal_data_read",
+        payload={
+            "operation": "get_beta_user",
+            "user_id": "user-123",
+        },
+        actor=actor,
+    )
+
+    assert gateway.last_request is not None
+    assert gateway.last_request.actor == actor
+    assert gateway.last_request.actor.actor_id == "user-123"
+    assert gateway.last_request.actor.roles == frozenset({"ADMIN"})
+

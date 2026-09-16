@@ -1,14 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from uuid import uuid4
 
 import pytest
 
-from backend.app.application.announcements.audit import (
+from app.application.announcements.audit import (
     AnnouncementAuditEventType,
     InMemoryAnnouncementAuditSink,
 )
-from backend.app.application.announcements.execution.audit_adapter import (
+from app.application.announcements.execution.audit_adapter import (
     PublicationExecutionAuditAdapter,
 )
 

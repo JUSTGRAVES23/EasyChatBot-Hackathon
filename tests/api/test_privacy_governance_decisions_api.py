@@ -1,14 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.api.privacy_governance import router
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.api.privacy_governance import router
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
     reset_privacy_governance_composition_for_tests,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
 )
@@ -151,3 +151,4 @@ def test_unknown_case_is_controlled() -> None:
     )
 
     assert response.status_code == 404
+

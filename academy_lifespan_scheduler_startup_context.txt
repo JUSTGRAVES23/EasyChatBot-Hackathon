@@ -1,0 +1,224 @@
+﻿====================================================================================================
+EASYCHATBOT ACADEMY
+LIFESPAN SCHEDULER STARTUP CONTEXT
+====================================================================================================
+
+READ-ONLY
+NO SOURCE MODIFICATION
+NO DATABASE WRITE
+NO MIGRATION
+NO EMAIL
+NO TELEGRAM
+NO SCHEDULER START
+
+====================================================================================================
+1. LIFESPAN DEFINITION
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:396: async def lifespan(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:421: await application.state.scheduler_runtime.start()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:439: await application.state.scheduler_runtime.stop()
+
+====================================================================================================
+2. MAIN.PY LIFESPAN CONTEXT
+====================================================================================================
+
+
+    Starts:
+    - cybersecurity scheduler runtime.
+
+    Stops:
+    - cybersecurity scheduler runtime;
+    - outbound announcement Telegram client.
+
+    IMPORTANT:
+
+    The classroom Telegram polling runtime is NOT started here.
+
+    It remains owned by:
+
+        backend/scripts/run_telegram_runtime.py
+
+    This prevents multiple getUpdates consumers.
+    """
+
+    try:
+        await application.state.scheduler_runtime.start()
+
+    except Exception as exc:
+        logger.exception(
+            "Cybersecurity scheduler startup failed: %s",
+            exc,
+        )
+
+    try:
+        yield
+
+    finally:
+
+        #
+        # Scheduler shutdown
+        #
+
+        try:
+            await application.state.scheduler_runtime.stop()
+
+        except Exception as exc:
+            logger.exception(
+                "Cybersecurity scheduler shutdown failed: %s",
+                exc,
+            )
+
+        #
+        # Announcement Telegram client shutdown
+        #
+        # The client is outbound-only and does not own Telegram
+        # polling.
+        #
+
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+
+        if telegram_client is not None:
+
+            try:
+                await telegram_client.close()
+
+            except Exception as exc:
+                logger.exception(
+                    "Announcement Telegram client shutdown failed: %s",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+    """
+
+    #
+    # Announcement dependency composition.
+    #
+    # This creates only the outbound Telegram client.
+    #
+    # It does NOT start Telegram polling.
+    #
+
+    (
+        announcement_telegram_client,
+        announcement_publisher,
+    ) = _create_announcement_components()
+
+
+
+====================================================================================================
+3. SCHEDULER RUNTIME REFERENCES IN MAIN.PY
+====================================================================================================
+
+56: create_cybersecurity_scheduler_runtime,
+421: await application.state.scheduler_runtime.start()
+439: await application.state.scheduler_runtime.stop()
+530: scheduler_runtime = create_cybersecurity_scheduler_runtime(
+570: application.state.scheduler_runtime = (
+571: scheduler_runtime
+
+====================================================================================================
+4. ACADEMY ACTIVATION CONFIGURATION
+====================================================================================================
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+_TRUE_VALUES = {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+_FALSE_VALUES = {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+@dataclass(frozen=True)
+class AcademyActivationConfig:
+    """
+    Controlled Academy production activation configuration.
+
+    Production activation is disabled unless both explicit
+    activation switches are enabled.
+    """
+
+    scheduler_enabled: bool
+    first_run_enabled: bool
+
+    @classmethod
+    def from_environment(cls) -> "AcademyActivationConfig":
+        return cls(
+            scheduler_enabled=_read_bool(
+                "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED",
+                default=False,
+            ),
+            first_run_enabled=_read_bool(
+                "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED",
+                default=False,
+            ),
+        )
+
+    @property
+    def activation_allowed(self) -> bool:
+        return (
+            self.scheduler_enabled
+            and self.first_run_enabled
+        )
+
+
+def _read_bool(
+    name: str,
+    *,
+    default: bool,
+) -> bool:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    value = raw.strip().lower()
+
+    if value in _TRUE_VALUES:
+        return True
+
+    if value in _FALSE_VALUES:
+        return False
+
+    raise RuntimeError(
+        f"{name} must be a boolean value: "
+        "true/false, yes/no, on/off, or 1/0."
+    )
+
+
+__all__ = [
+    "AcademyActivationConfig",
+]
+
+====================================================================================================
+DISCOVERY COMPLETE
+====================================================================================================
+
+NEXT GATE:
+Integrate activation into the existing scheduler lifecycle.
+Do NOT create a second scheduler.
+Do NOT create a second Telegram client.
+Do NOT send email.
+Do NOT send Telegram.
+Do NOT start production scheduler.

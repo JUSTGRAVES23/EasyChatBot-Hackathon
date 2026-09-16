@@ -1,5 +1,5 @@
-"""
-H3-04B — Memory Context Security and Bounds Tests.
+﻿"""
+H3-04B â€” Memory Context Security and Bounds Tests.
 
 Purpose
 -------
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from backend.memory.memory_record import (
+from memory.memory_record import (
     MemoryRecord,
 )
 

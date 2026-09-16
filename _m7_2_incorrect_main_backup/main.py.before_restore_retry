@@ -1,0 +1,115 @@
+"""
+EasyChatBot Academy application composition root.
+
+M7.2 privacy screening is composed here as an application capability.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.authentication import router as authentication_router
+from app.api.operations_center import router as cmp_operations_center_router
+from app.api.privacy_screening import create_privacy_screening_router
+from app.api.routes.academy_routes import router as academy_router
+from app.api.routes.cmp_population_routes import router as cmp_population_router
+from app.api.routes.questionnaire_routes import router as questionnaire_router
+from app.api.routes.world_questionnaire_routes import router as world_questionnaire_router
+from app.application.privacy.beta1_processing_catalog import create_beta1_processing_registry
+from app.application.privacy.screening.adapter import ProcessingActivityScreeningAdapter
+from app.application.privacy.screening.service import ScreeningService
+from app.application.questionnaire.runtime_source import QuestionnaireRuntime
+from app.bootstrap.compositions.runtime_composition import create_runtime_services
+from app.bootstrap.repositories import create_repositories
+
+logger = logging.getLogger(__name__)
+
+
+def create_application() -> FastAPI:
+    logger.info("Creating EasyChatBot Academy application.")
+
+    try:
+        repositories = create_repositories()
+        if repositories is None:
+            raise RuntimeError("Repository composition returned None.")
+
+        runtime_services = create_runtime_services(repositories=repositories)
+        if runtime_services is None:
+            raise RuntimeError("Runtime services composition returned None.")
+
+        questionnaire_runtime = QuestionnaireRuntime()
+
+        application = FastAPI(
+            title="EasyChatBot Academy",
+            version="0.1.0-beta",
+            description="AI-powered learning platform runtime.",
+        )
+
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        application.state.repositories = repositories
+        application.state.runtime_services = runtime_services
+        application.state.questionnaire_runtime = questionnaire_runtime
+
+        learning_world_repository = getattr(
+            repositories,
+            "learning_world_repository",
+            None,
+        )
+        if learning_world_repository is None:
+            raise RuntimeError("LearningWorldRepository was not composed.")
+
+        application.state.learning_world_repository = learning_world_repository
+
+        # M7.2 privacy screening composition.
+        processing_registry = create_beta1_processing_registry()
+        screening_service = ScreeningService()
+        screening_adapter = ProcessingActivityScreeningAdapter(screening_service)
+
+        application.state.privacy_processing_registry = processing_registry
+        application.state.privacy_screening_service = screening_service
+        application.state.privacy_screening_adapter = screening_adapter
+
+        application.include_router(authentication_router)
+        application.include_router(academy_router)
+        application.include_router(questionnaire_router)
+        application.include_router(world_questionnaire_router)
+        application.include_router(cmp_operations_center_router)
+        application.include_router(cmp_population_router)
+
+        application.include_router(
+            create_privacy_screening_router(
+                processing_registry=processing_registry,
+                screening_adapter=screening_adapter,
+            )
+        )
+
+        @application.get("/health")
+        def health_check() -> dict[str, str]:
+            return {
+                "status": "healthy",
+                "service": "easychatbot-academy",
+            }
+
+        logger.info("EasyChatBot Academy application created successfully.")
+        return application
+
+    except Exception:
+        logger.exception("Failed creating EasyChatBot Academy application.")
+        raise
+
+
+application = create_application()
+app = application

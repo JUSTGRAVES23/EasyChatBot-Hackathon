@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import os
+from html import escape
+from pathlib import Path
+from typing import Any
+
+from ..domain.academy_notification import AcademyNotification
+
+
+class AcademyEmailFormatter:
+    """Render branded Academy email content.
+
+    The logo is referenced by CID and delivered as an inline MIME asset,
+    not as a normal user-visible attachment. Both logo instances are
+    navigation links to the configured Academy portal.
+
+    Social destinations are configuration-driven. Until EasyChatBot's own
+    accounts exist, the defaults point to the corresponding platform home.
+    """
+
+    LOGO_CONTENT_ID = "easychatbot-logo"
+
+    def __init__(
+        self,
+        *,
+        logo_path: str | Path | None = None,
+        x_url: str | None = None,
+        instagram_url: str | None = None,
+        linkedin_url: str | None = None,
+        youtube_url: str | None = None,
+    ) -> None:
+        if logo_path is None:
+            logo_path = (
+                Path(__file__).resolve().parents[2]
+                / "assets"
+                / "email"
+                / "easychatbot-logo.png"
+            )
+
+        self.logo_path = Path(logo_path)
+
+        if not self.logo_path.is_file():
+            raise FileNotFoundError(
+                f"EasyChatBot Academy email logo not found: {self.logo_path}"
+            )
+
+        self.social_urls = {
+            "x": self._resolve_url(x_url, "EASYCHATBOT_X_URL", "https://x.com/"),
+            "instagram": self._resolve_url(
+                instagram_url,
+                "EASYCHATBOT_INSTAGRAM_URL",
+                "https://www.instagram.com/",
+            ),
+            "linkedin": self._resolve_url(
+                linkedin_url,
+                "EASYCHATBOT_LINKEDIN_URL",
+                "https://www.linkedin.com/",
+            ),
+            "youtube": self._resolve_url(
+                youtube_url,
+                "EASYCHATBOT_YOUTUBE_URL",
+                "https://www.youtube.com/",
+            ),
+        }
+
+    @staticmethod
+    def _resolve_url(
+        explicit: str | None,
+        environment_name: str,
+        default: str,
+    ) -> str:
+        value = explicit or os.getenv(environment_name) or default
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{environment_name} cannot be empty.")
+        return value
+
+    def render(self, notification: AcademyNotification) -> dict[str, Any]:
+        username = escape(notification.username, quote=True)
+        portal_url = escape(notification.portal_url, quote=True)
+        social = {
+            key: escape(value, quote=True)
+            for key, value in self.social_urls.items()
+        }
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>One Week at EasyChatBot</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f7fb;font-family:Arial,Helvetica,sans-serif;color:#18243a;">
+<div style="width:100%;padding:28px 12px;box-sizing:border-box;">
+<div style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:18px;overflow:hidden;">
+
+<div style="text-align:center;padding:28px 24px 16px;">
+<a href="{portal_url}" style="text-decoration:none;display:inline-block;">
+<img src="cid:{self.LOGO_CONTENT_ID}" alt="EasyChatBot" width="220"
+     style="display:block;width:220px;max-width:100%;height:auto;border:0;margin:0 auto;">
+</a>
+</div>
+
+<div style="padding:10px 36px 36px;">
+<h1 style="margin:0 0 18px;font-size:30px;line-height:1.15;color:#18243a;text-align:center;">
+&#127891; Congratulations, @{username}!
+</h1>
+
+<p style="font-size:16px;line-height:1.65;margin:0 0 16px;">
+It has been one week since you joined the EasyChatBot Academy.
+</p>
+
+<p style="font-size:16px;line-height:1.65;margin:0 0 16px;">
+What a great start! Every lesson you complete, every question you ask,
+and every conversation you have is another step forward in your journey.
+</p>
+
+<p style="font-size:16px;line-height:1.65;margin:0 0 24px;">
+Keep exploring, keep practising, and keep building your confidence.
+Your Academy journey is only just beginning. &#128640;
+</p>
+
+<div style="text-align:center;margin:28px 0 30px;">
+<a href="{portal_url}"
+   style="display:inline-block;background:#123b78;color:#ffffff;padding:14px 26px;border-radius:10px;text-decoration:none;font-weight:bold;font-size:16px;">
+&#128640; Continue Learning
+</a>
+</div>
+
+<p style="font-size:16px;line-height:1.65;margin:0;">
+Keep going, @{username}. We are growing with you.
+</p>
+</div>
+
+<div style="background:#0f2345;padding:28px 24px;text-align:center;">
+<a href="{portal_url}" style="display:inline-block;text-decoration:none;">
+<img src="cid:{self.LOGO_CONTENT_ID}" alt="EasyChatBot" width="135"
+     style="display:block;width:135px;max-width:100%;height:auto;border:0;margin:0 auto 16px;">
+</a>
+
+<div style="margin:8px 0 18px;font-size:0;">
+<a href="{social['x']}" aria-label="X" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:16px;font-weight:bold;">X</a>
+<a href="{social['instagram']}" aria-label="Instagram" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:18px;font-weight:bold;">◎</a>
+<a href="{social['linkedin']}" aria-label="LinkedIn" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;">in</a>
+<a href="{social['youtube']}" aria-label="YouTube" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;">&#9654;</a>
+</div>
+
+<p style="margin:0 0 8px;color:#ffffff;font-size:14px;font-weight:bold;">
+EasyChatBot — Growing With You.
+</p>
+<p style="margin:0;color:#c8d3e3;font-size:12px;line-height:1.5;">
+This is an automated message from EasyChatBot.
+</p>
+</div>
+
+</div>
+</div>
+</body>
+</html>
+"""
+
+        text = (
+            "🎓 Congratulations, @"
+            f"{notification.username}!\n\n"
+            "It has been one week since you joined the EasyChatBot Academy.\n\n"
+            "What a great start! Every lesson you complete, every question you ask, "
+            "and every conversation you have is another step forward in your journey.\n\n"
+            "Keep exploring, keep practising, and keep building your confidence. "
+            "Your Academy journey is only just beginning. 🚀\n\n"
+            "Continue Learning:\n"
+            f"{notification.portal_url}\n\n"
+            f"Keep going, @{notification.username}. We are growing with you.\n\n"
+            "EasyChatBot — Growing With You.\n"
+        )
+
+        return {
+            "html": html,
+            "body": text,
+            "attachments": [
+                {
+                    "path": str(self.logo_path),
+                    "filename": "easychatbot-logo.png",
+                    "inline": True,
+                    "content_id": self.LOGO_CONTENT_ID,
+                }
+            ],
+        }
+
+
+class AcademyTelegramFormatter:
+    """Render the same notification as Telegram-friendly text."""
+
+    def render(self, notification: AcademyNotification) -> str:
+        return (
+            "🎓 *Congratulations, @"
+            f"{notification.username}!*\n\n"
+            "It has been one week since you joined the EasyChatBot Academy.\n\n"
+            "What a great start! Every lesson you complete, every question "
+            "you ask, and every conversation you have is another step forward "
+            "in your journey.\n\n"
+            "Keep exploring, keep practising, and keep building your confidence. "
+            "Your Academy journey is only just beginning. 🚀\n\n"
+            f"Keep going, @{notification.username}. We are growing with you."
+        )

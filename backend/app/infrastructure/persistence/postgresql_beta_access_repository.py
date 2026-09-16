@@ -4,13 +4,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from backend.app.application.beta_access.models import (
+from app.application.beta_access.models import (
     BetaConnectionToken,
     BetaUserState,
     TelegramBinding,
 )
 
-from backend.app.application.beta_access.repositories import (
+from app.application.beta_access.repositories import (
     BetaTokenRepository,
     BetaUserRepository,
     TelegramBindingRepository,

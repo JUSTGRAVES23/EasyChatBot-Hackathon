@@ -1,0 +1,848 @@
+﻿===== DATABASE.PY =====
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+
+class Base(DeclarativeBase):
+    """Canonical SQLAlchemy metadata registry for the platform."""
+
+    pass
+
+
+def database_url() -> str:
+    """Return the canonical PostgreSQL connection URL."""
+
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for PostgreSQL persistence."
+        )
+
+    return value
+
+
+def create_database_engine():
+    """Create the existing synchronous PostgreSQL engine.
+
+    This API is preserved for the existing Beta 1 persistence layer.
+    """
+
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(
+    engine,
+) -> sessionmaker[Session]:
+    """Create the existing synchronous session factory.
+
+    Preserved for existing Beta 1 repositories.
+    """
+
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
+def async_database_url() -> str:
+    """Return DATABASE_URL adapted for SQLAlchemy async PostgreSQL.
+
+    The environment remains the single source of truth. We only adapt the
+    driver at the infrastructure boundary when the configured URL uses the
+    standard PostgreSQL SQLAlchemy scheme.
+    """
+
+    value = database_url()
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    raise RuntimeError(
+        "DATABASE_URL must use a PostgreSQL URL compatible with "
+        "the synchronous or async PostgreSQL persistence boundary."
+    )
+
+
+def create_async_database_engine() -> AsyncEngine:
+    """Create the canonical asynchronous PostgreSQL engine.
+
+    This is used by durable WS-22 persistence while sharing the same
+    DATABASE_URL and canonical Base as the existing persistence layer.
+    """
+
+    return create_async_engine(
+        async_database_url(),
+        pool_pre_ping=True,
+    )
+
+
+def create_async_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    """Create the canonical asynchronous PostgreSQL session factory."""
+
+    return async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+===== PROVIDER USAGE REPOSITORY =====
+from __future__ import annotations
+
+from src.ai_runtime.providers.usage.models import ProviderUsageEvent
+from src.ai_runtime.providers.usage.repository import ProviderUsageRepository
+
+from .provider_usage_records import ProviderUsageRecord
+
+
+class PostgreSQLProviderUsageRepository(ProviderUsageRepository):
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+
+        self._session_factory = session_factory
+
+    def save(self, event: ProviderUsageEvent) -> None:
+        if event is None:
+            raise ValueError("Provider usage event cannot be None.")
+
+        with self._session_factory() as session:
+            session.add(
+                ProviderUsageRecord(
+                    provider=event.provider,
+                    model=event.model,
+                    capability=event.capability,
+                    functionality=event.functionality,
+                    agent=event.agent,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    total_tokens=event.total_tokens,
+                    latency_ms=event.latency_ms,
+                    estimated_cost=event.estimated_cost,
+                    quality_score=event.quality_score,
+                    success=event.success,
+                    provider_request_id=event.provider_request_id,
+                    created_at=event.created_at,
+                )
+            )
+            session.commit()
+
+    def get_all(self) -> list[ProviderUsageEvent]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ProviderUsageRecord)
+                .order_by(
+                    ProviderUsageRecord.created_at.asc(),
+                    ProviderUsageRecord.id.asc(),
+                )
+                .all()
+            )
+
+        return [_event_from_record(row) for row in rows]
+
+    def clear(self) -> None:
+        with self._session_factory() as session:
+            session.query(ProviderUsageRecord).delete()
+            session.commit()
+
+
+def _event_from_record(row: ProviderUsageRecord) -> ProviderUsageEvent:
+    return ProviderUsageEvent(
+        provider=row.provider,
+        model=row.model,
+        capability=row.capability,
+        functionality=row.functionality,
+        agent=row.agent,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        total_tokens=row.total_tokens,
+        latency_ms=row.latency_ms,
+        estimated_cost=row.estimated_cost,
+        quality_score=float(row.quality_score),
+        success=row.success,
+        provider_request_id=row.provider_request_id,
+        created_at=row.created_at,
+    )
+===== CONVERSATION EVENT REPOSITORY =====
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from backend.app.application.conversation.conversation_event_models import (
+    ConversationEvent,
+)
+
+from backend.app.application.conversation.conversation_event_repository import (
+    ConversationEventRepository,
+)
+
+from .conversation_event_records import (
+    ConversationEventRecord,
+)
+
+
+class PostgreSQLConversationEventRepository(
+    ConversationEventRepository
+):
+    """
+    PostgreSQL implementation of conversation event storage.
+
+    Privacy isolation:
+
+        telegram_user_hash
+                +
+          conversation_id
+                +
+             world_id
+
+    Governance:
+
+        privacy_hash_version
+                +
+        retention_policy_id
+
+    Responsibility:
+
+    - persist conversation events
+    - retrieve conversation history
+
+    Does NOT:
+
+    - validate business rules
+    - create memories
+    - analyse learning behaviour
+    - create RAG knowledge
+    """
+
+    def __init__(
+        self,
+        session_factory,
+    ) -> None:
+        if session_factory is None:
+            raise ValueError(
+                "session_factory cannot be None."
+            )
+
+        self._session_factory = session_factory
+
+    async def save(
+        self,
+        event: ConversationEvent,
+    ) -> ConversationEvent:
+        """
+        Persist an anonymised conversation event.
+
+        Privacy and retention governance values are taken
+        from the validated event metadata and persisted into
+        their dedicated database columns.
+        """
+
+        metadata = event.metadata or {}
+
+        privacy_hash_version = metadata.get(
+            "privacy_hash_version",
+        )
+
+        retention_policy_id = metadata.get(
+            "retention_policy_id",
+        )
+
+        if not privacy_hash_version:
+            raise ValueError(
+                "Conversation event is missing "
+                "privacy_hash_version."
+            )
+
+        if not retention_policy_id:
+            raise ValueError(
+                "Conversation event is missing "
+                "retention_policy_id."
+            )
+
+        with self._session_factory() as session:
+            record = ConversationEventRecord(
+                id=event.event_id,
+                conversation_id=event.conversation_id,
+                telegram_user_hash=(
+                    event.telegram_user_hash
+                ),
+                world_id=event.world_id,
+                channel=event.channel,
+                role=event.role,
+                content=event.content,
+                metadata_json=metadata,
+                privacy_hash_version=(
+                    privacy_hash_version
+                ),
+                retention_policy_id=(
+                    retention_policy_id
+                ),
+                created_at=event.created_at,
+            )
+
+            session.add(record)
+            session.commit()
+
+        return event
+
+    async def get_recent(
+        self,
+        *,
+        telegram_user_hash: str,
+        conversation_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[ConversationEvent]:
+        """
+        Retrieve recent conversation events for one
+        pseudonymised Telegram identity, conversation,
+        and learning world.
+
+        Isolation key:
+
+            telegram_user_hash
+                    +
+            conversation_id
+                    +
+                world_id
+
+        Results are returned in chronological order so
+        callers can construct conversation context safely.
+        """
+
+        if limit <= 0:
+            return []
+
+        if not telegram_user_hash:
+            raise ValueError(
+                "telegram_user_hash cannot be empty."
+            )
+
+        if not conversation_id:
+            raise ValueError(
+                "conversation_id cannot be empty."
+            )
+
+        if not world_id:
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(
+                    ConversationEventRecord
+                )
+                .where(
+                    ConversationEventRecord.telegram_user_hash
+                    == telegram_user_hash
+                )
+                .where(
+                    ConversationEventRecord.conversation_id
+                    == conversation_id
+                )
+                .where(
+                    ConversationEventRecord.world_id
+                    == world_id
+                )
+                .order_by(
+                    ConversationEventRecord.created_at.desc()
+                )
+                .limit(limit)
+            ).all()
+
+        return [
+            _event_from_record(row)
+            for row in reversed(rows)
+        ]
+
+
+def _event_from_record(
+    row: ConversationEventRecord,
+) -> ConversationEvent:
+    """
+    Convert the persistence record back into the
+    application-domain conversation event.
+
+    Governance fields remain available through metadata
+    so the domain event retains its original contract.
+    """
+
+    metadata = dict(
+        row.metadata_json or {}
+    )
+
+    metadata.setdefault(
+        "privacy_hash_version",
+        row.privacy_hash_version,
+    )
+
+    metadata.setdefault(
+        "retention_policy_id",
+        row.retention_policy_id,
+    )
+
+    return ConversationEvent(
+        event_id=row.id,
+        conversation_id=row.conversation_id,
+        telegram_user_hash=(
+            row.telegram_user_hash
+        ),
+        world_id=row.world_id,
+        channel=row.channel,
+        role=row.role,
+        content=row.content,
+        metadata=metadata,
+        created_at=row.created_at,
+    )
+===== BETA ACCESS REPOSITORY =====
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from backend.app.application.beta_access.models import (
+    BetaConnectionToken,
+    BetaUserState,
+    TelegramBinding,
+)
+
+from backend.app.application.beta_access.repositories import (
+    BetaTokenRepository,
+    BetaUserRepository,
+    TelegramBindingRepository,
+)
+
+from .beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PostgreSQLBetaUserRepository(BetaUserRepository):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get(
+        self,
+        user_id: str,
+    ) -> BetaUserState | None:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaUserRecord,
+                user_id,
+            )
+
+            return (
+                None
+                if row is None
+                else _user_from_record(row)
+            )
+
+
+    async def get_by_telegram_id(
+        self,
+        telegram_id: int,
+    ) -> BetaUserState | None:
+        """
+        Resolve Telegram identity.
+
+        Source of truth:
+
+            telegram_bindings
+                    |
+                    v
+                beta_users
+        """
+
+        with self._session_factory() as session:
+
+            binding = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id
+                    == str(telegram_id)
+                )
+            )
+
+
+            if binding is None:
+                return None
+
+
+            row = session.get(
+                BetaUserRecord,
+                binding.user_id,
+            )
+
+
+            if row is None:
+                return None
+
+
+            user = _user_from_record(row)
+
+
+            #
+            # Telegram binding is authoritative.
+            #
+            # Do not depend on beta_users.telegram_id.
+            #
+            return BetaUserState(
+                user_id=user.user_id,
+                email=user.email,
+                email_verified=user.email_verified,
+                beta_approved=user.beta_approved,
+                telegram_id=int(
+                    binding.telegram_user_id
+                ),
+                active_world_id=user.active_world_id,
+            )
+
+
+    async def save(
+        self,
+        user: BetaUserState,
+    ) -> BetaUserState:
+
+        now = _utcnow()
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaUserRecord,
+                user.user_id,
+            )
+
+
+            if row is None:
+
+                row = BetaUserRecord(
+                    id=user.user_id,
+                    email=user.email,
+                    email_verified=user.email_verified,
+                    approved=user.beta_approved,
+                    active_world_id=user.active_world_id,
+                    telegram_id=(
+                        None
+                        if user.telegram_id is None
+                        else str(user.telegram_id)
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                )
+
+                session.add(row)
+
+
+            else:
+
+                row.email = user.email
+                row.email_verified = user.email_verified
+                row.approved = user.beta_approved
+                row.active_world_id = user.active_world_id
+
+                row.telegram_id = (
+                    None
+                    if user.telegram_id is None
+                    else str(user.telegram_id)
+                )
+
+                row.updated_at = now
+
+
+            session.commit()
+
+
+        return user
+
+
+
+class PostgreSQLBetaTokenRepository(
+    BetaTokenRepository
+):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get_by_hash(
+        self,
+        token_hash: str,
+    ) -> BetaConnectionToken | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(BetaConnectionTokenRecord).where(
+                    BetaConnectionTokenRecord.token_hash
+                    == token_hash
+                )
+            )
+
+            return (
+                None
+                if row is None
+                else _token_from_record(row)
+            )
+
+
+    async def save(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+
+        now = _utcnow()
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaConnectionTokenRecord,
+                token.token_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    BetaConnectionTokenRecord(
+                        id=token.token_id,
+                        token_hash=token.token_hash,
+                        user_id=token.user_id,
+                        expires_at=token.expires_at,
+                        used_at=token.used_at,
+                        created_at=now,
+                    )
+                )
+
+            else:
+
+                row.used_at = token.used_at
+
+
+            session.commit()
+
+
+        return token
+
+
+    async def mark_used(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+
+        return await self.save(token)
+
+
+
+class PostgreSQLTelegramBindingRepository(
+    TelegramBindingRepository
+):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get_by_telegram_user_id(
+        self,
+        telegram_user_id: str,
+    ) -> TelegramBinding | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id
+                    == telegram_user_id
+                )
+            )
+
+
+            return (
+                None
+                if row is None
+                else _binding_from_record(row)
+            )
+
+
+    async def get_by_user_id(
+        self,
+        user_id: str,
+    ) -> TelegramBinding | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.user_id
+                    == user_id
+                )
+            )
+
+
+            return (
+                None
+                if row is None
+                else _binding_from_record(row)
+            )
+
+
+    async def save(
+        self,
+        binding: TelegramBinding,
+    ) -> TelegramBinding:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                TelegramBindingRecord,
+                binding.binding_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    TelegramBindingRecord(
+                        id=binding.binding_id,
+                        user_id=binding.user_id,
+                        telegram_user_id=binding.telegram_user_id,
+                        chat_id=binding.chat_id,
+                        connected_at=binding.connected_at,
+                    )
+                )
+
+
+            else:
+
+                row.telegram_user_id = (
+                    binding.telegram_user_id
+                )
+
+                row.chat_id = (
+                    binding.chat_id
+                )
+
+                row.connected_at = (
+                    binding.connected_at
+                )
+
+
+            session.commit()
+
+
+        return binding
+
+
+
+def _user_from_record(
+    row: BetaUserRecord,
+) -> BetaUserState:
+
+    return BetaUserState(
+        user_id=row.id,
+        email=row.email,
+        email_verified=row.email_verified,
+        beta_approved=row.approved,
+        telegram_id=(
+            None
+            if row.telegram_id is None
+            else int(row.telegram_id)
+        ),
+        active_world_id=row.active_world_id,
+    )
+
+
+
+def _token_from_record(
+    row: BetaConnectionTokenRecord,
+) -> BetaConnectionToken:
+
+    return BetaConnectionToken(
+        token_id=row.id,
+        user_id=row.user_id,
+        token_hash=row.token_hash,
+        expires_at=row.expires_at,
+        used_at=row.used_at,
+    )
+
+
+
+def _binding_from_record(
+    row: TelegramBindingRecord,
+) -> TelegramBinding:
+
+    return TelegramBinding(
+        binding_id=row.id,
+        user_id=row.user_id,
+        telegram_user_id=row.telegram_user_id,
+        chat_id=row.chat_id,
+        connected_at=row.connected_at,
+    )
+===== MAIN ALEMBIC VERSION DIRECTORY =====
+@{Name=1bead328cddf_create_events_table.py}
+@{Name=1c33dbcd7217_create_platform_state_table.py}
+@{Name=20260821_beta_telegram_access.py}
+@{Name=20260821_beta_telegram_token.py}
+@{Name=20260822_beta_access_repair.py}
+@{Name=20260822_create_conversation_events.py}
+@{Name=20260822_create_conversation_memory.py}
+@{Name=20260822_fix_beta_token_user_id.py}
+@{Name=20260822_privacy_event_governance.py}
+@{Name=20260822_privacy_event_model_update.py}
+@{Name=20260826_auth_persistence_integration.py}
+@{Name=20260826_ws22_3_2x_create_publication_executions.py}
+@{Name=20260826_ws22_3_4_2_create_publication_audit_events.py}
+@{Name=20260826_ws23_1_3_approval_audit_events.py}
+@{Name=20260826_ws23_1_3_create_publication_state.py}
+@{Name=20260906_provider_usage_events.py}
+@{Name=405914bece20_add_learning_world_id_to_events.py}
+@{Name=536722d48314_create_events_table.py}
+@{Name=8659a97d744b_add_conversation_event_retrieval_index.py}
+@{Name=8f1522bc0a08_add_telegram_id_to_users.py}
+@{Name=ACADEMY_NOTIFICATION_DELIVERY_TEMPLATE.py}
+@{Name=bca56284c755_merge_conversation_event_privacy_.py}
+@{Name=ca4b137f646c_merge_authentication_persistence_into_.py}
+@{Name=d355a996cfdd_create_events_table.py}
+@{Name=db461433a79d_create_worlds_table.py}
+@{Name=e75bf3e7c80b_create_users_table.py}

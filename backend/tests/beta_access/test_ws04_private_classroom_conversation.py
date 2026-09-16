@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,11 +12,41 @@ from app.application.beta_access.beta_telegram_conversation_boundary import (
 from app.application.beta_access.telegram_conversation_service import (
     TelegramConversationService,
 )
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+from app.domain.uai.context.world_context import (
+    LanguagePolicy,
+    WorldContext,
+)
+
+
+class DeterministicLanguageDetector:
+    """
+    Deterministic language-detector test double.
+
+    WS04 does not test the language-detection implementation itself.
+    It only requires a controlled detector so the real
+    TelegramConversationService can execute its M2-E.2 response-language
+    policy without an external provider.
+    """
+
+    def __init__(self, language: str = "fr") -> None:
+        self.language = language
+        self.calls: list[str] = []
+
+    def detect(self, text: str) -> str:
+        self.calls.append(text)
+        return self.language
 
 
 @dataclass(frozen=True)
 class FakeConversationContext:
     world_id: str = "world-fr"
+    language_code: str = "fr"
     character: str = "Alix"
     level: str = "B1"
 
@@ -79,7 +110,7 @@ class FakeConversationEventRepository:
                 +
         conversation_id
                 +
-            world_id
+              world_id
     """
 
     def __init__(self) -> None:
@@ -186,11 +217,37 @@ def make_conversation_service():
     privacy = FakePrivacyIdentifierService()
     validator = FakeConversationEventValidator()
 
+    language_response_policy = LanguageResponsePolicy()
+    language_detector = DeterministicLanguageDetector("fr")
+
+    world_resolver = MagicMock(
+        spec=WorldResolver,
+    )
+
+    world_resolver.resolve.return_value = WorldContext(
+        world_id="world-fr",
+        name="French World",
+        language_code="fr",
+        available_characters=[
+            "yeti",
+            "alix",
+        ],
+        world_type="language",
+        learning_domain="language",
+        language_policy=LanguagePolicy(
+            mode="target_language",
+            target_language="fr",
+        ),
+    )
+
     service = TelegramConversationService(
         conversation_runtime=runtime,
         conversation_event_repository=repository,
         privacy_identifier_service=privacy,
         conversation_event_validator=validator,
+        language_response_policy=language_response_policy,
+        language_detector=language_detector,
+        world_resolver=world_resolver,
     )
 
     return (
@@ -357,6 +414,11 @@ async def test_ws04_private_classroom_message_completes_full_application_flow():
         in runtime.calls[0]["character_instruction"]
     )
 
+    assert (
+        "Learning language: fr"
+        in runtime.calls[0]["character_instruction"]
+    )
+
 
 @pytest.mark.asyncio
 async def test_ws04_unauthorized_telegram_user_never_reaches_runtime():
@@ -452,6 +514,7 @@ async def test_ws04_context_does_not_modify_learner_message():
     metadata = repository.events[0].metadata
 
     assert metadata["world_id"] == "world-fr"
+    assert metadata["language_code"] == "fr"
     assert metadata["character"] == "Alix"
     assert metadata["level"] == "B1"
 

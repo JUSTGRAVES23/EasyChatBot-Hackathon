@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -10,14 +11,37 @@ from app.application.beta_access.beta_access_service import (
 from app.application.beta_access.models import (
     BetaUserState,
 )
+from app.application.uai.world.world_resolver import WorldResolver
 from app.infrastructure.persistence.in_memory_beta_access_repository import (
     InMemoryBetaTokenRepository,
     InMemoryBetaUserRepository,
     InMemoryTelegramBindingRepository,
 )
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
 from app.interfaces.telegram.beta_private_chat_gate import (
     BetaPrivateChatGate,
 )
+
+
+def create_world_resolver() -> WorldResolver:
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[2]
+        / "app"
+    )
+
+    return WorldResolver(
+        world_repository=YamlWorldRepository(
+            worlds_path=(
+                app_root
+                / "configuration"
+                / "worlds"
+            )
+        )
+    )
 
 
 @pytest.fixture
@@ -26,6 +50,7 @@ def access() -> BetaAccessService:
         user_repository=InMemoryBetaUserRepository(),
         token_repository=InMemoryBetaTokenRepository(),
         binding_repository=InMemoryTelegramBindingRepository(),
+        world_resolver=create_world_resolver(),
     )
 
 

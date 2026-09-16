@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Connection Composition.
 
 Composition root for voice connection
@@ -19,7 +19,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.app.application.uai.voice.voice_connection_service import (
+from app.application.uai.voice.voice_connection_service import (
     VoiceConnectionService,
 )
 
@@ -66,3 +66,6 @@ __all__ = [
     "create_voice_connection_service",
     "build_voice_connection_service",
 ]
+
+
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 API provider wiring integration test.
 
 Verifies that the API composition layer injects
@@ -9,16 +9,16 @@ The OpenAI API call is replaced with a fake provider.
 
 import pytest
 
-from backend.api import routes
-from backend.characters.character_profile import (
+from api import routes
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
@@ -71,7 +71,7 @@ async def test_conversation_agent_receives_provider():
 
     provider = FakeLLMProvider()
 
-    from backend.agents.conversation_agent import (
+    from agents.conversation_agent import (
         ConversationAgent,
     )
 

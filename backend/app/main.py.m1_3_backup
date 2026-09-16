@@ -1,0 +1,660 @@
+"""
+EasyChatBot FastAPI Application.
+
+Application entry point.
+
+Responsibilities:
+- Create FastAPI application.
+- Register active API routers.
+- Configure application metadata.
+- Manage application lifecycle.
+
+Does NOT:
+- Execute AI agents.
+- Handle business logic.
+- Manage voice sessions.
+- Call external providers directly.
+- Implement individual application services.
+- Execute cybersecurity workflows.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+
+#
+# Academy activation
+#
+# Academy production remains fail-closed by default.
+# Both explicit activation flags are required.
+#
+
+from backend.app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+#
+# Existing authentication persistence boundary
+#
+
+from backend.app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+
+
+#
+# Existing canonical async PostgreSQL persistence boundary
+#
+
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+
+
+#
+# Existing outbound-only Telegram announcement boundary
+#
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+
+
+#
+# Scheduler lifecycle boundary
+#
+# FastAPI only controls lifecycle.
+# Business logic remains outside.
+#
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+#
+# Governance Audit API
+#
+# Read-only governance evidence boundary.
+#
+# Does NOT:
+# - modify controls;
+# - execute actions;
+# - change audit history.
+#
+
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+
+
+#
+# Operations Center Governance API
+#
+# Read-only governance visibility.
+#
+# Provides:
+# - control status;
+# - audit visibility;
+# - YETI governance messages.
+#
+
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+
+#
+# Governance Evidence Timeline API
+#
+# Read-only evidence explorer.
+#
+# Provides:
+# - governance events;
+# - operational history;
+# - audit evidence visibility.
+#
+
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+
+
+#
+# Governance Change Lifecycle API
+#
+# Provides:
+# - approval lifecycle;
+# - change management visibility;
+# - audit lifecycle integration.
+#
+# Flow:
+#
+# Approval
+#    |
+#    v
+# Change Record
+#    |
+#    v
+# Governance Audit
+#
+
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+
+
+#
+# Provider Management Controls
+#
+# Human-controlled provider delivery governance.
+#
+# Provider Management owns the control.
+# Governance Center observes and explains the state.
+#
+
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+
+
+#
+# Privacy Governance Operations Center API
+#
+# Privacy governance API boundary.
+#
+# Provides:
+# - governance summary;
+# - governance status chart;
+# - governance case list;
+# - governance case detail;
+# - explicit human governance decisions;
+# - controlled Beta/demo case creation.
+#
+# Decision logic remains inside the application service layer.
+#
+
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+
+
+#
+# M7.2 Privacy Screening API
+#
+# The API adapter remains thin.
+#
+# Composition:
+#
+# Processing Registry
+#        |
+#        v
+# Screening Service
+#        |
+#        v
+# Screening Adapter
+#        |
+#        v
+# Privacy Screening API
+#
+# No screening business logic belongs in this module.
+#
+
+from backend.app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+
+from backend.app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+
+from backend.app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+
+from backend.app.application.privacy.screening.service import (
+    ScreeningService,
+)
+
+
+#
+# Voice APIs
+#
+
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+
+
+#
+# AI Operations Center
+#
+
+from app.api.operations_center import (
+    router as operations_center_router,
+)
+
+
+#
+# Cybersecurity Intelligence API
+#
+
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+
+#
+# Cybersecurity Decision Support API
+#
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+
+
+#
+# Cybersecurity Reports API
+#
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+#
+# Cybersecurity Live Reports API
+#
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Announcement composition boundary
+#
+
+def _create_announcement_components():
+    """
+    Compose the existing outbound-only Telegram announcement boundary.
+
+    This creates an outbound Telegram client only.
+
+    It does NOT:
+    - poll Telegram;
+    - register handlers;
+    - start polling;
+    - create a second Telegram bot runtime.
+    """
+
+    telegram_client = TelegramAnnouncementClient()
+
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    return (
+        telegram_client,
+        announcement_publisher,
+    )
+
+
+#
+# FastAPI lifecycle
+#
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    The scheduler is composed once per application and stored on
+    application.state.
+
+    FastAPI only controls scheduler lifecycle.
+    """
+
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+
+    Academy production composition is explicitly activated only when
+    both Academy activation flags are enabled.
+    """
+
+    #
+    # Academy production composition
+    #
+    # Fail-closed by default.
+    #
+    # No Academy PostgreSQL or Telegram infrastructure is created when
+    # Academy activation is disabled.
+    #
+
+    academy_config = AcademyActivationConfig.from_environment()
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+
+        #
+        # Existing canonical async PostgreSQL boundary.
+        #
+
+        academy_engine = create_async_database_engine()
+
+        academy_session_factory = create_async_session_factory(
+            academy_engine,
+        )
+
+        #
+        # Preserve the existing authentication repository boundary.
+        #
+        # This repository remains an adapter around the canonical session
+        # factory. No alternative persistence architecture is introduced.
+        #
+
+        PostgreSQLAuthenticationRepository(
+            academy_session_factory,
+        )
+
+        #
+        # Existing outbound Telegram announcement boundary.
+        #
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        #
+        # Compose Academy using the exact existing boundaries.
+        #
+
+        academy_one_week_workflow = create_academy_one_week_workflow(
+            session_factory=academy_session_factory,
+            telegram_bot=announcement_telegram_client,
+        )
+
+    #
+    # Shared scheduler
+    #
+    # Exactly one scheduler runtime is composed for this application.
+    #
+    # Academy is injected into the existing cybersecurity scheduler.
+    #
+
+    scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    #
+    # Application state
+    #
+
+    application.state.scheduler_runtime = scheduler_runtime
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    #
+    # CORS
+    #
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=[
+            "*",
+        ],
+        allow_headers=[
+            "*",
+        ],
+    )
+
+    #
+    # Voice APIs
+    #
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    #
+    # AI Operations Center
+    #
+
+    application.include_router(
+        operations_center_router,
+    )
+
+    #
+    # Privacy Governance Operations Center
+    #
+    # Existing privacy governance API contract.
+    #
+    # Read endpoints:
+    #
+    # GET /api/privacy/governance/summary
+    # GET /api/privacy/governance/status-chart
+    # GET /api/privacy/governance/cases
+    # GET /api/privacy/governance/cases/{case_id}
+    #
+    # Decision endpoints:
+    #
+    # POST /api/privacy/governance/cases/{case_id}/approve
+    # POST /api/privacy/governance/cases/{case_id}/reject
+    # POST /api/privacy/governance/cases/{case_id}/request-changes
+    #
+    # Development/demo:
+    #
+    # POST /api/privacy/governance/demo/create-case
+    #
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    #
+    # M7.2 Privacy Screening
+    #
+    # Beta processing activities are provided by the existing
+    # processing catalog.
+    #
+    # Screening remains read/evaluation oriented and does not
+    # independently create governance state.
+    #
+
+    processing_registry = create_beta1_processing_registry()
+
+    screening_service = ScreeningService()
+
+    screening_adapter = ProcessingActivityScreeningAdapter(
+        screening_service,
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    #
+    # Provider Management Controls
+    #
+    # Human-controlled provider delivery controls.
+    #
+    # POST /controls/providers/pause
+    # POST /controls/providers/resume
+    # GET  /controls/providers/status
+    #
+    # Provider Management remains the authority
+    # for changing provider execution state.
+    #
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    #
+    # Governance Audit API
+    #
+    # Provides immutable evidence visibility.
+    #
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    #
+    # Operations Center Governance API
+    #
+    # Provides governance dashboard state.
+    #
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    #
+    # Governance Evidence Timeline API
+    #
+    # Provides evidence explorer data.
+    #
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    #
+    # Governance Change Lifecycle API
+    #
+    # Approval -> Change -> Audit lifecycle.
+    #
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    #
+    # Cybersecurity Intelligence
+    #
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    #
+    # Cybersecurity Decision Support
+    #
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    #
+    # Cybersecurity Reports
+    #
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    #
+    # Cybersecurity Live Reports
+    #
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]

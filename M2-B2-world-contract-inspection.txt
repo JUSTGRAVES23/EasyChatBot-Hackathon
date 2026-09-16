@@ -1,0 +1,307 @@
+﻿===== backend/app/domain/uai/context/world_context.py =====
+"""
+World Context.
+
+Represents the active learning world
+for an AI interaction.
+
+Examples:
+
+- French World
+- Spanish World
+- Business French World
+
+The world determines:
+- language
+- learning environment
+- available experience rules
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class WorldContext:
+    """
+    Immutable learning world context.
+    """
+
+    world_id: str
+
+    name: str
+
+    language_code: str
+
+    available_characters: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """
+        Validate world context.
+        """
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        if not self.name.strip():
+            raise ValueError(
+                "world name cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+===== backend/app/infrastructure/worlds/yaml_world_repository.py =====
+"""
+YAML World Repository.
+
+Infrastructure implementation for loading
+World configurations from YAML files.
+
+Implements:
+
+WorldRepository
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+
+class WorldConfiguration:
+    """
+    Infrastructure representation of a world.
+    """
+
+    def __init__(
+        self,
+        data: dict,
+    ) -> None:
+
+        self.id = data["id"]
+
+        self.name = data["name"]
+
+        self.language_code = (
+            data["language_code"]
+        )
+
+        self.available_characters = (
+            data.get(
+                "available_characters",
+                [],
+            )
+        )
+
+
+class YamlWorldRepository:
+    """
+    Loads worlds from YAML files.
+    """
+
+    def __init__(
+        self,
+        *,
+        worlds_path: Path,
+    ) -> None:
+
+        self._worlds_path = worlds_path
+
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ) -> WorldConfiguration | None:
+
+        file_path = (
+    self._worlds_path.resolve()
+    / f"{world_id}.yaml"
+)
+
+        if not file_path.exists():
+            return None
+
+
+        with file_path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            data = yaml.safe_load(file)
+
+
+        return WorldConfiguration(data)
+
+===== backend/app/application/uai/world/world_resolver.py =====
+"""
+World Resolver.
+
+Application service responsible for resolving
+the learner's active AI learning world.
+
+Responsibilities
+----------------
+
+- Retrieve world configuration.
+- Validate world availability.
+- Create WorldContext.
+
+Does NOT
+--------
+
+- Execute AI models.
+- Manage characters.
+- Create conversations.
+- Handle persistence directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Protocol
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class WorldRepository(Protocol):
+    """
+    Repository contract for world retrieval.
+    """
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ):
+        """
+        Retrieve a world configuration.
+        """
+        ...
+
+
+class WorldResolver:
+    """
+    Resolves a learning world into runtime context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_repository: WorldRepository,
+    ) -> None:
+        self._world_repository = world_repository
+
+    def resolve(
+        self,
+        world_id: str,
+    ) -> WorldContext:
+        """
+        Resolve world configuration.
+
+        Returns
+        -------
+        WorldContext
+            Validated world interaction context.
+        """
+
+        logger.info(
+            "Resolving world context",
+            extra={
+                "world_id": world_id,
+            },
+        )
+
+        world = (
+            self._world_repository
+            .get_by_id(world_id)
+        )
+
+        if world is None:
+            raise ValueError(
+                f"World not found: {world_id}"
+            )
+
+        return WorldContext(
+            world_id=world.id,
+            name=world.name,
+            language_code=world.language_code,
+            available_characters=(
+                tuple(
+                    world.available_characters
+                )
+            ),
+        )
+
+===== backend/tests/application/uai/world/test_world_resolver.py =====
+"""
+Tests for World Resolver.
+"""
+
+from pathlib import Path
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+
+BACKEND_PATH = (
+    Path(__file__)
+    .resolve()
+    .parents[4]
+)
+
+
+WORLDS_PATH = (
+    BACKEND_PATH
+    / "app"
+    / "configuration"
+    / "worlds"
+)
+
+
+def test_resolve_french_world():
+
+    repository = YamlWorldRepository(
+        worlds_path=WORLDS_PATH
+    )
+
+    resolver = WorldResolver(
+        world_repository=repository
+    )
+
+    context = resolver.resolve(
+        "french_world"
+    )
+
+    assert context.world_id == (
+        "french_world"
+    )
+
+    assert context.language_code == "fr"
+
+    assert "yeti" in (
+        context.available_characters
+    )
+
+    assert "alix" in (
+        context.available_characters
+    )
+

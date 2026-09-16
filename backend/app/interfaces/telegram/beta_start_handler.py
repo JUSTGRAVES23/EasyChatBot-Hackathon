@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from backend.app.application.beta_access.beta_access_service import (
+from app.application.beta_access.beta_access_service import (
     BetaAccessService,
 )
 

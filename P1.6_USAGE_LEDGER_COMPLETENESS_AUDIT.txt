@@ -1,0 +1,1751 @@
+﻿============================================================
+P1.6 - USAGE LEDGER COMPLETENESS AUDIT
+============================================================
+Audit date: 2026-09-06T11:46:23.8403212+02:00
+Repository: C:\AI Folder\EasyChatBot-Hackathon
+
+SCOPE
+1. provider_request_id persistence
+2. provider-native usage preservation
+3. estimated cost calculation boundary
+4. failure-event capture
+5. durable ledger contract tests
+6. production Telegram runtime capture wiring
+
+AUDIT ONLY
+No application code, migrations, dependencies, or database changes.
+============================================================
+
+
+============================================================
+PRODUCTION TELEGRAM BOOTSTRAP
+============================================================
+
+from __future__ import annotations
+
+import logging
+
+from backend.app.application.composition.beta_telegram_production import (
+    BetaTelegramProductionComposition,
+    create_production_beta_telegram_composition,
+)
+from backend.app.application.composition.conversation_composition import (
+    create_conversation_runtime,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+    TelegramBotRuntime,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+_telegram_production: (
+    BetaTelegramProductionComposition | None
+) = None
+
+
+def create_telegram_runtime() -> TelegramBotRuntime:
+    """
+    Create the production Beta Telegram runtime.
+
+    Existing dependency seams remain exposed at this module level
+    intentionally. This preserves deterministic test composition
+    and allows controlled dependency injection without changing
+    production behavior.
+    """
+
+    global _telegram_production
+
+    if _telegram_production is None:
+        _telegram_production = (
+            create_production_beta_telegram_composition(
+                database_engine_factory=(
+                    create_database_engine
+                ),
+                session_factory_factory=(
+                    create_session_factory
+                ),
+                conversation_runtime_factory=(
+                    create_conversation_runtime
+                ),
+            )
+        )
+
+        logger.info(
+            "Production Beta Telegram composition created."
+        )
+
+    return _telegram_production.beta_telegram.runtime
+
+
+async def start_telegram_runtime() -> None:
+    """
+    Start the production Telegram runtime.
+    """
+
+    runtime = create_telegram_runtime()
+
+    await runtime.start()
+
+    logger.info(
+        "Production Beta Telegram runtime started."
+    )
+
+
+async def stop_telegram_runtime() -> None:
+    """
+    Stop the production Telegram runtime.
+    """
+
+    if _telegram_production is None:
+        return
+
+    await _telegram_production.beta_telegram.runtime.stop()
+
+    logger.info(
+        "Production Beta Telegram runtime stopped."
+    )
+
+
+def reset_telegram_runtime() -> None:
+    """
+    Reset the Telegram production composition.
+
+    Intended primarily for tests and controlled lifecycle
+    management.
+    """
+
+    global _telegram_production
+
+    _telegram_production = None
+
+
+def get_telegram_production_composition() -> (
+    BetaTelegramProductionComposition
+):
+    """
+    Return the active production Beta Telegram composition.
+    """
+
+    if _telegram_production is None:
+        raise RuntimeError(
+            "Telegram production composition has not been created."
+        )
+
+    return _telegram_production
+
+
+__all__ = [
+    "create_telegram_runtime",
+    "start_telegram_runtime",
+    "stop_telegram_runtime",
+    "reset_telegram_runtime",
+    "get_telegram_production_composition",
+]
+
+============================================================
+BETA TELEGRAM PRODUCTION COMPOSITION
+============================================================
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from backend.app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from backend.app.application.composition.beta_telegram_composition import (
+    BetaTelegramComposition,
+    create_beta_telegram_composition,
+)
+from backend.app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+from backend.app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+from backend.app.infrastructure.persistence.postgresql_beta_access_repository import (
+    PostgreSQLBetaTokenRepository,
+    PostgreSQLBetaUserRepository,
+    PostgreSQLTelegramBindingRepository,
+)
+from backend.app.infrastructure.persistence.postgresql_conversation_event_repository import (
+    PostgreSQLConversationEventRepository,
+)
+from backend.app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BetaTelegramProductionComposition:
+    beta_telegram: BetaTelegramComposition
+    database_engine: Any
+    session_factory: Any
+
+    @property
+    def runtime(self) -> Any:
+        return self.beta_telegram.runtime
+
+    @property
+    def adapter(self) -> Any:
+        return self.beta_telegram.adapter
+
+    @property
+    def beta_access_service(self) -> Any:
+        return self.beta_telegram.beta_access_service
+
+    @property
+    def conversation_runtime(self) -> Any:
+        return self.beta_telegram.conversation_runtime
+
+    @property
+    def conversation_service(self) -> Any:
+        return self.beta_telegram.conversation_service
+
+    @property
+    def conversation_boundary(self) -> Any:
+        return self.beta_telegram.conversation_boundary
+
+    @property
+    def private_chat_gate(self) -> Any:
+        return self.beta_telegram.private_chat_gate
+
+    @property
+    def start_handler(self) -> Any:
+        return self.beta_telegram.start_handler
+
+
+def create_production_beta_telegram_composition(
+    *,
+    expiration_minutes: int = 1440,
+    database_engine: Any | None = None,
+    session_factory: Any | None = None,
+    database_engine_factory: Callable[[], Any] | None = None,
+    session_factory_factory: Callable[[Any], Any] | None = None,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+) -> BetaTelegramProductionComposition:
+    if expiration_minutes <= 0:
+        raise ValueError("expiration_minutes must be greater than zero.")
+
+    if database_engine is not None and database_engine_factory is not None:
+        raise ValueError(
+            "Provide either database_engine or database_engine_factory, not both."
+        )
+
+    if session_factory is not None and session_factory_factory is not None:
+        raise ValueError(
+            "Provide either session_factory or session_factory_factory, not both."
+        )
+
+    if conversation_runtime is not None and conversation_runtime_factory is not None:
+        raise ValueError(
+            "Provide either conversation_runtime or conversation_runtime_factory, not both."
+        )
+
+    if database_engine is None:
+        database_engine = (
+            database_engine_factory or create_database_engine
+        )()
+
+    if session_factory is None:
+        session_factory = (
+            session_factory_factory or create_session_factory
+        )(database_engine)
+
+    beta_user_repository = PostgreSQLBetaUserRepository(session_factory)
+    beta_token_repository = PostgreSQLBetaTokenRepository(session_factory)
+    telegram_binding_repository = PostgreSQLTelegramBindingRepository(session_factory)
+    conversation_event_repository = PostgreSQLConversationEventRepository(session_factory)
+
+    # Durable provider usage ledger. The repository implements the existing
+    # ProviderUsageRepository abstraction; accounting remains outside the
+    # Operations Center.
+    provider_usage_repository = PostgreSQLProviderUsageRepository(session_factory)
+
+    privacy_identifier_service = PrivacyIdentifierService()
+    conversation_event_validator = ConversationEventValidator()
+
+    beta_telegram = create_beta_telegram_composition(
+        user_repository=beta_user_repository,
+        token_repository=beta_token_repository,
+        binding_repository=telegram_binding_repository,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+        expiration_minutes=expiration_minutes,
+        conversation_runtime=conversation_runtime,
+        conversation_runtime_factory=conversation_runtime_factory,
+        provider_usage_repository=provider_usage_repository,
+    )
+
+    logger.info("Production Beta Telegram composition created with durable usage ledger.")
+
+    return BetaTelegramProductionComposition(
+        beta_telegram=beta_telegram,
+        database_engine=database_engine,
+        session_factory=session_factory,
+    )
+
+
+__all__ = [
+    "BetaTelegramProductionComposition",
+    "create_production_beta_telegram_composition",
+]
+
+============================================================
+BETA TELEGRAM APPLICATION COMPOSITION
+============================================================
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from backend.app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from backend.app.application.beta_access.beta_access_service import BetaAccessService
+from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from backend.app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
+from backend.app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+from backend.app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from backend.app.interfaces.telegram.beta_private_chat_gate import BetaPrivateChatGate
+from backend.app.interfaces.telegram.beta_start_handler import BetaTelegramStartHandler
+from backend.app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
+from backend.app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from backend.app.providers.llm.llm_provider_factory import LLMProviderFactory
+from src.ai_runtime.providers.usage.repository import (
+    InMemoryProviderUsageRepository,
+    ProviderUsageRepository,
+)
+from src.ai_runtime.providers.usage.service import ProviderUsageService
+
+
+@dataclass(frozen=True)
+class BetaTelegramComposition:
+    beta_access_service: BetaAccessService
+    conversation_runtime: ConversationRuntime
+    conversation_service: TelegramConversationService
+    conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_gate: BetaPrivateChatGate
+    start_handler: BetaTelegramStartHandler
+    adapter: BetaTelegramAdapter
+    runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+    provider_usage_repository: ProviderUsageRepository | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number.") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive number.")
+    return value
+
+
+def create_beta_telegram_composition(
+    *,
+    user_repository: Any,
+    token_repository: Any,
+    binding_repository: Any,
+    conversation_event_repository: Any,
+    privacy_identifier_service: Any,
+    conversation_event_validator: Any,
+    expiration_minutes: int = 1440,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
+    provider_usage_capture: ProviderUsageCapture | None = None,
+    provider_usage_repository: ProviderUsageRepository | None = None,
+) -> BetaTelegramComposition:
+    if expiration_minutes <= 0:
+        raise ValueError("expiration_minutes must be greater than zero.")
+
+    if conversation_runtime is not None and conversation_runtime_factory is not None:
+        raise ValueError(
+            "Provide either conversation_runtime or conversation_runtime_factory, not both."
+        )
+
+    beta_access_service = BetaAccessService(
+        user_repository=user_repository,
+        token_repository=token_repository,
+        binding_repository=binding_repository,
+        expiration_minutes=expiration_minutes,
+    )
+
+    resolved_usage_repository = provider_usage_repository
+    if conversation_runtime is not None:
+        resolved_conversation_runtime = conversation_runtime
+    elif conversation_runtime_factory is not None:
+        resolved_conversation_runtime = conversation_runtime_factory()
+    else:
+        if provider_usage_capture is None:
+            if resolved_usage_repository is None:
+                resolved_usage_repository = InMemoryProviderUsageRepository()
+            provider_usage_service = ProviderUsageService(resolved_usage_repository)
+            provider_usage_capture = ProviderUsageCapture(provider_usage_service)
+
+        resolved_conversation_runtime = ConversationRuntime(
+            llm_provider=LLMProviderFactory.create(),
+            usage_capture=provider_usage_capture,
+            usage_context=ProviderUsageContext(
+                capability="conversation",
+                functionality="chat",
+                agent="conversation_agent",
+            ),
+        )
+
+    conversation_service = TelegramConversationService(
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+    )
+
+    resolved_rate_limiter = rate_limiter or InMemoryTelegramRateLimiter(
+        max_messages=_env_positive_int("TELEGRAM_RATE_LIMIT_MAX_MESSAGES", 100),
+        window_seconds=_env_positive_float(
+            "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS", 86400.0
+        ),
+    )
+    resolved_abuse_protector = abuse_protector or InMemoryTelegramAbuseProtector(
+        max_messages=_env_positive_int("TELEGRAM_ABUSE_MAX_MESSAGES", 10),
+        window_seconds=_env_positive_float(
+            "TELEGRAM_ABUSE_WINDOW_SECONDS", 60.0
+        ),
+    )
+    resolved_observability = observability or LoggingTelegramObservability(
+        privacy_identifier_service=privacy_identifier_service,
+    )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+    )
+    private_chat_gate = BetaPrivateChatGate(beta_access_service=beta_access_service)
+    start_handler = BetaTelegramStartHandler(beta_access_service=beta_access_service)
+    adapter = BetaTelegramAdapter(
+        start_handler=start_handler,
+        private_chat_gate=private_chat_gate,
+        conversation_boundary=conversation_boundary,
+    )
+    runtime = TelegramBotRuntime(
+        adapter=adapter,
+        conversation_boundary=conversation_boundary,
+    )
+
+    return BetaTelegramComposition(
+        beta_access_service=beta_access_service,
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_service=conversation_service,
+        conversation_boundary=conversation_boundary,
+        private_chat_gate=private_chat_gate,
+        start_handler=start_handler,
+        adapter=adapter,
+        runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        provider_usage_repository=resolved_usage_repository,
+    )
+
+
+__all__ = ["BetaTelegramComposition", "create_beta_telegram_composition"]
+
+============================================================
+CANONICAL PROVIDER RESULT
+============================================================
+
+"""Canonical provider execution result for the live application provider path."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    """Provider-neutral execution usage metadata.
+
+    Values are optional because not every provider exposes every metric.
+    Providers must never invent token counts or request IDs.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("total_tokens", self.total_tokens),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} cannot be negative.")
+
+        if (
+            self.total_tokens is not None
+            and self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens < self.input_tokens + self.output_tokens
+        ):
+            raise ValueError(
+                "total_tokens cannot be less than input_tokens + output_tokens."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderResult:
+    """Provider-independent result returned by every live LLM adapter.
+
+    Provider SDK objects must never cross this boundary.
+
+    ``content`` is the canonical generated text. ``output`` is retained as
+    a compatibility property for consumers that already use that name.
+    """
+
+    success: bool
+    provider_id: str
+    model: str
+    content: str = ""
+    usage: ProviderUsage = field(default_factory=ProviderUsage)
+    provider_request_id: str | None = None
+    latency_ms: float | None = None
+    completed_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("ProviderResult requires provider_id.")
+        if not self.model.strip():
+            raise ValueError("ProviderResult requires model.")
+        if self.latency_ms is not None and self.latency_ms < 0:
+            raise ValueError("latency_ms cannot be negative.")
+        if self.success and not self.content.strip():
+            raise ValueError(
+                "Successful ProviderResult requires non-empty content."
+            )
+        if not self.success and not self.error:
+            raise ValueError(
+                "Failed ProviderResult requires an error."
+            )
+
+    @property
+    def output(self) -> str:
+        """Backward-compatible alias for canonical ``content``."""
+        return self.content
+
+============================================================
+LLM PROVIDER CONTRACT
+============================================================
+
+"""Provider-independent LLM contract for the live application runtime."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from backend.app.providers.provider_result import ProviderResult
+
+
+class LLMProvider(ABC):
+    """Stable boundary between ConversationRuntime and provider adapters."""
+
+    @abstractmethod
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> ProviderResult:
+        """Execute an LLM request and return canonical provider metadata."""
+        raise NotImplementedError
+
+============================================================
+OPENAI PROVIDER
+============================================================
+
+"""OpenAI adapter for the live application provider path."""
+
+from __future__ import annotations
+
+import os
+import time
+
+from openai import AsyncOpenAI
+
+from backend.app.providers.llm.llm_provider import LLMProvider
+from backend.app.providers.provider_result import ProviderResult, ProviderUsage
+
+
+class OpenAILLMProvider(LLMProvider):
+    """Infrastructure adapter that normalizes OpenAI responses."""
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        self.model = (
+            model
+            or os.getenv("OPENAI_MODEL")
+            or "gpt-4o-mini"
+        ).strip()
+
+        if not self.model:
+            raise ValueError("OpenAI model cannot be empty.")
+
+        if client is not None:
+            self.client = client
+            return
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY missing")
+
+        self.client = AsyncOpenAI(api_key=api_key)
+
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> ProviderResult:
+        started = time.perf_counter()
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+            )
+        except Exception as exc:
+            return ProviderResult(
+                success=False,
+                provider_id="openai",
+                model=self.model,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=str(exc),
+            )
+
+        content = (
+            response.choices[0].message.content
+            if response.choices
+            else None
+        ) or ""
+
+        if not content.strip():
+            return ProviderResult(
+                success=False,
+                provider_id="openai",
+                model=self.model,
+                provider_request_id=getattr(response, "id", None),
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error="OpenAI returned an empty response.",
+            )
+
+        native_usage = getattr(response, "usage", None)
+
+        usage = ProviderUsage(
+            input_tokens=getattr(native_usage, "prompt_tokens", None),
+            output_tokens=getattr(native_usage, "completion_tokens", None),
+            total_tokens=getattr(native_usage, "total_tokens", None),
+        )
+
+        return ProviderResult(
+            success=True,
+            provider_id="openai",
+            model=self.model,
+            content=content,
+            usage=usage,
+            provider_request_id=getattr(response, "id", None),
+            latency_ms=(time.perf_counter() - started) * 1000,
+            metadata={
+                "finish_reason": (
+                    getattr(response.choices[0], "finish_reason", None)
+                    if response.choices
+                    else None
+                )
+            },
+        )
+
+============================================================
+OLLAMA PROVIDER
+============================================================
+
+"""Ollama adapter for the live application provider path."""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from typing import Any
+
+import requests
+
+from backend.app.providers.llm.llm_provider import LLMProvider
+from backend.app.providers.provider_result import ProviderResult, ProviderUsage
+
+
+logger = logging.getLogger(__name__)
+
+
+class OllamaLLMProvider(LLMProvider):
+    """Infrastructure adapter that normalizes Ollama responses."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        self.base_url = (
+            base_url
+            or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        ).rstrip("/")
+        self.model = (
+            model
+            or os.getenv("OLLAMA_MODEL", "gpt-oss:120b-cloud")
+        ).strip()
+
+        if not self.model:
+            raise ValueError("Ollama model cannot be empty.")
+
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        **kwargs: Any,
+    ) -> ProviderResult:
+        if not user_message:
+            raise ValueError("User message cannot be empty.")
+
+        started = time.perf_counter()
+
+        payload = {
+            "model": self.model,
+            "prompt": (
+                f"System:\n{system_prompt}\n\n"
+                f"User:\n{user_message}\n\n"
+                "Assistant:\n"
+            ),
+            "stream": False,
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=300,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as exc:
+            logger.exception("Ollama request failed.")
+            return ProviderResult(
+                success=False,
+                provider_id="ollama",
+                model=self.model,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error="Ollama provider unavailable.",
+            )
+        except ValueError as exc:
+            return ProviderResult(
+                success=False,
+                provider_id="ollama",
+                model=self.model,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=f"Invalid Ollama response: {exc}",
+            )
+
+        result = str(data.get("response") or "").strip()
+
+        if not result:
+            return ProviderResult(
+                success=False,
+                provider_id="ollama",
+                model=self.model,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error="Ollama returned empty response.",
+            )
+
+        # Ollama exposes these counters for /api/generate when available.
+        usage = ProviderUsage(
+            input_tokens=_non_negative_int(data.get("prompt_eval_count")),
+            output_tokens=_non_negative_int(data.get("eval_count")),
+            total_tokens=_sum_if_available(
+                data.get("prompt_eval_count"),
+                data.get("eval_count"),
+            ),
+        )
+
+        return ProviderResult(
+            success=True,
+            provider_id="ollama",
+            model=self.model,
+            content=result,
+            usage=usage,
+            provider_request_id=None,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            metadata={
+                "done": data.get("done"),
+                "load_duration_ns": data.get("load_duration"),
+                "prompt_eval_duration_ns": data.get("prompt_eval_duration"),
+                "eval_duration_ns": data.get("eval_duration"),
+            },
+        )
+
+
+def _non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _sum_if_available(left: Any, right: Any) -> int | None:
+    left_value = _non_negative_int(left)
+    right_value = _non_negative_int(right)
+    if left_value is None or right_value is None:
+        return None
+    return left_value + right_value
+
+============================================================
+CONVERSATION RUNTIME
+============================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from backend.app.providers.llm.llm_provider import LLMProvider
+from backend.app.providers.provider_result import ProviderResult
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRuntime:
+    """Execute conversation requests and optionally capture provider usage."""
+
+    llm_provider: LLMProvider
+    usage_capture: ProviderUsageCapture | None = None
+    usage_context: ProviderUsageContext | None = None
+
+    async def respond(
+        self,
+        *,
+        character_instruction: str,
+        learner_message: str,
+    ) -> str:
+        result = await self.llm_provider.generate(
+            system_prompt=character_instruction,
+            user_message=learner_message,
+        )
+
+        if isinstance(result, ProviderResult):
+            if self.usage_capture is not None:
+                if self.usage_context is None:
+                    raise RuntimeError(
+                        "Provider usage capture requires usage context."
+                    )
+                self.usage_capture.capture(
+                    result=result,
+                    context=self.usage_context,
+                )
+
+            if not result.success:
+                raise RuntimeError(result.error or "Provider request failed.")
+            return result.content
+
+        if isinstance(result, str):
+            return result
+
+        raise TypeError(
+            "LLM provider must return ProviderResult or str, "
+            f"got {type(result).__name__}"
+        )
+
+============================================================
+PROVIDER REQUEST ID REFERENCES
+============================================================
+
+
+Path                                                                                LineNumber Line                                                              
+----                                                                                ---------- ----                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                   533             request_id=result["request_id"],                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                   541         request_id=result.request_id,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                   622             "request_id": result["request_id"],                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                   629         "request_id": result.request_id,                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                   699             request_id=result["request_id"],                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                   706         request_id=result.request_id,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                  136     request_id: str                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                  186     request_id: str | None = None                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                  251     request_id: str | None = None                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                 57     provider_request_id: str | None = None                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py        115             provider_request_id=None,                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py         78                 provider_request_id=getattr(response, "id", None),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py         97             provider_request_id=getattr(response, "id", None),    
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\learning_service.py                     60         request_id: str,                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\learning_service.py                     82             request_id=request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\runtime\runtime_application_...        152             request_id=str(                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_prov...         35         provider_request_id="req_123",                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_r...         39         provider_request_id="req_test_1",                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_r...         74         provider_request_id="req_test_2",                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provide...         44             provider_request_id=f"test-{uuid4()}",                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\flashcard_generat...        162             request_id=request.request_id,                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\gateway.py                  167                 request_id=request.request_id,                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\listening_proposa...        175             request_id=request.request_id,                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\live_intelligence...        125             request_id=request.request_id,                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                   134     request_id: str                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                   150             self.request_id,                                      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                   154                 "Capability request_id must be a string."         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                   157         if not self.request_id.strip():                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                   159                 "Capability request_id cannot be empty."          
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                   228     request_id: str                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\podcast_discovery...        179             request_id=request.request_id,                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\podcast_learning_...        147             request_id=request.request_id,                        
+
+
+
+
+============================================================
+NATIVE USAGE REFERENCES
+============================================================
+
+
+Path                                                                                           LineNumber Line                                                             
+----                                                                                           ---------- ----                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260906_provider_usage_events.py          27         sa.Column("input_tokens", sa.Integer(), nullable=False), 
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260906_provider_usage_events.py          28         sa.Column("output_tokens", sa.Integer(), nullable=False),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py         47         input_tokens = result.usage.input_tokens                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py         48         output_tokens = result.usage.output_tokens               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py         54         input_tokens = input_tokens if input_tokens is not Non...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py         55         output_tokens = output_tokens if output_tokens is not ...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py         69             input_tokens=input_tokens,                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py         70             output_tokens=output_tokens,                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provid...         33                     input_tokens=event.input_tokens,             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provid...         34                     output_tokens=event.output_tokens,           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provid...         67         input_tokens=row.input_tokens,                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provid...         68         output_tokens=row.output_tokens,                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_re...         31     input_tokens: Mapped[int] = mapped_column(Integer, nullabl...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_re...         32     output_tokens: Mapped[int] = mapped_column(Integer, nullab...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            18     input_tokens: int | None = None                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            19     output_tokens: int | None = None                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            20     total_tokens: int | None = None                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            24             ("input_tokens", self.input_tokens),                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            25             ("output_tokens", self.output_tokens),               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            26             ("total_tokens", self.total_tokens),                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            32             self.total_tokens is not None                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            33             and self.input_tokens is not None                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            34             and self.output_tokens is not None                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            35             and self.total_tokens < self.input_tokens + self.o...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                            38                 "total_tokens cannot be less than input_tokens...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                   101             input_tokens=_non_negative_int(data.get("prompt_ev...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                   102             output_tokens=_non_negative_int(data.get("eval_cou...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                   103             total_tokens=_sum_if_available(                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                   104                 data.get("prompt_eval_count"),                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                   105                 data.get("eval_count"),                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                    86             input_tokens=getattr(native_usage, "prompt_tokens"...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                    87             output_tokens=getattr(native_usage, "completion_to...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                    88             total_tokens=getattr(native_usage, "total_tokens",...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         31             input_tokens=100,                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         32             output_tokens=50,                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         33             total_tokens=150,                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         52     assert event.input_tokens == 100                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         53     assert event.output_tokens == 50                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         84     assert event.input_tokens == 0                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_...         85     assert event.output_tokens == 0                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usag...         38         usage=ProviderUsage(input_tokens=10, output_tokens=5, ...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usag...         61     assert events[0].input_tokens == 10                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usag...         62     assert events[0].output_tokens == 5                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql...         40         input_tokens=11,                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql...         41         output_tokens=7,                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql...         91         assert restored.input_tokens == event.input_tokens       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql...         92         assert restored.output_tokens == event.output_tokens     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_u...         49     assert isinstance(columns["input_tokens"].type, Integer)     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_u...         50     assert isinstance(columns["output_tokens"].type, Integer)    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durabl...         40                 input_tokens=17,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durabl...         41                 output_tokens=9,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durabl...         42                 total_tokens=26,                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durabl...        103                            agent, input_tokens, output_tokens,   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durabl...        120         assert row["input_tokens"] == 17                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durabl...        121         assert row["output_tokens"] == 9                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contrac...         11     assert usage.input_tokens is None                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contrac...         12     assert usage.output_tokens is None                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contrac...         13     assert usage.total_tokens is None                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contrac...         17     with pytest.raises(ValueError, match="input_tokens cannot ...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contrac...         18         ProviderUsage(input_tokens=-1)                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                             57     input_tokens: int                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                             59     output_tokens: int                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                             76         if self.input_tokens < 0:                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                             81         if self.output_tokens < 0:                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                            104     input_tokens: int                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                            106     output_tokens: int                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                           100                 usage.input_tokens                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                           109                 usage.output_tokens                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                           121             input_tokens=usage.input_tokens,                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                           123             output_tokens=usage.output_tokens,                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                            67     input_tokens: int                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                            69     output_tokens: int                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           101         if self.input_tokens < 0:                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           106         if self.output_tokens < 0:                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           142     total_input_tokens: int                                      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           144     total_output_tokens: int                                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           155     def total_tokens(self) -> int:                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           157             self.total_input_tokens                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                           158             + self.total_output_tokens                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          106         total_input_tokens = sum(                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          107             event.input_tokens                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          111         total_output_tokens = sum(                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          112             event.output_tokens                                  
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          148             total_input_tokens=(                                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          149                 total_input_tokens                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          151             total_output_tokens=(                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                          152                 total_output_tokens                              
+
+
+
+
+============================================================
+ESTIMATED COST REFERENCES
+============================================================
+
+
+Path                                                                                                              LineNumber Line                                                    
+----                                                                                                              ---------- ----                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260906_provider_usage_events.py                             31             "estimated_cost",                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                  51     FlashDealPricingResponse,                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                 806         pricing=FlashDealPricingResponse(               
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                285 class FlashDealPricingResponse(BaseModel):              
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                287     Verified pricing data for a Flash Deal Card.        
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                320     - calculate pricing;                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                332     pricing: FlashDealPricingResponse                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                            21     estimated_cost: Decimal = Decimal("0")              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                            72             estimated_cost=context.estimated_cost,      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py         36                     estimated_cost=event.estimated_cost,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py         70         estimated_cost=row.estimated_cost,              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py                       34     estimated_cost: Mapped[Decimal] = mapped_column(    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                     46             estimated_cost=Decimal("0.010"),            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                     55     assert event.estimated_cost == Decimal("0.010")     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                     86     assert event.estimated_cost == Decimal("0")         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                   49             estimated_cost=Decimal("0"),                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_rep...         43         estimated_cost=Decimal("0.00123456"),           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_rep...         94         assert restored.estimated_cost == event.estim...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_usage_migration_defi...         52     assert isinstance(columns["estimated_cost"].type,...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_usage_migration_defi...         53     assert columns["estimated_cost"].type.precision =...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_usage_migration_defi...         54     assert columns["estimated_cost"].type.scale == 8    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                    86             estimated_cost=Decimal("0.00000000"),       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                   104                            latency_ms, estimated_cost...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                   123         assert row["estimated_cost"] == Decimal("0E-8") 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\discovery\flash_deal_card.py                                            55     - pricing                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\discovery\flash_deal_card.py                                           208         Product, pricing and vendor information comes...
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\discovery\flash_deal_card.py                                           212         No product or pricing information is invented...
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\discovery\flash_deal_demo.py                                            32 - pretend that demo pricing is live vendor data         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\discovery\flash_deal_presenter.py                                       18 - present verified product and pricing information      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\discovery\flash_deal_presenter.py                                      133         """Render verified pricing information."""      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                 9 - access pricing APIs;                                  
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                28 Future pricing sources:                                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                30 - OpenAI pricing configuration;                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                31 - Gemini pricing configuration;                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                33 - Parallel Search pricing;                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                50     It does not know how pricing is obtained.           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               30 Pricing is injected explicitly.                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               32 Future pricing sources:                                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               35 - provider pricing registry;                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               55     It receives pricing values instead of               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               63         input_price_per_million_tokens: Decimal,        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               64         output_price_per_million_tokens: Decimal,       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               69         Pricing is expressed as:                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               88         if input_price_per_million_tokens < 0:          
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                               93         if output_price_per_million_tokens < 0:         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                              105         ) * input_price_per_million_tokens              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                              114         ) * output_price_per_million_tokens             
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                               73     estimated_cost: Decimal                             
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                              116         if self.estimated_cost < 0:                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                             138                 event.estimated_cost                    
+
+
+
+
+============================================================
+FAILURE CAPTURE REFERENCES
+============================================================
+
+
+Path                                                                                                            LineNumber Line                                                                          
+----                                                                                                            ---------- ----                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\conversation_agent.py                                                265                     success=False,                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  106                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  120                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  134                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  165                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  189                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  216                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\cybersecurity_intelligence_agent.py                                  229                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\research_agent.py                                                     82                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\discovery\discovery_agent.py                                         835             success=False,                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260906_provider_usage_events.py                           40         sa.Column("success", sa.Boolean(), nullable=False),                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\character_theme_routes.py                                               130     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                               525     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                               614     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                               688     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.core.remote.py                                                     243     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.core.remote.py                                                     254     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py                                                                 262     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py                                                                 273     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py                          10 from backend.app.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py                          32         if isinstance(result, ProviderResult):                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py                          35                     raise RuntimeError(                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py                          44                 raise RuntimeError(result.error or "Provider request failed.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py                          51             "LLM provider must return ProviderResult or str, "                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_controls.py                                             83         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_operations_approval.py                                  48         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py                                            71         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py                                            79         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy\academy_activation.py                                73     raise RuntimeError(                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy\academy_one_week_workflow.py                         92             except Exception as exc:                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_service.py         87             except Exception:                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_service.py        118         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\publication_execution_ser...        111         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcement_operations\publication_execution_ser...         91         except Exception as exc:  # noqa: BLE001                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py          126         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py          167         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py          195             except Exception as exc:                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py          240             except Exception as exc:                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py          320         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_observability.py               66         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py                            64         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\dependency_checks.py                                  66         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py                       206             except Exception:                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\production_readiness_service.py                       42             except Exception:                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\identity\authentication_email_service.py                     23         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\identity\authentication_email_service.py                    101             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_api_sync.py                       74         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_flow_service.py                  145             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_gate.py                          136             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_gate.py                          142             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py            305         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_tracker_config.py                 16         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_identifier_service.py                        58             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                           8 from backend.app.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                          25     """Translate a canonical ProviderResult into the existing usage contract. 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                          39         result: ProviderResult,                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                          43             raise ValueError("ProviderResult cannot be None.")                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py                          53         # provider-native values through ProviderResult before capture.       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py                   214             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py                   246             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py                   275             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\async_publication_repository_ada...         29         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repositor...        115         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repositor...        121         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repositor...        127         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py                    213             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py                    218             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py                    259         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py                    260             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py                       82                     raise RuntimeError(                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py                      106         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py                      157         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\postgresql_health_check.py                         45         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\telegram_health_check.py                           91         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py                                   26         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py                                   81     raise RuntimeError(                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py                     42     success: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\privacy_governance_reminder_email_send...        133             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_announcement_client.py                  41             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_announcement_publisher.py               35             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                         110             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                         169             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                         271         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                           127             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py                           135             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py                             78         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                            209             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                            293         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                            333         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                                             43 class ProviderResult:                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                                             67             raise ValueError("ProviderResult requires provider_id.")          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                                             69             raise ValueError("ProviderResult requires model.")                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                                             74                 "Successful ProviderResult requires non-empty content."       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\provider_result.py                                             78                 "Failed ProviderResult requires an error."                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider.py                                             7 from backend.app.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider.py                                            19     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     13 from backend.app.providers.provider_result import ProviderResult, ProviderU...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     46     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     72             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     73                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     80             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     81                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     91             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                     92                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                    109         return ProviderResult(                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     11 from backend.app.providers.provider_result import ProviderResult, ProviderU...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     38             raise RuntimeError("OPENAI_API_KEY missing")                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     47     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     58         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     59             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     60                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     74             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     75                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                     91         return ProviderResult(                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py                              129                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py                              212             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py                              317         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py                                           113         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\email\cybersecurity_email_service.py                          159         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\intelligence\research_service.py                                             99             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py                                                   19 from backend.providers.provider_result import ProviderResult                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py                                                   57     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py                                                   66             ProviderResult containing provider output.                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\provider_result.py                                                 16 class ProviderResult:                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\health\ollama_cloud_health_probe.py                               191         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                             24       ProviderResult                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                             29 - translate Gemini responses into ProviderResult                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                             58     ProviderResult,                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            114             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            121             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            172     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            176         Returns a provider-independent ProviderResult and never               
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            206         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            211             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            212                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            225             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            226                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                            232         return ProviderResult(                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                24 ProviderResult                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                52     ProviderResult,                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                92     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                               101             ProviderResult containing the generated                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                             24 ProviderResult                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                             30 - translate the OpenAI response into ProviderResult                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                             59     ProviderResult,                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            136     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            151         ProviderResult                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            198         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            203             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            204                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            216             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            217                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                            224         return ProviderResult(                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                      13     ProviderResult,                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                      61     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                      74             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                      80         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                      82             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                      83                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\runtime\external_runtime_container.py                                        81         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\check_beta_database.py                                              199         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py                                           149         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                      21 ProviderResult                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                      27 - return the provider-independent ProviderResult                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                      56     ProviderResult,                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                      97     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                     112         ProviderResult                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                     138             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\skills\skill_result.py                                                       63             success=False,                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\parallel_gateway.py                                        112             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_one_week_workflow_failure.py                      50         raise RuntimeError("provider unavailable")                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py                          55             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_1_publication_execution_contract.py          47         raise RuntimeError("private provider response must not be audited")   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2_durable_execution.py                       60             raise RuntimeError("duplicate idempotency key")                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2_durable_execution.py                      172             raise RuntimeError("secret provider response: APIKEY=DO_NOT_STO...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcement_operations\test_ws22_3_1_publication_execution.py         36             raise RuntimeError(self.error)                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                    9 from backend.app.providers.provider_result import ProviderResult, ProviderU...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                   25     result = ProviderResult(                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                   66     result = ProviderResult(                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                   67         success=False,                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                   83     assert event.success is False                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                   93     with pytest.raises(ValueError, match="ProviderResult cannot be None"):    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py                  105             result=ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py                6 from backend.app.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py               11         return ProviderResult(                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py               48             return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py               49                 success=False,                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                 11 from backend.app.providers.provider_result import ProviderResult, ProviderU...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                 17     def __init__(self, result: ProviderResult):                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                 33     result = ProviderResult(                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                 69     result = ProviderResult(                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                 70         success=False,                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py                 94     assert events[0].success is False                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws13_telegram_classroom_observability.py             150         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws13_telegram_classroom_observability.py             227         except Exception:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py               193         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py              1040                     raise RuntimeError(                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_4_failure_recovery.py                            61             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_4_failure_recovery.py                            92             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_4_failure_recovery.py                           136             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_5_production_readiness.py                             44         raise RuntimeError("database password=SECRET")                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_5_production_readiness.py                             71         raise RuntimeError("provider api_key=SECRET")                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_5_production_readiness.py                            133         raise RuntimeError("internal failure")                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_5_production_readiness.py                            213         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_6_real_dependency_health.py                           65             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_6_real_dependency_health.py                          159         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_6_real_dependency_health.py                          190             raise RuntimeError("secret")                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_6_real_dependency_health.py                          199             raise RuntimeError("secret")                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_7_operational_health_integration.py                  113             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_8_operational_health_snapshot.py                     103         raise RuntimeError(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\health\test_ws21_8_operational_health_snapshot.py                     452             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                  19 from backend.app.providers.provider_result import ProviderResult, ProviderU...
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                  33     ) -> ProviderResult:                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                  34         return ProviderResult(                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py                  64     except Exception as exc:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py                          4     ProviderResult,                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py                         22     result = ProviderResult(                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py                         34         ProviderResult(                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py                         35             success=False,                                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_agents\live_intelligence_agent\gemini_intelligence_processor.py              142             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_agents\live_intelligence_agent\gemini_intelligence_processor.py              156             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_agents\live_intelligence_agent\gemini_intelligence_processor.py              173             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_agents\live_intelligence_agent\gemini_intelligence_processor.py              181             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_agents\live_intelligence_agent\gemini_processor.py                           126             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\gateway.py                                              160         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\gateway.py                                              186         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\gateway.py                                              197         except Exception as exc:                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    117             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    197             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    363                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    368                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    379                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    430             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    438             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    467             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    475             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    480             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    485             raise RuntimeError(                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    494                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    504                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    515                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    525                 raise RuntimeError(                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\challenge_engine\gemini_content_generator.py                                    536                 raise RuntimeError(                                           
+
+
+
+
+============================================================
+USAGE / COST / LEDGER / PROVIDER TEST INVENTORY
+============================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\.venv\Lib\site-packages\google\genai\tests\afc\test_get_usage_header.py
+C:\AI Folder\EasyChatBot-Hackathon\.venv\Lib\site-packages\google\genai\tests\mcp\test_has_mcp_tool_usage.py
+C:\AI Folder\EasyChatBot-Hackathon\.venv\Lib\site-packages\google\genai\tests\mcp\test_parse_config_for_mcp_usage.py
+C:\AI Folder\EasyChatBot-Hackathon\.venv\Lib\site-packages\google\genai\tests\mcp\test_set_mcp_usage_header.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\composition\test_p1_5_3_durable_usage_wiring.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_health_service.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\configuration\providers\test_speech_provider_config.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\configuration\providers\__init__.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_usage_migration_definition.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\__init__.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\test_openai_speech_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\test_openai_speech_smoke.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\test_speech_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\test_speech_provider_factory.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\__init__.py
+C:\AI Folder\EasyChatBot-Hackathon\Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_events_api.py
+C:\AI Folder\EasyChatBot-Hackathon\Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_events_api_integration.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\test_parallel_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_provider_boundary.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\podcast\test_providers.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_email_notification_adapter.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_detail_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_history_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_notification_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_type_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_workflow_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_escalation_workflow_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_ollama_cloud_health_probe.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operational_event.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operational_event_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operational_event_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_composition.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_api.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_composition.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_contract.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_facade.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_dashboard_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_events_api.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_operational_event_composition.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_dashboard_api.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_flow.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_operations_center_provider_intelligence_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_application_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_composition.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_escalation_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_history_repository.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_monitor_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_probe_runner.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_read_model.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_refresh_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_health_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_incident_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_operational_event_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_recommendation_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\cybersecurity\test_email_provider_manager.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\cybersecurity\test_resend_email_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_conversation_agent_provider_integration.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_operations_center_dashboard_provider_health.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_parallel_search_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_health_to_escalation.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\provider_management\test_operations_center_dashboard_router.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_parallel_client.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_parallel_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\__init__.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\search_provider\test_interface.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\search_provider\test_parallel_adapter.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\search_provider\__init__.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\provider_management\test_provider_delivery_control.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\provider_management\test_provider_management_controls_api.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\provider_management\__init__.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_provider_contracts.py
+
+============================================================
+TARGETED USAGE/COST/LEDGER TEST RUN
+============================================================
+
+.\.venv\Scripts\python.exe : ERROR: file or directory not found: backend\tests\providers\usage
+At line:9 char:1
++ .\.venv\Scripts\python.exe -m pytest `
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: file or ...providers\usage:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+
+no tests ran in 0.01s
+
+
+============================================================
+GIT STATUS
+============================================================
+
+ M app/interfaces/provider_management/operations_center_dashboard_router.py
+ M backend/app/ai_runtime/conversation/conversation_runtime.py
+ M backend/app/api/authentication.py
+ M backend/app/api/operations_center.py
+ M backend/app/application/composition/beta_telegram_composition.py
+ M backend/app/application/composition/beta_telegram_production.py
+ M backend/app/application/operations_center/__init__.py
+ M backend/app/application/operations_center/announcement_group_operations_api.py
+ M backend/app/application/operations_center/chat_operations_dashboard_api.py
+ M backend/app/application/operations_center/dashboard_api.py
+ M backend/app/application/operations_center/dashboard_composition.py
+ M backend/app/application/operations_center/dashboard_facade.py
+ M backend/app/application/operations_center/private_classroom_operations_api.py
+ M backend/app/application/operations_center/private_classroom_operations_composition.py
+ M backend/app/infrastructure/health/llm_provider_health_check.py
+ M backend/app/infrastructure/health/postgresql_health_check.py
+ M backend/app/infrastructure/health/telegram_health_check.py
+ M backend/app/infrastructure/telegram/telegram_announcement_client.py
+ M backend/app/main.py
+ M backend/app/providers/llm/llm_provider.py
+ M backend/app/providers/llm/ollama_llm_provider.py
+ M backend/app/providers/llm/openai_llm_provider.py
+ M backend/cybersecurity/email/resend_email_provider.py
+ M backend/cybersecurity/scheduler/cybersecurity_apscheduler_adapter.py
+ M backend/cybersecurity/scheduler/cybersecurity_scheduler_factory.py
+ M backend/data/privacy_governance_tracker.xlsx
+ M backend/easychatbot_backend.egg-info/PKG-INFO
+ M backend/easychatbot_backend.egg-info/SOURCES.txt
+ M backend/easychatbot_backend.egg-info/requires.txt
+ M backend/pyproject.toml
+ M backend/tests/conftest.py
+ M data/memory.db
+ D frontend/dist/assets/index-BA-MgUFa.css
+ D frontend/dist/assets/index-CdPAv7aD.js
+ M frontend/dist/index.html
+ M frontend/node_modules/.tmp/tsconfig.app.tsbuildinfo
+ M frontend/node_modules/.vite/deps/_metadata.json
+ M frontend/node_modules/.vite/vitest/da39a3ee5e6b4b0d3255bfef95601890afd80709/results.json
+ M frontend/src/router.tsx
+ M frontend/tsconfig.app.json
+ M frontend/vite.config.ts
+ M pytest.ini
+?? EasyChatBot_Compliance_Repository_Inspection.txt
+?? M10_REPOSITORY_DISCOVERY_20260905_092818.txt
+?? M1_2_Backend_Exact_Inspection.txt
+?? M1_2_FULL_REPOSITORY_INSPECTION.txt
+?? M1_3_FINAL_DIFF.txt
+?? M1_3_router_diff.txt
+?? M7_2_COMPOSITION_AND_PRIVACY_INSPECTION.txt
+?? M7_2_COMPOSITION_RESTORE_VALIDATION.txt
+?? M7_2_IMPORT_NAMESPACE_AND_COMPOSITION_DIAGNOSTIC.txt
+?? P1.2.1_live_provider_wiring.txt
+?? P1.2.2_provider_result_usage_audit.txt
+?? P1.2.3_live_beta_provider_path_audit.txt
+?? P1.2.4_ollama_usage_contract_audit.txt
+?? P1.2_provider_execution_audit.txt
+?? P1.4.2_migration_audit.txt
+?? P1.4.3R1_MIGRATION_OWNERSHIP_AUDIT.txt
+?? P1.4.3_FINAL_MIGRATION_RECONCILIATION.tmp
+?? P1.4.3_FINAL_MIGRATION_RECONCILIATION.txt
+?? P1.5.2_PRODUCTION_BOOTSTRAP_WIRING_AUDIT.txt
+?? P1.5.3_DURABLE_USAGE_LEDGER_WIRING_AUDIT.txt
+?? P1.5.4_PROVIDER_TO_DURABLE_LEDGER_AUDIT.txt
+?? P1.5.5_DURABLE_USAGE_PRODUCTION_VERIFICATION.txt
+?? P1.6_USAGE_LEDGER_COMPLETENESS_AUDIT.txt
+?? REMOTE_BACKEND_MAIN.txt
+?? _academy_composition_backup/
+?? _academy_composition_import_fix_backup/
+?? _academy_delivery_pre_integration_backup/
+?? _academy_final_vertical_input/
+?? _academy_formatter_asset_path_backup/
+?? _academy_main_integration_backup/
+?? _academy_pytest_config_backup/
+?? _integration_staging/
+?? _m1_2_import_boundary_backup/
+?? _m1_2_import_boundary_backup_v2/
+?? _m7_2_incorrect_main_backup/
+?? academy_actual_interfaces.txt
+?? academy_alembic_graph_analysis.txt
+?? academy_alembic_migration_chain_inspection.txt
+?? academy_alembic_scheduler_compatibility.txt
+?? academy_automatic_email_final_composition_inspection.txt
+?? academy_automatic_email_final_implementation_inspection.txt
+?? academy_automatic_email_full_architecture_package.txt
+?? academy_automatic_email_full_source_review.txt
+?? academy_automatic_email_gap_analysis.txt
+?? academy_automatic_email_next_source_inspection.txt
+?? academy_automatic_email_relevant_files.txt
+?? academy_automatic_trigger_dependency_review.txt
+?? academy_automatic_trigger_source_review.txt
+?? academy_database_environment_diagnostic.txt
+?? academy_database_migration_state.txt
+?? academy_durable_delivery_copy.log
+?? academy_durable_delivery_copy_diagnostic.txt
+?? academy_durable_delivery_integration.log
+?? academy_durable_delivery_integration.txt
+?? academy_durable_delivery_persistence_readiness.txt
+?? academy_email_logo_asset_discovery.txt
+?? academy_final_architecture_security_gate.txt
+?? academy_final_regression_output.txt
+?? academy_final_vertical_inspection.txt
+?? academy_final_wiring_inspection.txt
+?? academy_formatter_asset_path_fix.txt
+?? academy_integration_compatibility_report.txt
+?? academy_lifespan_final_context.txt
+?? academy_lifespan_scheduler_startup_context.txt
+?? academy_main_academy_integration_context.txt
+?? academy_main_scheduler_lifecycle_context.txt
+?? academy_migration_final_chain_inspection.txt
+?? academy_migration_parent_remediation.txt
+?? academy_persistence_migration_execution.txt
+?? academy_postgresql_clean_gate.txt
+?? academy_postgresql_connection_verification.txt
+?? academy_postgresql_integration_execution.txt
+?? academy_postgresql_integration_real_execution.txt
+?? academy_postgresql_integration_real_execution_copy.txt
+?? academy_postgresql_integration_test_results.txt
+?? academy_postgresql_test_integration.txt
+?? academy_postgresql_test_integration_process.txt
+?? academy_postgresql_test_package_integration.txt
+?? academy_postgresql_tests_integration.txt
+?? academy_postgresql_tests_process.txt
+?? academy_production_composition_implementation.txt
+?? academy_production_composition_inspection.txt
+?? academy_production_config_location.txt
+?? academy_production_first_run_evidence.txt
+?? academy_production_readiness_final.txt
+?? academy_production_readiness_regression.txt
+?? academy_project_pytest_config.txt
+?? academy_pytest_configuration_inspection.txt
+?? academy_pytest_environment_boundary.txt
+?? academy_pytest_marker_encoding_remediation.txt
+?? academy_pytest_marker_remediation.txt
+?? academy_pytest_marker_test_output.txt
+?? academy_real_workflow_test_context.txt
+?? academy_relevant_full_source_review.txt
+?? academy_runtime_wiring_focused_inspection.txt
+?? academy_scheduler_email_contract_inspection.txt
+?? academy_scheduler_factory_startup_context.txt
+?? academy_scheduler_registration_context.txt
+?? academy_scheduler_registration_inspection.txt
+?? academy_scheduler_registration_inspection_full.txt
+?? academy_test_environment_diagnosis.txt
+?? academy_test_package_location.txt
+?? academy_trigger_architecture_review.txt
+?? academy_users_schema_context.txt
+?? academy_wiring_files_inspection.txt
+?? academy_workflow_run_contract.txt
+?? app/interfaces/provider_management/operations_center_dashboard_router.py.m1_2_backup
+?? backend/M1_2_Backend_Diagnosis.txt
+?? backend/M1_2_Backend_Implementation_Inspection.txt
+?? backend/M1_2_COMPOSITION_INSPECTION.txt
+?? backend/alembic/versions/20260906_provider_usage_events.py
+?? backend/alembic/versions/ACADEMY_NOTIFICATION_DELIVERY_TEMPLATE.py
+?? backend/app/api/privacy_screening.py
+?? backend/app/application/academy/
+?? backend/app/application/academy_notification_formatters.py
+?? backend/app/application/academy_notification_formatters.py.pre_branding_v1
+?? backend/app/application/academy_notification_formatters.py.pre_center_heading
+?? backend/app/application/academy_notification_ports.py
+?? backend/app/application/academy_notification_service.py
+?? backend/app/application/composition/academy_production.py
+?? backend/app/application/privacy/beta1_processing_catalog.py
+?? backend/app/application/privacy/screening/
+?? backend/app/application/provider_management/
+?? backend/app/application/providers/
+?? backend/app/domain/academy_notification.py
+?? backend/app/infrastructure/academy/
+?? backend/app/infrastructure/email/academy_email_notification_sender.py
+?? backend/app/infrastructure/persistence/postgresql_provider_usage_repository.py
+?? backend/app/infrastructure/persistence/provider_usage_records.py
+?? backend/app/infrastructure/telegram/academy_notification_telegram.py
+?? backend/app/main.core.remote.py
+?? backend/app/main.py.before-academy-composition
+?? backend/app/main.py.before-m72-academy-activation
+?? backend/app/main.py.before-m72-screening
+?? backend/app/main.py.before_core_restore
+?? backend/app/main.py.before_m1_3
+?? backend/app/main.py.m1_2_before_composition_fix
+?? backend/app/main.py.m1_3_backup
+?? backend/app/main.py.m7-2-working-backup
+?? backend/app/providers/provider_result.py
+?? backend/cybersecurity/email/resend_email_provider.py.pre_academy_backup
+?? backend/pyproject.toml.m1_2_backup
+?? backend/tests/academy/
+?? backend/tests/application/composition/test_p1_5_3_durable_usage_wiring.py
+?? backend/tests/application/provider_management/
+?? backend/tests/application/providers/
+?? backend/tests/beta_access/test_conversation_runtime_provider_result.py
+?? backend/tests/beta_access/test_conversation_runtime_usage_capture.py
+?? backend/tests/cybersecurity/
+?? backend/tests/infrastructure/persistence/test_postgresql_provider_usage_repository.py
+?? backend/tests/infrastructure/persistence/test_provider_usage_migration_definition.py
+?? backend/tests/integration/
+?? backend/tests/providers/test_app_provider_result_contract.py
+?? backend/tests/test_academy_email_branding_navigation.py
+?? backend/tests/unit/privacy/
+?? docs/M7_2_BACKEND_SCREENING_INSPECTION.txt
+?? docs/M7_2_FRONTEND_INSPECTION.txt
+?? docs/M7_2_SCREENING_INSPECTION.txt
+?? docs/P1.2.4_CANONICAL_PROVIDER_RESULT_CONTRACT.md
+?? docs/P1.3.1_LIVE_PROVIDER_USAGE_CAPTURE.md
+?? docs/P1.3_PROVIDER_USAGE_CAPTURE_BOUNDARY.md
+?? docs/P1.4.1_DURABLE_USAGE_REPOSITORY.md
+?? docs/P1.4.2_USAGE_LEDGER_MIGRATION.md
+?? docs/P1.5.3_DURABLE_USAGE_LEDGER_WIRING.md
+?? docs/P1.5.4_PROVIDER_TO_DURABLE_LEDGER_E2E.md
+?? docs/privacy-governance/CODEX_M0_ARCHITECTURE_DISCOVERY.md
+?? docs/privacy-governance/m7_inspection/
+?? docs/privacy/M7.2_BACKEND_INTEGRATION.md
+?? email_workflow_architecture_inspection.txt
+?? frontend/app/components/operations-center/OperationsCenterLayout.tsx
+?? frontend/app/components/operations-center/OperationsCenterShell.tsx
+?? frontend/app/components/operations-center/functionality-health/
+?? frontend/app/components/operations-center/navigation/
+?? frontend/app/lib/api/functionalityHealth.ts
+?? frontend/app/operations-center/functionality-health/
+?? frontend/dist/assets/index-DtHmhDVV.css
+?? frontend/dist/assets/index-fKvFpAGO.js
+?? frontend/dist/assets/mascot/
+?? frontend/navigation/
+?? frontend/src/router.tsx.m1_3_backup
+?? frontend/test-results/
+?? frontend/tests/frontend/functionality-health.spec.tsx
+?? functionality_dashboard_actual_backend.txt
+?? functionality_dashboard_architecture_review.txt
+?? functionality_dashboard_contract_review.txt
+?? functionality_dashboard_review.txt
+?? m1_3_frontend_architecture_review.txt
+?? m72_architecture_investigation.txt
+?? m72_telegram_and_composition.txt
+?? m7_2_FINAL_RUNTIME_COMPOSITION_INSPECTION.txt
+?? m7_2_backend_IMPLEMENTATION_PRECHECK.txt
+?? m7_2_backend_screening_inspection.txt
+?? m7_2_backend_wiring_inspection.txt
+?? sprint_0_5_active_path_verification.txt
+?? tests/application/test_m4103_content_source_ingestion.py
+?? tests/application/test_m4104_multi_format_extraction_adapters.py
+?? tests/application/test_m4105_content_semantic_detection.py
+?? tests/application/test_m4106_content_classification_and_mapping.py
+?? tests/application/test_m4107_content_human_review_approval_queue.py
+?? tests/application/test_m4108_content_review_admin_api.py
+?? tests/application/test_m4109_approved_content_persistence_publishing.py
+?? tests/application/test_m4113_results_api_ui_connection_contract.py
+
+============================================================
+END OF P1.6 AUDIT
+============================================================
+

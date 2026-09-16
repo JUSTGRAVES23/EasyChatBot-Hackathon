@@ -1,0 +1,666 @@
+﻿============================================================
+M7.2 BACKEND IMPLEMENTATION PRECHECK
+Generated: 2026-09-05 16:19:53
+============================================================
+
+### 1. FULL backend/app/main.py
+------------------------------------------------------------
+"""
+===============================================================================
+
+EasyChatBot Academy
+Application Entry Point
+
+Purpose
+-------
+Creates and composes the EasyChatBot Academy FastAPI application.
+
+Responsibilities
+----------------
+- Create the FastAPI application.
+- Compose repositories.
+- Compose runtime services.
+- Register application API routers.
+- Expose the application health endpoint.
+- Store the composed runtime services on application state.
+- Compose the Academy Questionnaire runtime.
+
+Does NOT
+--------
+- Contain business logic.
+- Execute AI workflows directly.
+- Implement Academy business rules.
+- Construct repositories inside API routes.
+- Implement authentication logic.
+- Implement authorization logic.
+- Contain provider-specific AI logic.
+- Define hard-coded Agents or Skills.
+
+Architecture
+------------
+
+FastAPI Application
+        |
+        v
+API Routers
+        |
+        +------------------------------+
+        |                              |
+        v                              v
+Runtime Services                AI Operations Center
+        |
+        v
+Academy Services
+        |
+        v
+Repositories / Infrastructure
+
+Questionnaire:
+
+FastAPI Application
+        |
+        v
+Questionnaire Router
+        |
+        v
+QuestionnaireRuntime
+        |
+        v
+Questionnaire Persistence
+
+The application entry point is a composition root only.
+
+===============================================================================
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes.academy_routes import (
+    router as academy_router,
+)
+
+from app.api.authentication import (
+    router as authentication_router,
+)
+
+from app.api.operations_center import (
+    router as cmp_operations_center_router,
+)
+
+from app.api.routes.cmp_population_routes import (
+    router as cmp_population_router,
+)
+
+from app.api.routes.questionnaire_routes import (
+    router as questionnaire_router,
+)
+
+from app.api.routes.world_questionnaire_routes import (
+    router as world_questionnaire_router,
+)
+
+from app.application.questionnaire.runtime_source import (
+    QuestionnaireRuntime,
+)
+
+from app.bootstrap.compositions.runtime_composition import (
+    create_runtime_services,
+)
+
+from app.bootstrap.repositories import (
+    create_repositories,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# APPLICATION COMPOSITION
+# =============================================================================
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure the EasyChatBot Academy application.
+
+    Composition happens here only.
+
+    Business logic remains inside the application/domain layers.
+
+    Returns
+    -------
+    FastAPI
+        Configured EasyChatBot Academy application.
+
+    Raises
+    ------
+    Exception
+        Propagates composition failures so application startup fails closed
+        rather than running with incomplete dependencies.
+    """
+
+    logger.info(
+        "Creating EasyChatBot Academy application."
+    )
+
+    try:
+        # =====================================================================
+        # Repository Composition
+        #
+        # Infrastructure implementations are composed behind repository
+        # contracts.
+        # =====================================================================
+
+        repositories = create_repositories()
+
+        if repositories is None:
+            raise RuntimeError(
+                "Repository composition returned None."
+            )
+
+        # =====================================================================
+        # Runtime Composition
+        #
+        # Runtime owns orchestration and application lifecycle concerns.
+        # =====================================================================
+
+        runtime_services = create_runtime_services(
+            repositories=repositories,
+        )
+
+        if runtime_services is None:
+            raise RuntimeError(
+                "Runtime services composition returned None."
+            )
+
+        # =====================================================================
+        # Questionnaire Runtime Composition
+        #
+        # Compose the existing QuestionnaireRuntime once at the application
+        # boundary. The HTTP router resolves this instance from application
+        # state.
+        #
+        # This does not create another FastAPI application.
+        # =====================================================================
+
+        questionnaire_runtime = QuestionnaireRuntime()
+
+        # =====================================================================
+        # FastAPI Application
+        # =====================================================================
+
+        application = FastAPI(
+            title="EasyChatBot Academy",
+            version="0.1.0-beta",
+            description=(
+                "AI-powered learning platform runtime."
+            ),
+        )
+
+        # =====================================================================
+        # Browser CORS Boundary
+        #
+        # The frontend runs as a separate origin during local development.
+        #
+        # Keep the trust boundary explicit. Do not use:
+        #
+        #     allow_origins=["*"]
+        #
+        # This middleware belongs at the application composition boundary,
+        # rather than inside CMP routers or application services.
+        # =====================================================================
+
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        # =====================================================================
+        # Application State
+        #
+        # Store the already-composed boundaries.
+        #
+        # No duplicate repositories or services are created by API routes.
+        # =====================================================================
+
+        application.state.repositories = repositories
+
+        application.state.runtime_services = runtime_services
+
+        application.state.questionnaire_runtime = (
+            questionnaire_runtime
+        )
+
+        # =====================================================================
+        # M2.2 World Questionnaire repository boundary
+        # =====================================================================
+
+        learning_world_repository = getattr(
+            repositories,
+            "learning_world_repository",
+            None,
+        )
+
+        if learning_world_repository is None:
+            raise RuntimeError(
+                "LearningWorldRepository was not composed."
+            )
+
+        application.state.learning_world_repository = (
+            learning_world_repository
+        )
+
+        # =====================================================================
+        # Authentication API
+        #
+        # Authentication implementation remains behind the existing Academy
+        # application/infrastructure boundaries.
+        # =====================================================================
+
+        application.include_router(
+            authentication_router,
+        )
+
+        # =====================================================================
+        # Academy API
+        # =====================================================================
+
+        application.include_router(
+            academy_router,
+        )
+
+        # =====================================================================
+        # QUESTIONNAIRE API
+        #
+        # Existing QuestionnaireRuntime is exposed through its thin Academy
+        # HTTP presentation boundary.
+        #
+        # Exact frontend contract:
+        #
+        # GET
+        # /api/academy/questionnaires/{questionnaire_id}
+        #
+        # POST
+        # /api/academy/questionnaires/{questionnaire_id}/answers
+        #
+        # POST
+        # /api/academy/questionnaires/{questionnaire_id}/complete
+        #
+        # GET
+        # /api/academy/questionnaire-results/{result_id}
+        # =====================================================================
+
+        application.include_router(
+            questionnaire_router,
+        )
+
+        # =====================================================================
+        # M2.2 WORLD QUESTIONNAIRE API
+        # =====================================================================
+
+        application.include_router(
+            world_questionnaire_router,
+        )
+
+        # =====================================================================
+        # CMP OPERATIONS CENTER API
+        #
+        # Existing Compliance Framework Operations Center remains separate
+        # from the AI Operations Center.
+        #
+        # Do NOT merge these two bounded contexts.
+        # =====================================================================
+
+        application.include_router(
+            cmp_operations_center_router,
+        )
+
+        application.include_router(
+            cmp_population_router,
+        )
+
+        # =====================================================================
+        # Health Endpoint
+        # =====================================================================
+
+        @application.get(
+            "/health",
+        )
+        def health_check() -> dict[str, str]:
+            """
+            Return application liveness status.
+            """
+
+            return {
+                "status": "healthy",
+                "service": "easychatbot-academy",
+            }
+
+        logger.info(
+            "EasyChatBot Academy application created successfully."
+        )
+
+        return application
+
+    except Exception:
+        logger.exception(
+            "Failed creating EasyChatBot Academy application."
+        )
+        raise
+
+
+# =============================================================================
+# ASGI APPLICATION
+# =============================================================================
+#
+# Canonical ASGI target:
+#     app.main:application
+#
+# Backwards-compatible alias:
+#     app.main:app
+# =============================================================================
+
+application = create_application()
+
+app = application
+
+
+
+### 2. FULL privacy validate.py
+------------------------------------------------------------
+from __future__ import annotations
+
+from .data_processing_map import DataProcessingMap, DataProcessingMapEntry
+from .dpia_screening import DPIAScreening, DPIAScreeningRegistry
+from .processing_activity import ProcessingActivity
+from .processing_registry import ProcessingRegistry
+from .processor_registry import ProcessorRecord, ProcessorRegistry
+from .privacy_validation_service import PrivacyValidationService
+from .retention_registry import RetentionRegistry, RetentionRule
+
+
+def build_beta1_validation_service() -> PrivacyValidationService:
+    """Build the deterministic Beta 1 governance validation fixture.
+
+    In production, these records should be loaded from the authoritative
+    controlled privacy registry rather than hard-coded.
+    """
+
+    activity = ProcessingActivity(
+        processing_id="PA-BETA1-001",
+        name="Beta 1 Telegram conversation processing",
+        purpose="Provide the approved Beta 1 French learning conversation service.",
+        data_categories=("conversation content", "pseudonymous identifier"),
+        data_subjects=("Beta 1 learner",),
+        source=("Telegram",),
+        destinations=("EasyChatBot runtime", "approved persistence"),
+        legal_basis="PENDING_DPO_LEGAL",
+        retention_id="RET-BETA1-CONVERSATION",
+        processor_ids=(),
+        data_map_id="MAP-BETA1-001",
+        dpia_screening_id="DPIA-BETA1-001",
+        gdpr_references=(
+            "GDPR Art. 5",
+            "GDPR Art. 6",
+            "GDPR Art. 25",
+            "GDPR Art. 30",
+            "GDPR Art. 32",
+        ),
+        security_controls=(
+            "pseudonymisation",
+            "access control",
+            "auditability",
+        ),
+        approval_status="PENDING",
+    )
+
+    processing = ProcessingRegistry([activity])
+
+    maps = DataProcessingMap([
+        DataProcessingMapEntry(
+            map_id="MAP-BETA1-001",
+            processing_id="PA-BETA1-001",
+            source="Telegram",
+            input_data=("conversation content", "Telegram identifier for runtime access"),
+            runtime_processing=("conversation runtime", "privacy pseudonymisation"),
+            pseudonymisation="Telegram identifier is pseudonymised before persistence.",
+            persistence=("conversation event store",),
+            destinations=("EasyChatBot runtime", "approved persistence"),
+            third_country_transfer=False,
+        )
+    ])
+
+    retention = RetentionRegistry([
+        RetentionRule(
+            retention_id="RET-BETA1-CONVERSATION",
+            data_domain="Beta 1 conversation",
+            record_type="conversation event",
+            retention_period="PENDING_DPO_GRC",
+            trigger="PENDING_DPO_GRC",
+            deletion_action="PENDING_DPO_GRC",
+            legal_policy_basis="PENDING_DPO_LEGAL",
+        )
+    ])
+
+    processors = ProcessorRegistry([])
+
+    dpia = DPIAScreeningRegistry([
+        DPIAScreening(
+            screening_id="DPIA-BETA1-001",
+            processing_id="PA-BETA1-001",
+            overall_risk="PENDING_DPO_GRC",
+            dpia_required="PENDING_DPO",
+            dpo_assessment="PENDING_DPO",
+            grc_assessment="PENDING_GRC",
+            status="PENDING",
+        )
+    ])
+
+    return PrivacyValidationService(
+        processing_registry=processing,
+        data_processing_map=maps,
+        retention_registry=retention,
+        processor_registry=processors,
+        dpia_registry=dpia,
+    )
+
+
+def main() -> int:
+    result = build_beta1_validation_service().validate()
+    print(result.status)
+    print(f"{result.checks} controls validated")
+    print(f"{result.blocking_failures} blocking privacy gaps")
+
+    if result.failures:
+        for failure in result.failures:
+            print(f"- {failure}")
+
+    return 0 if result.status == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+### 3. PRIVACY PACKAGE INIT
+------------------------------------------------------------
+
+### 4. PRIVACY README
+------------------------------------------------------------
+# EasyChatBot Beta 1 Privacy / GRC Operational Layer
+
+Status: DRAFT â€” PENDING DPO, GRC and Legal review.
+
+This package is the governance/evidence boundary around the Beta 1 Telegram
+processing already implemented in the application.
+
+It does not execute personal-data processing and must not be treated as a
+substitute for legal advice, the formal ROPA, privacy notice, DPIA, contracts
+or DPO approval.
+
+## Scope
+
+Only Beta 1 processing is represented:
+
+- Telegram Beta access/authentication
+- Telegram conversation processing
+- pseudonymous conversation-event persistence
+- privacy/quality validation before persistence
+- provider/transfer assessment where an external AI provider is used
+
+Future application conversations and future memory capabilities are not
+treated as active Beta 1 processing unless separately approved.
+
+## Sign-off rule
+
+All records are DRAFT until:
+
+1. Legal basis is confirmed for each purpose.
+2. Retention periods/triggers are approved.
+3. Processor/controller roles are confirmed.
+4. International transfer analysis is completed where relevant.
+5. DPIA screening is completed and any required DPIA is approved.
+6. Transparency/privacy notice requirements are satisfied.
+7. DPO and Head GRC sign off.
+
+## Legal references
+
+Primary references are the GDPR Articles listed in the workbook's
+Legal_Article_Register. EUR-Lex is the authoritative source used for the
+draft legal references.
+
+### 5. SEARCH FOR BETA PROCESSING DEFINITIONS / CONFIGURATION
+------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py:2: Conversation Runtime.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py:419: "learner processing activity."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:55: conversation runtime
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\data_processing_map.py:8: """Describes the operational data flow for one processing activity."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_change_detector.py:43: # A new processing activity or data-map entry is itself privacy-impacting.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_change_detector.py:44: if change_descriptor.get("new_processing_activity"):
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_change_detector.py:45: reasons += ("new processing activity",)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_operational_register.py:5: from .processing_activity_record import ProcessingActivityRecord
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_operational_register.py:20: def add_processing_activity(self, record: ProcessingActivityRecord) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_operational_register.py:22: raise ValueError(f"Duplicate processing activity: {record.activity_id}")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_operational_register.py:28: if record.processing_activity_id not in self.processing_activities:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_operational_register.py:29: raise ValueError("Processing activity must exist before data map.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_operational_register.py:41: raise ValueError("Processing activity must exist before evidence.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_activity.py:9: """Machine-readable Beta 1 processing activity definition."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_activity_record.py:9: """ROPA-oriented processing activity record.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_registry.py:5: from .processing_activity import ProcessingActivity
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_registry.py:25: f"Processing activity already registered: {activity.processing_id}"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_registry.py:34: f"Processing activity not registered: {processing_id}"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:5: from .processing_activity import ProcessingActivity
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:20: processing_id="PA-BETA1-001",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:52: processing_id="PA-BETA1-001",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:55: runtime_processing=("conversation runtime", "privacy pseudonymisation"),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:80: processing_id="PA-BETA1-001",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py:8: - Compose conversation runtime.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py:52: Build EasyChatBot AI conversation runtime.
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_conversation_service.py:13: """Test double for the AI conversation runtime."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py:61: "Conversation Runtime."
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py:404: # WS-19.5 — Conversation Runtime
+
+### 6. FULL M7.2 FRONTEND API TYPES
+------------------------------------------------------------
+import type {
+  ProcessingActivitySummary,
+  ScreeningResult,
+} from "../types/privacyScreening";
+
+async function readJson<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    throw new Error(`Privacy screening request failed (${response.status})`);
+  }
+  return response.json() as Promise<T>;
+}
+
+export async function getScreenableProcessingActivities(): Promise<ProcessingActivitySummary[]> {
+  const response = await fetch("/api/privacy/screening/processing-activities", {
+    method: "GET",
+    cache: "no-store",
+  });
+  return readJson<ProcessingActivitySummary[]>(response);
+}
+
+export async function runPrivacyScreening(processingId: string): Promise<ScreeningResult> {
+  const response = await fetch("/api/privacy/screening/screen", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ processing_id: processingId }),
+  });
+  return readJson<ScreeningResult>(response);
+}
+export type ScreeningStatus =
+  | "NOT_STARTED"
+  | "READY"
+  | "RUNNING"
+  | "COMPLETED"
+  | "LEGAL_REVIEW_REQUIRED"
+  | "ERROR";
+
+export type AssessmentOutcome =
+  | "REQUIRED"
+  | "NOT_REQUIRED"
+  | "LEGAL_REVIEW_REQUIRED";
+
+export interface ProcessingActivitySummary {
+  processing_id: string;
+  name: string;
+  purpose?: string | null;
+  data_subjects?: string[];
+  data_categories?: string[];
+  special_category_data?: boolean;
+  processor_ids?: string[];
+  transfer_status?: string | null;
+  last_material_change_at?: string | null;
+}
+
+export interface ScreeningCriterion {
+  code: string;
+  label: string;
+  satisfied: boolean;
+  source: string;
+  source_version: string;
+  rationale: string;
+}
+
+export interface AssessmentScreeningOutcome {
+  assessment: "DPIA" | "FRIA" | "TIA";
+  outcome: AssessmentOutcome;
+  matched_criteria: ScreeningCriterion[];
+  rationale: string;
+}
+
+export interface ScreeningResult {
+  screening_id: string;
+  processing_id: string;
+  status: ScreeningStatus;
+  outcomes: AssessmentScreeningOutcome[];
+  reassessment_required: boolean;
+  provenance: ScreeningCriterion[];
+  rationale: string;
+  created_at: string;
+}
+
+### 7. EXISTING PRIVACY BACKEND TEST INVENTORY
+------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\privacy\test_m7_2_screening_service.py
+
+### 8. PRIVACY ROUTER IMPORTS ANYWHERE
+------------------------------------------------------------
+
+============================================================
+END
+============================================================

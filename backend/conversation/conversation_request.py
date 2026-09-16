@@ -1,43 +1,19 @@
-"""
+﻿"""
 Provider-independent conversation request.
 
 Represents the information required to generate a
 character-aware conversational response.
 
-This contract belongs to the application/runtime boundary.
-
-It deliberately does not know about:
-
-- Gemini
-- OpenAI
-- Ollama
-- Parallel
-- voice
-- HTTP
-- persistence
-- provider SDKs
-
-Architecture:
-
-CharacterProfile
-        +
-ExecutionContext
-        +
-Optional IntelligenceContext
-        |
-        v
-ConversationRequest
-        |
-        v
-Future / existing EasyChatBot LLM service
-
-The production EasyChatBot conversation and voice
-architecture remains outside this hackathon runtime.
+The contract remains provider-independent. Optional
+structured-output requirements are expressed as a
+provider-neutral JSON schema and translated by the
+selected provider adapter.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,14 +31,19 @@ class ConversationRequest:
         User-facing request to be answered.
 
     conversation_context:
-        Optional contextual information, such as live
-        intelligence retrieved by the Research Agent.
+        Optional contextual information.
 
     character_id:
         Identifier of the character producing the response.
 
     character_name:
         Display name of the character.
+
+    response_schema:
+        Optional provider-independent JSON schema describing
+        the structured response expected from the provider.
+        Providers are responsible for translating this schema
+        into their native structured-output mechanism.
     """
 
     system_instruction: str
@@ -75,10 +56,10 @@ class ConversationRequest:
 
     character_name: str = ""
 
+    response_schema: dict[str, Any] | None = None
+
     def __post_init__(self) -> None:
-        """
-        Validate request invariants.
-        """
+        """Validate request invariants."""
 
         if not isinstance(
             self.system_instruction,
@@ -158,6 +139,26 @@ class ConversationRequest:
                 "character_name must be a string."
             )
 
+        if self.response_schema is not None:
+            if not isinstance(
+                self.response_schema,
+                dict,
+            ):
+                raise ValueError(
+                    "response_schema must be a dictionary."
+                )
+
+            if not self.response_schema:
+                raise ValueError(
+                    "response_schema cannot be empty."
+                )
+
+            object.__setattr__(
+                self,
+                "response_schema",
+                dict(self.response_schema),
+            )
+
         object.__setattr__(
             self,
             "character_id",
@@ -172,21 +173,21 @@ class ConversationRequest:
 
     @property
     def has_conversation_context(self) -> bool:
-        """
-        Return whether contextual information exists.
-        """
+        """Return whether contextual information exists."""
 
         return bool(
             self.conversation_context
         )
 
     @property
-    def context_length(self) -> int:
-        """
-        Return the length of the conversation context.
+    def has_response_schema(self) -> bool:
+        """Return whether structured output was requested."""
 
-        Useful for diagnostics and future token estimation.
-        """
+        return self.response_schema is not None
+
+    @property
+    def context_length(self) -> int:
+        """Return the length of the conversation context."""
 
         if not self.conversation_context:
             return 0
@@ -199,7 +200,7 @@ class ConversationRequest:
         """
         Return a safe diagnostic summary.
 
-        Prompt and context content are deliberately
+        Prompt, context and schema content are deliberately
         excluded from the summary.
         """
 
@@ -208,6 +209,9 @@ class ConversationRequest:
             "character_name": self.character_name,
             "has_context": str(
                 self.has_conversation_context
+            ),
+            "has_response_schema": str(
+                self.has_response_schema
             ),
             "system_instruction_length": str(
                 len(self.system_instruction)

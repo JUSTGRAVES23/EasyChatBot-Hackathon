@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Lifecycle Connection Integration.
 
 Validates that the lifecycle service
@@ -160,3 +160,7 @@ def test_start_call_keeps_runtime_active():
     assert result["session"].state == (
         VoiceCallState.ACTIVE
     )
+
+
+
+

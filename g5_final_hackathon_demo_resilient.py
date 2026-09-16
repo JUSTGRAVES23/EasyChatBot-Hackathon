@@ -1,5 +1,5 @@
-"""
-G5 Final Hackathon Demo — Resilient / Demo-Safe.
+﻿"""
+G5 Final Hackathon Demo â€” Resilient / Demo-Safe.
 
 Purpose
 -------
@@ -57,10 +57,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.conversation.conversation_request import ConversationRequest
-from backend.memory.memory_service import MemoryService
-from backend.providers.llm.llm_provider_factory import LLMProviderFactory
-from backend.runtime.context.execution_context import ExecutionContext
+from conversation.conversation_request import ConversationRequest
+from memory.memory_service import MemoryService
+from providers.llm.llm_provider_factory import LLMProviderFactory
+from runtime.context.execution_context import ExecutionContext
 
 from src.ai_agents.live_intelligence_agent.handler import (
     LiveIntelligenceAgent,
@@ -257,26 +257,26 @@ def create_fallback_response() -> LiveIntelligenceResponse:
     return LiveIntelligenceResponse(
         topic=TOPIC,
         summary=(
-            "L'intelligence artificielle évolue rapidement vers des "
-            "modèles multimodaux capables de traiter le texte, l'image "
+            "L'intelligence artificielle Ã©volue rapidement vers des "
+            "modÃ¨les multimodaux capables de traiter le texte, l'image "
             "et l'audio. L'industrie se concentre aussi sur des agents "
-            "autonomes capables d'exécuter des tâches complexes. En "
-            "parallèle, les petits modèles permettent d'utiliser l'IA "
+            "autonomes capables d'exÃ©cuter des tÃ¢ches complexes. En "
+            "parallÃ¨le, les petits modÃ¨les permettent d'utiliser l'IA "
             "directement sur des appareils personnels."
         ),
         sources=sources,
         key_information=[
             (
-                "Les modèles récents développent des capacités "
+                "Les modÃ¨les rÃ©cents dÃ©veloppent des capacitÃ©s "
                 "multimodales et de raisonnement approfondi."
             ),
             (
-                "Les petits modèles permettent davantage de traitement "
+                "Les petits modÃ¨les permettent davantage de traitement "
                 "local directement sur les appareils personnels."
             ),
             (
-                "L'industrie développe des systèmes plus autonomes "
-                "capables d'exécuter des tâches complexes."
+                "L'industrie dÃ©veloppe des systÃ¨mes plus autonomes "
+                "capables d'exÃ©cuter des tÃ¢ches complexes."
             ),
         ],
     )
@@ -496,7 +496,7 @@ def build_personalised_experience(
 
 async def main() -> None:
     print("=" * 62)
-    print("       G5 FINAL HACKATHON DEMO — RESILIENT")
+    print("       G5 FINAL HACKATHON DEMO â€” RESILIENT")
     print("=" * 62)
     print()
 
@@ -659,25 +659,25 @@ async def main() -> None:
                     summary=intelligence.summary,
                     vocabulary=[
                         VocabularyItem(
-                            term="modèle multimodal",
+                            term="modÃ¨le multimodal",
                             definition=(
-                                "Modèle d'intelligence artificielle "
+                                "ModÃ¨le d'intelligence artificielle "
                                 "capable de traiter plusieurs formats "
-                                "de données."
+                                "de donnÃ©es."
                             ),
                         ),
                         VocabularyItem(
                             term="agent autonome",
                             definition=(
-                                "Système intelligent capable "
-                                "d'exécuter des tâches de manière "
-                                "indépendante."
+                                "SystÃ¨me intelligent capable "
+                                "d'exÃ©cuter des tÃ¢ches de maniÃ¨re "
+                                "indÃ©pendante."
                             ),
                         ),
                         VocabularyItem(
                             term="traitement local",
                             definition=(
-                                "Traitement effectué directement "
+                                "Traitement effectuÃ© directement "
                                 "sur un appareil personnel."
                             ),
                         ),
@@ -686,15 +686,15 @@ async def main() -> None:
                         DiscussionQuestion(
                             question=(
                                 "Quels sont les principaux "
-                                "développements de l'IA présentés "
-                                "dans ce résumé ?"
+                                "dÃ©veloppements de l'IA prÃ©sentÃ©s "
+                                "dans ce rÃ©sumÃ© ?"
                             ),
                             difficulty=LEARNER_LEVEL,
                         ),
                         DiscussionQuestion(
                             question=(
-                                "Pourquoi les petits modèles "
-                                "peuvent-ils être utiles sur les "
+                                "Pourquoi les petits modÃ¨les "
+                                "peuvent-ils Ãªtre utiles sur les "
                                 "appareils personnels ?"
                             ),
                             difficulty=LEARNER_LEVEL,
@@ -752,23 +752,23 @@ async def main() -> None:
                     summary=intelligence.summary,
                     vocabulary=[
                         VocabularyItem(
-                            term="modèle multimodal",
+                            term="modÃ¨le multimodal",
                             definition=(
-                                "Modèle d'IA capable de traiter "
-                                "plusieurs types de données."
+                                "ModÃ¨le d'IA capable de traiter "
+                                "plusieurs types de donnÃ©es."
                             ),
                         ),
                         VocabularyItem(
                             term="agent autonome",
                             definition=(
-                                "Système capable d'effectuer "
-                                "des tâches de façon indépendante."
+                                "SystÃ¨me capable d'effectuer "
+                                "des tÃ¢ches de faÃ§on indÃ©pendante."
                             ),
                         ),
                         VocabularyItem(
                             term="traitement local",
                             definition=(
-                                "Traitement effectué directement "
+                                "Traitement effectuÃ© directement "
                                 "sur l'appareil de l'utilisateur."
                             ),
                         ),
@@ -776,14 +776,14 @@ async def main() -> None:
                     discussion_questions=[
                         DiscussionQuestion(
                             question=(
-                                "Quels développements de l'IA "
-                                "sont présentés dans le résumé ?"
+                                "Quels dÃ©veloppements de l'IA "
+                                "sont prÃ©sentÃ©s dans le rÃ©sumÃ© ?"
                             ),
                             difficulty=LEARNER_LEVEL,
                         ),
                         DiscussionQuestion(
                             question=(
-                                "Quel avantage les petits modèles "
+                                "Quel avantage les petits modÃ¨les "
                                 "peuvent-ils apporter aux utilisateurs ?"
                             ),
                             difficulty=LEARNER_LEVEL,

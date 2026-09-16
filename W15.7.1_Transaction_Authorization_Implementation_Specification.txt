@@ -1,0 +1,1069 @@
+﻿W15.7.1 — TRANSACTION AUTHORIZATION IMPLEMENTATION SPECIFICATION
+================================================================
+
+STATUS
+------
+W15.7.0.1 Contract Specification: COMPLETE
+W15.7.0.2 Contract Hardening: COMPLETE
+W15.7.0.3 4-Eyes Review: PASS
+W15.7.0.4 Contract Freeze: COMPLETE
+
+Production implementation:
+    NOT STARTED
+
+Purpose:
+    Define the exact implementation boundary for W15.7 Transaction
+    Authorization before any production source code is created.
+
+
+1. IMPLEMENTATION OBJECTIVE
+---------------------------
+
+Implement a provider-neutral Transaction Authorization capability that:
+
+    - represents security-relevant transaction data deterministically
+    - binds authorization to the exact transaction
+    - binds authorization to the authenticated principal
+    - requires centrally supplied authentication assurance where policy requires
+    - enforces nonce uniqueness
+    - provides distinct authorization identifiers
+    - enforces authorization lifecycle transitions
+    - enforces trusted-clock validity and expiry
+    - prevents replay
+    - supports atomic single-use consumption
+    - prevents concurrent consumers from both succeeding
+    - rejects caller-controlled approval assertions
+    - preserves exact approval binding
+    - fails closed on uncertainty
+    - produces deterministic authorization decisions
+    - provides safe audit evidence without raw credentials or security secrets
+
+W15.7 MUST remain independent from:
+
+    - ZITADEL
+    - Keycloak
+    - WebAuthn implementation
+    - production payment integration
+    - production money movement
+    - cryptographic transaction signing
+    - business-service transaction gates
+
+
+2. IMPLEMENTATION FILE BOUNDARY
+-------------------------------
+
+Production domain contract:
+
+    backend/app/domain/identity/transaction_authorization.py
+
+Production application service:
+
+    backend/app/application/identity/transaction_authorization.py
+
+Security tests:
+
+    backend/tests/security/test_transaction_authorization.py
+
+No unrelated production files may be modified.
+
+In particular, do NOT modify:
+
+    AuthenticationService
+    Principal
+    IdentityProvider
+    SessionIdentityProvider
+    AuthorizationService
+
+unless an independently reviewed architectural necessity is demonstrated.
+
+
+3. ARCHITECTURAL TRUST BOUNDARY
+--------------------------------
+
+The implementation MUST preserve:
+
+    Identity Provider
+        ->
+    Identity Adapter
+        ->
+    Authentication Assurance
+        ->
+    Authorization Policy
+        ->
+    Transaction Construction
+        ->
+    Canonical Transaction
+        ->
+    User Approval
+        ->
+    Trusted Transaction Authorization
+        ->
+    Atomic Consumption
+        ->
+    Business Operation
+
+
+W15.7 consumes W15.6 Authentication Assurance.
+
+W15.7 MUST NOT:
+
+    - implement MFA
+    - calculate authentication assurance independently
+    - manufacture A2 or A3 assurance
+    - treat A3 authentication as transaction approval
+    - replace W15.6 freshness policy
+    - bypass AuthorizationService
+
+
+4. DOMAIN MODEL
+---------------
+
+The domain model MUST represent a transaction authorization independently
+from any external identity provider.
+
+The implementation MUST distinguish:
+
+    Business Transaction
+        =
+    transaction_id
+
+from:
+
+    Transaction Authorization Instance
+        =
+    authorization_id
+
+A transaction MAY have multiple authorization attempts/instances over
+its lifecycle, but each authorization instance MUST be uniquely
+identifiable.
+
+
+5. CANONICAL TRANSACTION
+------------------------
+
+The implementation MUST provide a deterministic canonical representation
+of all security-relevant transaction attributes.
+
+The canonical representation MUST support, where applicable:
+
+    transaction_id
+    principal_id
+    operation
+    amount
+    currency
+    merchant_or_service
+    recipient
+    timestamp
+    nonce
+    risk_context
+
+Only attributes applicable to a transaction need to be populated.
+
+Security-relevant attributes MUST NOT be silently omitted from the
+authorization binding.
+
+Canonicalization MUST occur before:
+
+    - comparison
+    - integrity/reference calculation
+    - approval binding
+    - authorization
+    - consumption
+
+
+6. MONETARY REPRESENTATION
+--------------------------
+
+Monetary authorization MUST NOT depend on binary floating-point equality.
+
+The implementation MUST use a deterministic monetary representation.
+
+The implementation MUST ensure that:
+
+    10.00 EUR
+
+and equivalent representations cannot produce ambiguous authorization
+results.
+
+A monetary value MUST have deterministic amount and currency semantics.
+
+Production monetary thresholds are OUT OF SCOPE.
+
+Threshold policy MUST remain centrally governed and MUST NOT be embedded
+inside individual business services.
+
+
+7. PRINCIPAL BINDING
+--------------------
+
+Every transaction authorization MUST be bound to exactly one principal.
+
+The authorization MUST verify:
+
+    requested principal_id
+        ==
+    authorization principal_id
+
+A mismatch MUST produce:
+
+    INVALID_PRINCIPAL_BINDING
+
+The caller MUST NOT be able to substitute another principal after
+authorization has been established.
+
+
+8. TRANSACTION BINDING
+----------------------
+
+Authorization MUST bind the exact transaction.
+
+At minimum, applicable security-relevant attributes MUST remain bound:
+
+    transaction_id
+    principal_id
+    operation
+    amount
+    currency
+    merchant_or_service / recipient
+    relevant risk context
+
+Any material change MUST invalidate the existing authorization or require
+fresh authorization according to central policy.
+
+An authorization for:
+
+    transaction A
+
+MUST NEVER silently authorize:
+
+    transaction B.
+
+
+9. APPROVAL BINDING
+-------------------
+
+User approval MUST bind to the exact canonical transaction presented
+for approval.
+
+The implementation MUST distinguish:
+
+    transaction construction
+        ->
+    canonical representation
+        ->
+    presentation
+        ->
+    user approval
+        ->
+    trusted approval evidence
+        ->
+    transaction authorization
+
+The following MUST NOT be sufficient to create trusted approval:
+
+    approved = True
+
+Caller-controlled approval assertions MUST NOT manufacture trusted
+authorization evidence.
+
+Approval evidence MUST be associated with the exact transaction
+representation being authorized.
+
+Any material modification to:
+
+    principal
+    transaction_id
+    operation
+    amount
+    currency
+    merchant/service
+    recipient
+    relevant risk context
+
+MUST invalidate the approval binding or require fresh approval according
+to policy.
+
+
+10. AUTHORIZATION STATE MACHINE
+------------------------------
+
+The implementation MUST support the following states:
+
+    CREATED
+    PENDING_USER_APPROVAL
+    APPROVED
+    CONSUMED
+    EXPIRED
+    REJECTED
+    REVOKED
+
+Allowed transitions:
+
+    CREATED
+        ->
+    PENDING_USER_APPROVAL
+
+    PENDING_USER_APPROVAL
+        ->
+    APPROVED
+
+    PENDING_USER_APPROVAL
+        ->
+    REJECTED
+
+    APPROVED
+        ->
+    CONSUMED
+
+    APPROVED
+        ->
+    REVOKED
+
+    APPROVED
+        ->
+    EXPIRED
+
+All other transitions MUST fail closed.
+
+Examples of forbidden transitions include:
+
+    CONSUMED -> APPROVED
+    CONSUMED -> PENDING_USER_APPROVAL
+    EXPIRED -> APPROVED
+    REVOKED -> APPROVED
+    REJECTED -> APPROVED
+
+An invalid transition MUST NEVER silently succeed.
+
+
+11. NONCE REQUIREMENTS
+----------------------
+
+Each authorization instance MUST contain a nonce or equivalent replay
+control value.
+
+Nonce uniqueness MUST be enforced by the trusted application boundary.
+
+The caller MUST NOT be allowed to declare:
+
+    "this nonce is unique"
+
+without server-side validation.
+
+A nonce MUST NOT be reusable for another successful authorization.
+
+Nonce reuse MUST fail closed.
+
+
+12. AUTHORIZATION ID REQUIREMENTS
+---------------------------------
+
+authorization_id MUST uniquely identify the authorization instance.
+
+transaction_id MUST identify the business transaction.
+
+The implementation MUST NOT rely on transaction_id alone when distinct
+authorization instances need to be distinguished.
+
+Authorization identifiers MUST NOT be caller-controlled in a way that
+allows collisions or authorization substitution.
+
+
+13. TRUSTED CLOCK
+-----------------
+
+Validity, expiry, authorization time, and consumption timing MUST use
+trusted server/application time.
+
+The implementation MUST receive a trusted clock dependency or equivalent
+trusted application time source.
+
+Caller-controlled timestamps MUST NOT establish:
+
+    current time
+    freshness
+    validity
+    expiry
+
+Future-dated authorization timestamps MUST fail closed unless a later
+centrally governed scheduling capability explicitly permits them.
+
+The implementation MUST be deterministic under a supplied trusted clock
+so that security tests can control time without relying on wall-clock
+sleep operations.
+
+
+14. EXPIRY
+----------
+
+Every authorization that has an expiry requirement MUST have a centrally
+defined validity period.
+
+Expiration MUST be evaluated against trusted application/server time.
+
+An expired authorization MUST produce a deterministic denial/failure.
+
+Expiration MUST NOT be extended by caller-controlled timestamps.
+
+
+15. ATOMIC CONSUMPTION
+----------------------
+
+Transaction authorization MUST be single-use.
+
+Consumption MUST be atomic.
+
+The insecure pattern:
+
+    check authorization
+    ->
+    execute business operation
+    ->
+    mark authorization consumed
+
+MUST NOT be treated as sufficient transaction-authorization semantics.
+
+The implementation boundary MUST guarantee that competing consumers
+cannot both successfully consume the same authorization.
+
+At most one valid consumer may transition:
+
+    APPROVED -> CONSUMED
+
+for a given authorization instance.
+
+Concurrency semantics MUST be explicitly tested.
+
+
+16. REPLAY PROTECTION
+---------------------
+
+Replay MUST fail closed.
+
+The implementation MUST distinguish:
+
+    first successful consumption
+    repeated consumption
+    concurrent consumption
+    expired authorization
+    revoked authorization
+    rejected authorization
+    invalid authorization
+
+A repeated attempt after successful consumption MUST NOT produce a
+second successful transaction authorization.
+
+An idempotent business result MUST NOT be confused with a second valid
+transaction authorization.
+
+
+17. RISK-CONTEXT BINDING
+------------------------
+
+Relevant risk context MUST be bound to the authorization according to
+central policy.
+
+Material risk-context changes MUST NOT silently preserve authorization.
+
+Depending on policy, a material risk change MUST result in:
+
+    - invalidation
+    OR
+    - requirement for fresh authorization
+
+Risk policy itself remains outside individual business services.
+
+W15.7 MUST NOT create independent business-specific risk thresholds.
+
+
+18. AUTHENTICATION ASSURANCE INTEGRATION
+----------------------------------------
+
+W15.7 consumes the W15.6 AuthenticationAssuranceContext.
+
+The implementation MUST NOT implement authentication assurance itself.
+
+The implementation MUST NOT:
+
+    - implement MFA
+    - implement WebAuthn
+    - derive A2/A3 independently
+    - modify W15.6 freshness semantics
+    - treat A3 as transaction approval
+    - downgrade required assurance silently
+
+Transaction policy MAY require:
+
+    A0
+    A1
+    A2
+    A3
+
+but the required level MUST be supplied by central policy.
+
+If the supplied assurance is insufficient, authorization MUST fail with:
+
+    INSUFFICIENT_AUTHENTICATION_ASSURANCE
+
+W15.7 MUST preserve the distinction:
+
+    Authentication Assurance
+        !=
+    Transaction Authorization
+
+
+19. BUSINESS AUTHORIZATION SEPARATION
+-------------------------------------
+
+Transaction authorization MUST NOT replace business authorization.
+
+A valid transaction authorization means:
+
+    "this exact transaction was approved"
+
+It does NOT mean:
+
+    "this principal is authorized for every operation"
+
+Business authorization remains the responsibility of:
+
+    AuthorizationService
+
+Where both controls are required:
+
+    Authentication Assurance
+        +
+    Business Authorization
+        +
+    Transaction Authorization
+
+MUST all succeed.
+
+
+20. CENTRAL POLICY
+------------------
+
+The implementation MUST consume centrally supplied policy.
+
+Policy MUST determine, as applicable:
+
+    required authentication assurance
+    freshness requirements
+    transaction validity duration
+    risk-context requirements
+    monetary thresholds
+    transaction operation requirements
+    approval requirements
+
+Business services MUST NOT contain their own transaction-authorization
+policy.
+
+Business services MUST NOT contain their own MFA policy.
+
+Business services MUST NOT implement independent monetary security
+thresholds.
+
+
+21. DECISION MODEL
+-----------------
+
+The application service MUST expose deterministic authorization semantics.
+
+Successful transaction authorization MUST result in:
+
+    ALLOW
+
+Failure MUST result in:
+
+    DENY
+
+or an explicitly typed failure corresponding to the failure condition.
+
+The implementation MUST distinguish at minimum:
+
+    unauthenticated
+    invalid transaction evidence
+    invalid principal binding
+    invalid transaction binding
+    invalid nonce
+    invalid lifecycle state
+    expired authorization
+    revoked authorization
+    replay
+    insufficient authentication assurance
+    authorization denied
+    transaction authorization denied
+
+No ambiguous security state may default to ALLOW.
+
+
+22. FAIL-CLOSED REQUIREMENT
+---------------------------
+
+The implementation MUST fail closed when any security-relevant input is
+uncertain, missing, inconsistent, invalid, expired, replayed, or
+untrusted.
+
+Examples include uncertainty regarding:
+
+    principal
+    transaction identity
+    operation
+    amount
+    currency
+    merchant/service
+    recipient
+    nonce
+    authorization state
+    expiry
+    approval evidence
+    authentication assurance
+    risk context
+
+Security uncertainty MUST NOT become implicit approval.
+
+
+23. IMMUTABILITY
+---------------
+
+Security-relevant validated authorization data MUST be immutable after
+validation/creation where practical.
+
+The implementation MUST prevent post-validation mutation from silently
+changing the transaction that was approved.
+
+Immutable domain objects/value objects SHOULD be preferred.
+
+Any state transition MUST occur through controlled domain/application
+operations rather than arbitrary field mutation.
+
+
+24. AUDIT EVIDENCE
+------------------
+
+The implementation MUST define safe audit evidence sufficient to correlate:
+
+    authorization_id
+    transaction_id
+    principal_id
+    canonical transaction reference/integrity reference
+    authentication assurance evidence/reference
+    policy version
+    authorization state
+    authorization time
+    expiry
+    consumption result
+
+Audit evidence MUST NOT contain:
+
+    passwords
+    access tokens
+    refresh tokens
+    OTP secrets
+    WebAuthn private material
+    raw credentials
+    other security secrets
+
+W15.7 MUST not claim cryptographic proof unless actual cryptographic
+protection has been implemented, validated, and tested.
+
+
+25. CRYPTOGRAPHIC CLAIM BOUNDARY
+--------------------------------
+
+Initial W15.7 implementation MUST NOT claim:
+
+    cryptographic transaction signatures
+    digital signatures
+    cryptographic proof of user approval
+    non-repudiation
+
+unless those mechanisms are actually implemented and security-tested.
+
+Server-side binding, immutable domain data, nonce control, lifecycle
+control, and atomic consumption are NOT themselves cryptographic
+signatures.
+
+
+26. REQUIRED DOMAIN RESPONSIBILITIES
+------------------------------------
+
+transaction_authorization.py MUST contain the provider-neutral domain
+concepts necessary to represent:
+
+    transaction authorization
+    canonical transaction data
+    authorization state
+    authorization decision
+    failure semantics
+    lifecycle transition rules
+    authorization binding
+    approval binding
+
+The domain MUST NOT depend on:
+
+    FastAPI
+    HTTP
+    database-specific implementation
+    ZITADEL
+    Keycloak
+    external IAM SDKs
+    payment provider SDKs
+
+
+27. REQUIRED APPLICATION RESPONSIBILITIES
+-----------------------------------------
+
+application/identity/transaction_authorization.py MUST orchestrate:
+
+    - policy input
+    - W15.6 assurance input
+    - transaction validation
+    - canonical transaction binding
+    - authorization creation/validation
+    - approval validation
+    - trusted-clock validation
+    - lifecycle management
+    - single-use consumption
+    - deterministic decision output
+    - audit evidence preparation
+
+Infrastructure-specific persistence or external integration MUST remain
+outside the domain contract.
+
+An initial implementation MAY use an in-memory/test-oriented mechanism
+where necessary to prove the security contract.
+
+Production persistence architecture is NOT expanded by this step unless
+independently reviewed.
+
+
+28. TEST-FIRST SECURITY CONTRACT
+---------------------------------
+
+Before W15.7 can advance, the following security behaviors MUST be
+covered by automated tests:
+
+    canonical transaction representation
+    transaction binding
+    principal binding
+    transaction_id binding
+    operation binding
+    amount binding
+    currency binding
+    merchant/service binding
+    recipient binding where applicable
+    risk-context binding
+    nonce uniqueness
+    nonce replay protection
+    authorization_id uniqueness
+    authorization expiry
+    trusted-clock enforcement
+    future timestamp rejection
+    legal lifecycle transitions
+    illegal lifecycle transitions
+    atomic consumption
+    concurrent/double consumption
+    replay after consumption
+    revoked authorization
+    expired authorization
+    caller-controlled approval rejection
+    exact approval binding
+    insufficient authentication assurance
+    authorization separation
+    authentication-assurance separation
+    deterministic DENY
+    successful ALLOW
+    audit evidence safety
+    no raw secret storage
+    no silent downgrade
+
+
+29. MINIMUM ANTI-FORGERY TESTS
+------------------------------
+
+Tests MUST prove that an untrusted caller cannot:
+
+    self-assert A3
+    self-assert transaction approval
+    substitute principal_id
+    substitute transaction_id
+    substitute operation
+    substitute amount
+    substitute currency
+    substitute merchant/service
+    substitute recipient
+    mutate relevant risk context
+    reuse a nonce
+    reuse an authorization_id
+    alter trusted current time
+    bypass expiry
+    replay consumed authorization
+    resurrect expired/revoked/rejected authorization
+    bypass AuthorizationService
+    silently downgrade assurance
+
+
+30. CONCURRENCY TEST REQUIREMENT
+--------------------------------
+
+The test suite MUST explicitly exercise competing consumers.
+
+The required invariant is:
+
+    For one authorization_id:
+
+        consumer A succeeds
+        consumer B fails
+
+or:
+
+        consumer B succeeds
+        consumer A fails
+
+but:
+
+        A succeeds AND B succeeds
+
+MUST NEVER occur.
+
+The implementation must therefore make authorization consumption atomic
+at its trusted application boundary.
+
+
+31. NO SILENT DOWNGRADE
+-----------------------
+
+If policy requires:
+
+    A2
+
+and the supplied assurance is:
+
+    A1
+
+the result MUST NOT be converted to A1 behavior.
+
+If policy requires:
+
+    A3
+
+and the supplied assurance is:
+
+    A2
+
+the result MUST NOT silently downgrade.
+
+The implementation MUST fail closed with the appropriate assurance
+failure.
+
+
+32. EXISTING AUTHENTICATION PRESERVATION
+----------------------------------------
+
+W15.7 MUST NOT replace the existing authentication architecture.
+
+Existing:
+
+    AuthenticationService
+    Principal
+    IdentityProvider
+    SessionIdentityProvider
+    AuthorizationService
+
+remain intact.
+
+W15.7 is an additional transaction-authorization capability.
+
+No migration to ZITADEL or Keycloak occurs in this implementation step.
+
+
+33. EXTERNAL IAM BOUNDARY
+-------------------------
+
+ZITADEL and Keycloak are explicitly OUT OF SCOPE.
+
+No dependency may be added for:
+
+    ZITADEL
+    Keycloak
+    OIDC client implementation
+    SAML integration
+    WebAuthn implementation
+
+The implementation must remain provider-neutral so the future identity
+adapter can supply validated W15.6 assurance and identity evidence.
+
+
+34. PERSISTENCE BOUNDARY
+------------------------
+
+W15.7.1 is primarily a domain/application implementation step.
+
+Do not introduce unrelated database migrations.
+
+Do not modify the existing PostgreSQL authentication repository.
+
+Do not modify existing authentication session persistence.
+
+If persistence is required to prove atomic consumption, it must be
+introduced only after the domain/application contract and tests
+demonstrate the requirement and after separate architectural review.
+
+
+35. SECURITY FAILURE PROCEDURE
+------------------------------
+
+If any relevant test fails:
+
+    STOP
+      ->
+    DIAGNOSE
+      ->
+    FIX
+      ->
+    TEST
+      ->
+    4-EYES REVIEW
+      ->
+    VERIFY
+
+No relevant failure may be:
+
+    committed
+    advanced
+    declared complete
+    bypassed
+    suppressed
+    marked expected without architectural review
+
+
+36. 4-EYES REVIEW REQUIREMENT
+-----------------------------
+
+After implementation and tests pass, an independent review MUST verify:
+
+    domain boundary
+    application boundary
+    exact transaction binding
+    principal binding
+    approval binding
+    nonce enforcement
+    authorization ID handling
+    lifecycle correctness
+    trusted clock
+    expiry
+    replay resistance
+    atomic consumption
+    concurrency behavior
+    W15.6 separation
+    AuthorizationService separation
+    fail-closed behavior
+    audit safety
+    secret-handling safety
+    absence of forbidden integrations
+    absence of unrelated production changes
+
+
+37. VERIFICATION REQUIREMENTS
+-----------------------------
+
+W15.7 implementation verification MUST establish:
+
+    repository root is correct
+    project-local .venv is correct
+    expected production files exist
+    expected tests exist
+    syntax compilation passes
+    focused W15.7 tests pass
+    existing W15.6 security tests remain passing
+    full relevant security regression passes
+    no forbidden ZITADEL/Keycloak/WebAuthn dependencies exist
+    no unrelated production files were modified
+
+
+38. IMPLEMENTATION SUCCESS CRITERIA
+-----------------------------------
+
+W15.7 implementation may only be declared COMPLETE when:
+
+    1. Domain implementation exists.
+    2. Application implementation exists.
+    3. Required security tests exist.
+    4. Focused tests pass.
+    5. Relevant security regression passes.
+    6. W15.6 remains green.
+    7. 4-eyes review passes.
+    8. Verification passes.
+    9. No forbidden integration was introduced.
+   10. No unrelated production changes were introduced.
+   11. Transaction authorization is proven single-use.
+   12. Replay is proven to fail closed.
+   13. Concurrent consumers cannot both succeed.
+   14. Exact transaction binding is proven.
+   15. Caller-controlled approval is proven insufficient.
+   16. Trusted-clock enforcement is proven.
+   17. Authentication assurance remains separate.
+   18. Business authorization remains separate.
+   19. Audit evidence contains no raw secrets.
+   20. No cryptographic guarantees are claimed beyond what is actually
+       implemented and tested.
+
+
+39. IMPLEMENTATION ORDER
+------------------------
+
+The implementation MUST proceed in this order:
+
+    W15.7.1
+        Implementation Specification
+        ->
+    W15.7.2
+        Domain Model Implementation
+        ->
+    W15.7.3
+        Application Service Implementation
+        ->
+    W15.7.4
+        Security Test Implementation
+        ->
+    W15.7.5
+        Focused Test Gate
+        ->
+    W15.7.6
+        Security Regression
+        ->
+    W15.7.7
+        Independent 4-Eyes Review
+        ->
+    W15.7.8
+        Final Verification
+        ->
+    W15.7 COMPLETE
+
+
+40. CURRENT AUTHORIZATION
+-------------------------
+
+W15.7.1 is a PLAN artifact.
+
+Production source creation is NOT authorized until:
+
+    W15.7.1 specification
+        ->
+    implementation review
+        ->
+    specification freeze
+
+has completed successfully.
+
+The next implementation authorization therefore requires:
+
+    W15.7.1 4-Eyes Review
+        +
+    W15.7.1 Specification Freeze
+
+
+================================================================
+END OF W15.7.1 — TRANSACTION AUTHORIZATION IMPLEMENTATION SPECIFICATION
+================================================================

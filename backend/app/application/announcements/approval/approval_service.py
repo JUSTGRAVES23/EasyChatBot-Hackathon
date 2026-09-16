@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from backend.app.application.announcements.publication_service import (
+from app.application.announcements.publication_service import (
     AnnouncementPublicationService,
 )
-from backend.app.domain.announcements.publication import Publication
+from app.domain.announcements.publication import Publication
 
 
 class PublicationApprovalAudit(Protocol):
@@ -70,3 +70,4 @@ class AnnouncementPublicationApprovalService:
             actor=actor.strip(),
             approved_at=approved_at,
         )
+

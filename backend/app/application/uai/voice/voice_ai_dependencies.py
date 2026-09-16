@@ -26,6 +26,10 @@ from app.ai_runtime.conversation.conversation_runtime import (
 )
 
 
+from app.ai_runtime.voice.functionality_control_port import (
+    FunctionalityControlPort,
+)
+
 from app.ai_runtime.voice.voice_speech_runtime import (
     VoiceSpeechRuntime,
 )
@@ -63,9 +67,16 @@ def build_conversation_runtime() -> ConversationRuntime:
 
 
 
-def build_voice_speech_runtime() -> VoiceSpeechRuntime:
+def build_voice_speech_runtime(
+    *,
+    functionality_control_service: FunctionalityControlPort | None = None,
+) -> VoiceSpeechRuntime:
     """
     Build EasyChatBot voice speech runtime.
+
+    The operational-control dependency is injected through
+    the runtime port so the AI Runtime remains independent
+    from the application control-service implementation.
     """
 
     config = SpeechProviderConfig(
@@ -84,6 +95,9 @@ def build_voice_speech_runtime() -> VoiceSpeechRuntime:
 
     return VoiceSpeechRuntime(
         speech_provider=provider,
+        functionality_control_service=(
+            functionality_control_service
+        ),
     )
 
 

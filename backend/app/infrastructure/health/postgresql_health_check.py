@@ -1,14 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 
 from sqlalchemy import text
 
-from backend.app.application.health.health_result import (
+from app.application.health.health_result import (
     HealthCheckResult,
     HealthStatus,
 )
-from backend.app.infrastructure.persistence.database import (
+from app.infrastructure.persistence.database import (
     create_database_engine,
 )
 
@@ -68,6 +68,11 @@ class PostgreSQLHealthCheck:
 __all__ = [
     "PostgreSQLHealthCheck",
 ]
+
+
+
+
+
 
 
 

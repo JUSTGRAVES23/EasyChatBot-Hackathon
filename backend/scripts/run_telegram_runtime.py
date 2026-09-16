@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
@@ -40,52 +40,57 @@ logging.basicConfig(
 )
 
 
-from backend.application.telegram_bootstrap import (
+from application.telegram_bootstrap import (
     start_telegram_runtime,
     stop_telegram_runtime,
 )
 
+from app.application.provider_management.functionality_control_composition import (
+    create_standalone_functionality_control_service,
+)
+
 
 async def main():
-
     logging.info(
         "Starting EasyChatBot Telegram Beta runtime..."
     )
 
-    try:
+    (
+        functionality_control_service,
+        functionality_control_engine,
+    ) = create_standalone_functionality_control_service()
 
-        await start_telegram_runtime()
+    try:
+        await start_telegram_runtime(
+            functionality_control_service=(
+                functionality_control_service
+            ),
+        )
 
         logging.info(
             "Telegram runtime is running."
         )
 
         while True:
-
-            await asyncio.sleep(
-                3600
-            )
-
+            await asyncio.sleep(3600)
 
     except KeyboardInterrupt:
-
         logging.info(
             "Shutdown requested."
         )
 
-
     finally:
-
         await stop_telegram_runtime()
+
+        functionality_control_engine.dispose()
 
         logging.info(
             "Telegram runtime stopped."
         )
 
 
-
 if __name__ == "__main__":
-
     asyncio.run(
         main()
     )
+

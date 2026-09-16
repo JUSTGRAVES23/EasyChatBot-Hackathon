@@ -1,4 +1,4 @@
-"""
+﻿"""
 ConversationAgent -> LLMService integration test.
 
 Verifies that the ConversationAgent uses the application-level
@@ -28,23 +28,23 @@ AgentResult
 
 import pytest
 
-from backend.agents.conversation_agent import (
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.services.llm_service import (
+from services.llm_service import (
     LLMService,
 )
 

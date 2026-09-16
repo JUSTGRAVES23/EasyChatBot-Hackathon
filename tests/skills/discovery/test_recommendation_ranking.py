@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Discovery Recommendation Ranking Skill.
 """
 
@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import pytest
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     DiscoveryCandidate,
 )
-from backend.skills.discovery.relevance_matching import (
+from skills.discovery.relevance_matching import (
     RelevanceMatch,
 )
-from backend.skills.discovery.recommendation_ranking import (
+from skills.discovery.recommendation_ranking import (
     RankedRecommendation,
     RecommendationRankingSkill,
 )
-from backend.skills.skill import SkillInput
+from skills.skill import SkillInput
 
 
 def make_match(

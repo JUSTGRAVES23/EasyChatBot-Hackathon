@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.interfaces.telegram.beta_private_chat_gate import (
+from app.interfaces.telegram.beta_private_chat_gate import (
     BetaPrivateChatGate,
 )
 
@@ -52,3 +52,4 @@ async def test_gate_rejects_unauthorized_user():
         telegram_user_id=99,
         chat_type="private",
     )
+

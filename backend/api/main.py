@@ -25,28 +25,35 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import router
-from backend.api.character_theme_routes import (
+from api.routes import router
+from api.character_theme_routes import (
     router as character_theme_router,
 )
-from backend.api.character_routes import (
+from api.character_routes import (
     router as character_router,
 )
+from api.cinema_agent import (
+    router as cinema_router,
+)
 
-from backend.application.bootstrap import (
+from application.bootstrap import (
     bootstrap_application,
 )
 
-from backend.application.telegram_bootstrap import (
+from application.telegram_bootstrap import (
     start_telegram_runtime,
     stop_telegram_runtime,
+)
+
+from app.application.provider_management.functionality_control_composition import (
+    create_standalone_functionality_control_service,
 )
 
 from app.interfaces.provider_management.operations_center_dashboard_router import (
     router as operations_center_dashboard_router,
 )
 
-from backend.app.api.cybersecurity_intelligence import (
+from app.api.cybersecurity_intelligence import (
     router as cybersecurity_intelligence_router,
 )
 
@@ -60,10 +67,12 @@ async def lifespan(
 
     Startup:
         - compose application dependencies;
+        - create the authoritative functionality-control service;
         - start Telegram transport runtime.
 
     Shutdown:
-        - stop Telegram transport runtime.
+        - stop Telegram transport runtime;
+        - dispose of the functionality-control database engine.
 
     This layer does not:
 
@@ -75,13 +84,34 @@ async def lifespan(
 
     bootstrap_application()
 
-    await start_telegram_runtime()
+    (
+        functionality_control_service,
+        functionality_control_engine,
+    ) = create_standalone_functionality_control_service()
+
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+    application.state.functionality_control_engine = (
+        functionality_control_engine
+    )
 
     try:
+        await start_telegram_runtime(
+            functionality_control_service=(
+                functionality_control_service
+            ),
+        )
+
         yield
 
     finally:
         await stop_telegram_runtime()
+
+        functionality_control_engine.dispose()
+
+        application.state.functionality_control_service = None
+        application.state.functionality_control_engine = None
 
 
 def create_app() -> FastAPI:
@@ -119,6 +149,8 @@ def create_app() -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
             "http://127.0.0.1:5500",
             "http://localhost:5500",
             "http://127.0.0.1:5501",
@@ -137,6 +169,28 @@ def create_app() -> FastAPI:
 
     application.include_router(
         router,
+    )
+
+    # =========================================================
+    # Agentic Cinema Routes
+    # =========================================================
+    #
+    # Browser
+    #     ↓
+    # /api/cinema
+    #     ↓
+    # FastAPI Cinema Boundary
+    #     ↓
+    # Google Agent Runtime
+    #     ↓
+    # Gemini + Parallel + G5 workflow
+    #
+    # The API layer does not execute the agent directly.
+    # The Cinema router owns the HTTP/application boundary.
+    # =========================================================
+
+    application.include_router(
+        cinema_router,
     )
 
     # =========================================================

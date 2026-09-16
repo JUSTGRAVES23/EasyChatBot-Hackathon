@@ -1,23 +1,8 @@
 """
 World Resolver.
 
-Application service responsible for resolving
-the learner's active AI learning world.
-
-Responsibilities
-----------------
-
-- Retrieve world configuration.
-- Validate world availability.
-- Create WorldContext.
-
-Does NOT
---------
-
-- Execute AI models.
-- Manage characters.
-- Create conversations.
-- Handle persistence directly.
+Application service responsible for resolving a learner's
+active World into validated runtime context.
 """
 
 from __future__ import annotations
@@ -35,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class WorldRepository(Protocol):
     """
-    Repository contract for world retrieval.
+    Repository contract for World retrieval.
     """
 
     def get_by_id(
@@ -43,14 +28,14 @@ class WorldRepository(Protocol):
         world_id: str,
     ):
         """
-        Retrieve a world configuration.
+        Retrieve a World configuration.
         """
         ...
 
 
 class WorldResolver:
     """
-    Resolves a learning world into runtime context.
+    Resolves a World configuration into runtime context.
     """
 
     def __init__(
@@ -65,12 +50,7 @@ class WorldResolver:
         world_id: str,
     ) -> WorldContext:
         """
-        Resolve world configuration.
-
-        Returns
-        -------
-        WorldContext
-            Validated world interaction context.
+        Resolve World configuration.
         """
 
         logger.info(
@@ -94,9 +74,10 @@ class WorldResolver:
             world_id=world.id,
             name=world.name,
             language_code=world.language_code,
-            available_characters=(
-                tuple(
-                    world.available_characters
-                )
+            world_type=world.world_type,
+            learning_domain=world.learning_domain,
+            language_policy=world.language_policy,
+            available_characters=tuple(
+                world.available_characters
             ),
         )

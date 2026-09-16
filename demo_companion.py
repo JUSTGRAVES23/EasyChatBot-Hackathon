@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot AI Companion Demo.
 
 Demonstrates:
@@ -18,15 +18,15 @@ Parallel Search
 import asyncio
 
 
-from backend.services.companion_service import (
+from services.companion_service import (
     CompanionService,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

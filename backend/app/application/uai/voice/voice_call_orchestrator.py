@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Orchestrator.
 
 Coordinates the preparation of a voice call.
@@ -18,44 +18,30 @@ Does NOT:
 
 from __future__ import annotations
 
-
 from dataclasses import dataclass
 
-
-from backend.app.application.uai.voice.voice_call_request import (
-    VoiceCallRequest,
-)
-
-
-from backend.app.application.uai.context.interaction_context_builder import (
+from app.application.uai.context.interaction_context_builder import (
     InteractionContextBuilder,
 )
-
-
-from backend.app.application.uai.voice.voice_character_session_service import (
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+from app.application.uai.voice.voice_character_session_service import (
     VoiceCharacterSessionService,
 )
-
 
 from app.ai_runtime.voice.voice_call_runtime import (
     VoiceCallRuntime,
 )
-
-
 from app.domain.uai.context.learner_context import (
     LearnerContext,
 )
-
-
 from app.domain.uai.context.voice_context import (
     VoiceContext,
 )
-
-
 from app.domain.uai.voice.voice_call_session import (
     VoiceCallSession,
 )
-
 
 
 @dataclass(
@@ -75,8 +61,6 @@ class VoiceCallOrchestrator:
         VoiceCallRuntime()
     )
 
-
-
     def prepare_call(
         self,
         *,
@@ -89,22 +73,21 @@ class VoiceCallOrchestrator:
 
         Request
           |
-          â†“
+          ↓
         Interaction Context
           |
-          â†“
+          ↓
         Character Voice Session
           |
-          â†“
+          ↓
         Voice Call Session
           |
-          â†“
+          ↓
         Runtime Preparation
           |
-          â†“
+          ↓
         READY state
         """
-
 
         learner = LearnerContext(
             learner_id=request.learner_id,
@@ -113,13 +96,11 @@ class VoiceCallOrchestrator:
             ],
         )
 
-
         voice = VoiceContext(
             language_code=request.language_code,
             voice_provider="openai",
-            voice_profile="verse",
+            voice_profile=request.character_id,
         )
-
 
         context = (
             self.context_builder
@@ -131,14 +112,12 @@ class VoiceCallOrchestrator:
             )
         )
 
-
         voice_session = (
             self.session_service
             .create_session(
                 context=context,
             )
         )
-
 
         call_session = VoiceCallSession(
             session_id=(
@@ -150,10 +129,12 @@ class VoiceCallOrchestrator:
             language_code=request.language_code,
         )
 
-
         return (
             self.voice_runtime
             .prepare(
                 session=call_session,
             )
         )
+
+
+

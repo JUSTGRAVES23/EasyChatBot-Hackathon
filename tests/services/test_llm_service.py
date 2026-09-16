@@ -1,4 +1,4 @@
-"""
+﻿"""
 Unit tests for LLMService.
 
 These tests verify that:
@@ -19,15 +19,15 @@ The tests never call a real provider API.
 
 import pytest
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.services.llm_service import (
+from services.llm_service import (
     LLMService,
 )
 

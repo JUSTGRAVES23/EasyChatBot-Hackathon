@@ -1,0 +1,945 @@
+﻿"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  getFunctionalityHealth,
+  type FunctionalityHealth,
+  type FunctionalityHealthPayload,
+  type OperationsEnvironment,
+} from "@/app/lib/api/functionalityHealth";
+import {
+  resumeFunctionality,
+  stopFunctionality,
+} from "@/app/lib/api/functionalityHealthControls";
+import styles from "./FunctionalityHealthDashboard.module.css";
+
+const statusText: Record<FunctionalityHealth["status"], string> = {
+  healthy: "Healthy",
+  degraded: "Degraded",
+  unavailable: "Unavailable",
+  maintenance: "Maintenance",
+  disabled: "Disabled",
+  unknown: "Unknown",
+};
+
+const statusClass: Record<FunctionalityHealth["status"], string> = {
+  healthy: styles.statusHealthy,
+  degraded: styles.statusDegraded,
+  unavailable: styles.statusIncident,
+  maintenance: styles.statusMaintenance,
+  disabled: styles.statusDisabled,
+  unknown: styles.statusUnknown,
+};
+
+function Icon({
+  type,
+}: {
+  type:
+    | "health"
+    | "check"
+    | "warning"
+    | "incident"
+    | "maintenance"
+    | "search"
+    | "refresh"
+    | "download"
+    | "close";
+}) {
+  const common = {
+    width: 18,
+    height: 18,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  if (type === "check") {
+    return (
+      <svg {...common}>
+        <path d="m5 12 4 4L19 6" />
+      </svg>
+    );
+  }
+
+  if (type === "warning") {
+    return (
+      <svg {...common}>
+        <path d="M10.3 3.6 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.6a2 2 0 0 0-3.4 0Z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </svg>
+    );
+  }
+
+  if (type === "incident") {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5" />
+        <path d="M12 16h.01" />
+      </svg>
+    );
+  }
+
+  if (type === "maintenance") {
+    return (
+      <svg {...common}>
+        <path d="m14.7 6.3 3 3" />
+        <path d="m3 21 7.8-7.8" />
+        <path d="M14 4a5 5 0 0 0 6 6l-4 4-6-6 4-4Z" />
+      </svg>
+    );
+  }
+
+  if (type === "search") {
+    return (
+      <svg {...common}>
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-4-4" />
+      </svg>
+    );
+  }
+
+  if (type === "refresh") {
+    return (
+      <svg {...common}>
+        <path d="M20 11a8.1 8.1 0 0 0-14.8-4L3 10" />
+        <path d="M3 5v5h5" />
+        <path d="M4 13a8.1 8.1 0 0 0 14.8 4L21 14" />
+        <path d="M21 19v-5h-5" />
+      </svg>
+    );
+  }
+
+  if (type === "download") {
+    return (
+      <svg {...common}>
+        <path d="M12 3v12" />
+        <path d="m7 10 5 5 5-5" />
+        <path d="M5 21h14" />
+      </svg>
+    );
+  }
+
+  if (type === "close") {
+    return (
+      <svg {...common}>
+        <path d="m6 6 12 12" />
+        <path d="m18 6-12 12" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg {...common}>
+      <path d="M4 17V9" />
+      <path d="M9 17V5" />
+      <path d="M14 17v-7" />
+      <path d="M19 17V3" />
+    </svg>
+  );
+}
+
+function StatusBadge({
+  status,
+}: {
+  status: FunctionalityHealth["status"];
+}) {
+  const icon =
+    status === "healthy"
+      ? "check"
+      : status === "degraded"
+        ? "warning"
+        : status === "unavailable"
+          ? "incident"
+          : status === "maintenance"
+            ? "maintenance"
+            : "incident";
+
+  return (
+    <span className={`${styles.statusBadge} ${statusClass[status]}`}>
+      <Icon type={icon} />
+      {statusText[status]}
+    </span>
+  );
+}
+
+function HealthRing({ score }: { score: number | null }) {
+  const safeScore = score == null ? 0 : Math.max(0, Math.min(100, score));
+  const circumference = 2 * Math.PI * 42;
+  const offset = circumference - (safeScore / 100) * circumference;
+
+  return (
+    <div className={styles.healthRing}>
+      <svg viewBox="0 0 100 100" className={styles.healthRingSvg}>
+        <circle
+          cx="50"
+          cy="50"
+          r="42"
+          className={styles.healthRingTrack}
+        />
+        <circle
+          cx="50"
+          cy="50"
+          r="42"
+          className={styles.healthRingValue}
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+        />
+      </svg>
+      <div className={styles.healthRingLabel}>
+        <strong>{score == null ? "—" : `${score}%`}</strong>
+        <span>Health</span>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({
+  label,
+  value,
+  icon,
+  tone,
+}: {
+  label: string;
+  value: string | number;
+  icon: "check" | "warning" | "incident" | "maintenance";
+  tone: string;
+}) {
+  return (
+    <div className={styles.summaryCard}>
+      <div className={`${styles.summaryIcon} ${tone}`}>
+        <Icon type={icon} />
+      </div>
+      <div>
+        <div className={styles.summaryValue}>{value}</div>
+        <div className={styles.summaryLabel}>{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function CategoryChart({
+  functionalities,
+}: {
+  functionalities: FunctionalityHealth[];
+}) {
+  const categories = useMemo(() => {
+    const grouped = new Map<string, number>();
+
+    functionalities.forEach((item) => {
+      grouped.set(
+        item.category,
+        (grouped.get(item.category) ?? 0) + 1,
+      );
+    });
+
+    return Array.from(grouped.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+  }, [functionalities]);
+
+  const max = Math.max(...categories.map(([, count]) => count), 1);
+
+  return (
+    <div className={styles.chartCard}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2>Status by Category</h2>
+          <p>Current functionality distribution</p>
+        </div>
+      </div>
+
+      <div className={styles.barChart}>
+        {categories.map(([category, count]) => (
+          <div className={styles.barColumn} key={category}>
+            <div className={styles.barValue}>{count}</div>
+            <div className={styles.barTrack}>
+              <div
+                className={styles.barFill}
+                style={{
+                  height: `${Math.max(12, (count / max) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className={styles.barLabel}>{category}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StatusDistribution({
+  counts,
+  functionalities,
+}: {
+  counts: FunctionalityHealthPayload["counts"];
+  functionalities: FunctionalityHealth[];
+}) {
+  const total = functionalities.length;
+
+  const healthy = counts.healthy ?? 0;
+  const degraded = counts.degraded ?? 0;
+  const incident = counts.incident ?? 0;
+
+  const healthyPct = total ? (healthy / total) * 100 : 0;
+  const degradedPct = total ? (degraded / total) * 100 : 0;
+  const incidentPct = total ? (incident / total) * 100 : 0;
+
+  const gradient = `conic-gradient(
+    #10b981 0 ${healthyPct}%,
+    #f59e0b ${healthyPct}% ${healthyPct + degradedPct}%,
+    #ef4444 ${healthyPct + degradedPct}% ${healthyPct + degradedPct + incidentPct}%,
+    #e2e8f0 ${healthyPct + degradedPct + incidentPct}% 100%
+  )`;
+
+  return (
+    <div className={styles.chartCard}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2>Functionality Status</h2>
+          <p>Live operational distribution</p>
+        </div>
+      </div>
+
+      <div className={styles.statusDistribution}>
+        <div
+          className={styles.donut}
+          style={{ background: gradient }}
+          aria-label={`${total} total functionalities`}
+        >
+          <div className={styles.donutInner}>
+            <strong>{total}</strong>
+            <span>Total</span>
+          </div>
+        </div>
+
+        <div className={styles.legend}>
+          <div>
+            <span className={`${styles.legendDot} ${styles.dotHealthy}`} />
+            <span>Healthy</span>
+            <strong>{healthy}</strong>
+          </div>
+          <div>
+            <span className={`${styles.legendDot} ${styles.dotDegraded}`} />
+            <span>Degraded</span>
+            <strong>{degraded}</strong>
+          </div>
+          <div>
+            <span className={`${styles.legendDot} ${styles.dotIncident}`} />
+            <span>Incident</span>
+            <strong>{incident}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FunctionalityTable({
+  functionalities,
+  onSelect,
+  selectedId,
+}: {
+  functionalities: FunctionalityHealth[];
+  onSelect: (id: string) => void;
+  selectedId: string | null;
+}) {
+  return (
+    <div className={styles.tableCard}>
+      <div className={styles.cardHeader}>
+        <div>
+          <h2>Functionality Overview</h2>
+          <p>
+            All EasyChatBot capabilities and their current operational
+            status.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          className={styles.secondaryButton}
+          onClick={() => {
+            const headers = [
+              "Functionality",
+              "Category",
+              "Status",
+              "Health",
+              "Latency",
+              "Provider",
+              "Risk",
+            ];
+
+            const rows = functionalities.map((item) => [
+              item.name,
+              item.category,
+              statusText[item.status],
+              item.health_score == null ? "" : `${item.health_score}%`,
+              item.latency_ms == null ? "" : `${item.latency_ms} ms`,
+              item.provider ?? "",
+              item.risk_level,
+            ]);
+
+            const csv = [headers, ...rows]
+              .map((row) =>
+                row
+                  .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+                  .join(","),
+              )
+              .join("\n");
+
+            const blob = new Blob([csv], {
+              type: "text/csv;charset=utf-8;",
+            });
+
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = "easychatbot-functionality-health.csv";
+            anchor.click();
+            URL.revokeObjectURL(url);
+          }}
+        >
+          <Icon type="download" />
+          Export
+        </button>
+      </div>
+
+      <div className={styles.tableFilters}>
+        <div className={styles.searchBox}>
+          <Icon type="search" />
+          <input
+            aria-label="Search functionalities"
+            placeholder="Search functionalities..."
+            onChange={() => undefined}
+          />
+        </div>
+
+        <button type="button" className={styles.filterButton}>
+          All categories
+          <span>⌄</span>
+        </button>
+
+        <button type="button" className={styles.filterButton}>
+          All statuses
+          <span>⌄</span>
+        </button>
+      </div>
+
+      <div className={styles.tableWrapper}>
+        <table className={styles.healthTable}>
+          <thead>
+            <tr>
+              <th>Functionality</th>
+              <th>Category</th>
+              <th>Status</th>
+              <th>Health</th>
+              <th>Latency</th>
+              <th>Provider</th>
+              <th>Last Checked</th>
+            </tr>
+          </thead>
+          <tbody>
+            {functionalities.map((item) => (
+              <tr
+                key={item.functionality_id}
+                className={
+                  selectedId === item.functionality_id
+                    ? styles.selectedRow
+                    : ""
+                }
+                onClick={() => onSelect(item.functionality_id)}
+              >
+                <td>
+                  <div className={styles.functionalityName}>
+                    <span className={styles.functionalityIcon}>◉</span>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <span>{item.capability ?? item.description}</span>
+                    </div>
+                  </div>
+                </td>
+                <td>{item.category}</td>
+                <td>
+                  <StatusBadge status={item.status} />
+                </td>
+                <td>
+                  <strong
+                    className={
+                      item.status === "unavailable"
+                        ? styles.valueIncident
+                        : item.status === "degraded"
+                          ? styles.valueDegraded
+                          : styles.valueNormal
+                    }
+                  >
+                    {item.health_score == null
+                      ? "—"
+                      : `${item.health_score}%`}
+                  </strong>
+                </td>
+                <td>
+                  <span
+                    className={
+                      item.latency_ms != null && item.latency_ms > 1000
+                        ? styles.latencyWarning
+                        : ""
+                    }
+                  >
+                    {item.latency_ms == null
+                      ? "—"
+                      : `${item.latency_ms} ms`}
+                  </span>
+                </td>
+                <td>{item.provider ?? "—"}</td>
+                <td>
+                  {item.checked_at
+                    ? new Date(item.checked_at).toLocaleString()
+                    : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className={styles.tableFooter}>
+        Showing {functionalities.length} functionality
+        {functionalities.length === 1 ? "" : "ies"}
+      </div>
+    </div>
+  );
+}
+
+export default function FunctionalityHealthDashboard() {
+  const [data, setData] = useState<FunctionalityHealthPayload | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [environment, setEnvironment] = useState<OperationsEnvironment>("adults");
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const [stopConfirmationOpen, setStopConfirmationOpen] = useState(false);
+  const [stopReason, setStopReason] = useState("");
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+
+    try {
+      const next = await getFunctionalityHealth(environment);
+
+      setData(next);
+      setError(null);
+
+      setSelectedId((current) =>
+        current &&
+        next.functionalities.some(
+          (item) => item.functionality_id === current,
+        )
+          ? current
+          : next.functionalities[0]?.functionality_id ?? null,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to load live health.",
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  }, [environment]);
+
+  useEffect(() => {
+    void refresh();
+
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 15_000);
+
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  const selected = useMemo(
+    () =>
+      data?.functionalities.find(
+        (item) => item.functionality_id === selectedId,
+      ) ?? null,
+    [data, selectedId],
+  );
+
+  const selectedAvailability = selected?.availability ?? "enabled";
+  const selectedIsDisabled = selectedAvailability === "disabled";
+
+  const executeStop = async () => {
+    if (!selected || !stopReason.trim()) {
+      return;
+    }
+
+    setControlBusy(true);
+    setControlError(null);
+
+    try {
+      await stopFunctionality(
+        selected.functionality_id,
+        environment,
+        stopReason.trim(),
+      );
+
+      setStopConfirmationOpen(false);
+      setStopReason("");
+      await refresh();
+    } catch (cause) {
+      setControlError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to stop this functionality.",
+      );
+    } finally {
+      setControlBusy(false);
+    }
+  };
+
+  const executeResume = async () => {
+    if (!selected) {
+      return;
+    }
+
+    setControlBusy(true);
+    setControlError(null);
+
+    try {
+      await resumeFunctionality(
+        selected.functionality_id,
+        environment,
+      );
+
+      await refresh();
+    } catch (cause) {
+      setControlError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to resume this functionality.",
+      );
+    } finally {
+      setControlBusy(false);
+    }
+  };
+
+  if (!data) {
+    return (
+      <main className={styles.loadingPage}>
+        <div className={styles.loadingCard}>
+          {error ? (
+            <div role="alert" className={styles.error}>
+              {error}
+            </div>
+          ) : (
+            <div className={styles.loadingText} aria-live="polite">
+              Loading Functionality Health...
+            </div>
+          )}
+        </div>
+      </main>
+    );
+  }
+
+  const counts = data.counts;
+
+  return (
+    <main className={styles.page}>
+      <div className={styles.content}>
+        <header className={styles.pageHeader}>
+          <div>
+            <div className={styles.breadcrumb}>
+              Operations Center <span>›</span>{" "}
+              <strong>Functionality Health</strong>
+            </div>
+
+            <h1>Functionality Health</h1>
+
+            <p>
+              Real-time operational health across all EasyChatBot
+              capabilities.
+            </p>
+          </div>
+
+          <div className={styles.headerActions}>
+            <div role="group" aria-label="Operations Center environment" className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 p-1">
+              {(["kids", "adults"] as const).map((option) => (
+                <button key={option} type="button" aria-pressed={environment === option} onClick={() => setEnvironment(option)} className={`rounded-md px-3 py-2 text-sm font-semibold transition ${environment === option ? "bg-white text-slate-900" : "text-slate-300 hover:bg-white/10"}`}>
+                  {option === "kids" ? "Kids" : "Adults"}
+                </button>
+              ))}
+            </div>
+            <div className={styles.updated}>
+              <span>Last updated</span>
+              <strong>
+                {new Date(data.generated_at).toLocaleString()}
+              </strong>
+            </div>
+
+            <button
+              type="button"
+              className={styles.primaryButton}
+              onClick={() => void refresh()}
+              disabled={refreshing}
+            >
+              <Icon type="refresh" />
+              {refreshing ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+        </header>
+
+        <section className={styles.summaryGrid}>
+          <div className={styles.platformHealthCard}>
+            <HealthRing score={data.platform_health_score} />
+            <div>
+              <span>Platform Health</span>
+              <strong>Overall platform status</strong>
+              <small>User impact: {data.user_impact}</small>
+            </div>
+          </div>
+
+          <SummaryCard
+            label="Healthy"
+            value={counts.healthy ?? 0}
+            icon="check"
+            tone={styles.iconGreen}
+          />
+
+          <SummaryCard
+            label="Degraded"
+            value={counts.degraded ?? 0}
+            icon="warning"
+            tone={styles.iconAmber}
+          />
+
+          <SummaryCard
+            label="Incident"
+            value={counts.incident ?? 0}
+            icon="incident"
+            tone={styles.iconRed}
+          />
+
+          <SummaryCard
+            label="Maintenance"
+            value={counts.maintenance ?? 0}
+            icon="maintenance"
+            tone={styles.iconBlue}
+          />
+        </section>
+
+        {data.attention.length > 0 && (
+          <section className={styles.attentionBanner}>
+            <div className={styles.attentionIcon}>
+              <Icon type="warning" />
+            </div>
+            <div>
+              <strong>
+                {data.attention.length} functionality
+                {data.attention.length === 1 ? "" : "ies"} require attention
+              </strong>
+              <span>
+                Review the exception before taking operational action.
+              </span>
+            </div>
+          </section>
+        )}
+
+        <section className={styles.chartGrid}>
+          <StatusDistribution
+            counts={counts}
+            functionalities={data.functionalities}
+          />
+          <CategoryChart functionalities={data.functionalities} />
+        </section>
+
+        <section className={styles.workspace}>
+          <FunctionalityTable
+            functionalities={data.functionalities}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+
+          {selected && (
+            <aside className={styles.detailsPanel}>
+              <div className={styles.detailsHeader}>
+                <div>
+                  <span>Functionality Details</span>
+                  <h2>{selected.name}</h2>
+                </div>
+
+                <button
+                  type="button"
+                  aria-label="Close functionality details"
+                  className={styles.iconButton}
+                  onClick={() => setSelectedId(null)}
+                >
+                  <Icon type="close" />
+                </button>
+              </div>
+
+              <StatusBadge status={selected.status} />
+
+              <p className={styles.detailsDescription}>
+                {selected.description}
+              </p>
+
+              <div className={styles.detailsGrid}>
+                <div>
+                  <span>Functionality ID</span>
+                  <strong>{selected.functionality_id}</strong>
+                </div>
+                <div>
+                  <span>Category</span>
+                  <strong>{selected.category}</strong>
+                </div>
+                <div>
+                  <span>Health Score</span>
+                  <strong>{selected.health_score ?? "—"}%</strong>
+                </div>
+                <div>
+                  <span>Latency</span>
+                  <strong>{selected.latency_ms ?? "—"} ms</strong>
+                </div>
+                <div>
+                  <span>Provider</span>
+                  <strong>{selected.provider ?? "—"}</strong>
+                </div>
+                <div>
+                  <span>Model</span>
+                  <strong>{selected.model ?? "—"}</strong>
+                </div>
+                <div>
+                  <span>Risk Level</span>
+                  <strong>{selected.risk_level}</strong>
+                </div>
+                <div>
+                  <span>Last Checked</span>
+                  <strong>
+                    {selected.checked_at
+                      ? new Date(selected.checked_at).toLocaleString()
+                      : "—"}
+                  </strong>
+                </div>
+              </div>
+
+              <div className={styles.assessment}>
+                <span>Current assessment</span>
+                <p>{selected.reason}</p>
+              </div>
+
+              <div className={styles.controlNotice}>
+                <strong>Operational controls</strong>
+
+                {selectedIsDisabled ? (
+                  <>
+                    <span>
+                      This functionality is currently stopped for the{" "}
+                      {environment === "kids" ? "Kids" : "Adults"} environment.
+                    </span>
+
+                    <button
+                      type="button"
+                      className={styles.resumeButton}
+                      onClick={() => void executeResume()}
+                      disabled={controlBusy}
+                    >
+                      {controlBusy ? "Resuming..." : "Resume functionality"}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      Stop is a backend-authorised operational action and is
+                      recorded with an audit reason.
+                    </span>
+
+                    {!stopConfirmationOpen ? (
+                      <button
+                        type="button"
+                        className={styles.stopButton}
+                        onClick={() => {
+                          setControlError(null);
+                          setStopConfirmationOpen(true);
+                        }}
+                        disabled={controlBusy}
+                      >
+                        Stop functionality
+                      </button>
+                    ) : (
+                      <div className={styles.stopConfirmation}>
+                        <strong>Confirm stop</strong>
+
+                        <label htmlFor="functionality-stop-reason">
+                          Reason <span aria-hidden="true">*</span>
+                        </label>
+
+                        <textarea
+                          id="functionality-stop-reason"
+                          value={stopReason}
+                          onChange={(event) =>
+                            setStopReason(event.target.value)
+                          }
+                          placeholder="Enter the reason for stopping this functionality..."
+                          maxLength={2000}
+                          disabled={controlBusy}
+                          rows={4}
+                        />
+
+                        <div className={styles.controlActions}>
+                          <button
+                            type="button"
+                            className={styles.cancelButton}
+                            onClick={() => {
+                              setStopConfirmationOpen(false);
+                              setStopReason("");
+                              setControlError(null);
+                            }}
+                            disabled={controlBusy}
+                          >
+                            Cancel
+                          </button>
+
+                          <button
+                            type="button"
+                            className={styles.confirmStopButton}
+                            onClick={() => void executeStop()}
+                            disabled={controlBusy || !stopReason.trim()}
+                          >
+                            {controlBusy ? "Stopping..." : "Confirm Stop"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {controlError && (
+                  <div role="alert" className={styles.controlError}>
+                    {controlError}
+                  </div>
+                )}
+              </div>
+            </aside>
+          )}
+        </section>
+
+        <footer className={styles.footer}>
+          <span>EasyChatBot Operations Center</span>
+          <span>Backend-authorised operational controls</span>
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+
+
+

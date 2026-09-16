@@ -19,19 +19,14 @@ Does NOT:
 
 from __future__ import annotations
 
-
 from dataclasses import dataclass
 
-
-from app.infrastructure.voice.voice_room_adapter import (
-    VoiceRoomAdapter,
+from app.application.uai.voice.voice_room_port import (
+    VoiceRoomPort,
 )
-
-
 from app.domain.uai.voice.voice_call_execution_context import (
     VoiceCallExecutionContext,
 )
-
 
 
 @dataclass(
@@ -44,9 +39,7 @@ class VoiceRoomService:
     voice room preparation.
     """
 
-    room_adapter: VoiceRoomAdapter
-
-
+    room_adapter: VoiceRoomPort
 
     def prepare_room(
         self,
@@ -57,10 +50,15 @@ class VoiceRoomService:
         Prepare room configuration.
         """
 
-
         return (
             self.room_adapter
             .create_room_configuration(
                 context=context,
             )
         )
+
+
+__all__ = [
+    "VoiceRoomService",
+]
+

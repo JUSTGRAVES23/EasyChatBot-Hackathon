@@ -1,4 +1,4 @@
-"""
+﻿"""
 Content/Product Discovery Skill.
 
 Executes provider-independent discovery queries through an injected
@@ -41,14 +41,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQuery,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Execution Coordinator Composition.
 
 Validates that the composition root
@@ -54,3 +54,4 @@ def test_create_voice_call_execution_coordinator():
         coordinator.execution_runtime,
         VoiceCallExecutionRuntime,
     )
+

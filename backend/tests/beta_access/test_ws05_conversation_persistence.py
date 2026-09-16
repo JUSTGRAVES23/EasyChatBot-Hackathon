@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -290,3 +290,4 @@ async def test_ws05_different_telegram_identities_are_not_mixed():
             "message": "Bonjour",
         },
     ]
+

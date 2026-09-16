@@ -1,60 +1,62 @@
-"""
+﻿"""
 Tests for LiveKit Realtime Agent infrastructure adapter.
-
-Validates the boundary between EasyChatBot
-interaction context and LiveKit Agents.
 """
 
 from __future__ import annotations
 
-
 from unittest.mock import Mock
 
+import pytest
+from livekit.agents import Agent, AgentSession
 
-from livekit.agents import (
-    Agent,
-    AgentSession,
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
 )
-
-
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
 from app.domain.uai.context.interaction_context import (
     InteractionContext,
 )
-
-
 from app.infrastructure.voice.livekit_realtime_agent import (
     LiveKitRealtimeAgent,
 )
 
 
 def create_context() -> InteractionContext:
-    """
-    Create a minimal interaction context for the adapter tests.
-
-    The actual construction of InteractionContext is repository-specific,
-    therefore this test uses a mock constrained to the required interface.
-    """
-
     character = Mock()
     character.character_id = "yeti"
 
     world = Mock()
     world.language_code = "fr"
 
-    context = Mock(
-        spec=InteractionContext,
-    )
+    voice = Mock()
+    voice.language_code = "fr"
+    voice.voice_profile = "yeti"
 
+    context = Mock(spec=InteractionContext)
     context.character = character
     context.world = world
+    context.voice = voice
 
     return context
 
 
-def create_adapter() -> LiveKitRealtimeAgent:
-    """
-    Create a valid LiveKit realtime adapter.
-    """
+def create_adapter(
+    *,
+    with_runtime: bool = False,
+) -> LiveKitRealtimeAgent:
+    conversation_runtime = (
+        Mock(spec=ConversationRuntime)
+        if with_runtime
+        else None
+    )
+
+    speech_runtime = (
+        Mock(spec=VoiceSpeechRuntime)
+        if with_runtime
+        else None
+    )
 
     return LiveKitRealtimeAgent(
         context=create_context(),
@@ -62,78 +64,91 @@ def create_adapter() -> LiveKitRealtimeAgent:
             "You are Yeti, a friendly French "
             "conversation character."
         ),
+        conversation_runtime=conversation_runtime,
+        speech_runtime=speech_runtime,
     )
 
 
 def test_create_agent():
-    """
-    Adapter creates a LiveKit Agent.
-    """
-
     adapter = create_adapter()
 
     agent = adapter.create_agent()
 
-    assert isinstance(
-        agent,
-        Agent,
-    )
+    assert isinstance(agent, Agent)
 
 
 def test_agent_preserves_character_instructions():
-    """
-    Character instructions are passed to the LiveKit Agent.
-    """
-
     adapter = create_adapter()
 
     agent = adapter.create_agent()
 
-    assert (
-        agent.instructions
-        == (
-            "You are Yeti, a friendly French "
-            "conversation character."
-        )
+    assert agent.instructions == (
+        "You are Yeti, a friendly French "
+        "conversation character."
     )
 
 
-def test_create_session():
-    """
-    Adapter creates a LiveKit AgentSession.
-    """
-
+def test_create_session_without_runtime_fails_closed():
     adapter = create_adapter()
+
+    with pytest.raises(
+        RuntimeError,
+        match="ConversationRuntime is required",
+    ):
+        adapter.create_session()
+
+
+@pytest.mark.asyncio
+async def test_create_session_wires_easychatbot_voice_stack():
+    adapter = create_adapter(with_runtime=True)
 
     session = adapter.create_session()
 
-    assert isinstance(
-        session,
-        AgentSession,
-    )
+    try:
+        assert isinstance(session, AgentSession)
+        assert session._stt is not None
+        assert session._llm is not None
+        assert session._tts is not None
+
+        assert (
+            session._llm.__class__.__name__
+            == "LiveKitConversationLLM"
+        )
+        assert (
+            session._stt.__class__.__name__
+            == "LiveKitSTTAdapter"
+        )
+        assert (
+            session._tts.__class__.__name__
+            == "LiveKitTTSAdapter"
+        )
+
+        assert session._tts._voice_profile == "yeti"
+        assert session._tts._language_code == "fr"
+    finally:
+        await session.aclose()
 
 
 def test_character_id():
-    """
-    Adapter exposes the EasyChatBot character identity.
-    """
-
     adapter = create_adapter()
 
-    assert (
-        adapter.character_id()
-        == "yeti"
-    )
+    assert adapter.character_id() == "yeti"
 
 
 def test_language_code():
-    """
-    Adapter exposes the interaction language.
-    """
-
     adapter = create_adapter()
 
-    assert (
-        adapter.language_code()
-        == "fr"
-    )
+    assert adapter.language_code() == "fr"
+
+
+def test_voice_profile_comes_from_voice_context():
+    adapter = create_adapter()
+
+    assert adapter.context.voice.voice_profile == "yeti"
+
+
+def test_has_conversation_runtime():
+    assert create_adapter().has_conversation_runtime() is False
+    assert create_adapter(
+        with_runtime=True
+    ).has_conversation_runtime() is True

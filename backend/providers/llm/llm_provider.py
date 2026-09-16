@@ -1,4 +1,4 @@
-"""
+﻿"""
 LLM Provider Contract.
 
 Defines the provider-independent contract for language
@@ -44,11 +44,11 @@ from __future__ import annotations
 from abc import ABC
 from abc import abstractmethod
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 

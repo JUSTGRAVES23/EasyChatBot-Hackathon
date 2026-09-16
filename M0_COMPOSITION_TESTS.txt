@@ -1,0 +1,2185 @@
+===== M0 COMPOSITION TEST INSPECTION =====
+
+===== FILE: backend\tests\announcements\test_announcement_operations_foundation.py =====
+from __future__ import annotations
+
+from uuid import UUID
+
+import pytest
+
+from backend.app.application.announcements.announcement_operations_service import AnnouncementOperationsService
+from backend.app.application.announcements.in_memory_repositories import InMemoryAnnouncementRepository, InMemoryPublicationEventRepository
+from backend.app.domain.announcements.publication_event import PublicationEventType
+from backend.app.domain.announcements.publication_status import PublicationStatus
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_and_audit_events() -> None:
+    service = AnnouncementOperationsService(
+        repository=InMemoryAnnouncementRepository(),
+        event_repository=InMemoryPublicationEventRepository(),
+    )
+    item = await service.create(title="Beta 2", body="Release", actor="admin", correlation_id="ann-1")
+    assert item.status is PublicationStatus.DRAFT
+
+    await service.mark_ready_for_review(item.id, actor="admin")
+    await service.approve(item.id, actor="admin")
+    await service.request_publication(item.id, actor="admin")
+    await service.mark_published(item.id, actor="admin", provider_message_id="tg-1")
+
+    assert (await service.get(item.id)).status is PublicationStatus.PUBLISHED
+    events = await service.audit_log(item.id)
+    assert [event.event_type for event in events] == [
+        PublicationEventType.CREATED,
+        PublicationEventType.READY_FOR_REVIEW,
+        PublicationEventType.APPROVED,
+        PublicationEventType.PUBLISH_REQUESTED,
+        PublicationEventType.PUBLISHED,
+    ]
+    assert events[-1].provider_message_id == "tg-1"
+
+
+@pytest.mark.asyncio
+async def test_failed_publication_is_recorded() -> None:
+    service = AnnouncementOperationsService(
+        repository=InMemoryAnnouncementRepository(),
+        event_repository=InMemoryPublicationEventRepository(),
+    )
+    item = await service.create(title="Notice", body="Maintenance", actor="admin")
+    await service.mark_ready_for_review(item.id, actor="admin")
+    await service.approve(item.id, actor="admin")
+    await service.request_publication(item.id, actor="admin")
+    await service.mark_failed(item.id, actor="admin", error_code="TELEGRAM_TIMEOUT")
+
+    assert (await service.get(item.id)).status is PublicationStatus.FAILED
+    events = await service.audit_log(item.id)
+    assert events[-1].event_type is PublicationEventType.FAILED
+    assert events[-1].error_code == "TELEGRAM_TIMEOUT"
+
+
+def test_invalid_transition_is_rejected() -> None:
+    from backend.app.domain.announcements.announcement import Announcement
+    item = Announcement(title="A", body="B", created_by="admin")
+    with pytest.raises(ValueError):
+        item.mark_published()
+
+===== FILE: backend\tests\announcements\test_ws22_3_5_3_durable_execution_composition.py =====
+from __future__ import annotations
+
+import os
+
+import pytest
+from dotenv import load_dotenv
+
+from backend.app.application.announcements.execution.audit_adapter import (
+    DurablePublicationExecutionAudit,
+)
+from backend.app.application.announcements.execution.durable_execution_composition import (
+    DurablePublicationExecutionComposition,
+    create_durable_publication_execution_composition,
+)
+from backend.app.application.announcements.execution.durable_execution_service import (
+    DurablePublicationExecutionService,
+)
+from backend.app.infrastructure.announcements.publication_audit_repository import (
+    SqlAlchemyPublicationAuditRepository,
+)
+from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+    SqlAlchemyPublicationExecutionRepository,
+)
+
+
+def _load_repository_environment() -> None:
+    """Load the repository .env before creating the canonical DB boundary."""
+
+    load_dotenv()
+
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip(
+            "DATABASE_URL is not configured for PostgreSQL integration tests."
+        )
+
+
+class RecordingPublisher:
+    async def publish(self, **kwargs) -> str:
+        return "provider-test-001"
+
+
+@pytest.mark.asyncio
+async def test_ws22_composition_uses_canonical_shared_persistence() -> None:
+    _load_repository_environment()
+
+    composition = create_durable_publication_execution_composition(
+        publisher=RecordingPublisher(),
+    )
+
+    try:
+        assert isinstance(
+            composition,
+            DurablePublicationExecutionComposition,
+        )
+
+        assert isinstance(
+            composition.service,
+            DurablePublicationExecutionService,
+        )
+
+        assert isinstance(
+            composition.execution_repository,
+            SqlAlchemyPublicationExecutionRepository,
+        )
+
+        assert isinstance(
+            composition.audit_repository,
+            SqlAlchemyPublicationAuditRepository,
+        )
+
+        assert isinstance(
+            composition.audit,
+            DurablePublicationExecutionAudit,
+        )
+
+        # Critical architectural invariant:
+        # both WS-22 durable repositories use the canonical shared
+        # async session factory.
+        assert (
+            composition.execution_repository._session_factory
+            is composition.session_factory
+        )
+
+        assert (
+            composition.audit_repository._session_factory
+            is composition.session_factory
+        )
+
+    finally:
+        await composition.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ws22_composition_rejects_missing_publisher() -> None:
+    with pytest.raises(ValueError, match="publisher cannot be None"):
+        create_durable_publication_execution_composition(
+            publisher=None,
+        )
+
+===== FILE: backend\tests\announcements\test_ws22_3_5_4_composition_execution.py =====
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from uuid import UUID, uuid4
+
+import pytest
+from dotenv import load_dotenv
+from sqlalchemy import delete, select
+
+from backend.app.application.announcements.execution.contracts import (
+    PublicationExecutionRequest,
+    PublicationExecutionStatus,
+)
+from backend.app.application.announcements.execution.durable_execution_composition import (
+    create_durable_publication_execution_composition,
+)
+from backend.app.infrastructure.announcements.publication_audit_repository import (
+    PublicationAuditEventModel,
+)
+from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+    PublicationExecutionRecordModel,
+)
+
+
+def _load_repository_environment() -> None:
+    load_dotenv()
+
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip(
+            "DATABASE_URL is not configured for PostgreSQL integration tests."
+        )
+
+
+class RecordingPublisher:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def publish(self, **kwargs) -> str:
+        self.calls.append(kwargs)
+        return "provider-ws22-3-5-4-001"
+
+
+@dataclass
+class ApprovedPublication:
+    id: UUID
+    title: str = "WS-22.3.5.4 test"
+    content: str = "Durable composition integration test."
+    status: str = "approved"
+
+    def begin_publish(self) -> None:
+        pass
+
+    def publish_success(
+        self,
+        provider_message_id: str | None = None,
+    ) -> None:
+        self.status = "published"
+
+    def mark_failure(self, error_code: str) -> None:
+        self.status = "failed"
+
+
+async def _cleanup(
+    composition,
+    *,
+    idempotency_key: str,
+    publication_id: UUID,
+) -> None:
+    async with composition.session_factory() as session:
+        await session.execute(
+            delete(PublicationAuditEventModel).where(
+                PublicationAuditEventModel.publication_id
+                == str(publication_id)
+            )
+        )
+
+        await session.execute(
+            delete(PublicationExecutionRecordModel).where(
+                PublicationExecutionRecordModel.idempotency_key
+                == idempotency_key
+            )
+        )
+
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_composition_executes_and_persists_execution_and_audit() -> None:
+    _load_repository_environment()
+
+    publisher = RecordingPublisher()
+
+    composition = create_durable_publication_execution_composition(
+        publisher=publisher,
+    )
+
+    publication_id = uuid4()
+    idempotency_key = f"ws22-3-5-4-{uuid4()}"
+    correlation_id = f"corr-{uuid4()}"
+
+    request = PublicationExecutionRequest(
+        publication_id=publication_id,
+        idempotency_key=idempotency_key,
+        actor="ws22-3-5-4-test",
+        correlation_id=correlation_id,
+    )
+
+    publication = ApprovedPublication(id=publication_id)
+
+    try:
+        result = await composition.service.execute(
+            publication=publication,
+            request=request,
+        )
+
+        assert result.status is PublicationExecutionStatus.SUCCEEDED
+        assert result.provider_message_id == "provider-ws22-3-5-4-001"
+        assert len(publisher.calls) == 1
+
+        async with composition.session_factory() as session:
+            execution = await session.scalar(
+                select(PublicationExecutionRecordModel).where(
+                    PublicationExecutionRecordModel.idempotency_key
+                    == idempotency_key
+                )
+            )
+
+            assert execution is not None
+            assert execution.idempotency_key == idempotency_key
+            assert execution.correlation_id == correlation_id
+            assert execution.provider_message_id == (
+                "provider-ws22-3-5-4-001"
+            )
+
+            audit_events = (
+                await session.scalars(
+                    select(PublicationAuditEventModel)
+                    .where(
+                        PublicationAuditEventModel.publication_id
+                        == str(publication_id)
+                    )
+                    .order_by(PublicationAuditEventModel.id)
+                )
+            ).all()
+
+            assert len(audit_events) == 1
+            assert audit_events[0].event_type == "published"
+            assert audit_events[0].actor == "ws22-3-5-4-test"
+            assert audit_events[0].correlation_id == correlation_id
+            assert audit_events[0].provider_message_id == (
+                "provider-ws22-3-5-4-001"
+            )
+
+    finally:
+        await _cleanup(
+            composition,
+            idempotency_key=idempotency_key,
+            publication_id=publication_id,
+        )
+        await composition.dispose()
+
+
+@pytest.mark.asyncio
+async def test_composition_replays_without_second_provider_call() -> None:
+    _load_repository_environment()
+
+    publisher = RecordingPublisher()
+
+    composition = create_durable_publication_execution_composition(
+        publisher=publisher,
+    )
+
+    publication_id = uuid4()
+    idempotency_key = f"ws22-3-5-4-replay-{uuid4()}"
+    correlation_id = f"corr-{uuid4()}"
+
+    request = PublicationExecutionRequest(
+        publication_id=publication_id,
+        idempotency_key=idempotency_key,
+        actor="ws22-3-5-4-test",
+        correlation_id=correlation_id,
+    )
+
+    try:
+        first = await composition.service.execute(
+            publication=ApprovedPublication(id=publication_id),
+            request=request,
+        )
+
+        second = await composition.service.execute(
+            publication=ApprovedPublication(id=publication_id),
+            request=request,
+        )
+
+        assert first.status is PublicationExecutionStatus.SUCCEEDED
+        assert second.status is PublicationExecutionStatus.IDEMPOTENT_REPLAY
+
+        assert second.provider_message_id == first.provider_message_id
+        assert len(publisher.calls) == 1
+
+    finally:
+        await _cleanup(
+            composition,
+            idempotency_key=idempotency_key,
+            publication_id=publication_id,
+        )
+        await composition.dispose()
+
+===== FILE: backend\tests\announcements\test_ws23_1_3_composition.py =====
+from __future__ import annotations
+
+from backend.app.application.announcements.approval.composition import (
+    create_announcement_approval_composition,
+)
+
+
+class FakeService:
+    async def approve(self, *, publication_id: str, actor: str):
+        raise NotImplementedError
+
+
+async def allow() -> bool:
+    return True
+
+
+def test_ws23_1_3_composition_reuses_injected_approval_service() -> None:
+    service = FakeService()
+
+    composition = create_announcement_approval_composition(
+        approval_service=service,
+        admin_authorizer=allow,
+    )
+
+    assert composition.service is service
+    assert composition.router is not None
+
+===== FILE: backend\tests\announcements\test_ws23_1_3_persistence_composition.py =====
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from backend.app.api.announcement_operations_approval import (
+    create_announcement_operations_approval_router,
+)
+from backend.app.application.announcements.approval.async_approval_service import (
+    AsyncAnnouncementPublicationApprovalService,
+)
+from backend.app.domain.announcements.publication import Publication
+from backend.app.domain.announcements.template_models import (
+    PublicationStatus,
+    PublicationType,
+)
+from backend.app.infrastructure.announcements.in_memory_repositories import (
+    InMemoryPublicationRepository,
+)
+
+
+class FakeAsyncRepository:
+    def __init__(self, publication: Publication | None) -> None:
+        self.publication = publication
+        self.saved = []
+
+    async def get_async(self, publication_id: str):
+        if self.publication and self.publication.publication_id == publication_id:
+            return self.publication
+        return None
+
+    async def save_async(self, publication: Publication) -> None:
+        self.saved.append(publication)
+        self.publication = publication
+
+
+class AuditRecorder:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def record_approval(self, **kwargs) -> None:
+        self.events.append(kwargs)
+
+
+def make_publication() -> Publication:
+    return Publication(
+        publication_id="ws23-1-3-persistence-test",
+        template_id="beta-update",
+        template_version=1,
+        publication_type=PublicationType.BETA_UPDATE,
+        title="Beta update",
+        content="Test announcement",
+        status=PublicationStatus.PENDING_APPROVAL,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_approval_persists_state_and_audit_contract() -> None:
+    repository = FakeAsyncRepository(make_publication())
+    audit = AuditRecorder()
+    service = AsyncAnnouncementPublicationApprovalService(
+        publications=repository,
+        audit=audit,
+    )
+
+    result = await service.approve(
+        publication_id="ws23-1-3-persistence-test",
+        actor="admin-test",
+    )
+
+    assert result.publication.status is PublicationStatus.APPROVED
+    assert len(repository.saved) == 1
+    assert len(audit.events) == 1
+    assert audit.events[0]["actor"] == "admin-test"
+
+
+@pytest.mark.asyncio
+async def test_api_denies_unauthorized_approval() -> None:
+    repository = FakeAsyncRepository(make_publication())
+    audit = AuditRecorder()
+    service = AsyncAnnouncementPublicationApprovalService(
+        publications=repository,
+        audit=audit,
+    )
+
+    async def deny() -> bool:
+        return False
+
+    app = FastAPI()
+    app.include_router(
+        create_announcement_operations_approval_router(
+            approval_service=service,
+            admin_authorizer=deny,
+        )
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/announcement-operations/publications/"
+            "ws23-1-3-persistence-test/approve",
+            json={"actor": "admin-test"},
+        )
+
+    assert response.status_code == 403
+    assert repository.publication.status is PublicationStatus.PENDING_APPROVAL
+    assert audit.events == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_transition_is_rejected() -> None:
+    publication = make_publication()
+    publication.status = PublicationStatus.DRAFT
+
+    repository = FakeAsyncRepository(publication)
+    audit = AuditRecorder()
+    service = AsyncAnnouncementPublicationApprovalService(
+        publications=repository,
+        audit=audit,
+    )
+
+    with pytest.raises(ValueError, match="Invalid publication transition"):
+        await service.approve(
+            publication_id=publication.publication_id,
+            actor="admin-test",
+        )
+
+    assert repository.saved == []
+    assert audit.events == []
+
+===== FILE: backend\tests\announcements\test_ws23_1_4_telegram_composition_adapter.py =====
+from uuid import uuid4
+
+import pytest
+
+from backend.app.infrastructure.announcements.execution.telegram_publication_publisher_adapter import (
+    TelegramPublicationPublisherAdapter,
+)
+
+
+class FakeControlledPublisher:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def publish(
+        self,
+        *,
+        channel_id: str,
+        text: str,
+        announcement_type: str,
+    ):
+        self.calls.append(
+            {
+                "channel_id": channel_id,
+                "text": text,
+                "announcement_type": announcement_type,
+            }
+        )
+
+        class Record:
+            message_id = "telegram-message-123"
+
+        return Record()
+
+
+@pytest.mark.asyncio
+async def test_ws23_1_4_adapter_delegates_to_controlled_publisher() -> None:
+    controlled = FakeControlledPublisher()
+
+    adapter = TelegramPublicationPublisherAdapter(
+        publisher=controlled,
+        channel_id="-1001234567890",
+        announcement_type="beta_update",
+    )
+
+    message_id = await adapter.publish(
+        publication_id=uuid4(),
+        title="Beta 1",
+        content="The beta is ready.",
+        correlation_id="corr-1",
+        idempotency_key="idem-1",
+    )
+
+    assert message_id == "telegram-message-123"
+
+    assert controlled.calls == [
+        {
+            "channel_id": "-1001234567890",
+            "text": "*Beta 1*\n\nThe beta is ready.",
+            "announcement_type": "beta_update",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws23_1_4_adapter_rejects_empty_title() -> None:
+    controlled = FakeControlledPublisher()
+
+    adapter = TelegramPublicationPublisherAdapter(
+        publisher=controlled,
+        channel_id="-1001234567890",
+    )
+
+    with pytest.raises(ValueError, match="title cannot be empty"):
+        await adapter.publish(
+            publication_id=uuid4(),
+            title=" ",
+            content="content",
+            correlation_id="corr",
+            idempotency_key="idem",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ws23_1_4_adapter_rejects_empty_content() -> None:
+    controlled = FakeControlledPublisher()
+
+    adapter = TelegramPublicationPublisherAdapter(
+        publisher=controlled,
+        channel_id="-1001234567890",
+    )
+
+    with pytest.raises(ValueError, match="content cannot be empty"):
+        await adapter.publish(
+            publication_id=uuid4(),
+            title="Beta 1",
+            content=" ",
+            correlation_id="corr",
+            idempotency_key="idem",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ws23_1_4_adapter_rejects_empty_correlation_id() -> None:
+    controlled = FakeControlledPublisher()
+
+    adapter = TelegramPublicationPublisherAdapter(
+        publisher=controlled,
+        channel_id="-1001234567890",
+    )
+
+    with pytest.raises(ValueError, match="correlation_id cannot be empty"):
+        await adapter.publish(
+            publication_id=uuid4(),
+            title="Beta 1",
+            content="content",
+            correlation_id=" ",
+            idempotency_key="idem",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ws23_1_4_adapter_rejects_empty_idempotency_key() -> None:
+    controlled = FakeControlledPublisher()
+
+    adapter = TelegramPublicationPublisherAdapter(
+        publisher=controlled,
+        channel_id="-1001234567890",
+    )
+
+    with pytest.raises(ValueError, match="idempotency_key cannot be empty"):
+        await adapter.publish(
+            publication_id=uuid4(),
+            title="Beta 1",
+            content="content",
+            correlation_id="corr",
+            idempotency_key=" ",
+        )
+
+
+def test_ws23_1_4_adapter_requires_channel_id() -> None:
+    controlled = FakeControlledPublisher()
+
+    with pytest.raises(
+        ValueError,
+        match="BETA1_ANNOUNCEMENT_CHANNEL_ID is not configured",
+    ):
+        TelegramPublicationPublisherAdapter(
+            publisher=controlled,
+            channel_id=" ",
+        )
+
+===== FILE: backend\tests\api\test_announcement_controls.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from backend.app.application.announcement.announcement_composer import (
+    AnnouncementComposer,
+)
+from backend.app.application.announcement.announcement_publisher import (
+    ControlledAnnouncementPublisher,
+)
+from app.api.announcement_controls import (
+    create_announcement_router,
+)
+
+
+@dataclass
+class FakeTelegramMessage:
+    message_id: int
+
+
+class FakeTelegramClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        parse_mode: str,
+    ) -> FakeTelegramMessage:
+        self.calls.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+            }
+        )
+
+        return FakeTelegramMessage(
+            message_id=123,
+        )
+
+
+def create_test_app(
+    *,
+    client: FakeTelegramClient,
+    authorized: bool = True,
+    publishing_enabled: bool = True,
+) -> FastAPI:
+    publisher = ControlledAnnouncementPublisher(
+        publisher=_TelegramPublisherDouble(
+            client=client,
+        ),
+        publishing_enabled=publishing_enabled,
+    )
+
+    async def authorize_admin() -> bool:
+        return authorized
+
+    router = create_announcement_router(
+        publisher=publisher,
+        composer=AnnouncementComposer(),
+        admin_authorizer=authorize_admin,
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+
+    return app
+
+
+class _TelegramPublisherDouble:
+    """Small test double implementing AnnouncementPublisher."""
+
+    def __init__(
+        self,
+        *,
+        client: FakeTelegramClient,
+    ) -> None:
+        self._client = client
+
+    async def publish(
+        self,
+        *,
+        channel_id: str,
+        text: str,
+    ) -> str:
+        result = await self._client.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode="Markdown",
+        )
+
+        return str(result.message_id)
+
+
+@pytest.fixture
+def telegram_client() -> FakeTelegramClient:
+    return FakeTelegramClient()
+
+
+def test_admin_can_publish_announcement(
+    telegram_client: FakeTelegramClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "BETA1_ANNOUNCEMENT_CHANNEL_ID",
+        "-100123456789",
+    )
+
+    app = create_test_app(
+        client=telegram_client,
+        authorized=True,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/announcements/publish",
+            json={
+                "announcement_type": "maintenance",
+                "title": "Planned maintenance",
+                "body": "The Academy will be temporarily unavailable.",
+                "footer": "We will communicate when service is restored.",
+            },
+        )
+
+    assert response.status_code == 201
+
+    payload = response.json()
+
+    assert payload["channel_id"] == "-100123456789"
+    assert payload["message_id"] == "123"
+    assert payload["announcement_type"] == "maintenance"
+
+    assert len(telegram_client.calls) == 1
+
+    published_text = telegram_client.calls[0]["text"]
+
+    assert "🛠️ MAINTENANCE" in published_text
+    assert "Planned maintenance" in published_text
+    assert "Academy will be temporarily unavailable" in published_text
+    assert "EasyWorld" in published_text
+
+
+def test_non_admin_cannot_publish(
+    telegram_client: FakeTelegramClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "BETA1_ANNOUNCEMENT_CHANNEL_ID",
+        "-100123456789",
+    )
+
+    app = create_test_app(
+        client=telegram_client,
+        authorized=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/announcements/publish",
+            json={
+                "announcement_type": "important",
+                "title": "Important update",
+                "body": "This must not be published.",
+            },
+        )
+
+    assert response.status_code == 403
+    assert telegram_client.calls == []
+
+
+def test_publishing_disabled_does_not_call_telegram(
+    telegram_client: FakeTelegramClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "BETA1_ANNOUNCEMENT_CHANNEL_ID",
+        "-100123456789",
+    )
+
+    app = create_test_app(
+        client=telegram_client,
+        authorized=True,
+        publishing_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/announcements/publish",
+            json={
+                "announcement_type": "beta_update",
+                "title": "Beta update",
+                "body": "Publishing is currently disabled.",
+            },
+        )
+
+    assert response.status_code == 503
+    assert telegram_client.calls == []
+
+
+def test_invalid_announcement_is_rejected_before_telegram(
+    telegram_client: FakeTelegramClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "BETA1_ANNOUNCEMENT_CHANNEL_ID",
+        "-100123456789",
+    )
+
+    app = create_test_app(
+        client=telegram_client,
+        authorized=True,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/announcements/publish",
+            json={
+                "announcement_type": "important",
+                "title": "",
+                "body": "Invalid announcement.",
+            },
+        )
+
+    assert response.status_code == 422
+    assert telegram_client.calls == []
+
+
+def test_announcement_type_is_validated(
+    telegram_client: FakeTelegramClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "BETA1_ANNOUNCEMENT_CHANNEL_ID",
+        "-100123456789",
+    )
+
+    app = create_test_app(
+        client=telegram_client,
+        authorized=True,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/announcements/publish",
+            json={
+                "announcement_type": "not_a_real_type",
+                "title": "Invalid type",
+                "body": "This should not publish.",
+            },
+        )
+
+    assert response.status_code == 422
+    assert telegram_client.calls == []
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py =====
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+def _enable_academy_activation(monkeypatch):
+    """
+    Explicitly enable Academy for activation tests.
+    """
+
+    monkeypatch.setenv(
+        "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED",
+        "true",
+    )
+
+    monkeypatch.setenv(
+        "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED",
+        "true",
+    )
+
+
+def test_enabled_academy_is_registered_on_existing_scheduler(
+    monkeypatch,
+):
+    """
+    Explicit Academy activation must inject the Academy workflow
+    into the existing shared scheduler.
+
+    Scheduler registration is performed explicitly through the
+    existing scheduler runtime boundary.
+
+    Application construction itself must not start the scheduler.
+    """
+
+    _enable_academy_activation(monkeypatch)
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    existing_telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(
+                name="auth_repository",
+            ),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                existing_telegram_client,
+                announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+            return_value=academy_workflow,
+        ),
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    runtime = application.state.scheduler_runtime
+    adapter = runtime.scheduler_adapter
+
+    # Application construction does not start the scheduler.
+    assert adapter.scheduler.running is False
+
+    # Registration belongs to the scheduler runtime/adapter boundary.
+    adapter.register_jobs()
+
+    jobs = adapter.scheduler.get_jobs()
+
+    job_ids = {
+        job.id
+        for job in jobs
+    }
+
+    assert (
+        "academy_one_week_milestone"
+        in job_ids
+    )
+
+    assert (
+        "cybersecurity_daily_report"
+        in job_ids
+    )
+
+    assert (
+        "cybersecurity_weekly_report"
+        in job_ids
+    )
+
+    assert (
+        adapter.academy_one_week_workflow
+        is academy_workflow
+    )
+
+    # Registration must not start execution.
+    assert adapter.scheduler.running is False
+
+    # Academy workflow must not execute merely because it was registered.
+    academy_workflow.run.assert_not_called()
+
+    # Existing Telegram client must not be called.
+    assert existing_telegram_client.method_calls == []
+
+
+def test_disabled_academy_is_not_registered_on_shared_scheduler(
+    monkeypatch,
+):
+    """
+    Academy must remain absent from the existing scheduler unless
+    both explicit activation switches are enabled.
+
+    Existing cybersecurity jobs must remain registered normally.
+    """
+
+    monkeypatch.setenv(
+        "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED",
+        "false",
+    )
+
+    monkeypatch.setenv(
+        "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED",
+        "false",
+    )
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    existing_telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    announcement_publisher = MagicMock()
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                existing_telegram_client,
+                announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+        ) as academy_factory,
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    runtime = application.state.scheduler_runtime
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.academy_one_week_workflow is None
+
+    # Registration is explicit and belongs to the existing adapter.
+    adapter.register_jobs()
+
+    jobs = adapter.scheduler.get_jobs()
+
+    job_ids = {
+        job.id
+        for job in jobs
+    }
+
+    # Academy remains disabled.
+    assert (
+        "academy_one_week_milestone"
+        not in job_ids
+    )
+
+    # Existing scheduler jobs remain intact.
+    assert (
+        "cybersecurity_daily_report"
+        in job_ids
+    )
+
+    assert (
+        "cybersecurity_weekly_report"
+        in job_ids
+    )
+
+    academy_factory.assert_not_called()
+
+    # Registration does not start the scheduler.
+    assert adapter.scheduler.running is False
+
+
+def test_academy_activation_does_not_create_second_scheduler(
+    monkeypatch,
+):
+    """
+    Academy activation must use exactly one shared scheduler runtime.
+    """
+
+    _enable_academy_activation(monkeypatch)
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_workflow",
+    )
+
+    scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(),
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                telegram_client,
+                MagicMock(),
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+            return_value=academy_workflow,
+        ),
+        patch(
+            "backend.app.main.create_cybersecurity_scheduler_runtime",
+            return_value=scheduler_runtime,
+        ) as scheduler_factory,
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    scheduler_factory.assert_called_once_with(
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    assert (
+        application.state.scheduler_runtime
+        is scheduler_runtime
+    )
+
+    assert (
+        scheduler_runtime
+        .scheduler_adapter
+        .academy_one_week_workflow
+        is academy_workflow
+    )
+
+    # No production scheduler startup during composition.
+    assert (
+        scheduler_runtime
+        .scheduler_adapter
+        .scheduler
+        .running
+        is False
+    )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py =====
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+def _enable_academy_activation(monkeypatch):
+    """
+    Explicitly enable Academy for tests that verify the
+    activated production composition path.
+
+    Production remains fail-closed by default.
+    """
+
+    monkeypatch.setenv(
+        "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED",
+        "true",
+    )
+
+    monkeypatch.setenv(
+        "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED",
+        "true",
+    )
+
+
+def test_create_application_composes_academy_into_shared_scheduler(
+    monkeypatch,
+):
+    """
+    create_application() must compose Academy into the existing
+    scheduler when Academy activation is explicitly enabled.
+
+    Verifies:
+    - Academy factory is called;
+    - existing PostgreSQL session factory is reused;
+    - existing outbound Telegram client is reused;
+    - Academy workflow is injected into the shared scheduler;
+    - scheduler is not started during application construction;
+    - no external delivery occurs.
+    """
+
+    _enable_academy_activation(monkeypatch)
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    fake_telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    fake_announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    fake_scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(),
+        academy_one_week_workflow=MagicMock(),
+    )
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(
+                name="auth_repository",
+            ),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                fake_telegram_client,
+                fake_announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+        ) as academy_factory,
+        patch(
+            "backend.app.main.create_cybersecurity_scheduler_runtime",
+            return_value=fake_scheduler_runtime,
+        ) as scheduler_factory,
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    academy_factory.assert_called_once_with(
+        session_factory=fake_session_factory,
+        telegram_bot=fake_telegram_client,
+    )
+
+    scheduler_factory.assert_called_once_with(
+        academy_one_week_workflow=academy_factory.return_value,
+    )
+
+    assert (
+        application.state.announcement_telegram_client
+        is fake_telegram_client
+    )
+
+    assert (
+        application.state.scheduler_runtime
+        is fake_scheduler_runtime
+    )
+
+
+def test_create_application_does_not_start_scheduler(
+    monkeypatch,
+):
+    """
+    Application creation may compose the activated Academy workflow,
+    but must not start or stop the scheduler during construction.
+    """
+
+    _enable_academy_activation(monkeypatch)
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    fake_telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    fake_announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    fake_academy_workflow = MagicMock(
+        name="academy_workflow",
+    )
+
+    fake_scheduler_runtime = MagicMock(
+        name="scheduler_runtime",
+    )
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                fake_telegram_client,
+                fake_announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+            return_value=fake_academy_workflow,
+        ),
+        patch(
+            "backend.app.main.create_cybersecurity_scheduler_runtime",
+            return_value=fake_scheduler_runtime,
+        ),
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    assert (
+        application.state.scheduler_runtime
+        is fake_scheduler_runtime
+    )
+
+    fake_scheduler_runtime.start.assert_not_called()
+    fake_scheduler_runtime.stop.assert_not_called()
+
+
+def test_create_application_reuses_existing_telegram_client(
+    monkeypatch,
+):
+    """
+    Academy composition must receive the exact outbound Telegram
+    client already created by the application.
+    """
+
+    _enable_academy_activation(monkeypatch)
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    existing_telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="existing_telegram_client",
+    )
+
+    announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    scheduler_runtime = MagicMock(
+        name="scheduler_runtime",
+    )
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                existing_telegram_client,
+                announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+        ) as academy_factory,
+        patch(
+            "backend.app.main.create_cybersecurity_scheduler_runtime",
+            return_value=scheduler_runtime,
+        ),
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    academy_factory.assert_called_once_with(
+        session_factory=fake_session_factory,
+        telegram_bot=existing_telegram_client,
+    )
+
+    academy_kwargs = academy_factory.call_args.kwargs
+
+    assert (
+        academy_kwargs["telegram_bot"]
+        is existing_telegram_client
+    )
+
+    assert (
+        academy_kwargs["session_factory"]
+        is fake_session_factory
+    )
+
+    assert (
+        application.state.announcement_telegram_client
+        is existing_telegram_client
+    )
+
+    assert (
+        application.state.scheduler_runtime
+        is scheduler_runtime
+    )
+
+
+def test_create_application_does_not_create_second_scheduler(
+    monkeypatch,
+):
+    """
+    Application composition must invoke the shared scheduler factory
+    exactly once.
+
+    Academy must be injected into that existing scheduler rather than
+    creating another scheduler.
+    """
+
+    _enable_academy_activation(monkeypatch)
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_workflow",
+    )
+
+    scheduler_runtime = MagicMock(
+        name="scheduler_runtime",
+    )
+
+    with (
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                telegram_client,
+                MagicMock(),
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+            return_value=academy_workflow,
+        ),
+        patch(
+            "backend.app.main.create_cybersecurity_scheduler_runtime",
+            return_value=scheduler_runtime,
+        ) as scheduler_factory,
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+    assert application is not None
+
+    scheduler_factory.assert_called_once_with(
+        academy_one_week_workflow=academy_workflow,
+    )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_fastapi_lifespan_activation.py =====
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_academy_activation_through_fastapi_lifespan():
+    """
+    Controlled FastAPI lifespan activation smoke test.
+
+    Verifies the complete application lifecycle:
+
+        FastAPI lifespan
+            ↓
+        existing shared scheduler
+            ↓
+        Academy registration
+            ↓
+        scheduler running
+            ↓
+        clean shutdown
+
+    No real email or Telegram delivery is performed.
+    """
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    fake_telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    fake_announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    academy_workflow.run = MagicMock(
+        name="academy_workflow_run",
+    )
+
+    scheduler_runtime = MagicMock(
+        name="scheduler_runtime",
+    )
+
+    scheduler_runtime.start = MagicMock(
+        name="scheduler_runtime_start",
+    )
+
+    scheduler_runtime.stop = MagicMock(
+        name="scheduler_runtime_stop",
+    )
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED": "true",
+                "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED": "true",
+            },
+            clear=False,
+        ),
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(
+                name="auth_repository",
+            ),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                fake_telegram_client,
+                fake_announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+            return_value=academy_workflow,
+        ),
+        patch(
+            "backend.app.main.create_cybersecurity_scheduler_runtime",
+            return_value=scheduler_runtime,
+        ) as scheduler_factory,
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+        assert (
+            application.state.scheduler_runtime
+            is scheduler_runtime
+        )
+
+        scheduler_factory.assert_called_once_with(
+            academy_one_week_workflow=academy_workflow,
+        )
+
+        async with application.router.lifespan_context(
+            application,
+        ):
+            scheduler_runtime.start.assert_called_once()
+
+            scheduler_runtime.stop.assert_not_called()
+
+            academy_workflow.run.assert_not_called()
+
+            fake_telegram_client.method_calls == []
+
+        scheduler_runtime.stop.assert_called_once()
+
+    fake_telegram_client.method_calls == []
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_lifespan_scheduler_smoke.py =====
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_academy_real_shared_scheduler_lifespan_smoke():
+    """
+    Controlled end-to-end scheduler lifecycle smoke test.
+
+    Uses:
+    - real FastAPI lifespan;
+    - real CybersecuritySchedulerRuntime;
+    - real CybersecurityAPSchedulerAdapter;
+    - real APScheduler.
+
+    Academy execution and external delivery remain mocked.
+
+    No real email or Telegram delivery occurs.
+    """
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    academy_execution_count = 0
+
+    async def academy_run():
+        nonlocal academy_execution_count
+
+        academy_execution_count += 1
+
+        return {
+            "candidates": 0,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+    academy_workflow.run = academy_run
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED": "true",
+                "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED": "true",
+            },
+            clear=False,
+        ),
+        patch(
+            "backend.app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "backend.app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "backend.app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(
+                name="auth_repository",
+            ),
+        ),
+        patch(
+            "backend.app.main._create_announcement_components",
+            return_value=(
+                telegram_client,
+                announcement_publisher,
+            ),
+        ),
+        patch(
+            "backend.app.main.create_academy_one_week_workflow",
+            return_value=academy_workflow,
+        ),
+    ):
+        from backend.app.main import create_application
+
+        application = create_application()
+
+        runtime = application.state.scheduler_runtime
+        adapter = runtime.scheduler_adapter
+        scheduler = adapter.scheduler
+
+        #
+        # Application construction must not start scheduling.
+        #
+
+        assert scheduler.running is False
+
+        async with application.router.lifespan_context(
+            application,
+        ):
+            #
+            # FastAPI lifespan starts the existing scheduler.
+            #
+
+            assert scheduler.running is True
+
+            jobs = scheduler.get_jobs()
+
+            job_ids = {
+                job.id
+                for job in jobs
+            }
+
+            #
+            # Existing cybersecurity jobs remain registered.
+            #
+
+            assert (
+                "cybersecurity_daily_report"
+                in job_ids
+            )
+
+            assert (
+                "cybersecurity_weekly_report"
+                in job_ids
+            )
+
+            #
+            # Academy is registered on the same scheduler.
+            #
+
+            assert (
+                "academy_one_week_milestone"
+                in job_ids
+            )
+
+            assert (
+                adapter.academy_one_week_workflow
+                is academy_workflow
+            )
+
+            #
+            # Starting the scheduler must not execute the Academy
+            # cron job immediately.
+            #
+
+            await asyncio.sleep(0.05)
+
+            assert academy_execution_count == 0
+
+            #
+            # No Telegram delivery may occur.
+            #
+            # close() is intentionally excluded because it is normal
+            # FastAPI lifespan cleanup and is not a delivery operation.
+            #
+
+            telegram_delivery_calls = [
+                call
+                for call in telegram_client.method_calls
+                if call[0] not in {"close"}
+            ]
+
+            assert telegram_delivery_calls == []
+
+        #
+        # FastAPI lifespan has exited and requested scheduler shutdown.
+        #
+
+        for _ in range(20):
+            if scheduler.running is False:
+                break
+
+            await asyncio.sleep(0.01)
+
+        assert scheduler.running is False
+
+    #
+    # Academy must never have executed during this smoke test.
+    #
+
+    assert academy_execution_count == 0
+
+    #
+    # Telegram close is expected lifecycle cleanup.
+    #
+
+    telegram_client.close.assert_called_once()
+
+    #
+    # No Telegram delivery operation occurred.
+    #
+
+    telegram_delivery_calls = [
+        call
+        for call in telegram_client.method_calls
+        if call[0] not in {"close"}
+    ]
+
+    assert telegram_delivery_calls == []
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authorization_service.py =====
+from backend.app.application.authorization.authorization_service import (
+    AuthenticationRequiredError,
+    AuthorizationService,
+    PermissionDeniedError,
+)
+from backend.app.domain.authorization.permissions import Permission
+from backend.app.domain.identity.principal import (
+    AccountStatus,
+    Principal,
+)
+
+
+def operator() -> Principal:
+    return Principal(
+        user_id="operator-1",
+        email="operator@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset({"operator"}),
+    )
+
+
+def beta_user() -> Principal:
+    return Principal(
+        user_id="beta-1",
+        email="beta@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset({"beta_user"}),
+    )
+
+
+def test_operator_can_publish_announcements():
+    principal = AuthorizationService().require_permission(
+        principal=operator(),
+        permission=Permission.ANNOUNCEMENT_PUBLISH,
+    )
+    assert principal.user_id == "operator-1"
+
+
+def test_beta_user_cannot_publish_announcements():
+    try:
+        AuthorizationService().require_permission(
+            principal=beta_user(),
+            permission=Permission.ANNOUNCEMENT_PUBLISH,
+        )
+    except PermissionDeniedError:
+        return
+
+    raise AssertionError("Beta users must not publish announcements.")
+
+
+def test_missing_identity_is_rejected():
+    try:
+        AuthorizationService().require_authenticated(None)
+    except AuthenticationRequiredError:
+        return
+
+    raise AssertionError("Missing identity must be rejected.")
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_password_hasher.py =====
+from __future__ import annotations
+
+from backend.app.application.identity.authentication_service import (
+    AuthenticationError,
+    PasswordHasher,
+)
+
+
+def test_password_hash_round_trip() -> None:
+    hasher = PasswordHasher()
+
+    encoded = hasher.hash("A sufficiently strong password!")
+
+    assert encoded != "A sufficiently strong password!"
+    assert hasher.verify(
+        "A sufficiently strong password!",
+        encoded,
+    )
+    assert not hasher.verify(
+        "wrong password",
+        encoded,
+    )
+
+
+def test_short_password_rejected() -> None:
+    hasher = PasswordHasher()
+
+    try:
+        hasher.hash("short")
+    except AuthenticationError:
+        pass
+    else:
+        raise AssertionError("Short password was accepted.")
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_postgresql_auth_repository_contract.py =====
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import pytest
+
+from backend.app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+
+
+class FakeResult:
+    def __init__(self, row=None, rows=()):
+        self._row = row
+        self._rows = rows
+
+    def first(self):
+        return self._row
+
+    def all(self):
+        return list(self._rows)
+
+    def mappings(self):
+        return self
+
+
+class FakeSession:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, statement, params=None):
+        self.calls.append((str(statement), params))
+        if "SELECT 1 FROM users WHERE email" in str(statement):
+            return FakeResult()
+        if "SELECT 1 FROM users WHERE username" in str(statement):
+            return FakeResult()
+        return FakeResult()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def begin(self):
+        return self
+
+
+class FakeFactory:
+    def __call__(self):
+        return FakeSession()
+
+
+@pytest.mark.asyncio
+async def test_repository_uses_existing_users_table_contract():
+    repository = PostgreSQLAuthenticationRepository(FakeFactory())
+    assert await repository.email_exists("missing@example.com") is False
+    assert await repository.username_exists("missing") is False
+
+
+def test_repository_is_provider_neutral_at_application_boundary():
+    assert PostgreSQLAuthenticationRepository.__name__ == "PostgreSQLAuthenticationRepository"

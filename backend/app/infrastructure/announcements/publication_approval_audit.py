@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from sqlalchemy import DateTime, String, Text, select
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.app.domain.announcements.publication import Publication
-from backend.app.infrastructure.persistence.database import Base
+from app.domain.announcements.publication import Publication
+from app.infrastructure.persistence.database import Base
 
 
 class PublicationApprovalAuditEventModel(Base):
@@ -76,3 +76,4 @@ __all__ = [
     "PublicationApprovalAuditEventModel",
     "SqlAlchemyPublicationApprovalAudit",
 ]
+

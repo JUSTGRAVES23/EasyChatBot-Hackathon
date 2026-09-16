@@ -1,0 +1,345 @@
+﻿from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from typing import Mapping, Protocol
+
+
+class TransactionAuthorizationState(str, Enum):
+    CREATED = "CREATED"
+    PENDING_USER_APPROVAL = "PENDING_USER_APPROVAL"
+    APPROVED = "APPROVED"
+    CONSUMED = "CONSUMED"
+    EXPIRED = "EXPIRED"
+    REJECTED = "REJECTED"
+    REVOKED = "REVOKED"
+
+
+class TransactionAuthorizationFailure(str, Enum):
+    INVALID_TRANSACTION = "INVALID_TRANSACTION"
+    INVALID_PRINCIPAL_BINDING = "INVALID_PRINCIPAL_BINDING"
+    INVALID_TRANSACTION_BINDING = "INVALID_TRANSACTION_BINDING"
+    INVALID_OPERATION_BINDING = "INVALID_OPERATION_BINDING"
+    INVALID_AMOUNT_BINDING = "INVALID_AMOUNT_BINDING"
+    INVALID_CURRENCY_BINDING = "INVALID_CURRENCY_BINDING"
+    INVALID_MERCHANT_BINDING = "INVALID_MERCHANT_BINDING"
+    INVALID_RISK_CONTEXT = "INVALID_RISK_CONTEXT"
+    INVALID_NONCE = "INVALID_NONCE"
+    NONCE_REPLAY = "NONCE_REPLAY"
+    INVALID_APPROVAL = "INVALID_APPROVAL"
+    INSUFFICIENT_AUTHENTICATION_ASSURANCE = (
+        "INSUFFICIENT_AUTHENTICATION_ASSURANCE"
+    )
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+    ALREADY_CONSUMED = "ALREADY_CONSUMED"
+    INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
+
+
+class TransactionAuthorizationDecision(str, Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+class TrustedClock(Protocol):
+    def now(self) -> datetime:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionAuthorizationDecisionResult:
+    decision: TransactionAuthorizationDecision
+    failure: TransactionAuthorizationFailure | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalTransaction:
+    transaction_id: str
+    principal_id: str
+    amount: Decimal | None
+    currency: str | None
+    merchant_or_service: str | None
+    operation: str
+    timestamp: datetime
+    nonce: str
+    risk_context: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.transaction_id:
+            raise ValueError("transaction_id must not be empty")
+        if not self.principal_id:
+            raise ValueError("principal_id must not be empty")
+        if not self.operation:
+            raise ValueError("operation must not be empty")
+        if not self.nonce:
+            raise ValueError("nonce must not be empty")
+
+        if self.amount is not None:
+            if not self.amount.is_finite():
+                raise ValueError("amount must be finite")
+            object.__setattr__(
+                self,
+                "amount",
+                Decimal(str(self.amount)).quantize(Decimal("0.01")),
+            )
+
+        if self.currency is not None:
+            object.__setattr__(
+                self,
+                "currency",
+                self.currency.strip().upper(),
+            )
+
+        if self.merchant_or_service is not None:
+            object.__setattr__(
+                self,
+                "merchant_or_service",
+                self.merchant_or_service.strip(),
+            )
+
+        object.__setattr__(
+            self,
+            "timestamp",
+            _normalize_datetime(self.timestamp),
+        )
+
+        object.__setattr__(
+            self,
+            "risk_context",
+            tuple(sorted((str(k), str(v)) for k, v in self.risk_context)),
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        *,
+        transaction_id: str,
+        principal_id: str,
+        amount: Decimal | str | int | float | None,
+        currency: str | None,
+        merchant_or_service: str | None,
+        operation: str,
+        timestamp: datetime,
+        nonce: str,
+        risk_context: Mapping[str, str] | None = None,
+    ) -> "CanonicalTransaction":
+        normalized_amount = (
+            None if amount is None else Decimal(str(amount))
+        )
+
+        return cls(
+            transaction_id=transaction_id,
+            principal_id=principal_id,
+            amount=normalized_amount,
+            currency=currency,
+            merchant_or_service=merchant_or_service,
+            operation=operation,
+            timestamp=timestamp,
+            nonce=nonce,
+            risk_context=tuple(
+                sorted(
+                    (str(k), str(v))
+                    for k, v in (risk_context or {}).items()
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedApprovalEvidence:
+    authorization_id: str
+    transaction: CanonicalTransaction
+    approved_at: datetime
+    evidence_id: str
+    assurance_level: int
+
+    def __post_init__(self) -> None:
+        if not self.authorization_id:
+            raise ValueError("authorization_id must not be empty")
+        if not self.evidence_id:
+            raise ValueError("evidence_id must not be empty")
+        object.__setattr__(
+            self,
+            "approved_at",
+            _normalize_datetime(self.approved_at),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionAuthorization:
+    authorization_id: str
+    transaction: CanonicalTransaction
+    created_at: datetime
+    expires_at: datetime
+    state: TransactionAuthorizationState = TransactionAuthorizationState.CREATED
+    approval: TrustedApprovalEvidence | None = None
+
+    def __post_init__(self) -> None:
+        if not self.authorization_id:
+            raise ValueError("authorization_id must not be empty")
+
+        created = _normalize_datetime(self.created_at)
+        expires = _normalize_datetime(self.expires_at)
+
+        if expires <= created:
+            raise ValueError("expires_at must be after created_at")
+
+        object.__setattr__(self, "created_at", created)
+        object.__setattr__(self, "expires_at", expires)
+
+        if self.approval is not None:
+            if self.approval.authorization_id != self.authorization_id:
+                raise ValueError("approval authorization binding mismatch")
+            if self.approval.transaction != self.transaction:
+                raise ValueError("approval transaction binding mismatch")
+
+
+_ALLOWED_TRANSITIONS = {
+    TransactionAuthorizationState.CREATED: {
+        TransactionAuthorizationState.PENDING_USER_APPROVAL,
+    },
+    TransactionAuthorizationState.PENDING_USER_APPROVAL: {
+        TransactionAuthorizationState.APPROVED,
+        TransactionAuthorizationState.REJECTED,
+    },
+    TransactionAuthorizationState.APPROVED: {
+        TransactionAuthorizationState.CONSUMED,
+        TransactionAuthorizationState.REVOKED,
+        TransactionAuthorizationState.EXPIRED,
+    },
+    TransactionAuthorizationState.CONSUMED: set(),
+    TransactionAuthorizationState.EXPIRED: set(),
+    TransactionAuthorizationState.REJECTED: set(),
+    TransactionAuthorizationState.REVOKED: set(),
+}
+
+
+def transition(
+    authorization: TransactionAuthorization,
+    new_state: TransactionAuthorizationState,
+) -> TransactionAuthorization:
+    allowed = _ALLOWED_TRANSITIONS[authorization.state]
+
+    if new_state not in allowed:
+        raise ValueError(
+            f"invalid transaction authorization transition: "
+            f"{authorization.state.value} -> {new_state.value}"
+        )
+
+    return TransactionAuthorization(
+        authorization_id=authorization.authorization_id,
+        transaction=authorization.transaction,
+        created_at=authorization.created_at,
+        expires_at=authorization.expires_at,
+        state=new_state,
+        approval=authorization.approval,
+    )
+
+
+def attach_approval(
+    authorization: TransactionAuthorization,
+    approval: TrustedApprovalEvidence,
+    *,
+    clock: TrustedClock,
+) -> TransactionAuthorization:
+    if authorization.state is not TransactionAuthorizationState.PENDING_USER_APPROVAL:
+        raise ValueError("approval can only be attached while pending")
+
+    if approval.authorization_id != authorization.authorization_id:
+        raise ValueError("approval authorization binding mismatch")
+
+    if approval.transaction != authorization.transaction:
+        raise ValueError("approval is not bound to the exact transaction")
+
+    now = _trusted_now(clock)
+
+    if approval.approved_at > now:
+        raise ValueError("future-dated approval is invalid")
+
+    return transition(
+        TransactionAuthorization(
+            authorization_id=authorization.authorization_id,
+            transaction=authorization.transaction,
+            created_at=authorization.created_at,
+            expires_at=authorization.expires_at,
+            state=TransactionAuthorizationState.PENDING_USER_APPROVAL,
+            approval=approval,
+        ),
+        TransactionAuthorizationState.APPROVED,
+    )
+
+
+def consume(
+    authorization: TransactionAuthorization,
+    *,
+    clock: TrustedClock,
+) -> TransactionAuthorizationDecisionResult:
+    now = _trusted_now(clock)
+
+    if authorization.state is TransactionAuthorizationState.CONSUMED:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.ALREADY_CONSUMED,
+        )
+
+    if authorization.state is TransactionAuthorizationState.EXPIRED:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.EXPIRED,
+        )
+
+    if authorization.state is TransactionAuthorizationState.REVOKED:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.REVOKED,
+        )
+
+    if authorization.state is not TransactionAuthorizationState.APPROVED:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.INVALID_APPROVAL,
+        )
+
+    if now >= authorization.expires_at:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.EXPIRED,
+        )
+
+    if authorization.approval is None:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.INVALID_APPROVAL,
+        )
+
+    if authorization.approval.transaction != authorization.transaction:
+        return TransactionAuthorizationDecisionResult(
+            decision=TransactionAuthorizationDecision.DENY,
+            failure=TransactionAuthorizationFailure.INVALID_TRANSACTION_BINDING,
+        )
+
+    return TransactionAuthorizationDecisionResult(
+        decision=TransactionAuthorizationDecision.ALLOW
+    )
+
+
+def mark_consumed(
+    authorization: TransactionAuthorization,
+) -> TransactionAuthorization:
+    return transition(
+        authorization,
+        TransactionAuthorizationState.CONSUMED,
+    )
+
+
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("datetime must be timezone-aware")
+
+    return value.astimezone(timezone.utc)
+
+
+def _trusted_now(clock: TrustedClock) -> datetime:
+    return _normalize_datetime(clock.now())

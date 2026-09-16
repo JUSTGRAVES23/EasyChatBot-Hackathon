@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 
 import pytest
 
-from backend.app.interfaces.telegram.beta_telegram_adapter import (
+from app.interfaces.telegram.beta_telegram_adapter import (
     BetaTelegramAdapter,
 )
 

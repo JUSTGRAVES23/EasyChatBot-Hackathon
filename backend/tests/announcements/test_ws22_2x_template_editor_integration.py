@@ -1,22 +1,22 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.application.announcements.publication_service import (
+from app.application.announcements.publication_service import (
     AnnouncementPublicationService,
 )
-from backend.app.application.announcements.template_editor_service import (
+from app.application.announcements.template_editor_service import (
     AnnouncementTemplateEditorService,
 )
-from backend.app.application.announcements.template_registry import (
+from app.application.announcements.template_registry import (
     AnnouncementTemplateRegistry,
 )
-from backend.app.domain.announcements.template_models import (
+from app.domain.announcements.template_models import (
     AnnouncementTemplate,
     AnnouncementTemplateVersion,
     PublicationType,
 )
-from backend.app.infrastructure.announcements.in_memory_repositories import (
+from app.infrastructure.announcements.in_memory_repositories import (
     InMemoryAnnouncementTemplateRepository,
     InMemoryPublicationRepository,
 )
@@ -145,3 +145,4 @@ def test_editor_does_not_publish_external_content() -> None:
 
     assert publication.status.value == "draft"
     assert publication.published_at is None
+

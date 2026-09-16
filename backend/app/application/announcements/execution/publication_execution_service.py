@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     AnnouncementPublisher,
     PublicationExecutionRequest,
     PublicationExecutionResult,
@@ -159,3 +159,4 @@ class PublicationExecutionService:
         if isinstance(explicit, str) and explicit.strip():
             return explicit.strip()[:100]
         return type(exc).__name__.upper()[:100]
+

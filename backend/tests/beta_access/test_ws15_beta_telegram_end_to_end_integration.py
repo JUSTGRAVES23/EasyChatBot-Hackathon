@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
 import pytest
 
-from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+from app.infrastructure.telegram.telegram_bot_runtime import (
     TelegramBotRuntime,
 )
-from backend.app.interfaces.telegram.beta_telegram_adapter import (
+from app.interfaces.telegram.beta_telegram_adapter import (
     BetaTelegramAdapter,
 )
 
@@ -133,7 +133,7 @@ def make_composition(
         error=conversation_error,
     )
 
-    from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+    from app.application.beta_access.beta_telegram_conversation_boundary import (
         BetaTelegramConversationBoundary,
     )
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from backend.app.domain.authorization.permissions import Permission, has_permission
-from backend.app.domain.identity.principal import Principal
+from app.domain.authorization.permissions import Permission, has_permission
+from app.domain.identity.principal import Principal
 
 
 class AuthenticationRequiredError(PermissionError):
@@ -42,3 +42,7 @@ class AuthorizationService:
             )
 
         return authenticated
+
+
+
+

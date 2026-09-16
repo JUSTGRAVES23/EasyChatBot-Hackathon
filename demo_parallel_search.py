@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot Parallel Search Demo.
 
 Demonstrates:
@@ -18,8 +18,8 @@ This script uses the real Parallel API.
 
 import asyncio
 
-from backend.agents.research_agent import ResearchAgent
-from backend.runtime.context.execution_context import ExecutionContext
+from agents.research_agent import ResearchAgent
+from runtime.context.execution_context import ExecutionContext
 
 
 async def main():

@@ -1,14 +1,14 @@
-import pytest
+﻿import pytest
 
-from backend.agents.agent_result import (
+from agents.agent_result import (
     AgentResult,
 )
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
 )
 
-from backend.intelligence.research_service import (
+from intelligence.research_service import (
     ResearchService,
 )
 

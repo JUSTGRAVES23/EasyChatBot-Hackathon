@@ -1,18 +1,18 @@
-from backend.app.application.privacy.privacy_change import (
+﻿from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_change_detector import (
+from app.application.privacy.privacy_change_detector import (
     PrivacyChangeDetector,
 )
-from backend.app.application.privacy.privacy_change_assessment import (
+from app.application.privacy.privacy_change_assessment import (
     PrivacyChangeAssessmentService,
 )
-from backend.app.application.privacy.privacy_change_registry import (
+from app.application.privacy.privacy_change_registry import (
     PrivacyChangeRegistry,
 )
-from backend.app.application.privacy.privacy_governance_gate import (
+from app.application.privacy.privacy_governance_gate import (
     PrivacyGovernanceGate,
 )
 
@@ -106,3 +106,4 @@ def test_gate_blocks_failed_automated_validation():
     )
     assert blocked.status == PrivacyChangeStatus.BLOCKED
     assert gate.can_proceed("PCR-001") is False
+

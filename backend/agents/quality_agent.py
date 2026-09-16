@@ -1,4 +1,4 @@
-"""
+﻿"""
 Quality Agent.
 
 Internal AI operations agent.
@@ -14,15 +14,15 @@ It provides quality insights.
 """
 
 
-from backend.agents.base_agent import BaseAgent
-from backend.agents.agent_manifest import AgentManifest
-from backend.agents.agent_result import AgentResult
+from agents.base_agent import BaseAgent
+from agents.agent_manifest import AgentManifest
+from agents.agent_result import AgentResult
 
-from backend.evaluation.quality_result import (
+from evaluation.quality_result import (
     QualityResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

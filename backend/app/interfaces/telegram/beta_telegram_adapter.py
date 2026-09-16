@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+from app.application.beta_access.beta_telegram_conversation_boundary import (
     BetaTelegramConversationBoundary,
 )
-from backend.app.interfaces.telegram.private_chat_gate import (
+from app.interfaces.telegram.private_chat_gate import (
     BetaPrivateChatGate,
 )
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the External Runtime application service.
 
 The production service does not exist yet.
@@ -24,7 +24,7 @@ from src.ai_runtime.capabilities.models import (
     CapabilityType,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 

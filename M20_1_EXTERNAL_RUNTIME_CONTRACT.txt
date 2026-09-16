@@ -1,0 +1,802 @@
+===== tests/runtime/test_external_runtime_container.py =====
+"""
+Tests External Runtime Container.
+
+Validates:
+
+Application Bootstrap
+        |
+        v
+External Runtime Container
+        |
+        v
+ExternalRuntimeService
+
+The test uses controlled dependencies.
+
+No external providers are called.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from backend.runtime.external_runtime_container import (
+    configure_external_runtime_service,
+    get_external_runtime_service,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+
+class FakeGateway:
+    """
+    Controlled Runtime gateway.
+    """
+
+    async def execute(
+        self,
+        request,
+    ):
+        return None
+
+
+def test_container_registers_runtime_service():
+    """
+    Configured service should be retrievable.
+    """
+
+    service = ExternalRuntimeService(
+        gateway=FakeGateway(),
+    )
+
+    configure_external_runtime_service(
+        service,
+    )
+
+    result = get_external_runtime_service()
+
+    assert result is service
+
+
+def test_container_rejects_missing_service():
+    """
+    Container should reject invalid configuration.
+    """
+
+    with pytest.raises(
+        ValueError,
+        match="ExternalRuntimeService cannot be None",
+    ):
+        configure_external_runtime_service(
+            None,
+        )
+===== tests/application/test_external_runtime_service.py =====
+"""
+Tests for the External Runtime application service.
+
+The production service does not exist yet.
+
+These tests define the required application-layer contract before
+implementation.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityExecutionStatus,
+    CapabilityRequest,
+    CapabilityResult,
+    CapabilityType,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+
+def make_request() -> CapabilityRequest:
+    """
+    Create a minimal external Runtime capability request.
+    """
+
+    return CapabilityRequest(
+        capability=CapabilityType.PODCAST_DISCOVERY,
+        request_id="application-runtime-test-001",
+        payload={
+            "query": "French learning podcast",
+        },
+        requested_by="learning_application",
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_runtime_service_delegates_to_gateway():
+    """
+    Verify that the application service delegates execution to
+    the injected CapabilityGateway.
+    """
+
+    gateway = Mock(
+        spec=CapabilityGateway,
+    )
+
+    expected_result = CapabilityResult(
+        request_id="application-runtime-test-001",
+        capability=CapabilityType.PODCAST_DISCOVERY,
+        status=CapabilityExecutionStatus.COMPLETED,
+        output={
+            "ok": True,
+        },
+    )
+
+    gateway.execute = AsyncMock(
+        return_value=expected_result,
+    )
+
+    service = ExternalRuntimeService(
+        gateway=gateway,
+    )
+
+    request = make_request()
+
+    result = await service.execute(
+        request,
+    )
+
+    assert result is expected_result
+
+    gateway.execute.assert_awaited_once_with(
+        request,
+    )
+
+
+def test_external_runtime_service_requires_gateway():
+    """
+    Verify that the application service rejects a missing gateway.
+    """
+
+    with pytest.raises(
+        ValueError,
+        match="CapabilityGateway cannot be None",
+    ):
+        ExternalRuntimeService(
+            gateway=None,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_external_runtime_service_rejects_missing_request():
+    """
+    Verify that the application service rejects a missing request
+    before attempting Runtime execution.
+    """
+
+    gateway = Mock(
+        spec=CapabilityGateway,
+    )
+
+    gateway.execute = AsyncMock()
+
+    service = ExternalRuntimeService(
+        gateway=gateway,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="CapabilityRequest cannot be None",
+    ):
+        await service.execute(
+            None,  # type: ignore[arg-type]
+        )
+
+    gateway.execute.assert_not_awaited()
+===== tests/application/test_external_runtime_composition.py =====
+"""
+Tests for application composition of the external AI Runtime.
+
+These tests verify that the application composition layer:
+
+- creates the external Runtime gateway;
+- injects the gateway into ExternalRuntimeService;
+- preserves dependency injection;
+- does not alter the existing CompanionService flow.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import Mock
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityType,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+
+def make_live_intelligence_agent():
+    """
+    Create a mocked Live Intelligence agent dependency.
+    """
+
+    from src.ai_agents.live_intelligence_agent.handler import (
+        LiveIntelligenceAgent,
+    )
+
+    return Mock(
+        spec=LiveIntelligenceAgent,
+    )
+
+
+def make_podcast_discovery_agent():
+    """
+    Create a mocked Podcast Discovery agent dependency.
+    """
+
+    from src.ai_runtime.podcast.agent import (
+        PodcastDiscoveryAgent,
+    )
+
+    return Mock(
+        spec=PodcastDiscoveryAgent,
+    )
+
+
+def make_podcast_provider():
+    """
+    Create a mocked Podcast provider dependency.
+    """
+
+    from src.ai_runtime.podcast.providers import (
+        PodcastProvider,
+    )
+
+    return Mock(
+        spec=PodcastProvider,
+    )
+
+
+def make_governance():
+    """
+    Create a minimal governance dependency.
+
+    Governance is supplied by the application composition layer.
+    """
+
+    class FakeGovernance:
+        pass
+
+    return FakeGovernance()
+
+
+def test_application_can_create_external_runtime_gateway():
+    """
+    Verify that application composition can construct the external
+    Runtime gateway from injected dependencies.
+    """
+
+    gateway = create_external_runtime_gateway(
+        live_intelligence_agent=(
+            make_live_intelligence_agent()
+        ),
+        podcast_discovery_agent=(
+            make_podcast_discovery_agent()
+        ),
+        podcast_providers=[
+            make_podcast_provider(),
+        ],
+        governance=make_governance(),
+    )
+
+    assert isinstance(
+        gateway,
+        CapabilityGateway,
+    )
+
+    assert gateway._registry.contains(
+        CapabilityType.LIVE_INTELLIGENCE,
+    )
+
+    assert gateway._registry.contains(
+        CapabilityType.PODCAST_DISCOVERY,
+    )
+
+    assert gateway._registry.contains(
+        CapabilityType.LEARNING_GENERATION,
+    )
+
+    assert gateway._registry.contains(
+        CapabilityType.PODCAST_LISTENING_PROPOSAL,
+    )
+
+
+def test_application_can_inject_gateway_into_external_runtime_service():
+    """
+    Verify that the configured external Runtime gateway can be
+    injected into the application service.
+    """
+
+    gateway = create_external_runtime_gateway(
+        live_intelligence_agent=(
+            make_live_intelligence_agent()
+        ),
+        podcast_discovery_agent=(
+            make_podcast_discovery_agent()
+        ),
+        podcast_providers=[
+            make_podcast_provider(),
+        ],
+        governance=make_governance(),
+    )
+
+    service = ExternalRuntimeService(
+        gateway=gateway,
+    )
+
+    assert service._gateway is gateway
+===== tests/application/test_external_runtime_factory_integration.py =====
+"""
+Integration tests for application factory + external Runtime.
+
+Verifies the complete dependency wiring path:
+
+Application Factory
+        |
+        v
+ExternalRuntimeService
+        |
+        v
+CapabilityGateway
+        |
+        v
+CapabilityRegistry
+"""
+
+from __future__ import annotations
+
+from unittest.mock import Mock
+
+from backend.application.factory import (
+    ApplicationFactory,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from src.ai_runtime.capabilities.gateway import (
+    CapabilityGateway,
+)
+
+from src.ai_runtime.capabilities.models import (
+    CapabilityType,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+
+def make_live_intelligence_agent():
+    """
+    Create mocked Live Intelligence dependency.
+    """
+
+    from src.ai_agents.live_intelligence_agent.handler import (
+        LiveIntelligenceAgent,
+    )
+
+    return Mock(
+        spec=LiveIntelligenceAgent,
+    )
+
+
+def make_podcast_discovery_agent():
+    """
+    Create mocked Podcast Discovery dependency.
+    """
+
+    from src.ai_runtime.podcast.agent import (
+        PodcastDiscoveryAgent,
+    )
+
+    return Mock(
+        spec=PodcastDiscoveryAgent,
+    )
+
+
+def make_podcast_provider():
+    """
+    Create mocked Podcast provider dependency.
+    """
+
+    from src.ai_runtime.podcast.providers import (
+        PodcastProvider,
+    )
+
+    return Mock(
+        spec=PodcastProvider,
+    )
+
+
+def make_governance():
+    """
+    Create governance dependency.
+    """
+
+    class FakeGovernance:
+        pass
+
+    return FakeGovernance()
+
+
+def test_application_factory_creates_external_runtime_service_with_real_gateway():
+    """
+    Verify the complete application composition path.
+
+    The factory receives a fully configured Runtime gateway
+    and creates the application service boundary.
+    """
+
+    gateway = create_external_runtime_gateway(
+        live_intelligence_agent=(
+            make_live_intelligence_agent()
+        ),
+        podcast_discovery_agent=(
+            make_podcast_discovery_agent()
+        ),
+        podcast_providers=[
+            make_podcast_provider(),
+        ],
+        governance=make_governance(),
+    )
+
+    factory = ApplicationFactory()
+
+    service = factory.create_external_runtime_service(
+        gateway=gateway,
+    )
+
+    assert isinstance(
+        service,
+        ExternalRuntimeService,
+    )
+
+    assert service._gateway is gateway
+
+
+def test_application_factory_preserves_runtime_capabilities():
+    """
+    Verify that application composition does not lose
+    Runtime capability registration.
+    """
+
+    gateway = create_external_runtime_gateway(
+        live_intelligence_agent=(
+            make_live_intelligence_agent()
+        ),
+        podcast_discovery_agent=(
+            make_podcast_discovery_agent()
+        ),
+        podcast_providers=[
+            make_podcast_provider(),
+        ],
+        governance=make_governance(),
+    )
+
+    factory = ApplicationFactory()
+
+    service = factory.create_external_runtime_service(
+        gateway=gateway,
+    )
+
+    runtime_gateway = service._gateway
+
+    assert isinstance(
+        runtime_gateway,
+        CapabilityGateway,
+    )
+
+    assert runtime_gateway._registry.contains(
+        CapabilityType.PODCAST_DISCOVERY,
+    )
+
+    assert runtime_gateway._registry.contains(
+        CapabilityType.LEARNING_GENERATION,
+    )
+
+    assert runtime_gateway._registry.contains(
+        CapabilityType.PODCAST_LISTENING_PROPOSAL,
+    )
+===== backend/application/bootstrap.py =====
+"""
+EasyChatBot Application Bootstrap.
+
+Responsible for application startup composition.
+
+Responsibilities:
+
+- create application-level services;
+- compose approved Runtime dependencies;
+- register configured services.
+
+This module does not:
+
+- execute agents;
+- execute capabilities;
+- contain business logic;
+- expose runtime state;
+- serve API requests.
+
+Runtime construction remains delegated to:
+
+    src.ai_runtime.composition
+
+Live Intelligence Agent construction remains delegated to:
+
+    src.ai_agents.live_intelligence_agent.composition
+
+Internal Documentation Agent construction remains delegated to:
+
+    backend.application.internal_documentation_composition
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from backend.application.factory import (
+    ApplicationFactory,
+)
+
+from backend.application.internal_documentation_composition import (
+    create_internal_documentation_agent_from_repository,
+)
+
+from backend.runtime.external_runtime_container import (
+    configure_external_runtime_service,
+    get_external_runtime_service as _get_external_runtime_service,
+)
+
+from backend.services.external_runtime_service import (
+    ExternalRuntimeService,
+)
+
+from src.ai_runtime.composition import (
+    create_external_runtime_gateway,
+)
+
+from src.ai_agents.live_intelligence_agent.composition import (
+    create_live_intelligence_agent,
+)
+
+from src.ai_runtime.podcast.parallel import (
+    ParallelPodcastProvider,
+)
+
+
+_bootstrapped = False
+
+
+def bootstrap_application() -> None:
+    """
+    Bootstrap application dependencies.
+
+    Creates the ExternalRuntimeService and registers it
+    inside the application runtime container.
+    """
+
+    global _bootstrapped
+
+    if _bootstrapped:
+        return
+
+    factory = ApplicationFactory()
+
+    gateway = create_external_runtime_gateway(
+        live_intelligence_agent=(
+            create_live_intelligence_agent()
+        ),
+        podcast_discovery_agent=(
+            create_podcast_discovery_agent()
+        ),
+        podcast_providers=(
+            create_podcast_providers()
+        ),
+        governance=(
+            create_governance()
+        ),
+        internal_documentation_agent=(
+            create_internal_documentation_agent_from_repository()
+        ),
+    )
+
+    runtime_service = (
+        factory.create_external_runtime_service(
+            gateway=gateway,
+        )
+    )
+
+    configure_external_runtime_service(
+        runtime_service,
+    )
+
+    _bootstrapped = True
+
+
+def get_external_runtime_service() -> ExternalRuntimeService:
+    """
+    Backward-compatible Runtime accessor.
+    """
+
+    return _get_external_runtime_service()
+
+
+def reset_bootstrap() -> None:
+    """
+    Test-only reset.
+    """
+
+    global _bootstrapped
+
+    _bootstrapped = False
+
+
+# =========================================================
+# Podcast Runtime Dependencies
+# =========================================================
+
+
+class BootstrapPlaceholderPodcastAgent:
+    """
+    Temporary Podcast Discovery Agent adapter.
+
+    Kept only for hackathon compatibility.
+    """
+
+    def build_search_intent(
+        self,
+        *,
+        user_id: str,
+        learning_context,
+        memories,
+        max_results: int,
+    ):
+        from src.ai_runtime.podcast.models import (
+            PodcastSearchIntent,
+        )
+
+        return PodcastSearchIntent(
+            user_id=user_id,
+            learning_context=learning_context,
+            topics=(
+                "French learning podcast",
+            ),
+            keywords=(
+                "French",
+                "learning",
+                "listening",
+            ),
+            max_results=max_results,
+        )
+
+
+def create_podcast_discovery_agent():
+    """
+    Create Podcast Discovery Agent.
+    """
+
+    return BootstrapPlaceholderPodcastAgent()
+
+
+def create_podcast_providers() -> Sequence:
+    """
+    Create Podcast provider collection.
+    """
+
+    return [
+        ParallelPodcastProvider(
+            client=BootstrapParallelClient(),
+        ),
+    ]
+
+
+class BootstrapParallelClient:
+    """
+    Deterministic hackathon Parallel client.
+
+    Not the provider.
+
+    Represents the external provider boundary.
+    """
+
+    def search(
+        self,
+        intent,
+    ) -> list[dict[str, object]]:
+
+        return [
+            {
+                "id": (
+                    "demo-french-podcast-001"
+                ),
+                "title": (
+                    "French Learning Podcast"
+                ),
+                "description": (
+                    "French listening practice "
+                    "for B2 learners."
+                ),
+                "publisher": (
+                    "EasyChatBot Demo"
+                ),
+                "languages": [
+                    "fr",
+                ],
+                "url": (
+                    "https://example.com/"
+                    "french-learning-podcast"
+                ),
+            }
+        ]
+
+
+# =========================================================
+# Governance
+# =========================================================
+
+
+class BootstrapGovernanceDecision:
+    """
+    Runtime governance decision.
+    """
+
+    def __init__(
+        self,
+        allowed: bool,
+    ) -> None:
+
+        self.allowed = allowed
+
+
+class BootstrapGovernance:
+    """
+    Temporary hackathon governance implementation.
+    """
+
+    def evaluate(
+        self,
+        request,
+    ) -> BootstrapGovernanceDecision:
+
+        return BootstrapGovernanceDecision(
+            allowed=True,
+        )
+
+
+def create_governance():
+    """
+    Create Runtime governance dependency.
+    """
+
+    return BootstrapGovernance()

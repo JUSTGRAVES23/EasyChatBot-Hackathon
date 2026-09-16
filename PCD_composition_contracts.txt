@@ -1,0 +1,1606 @@
+﻿===== HEALTH SERVICE =====
+from __future__ import annotations
+
+from app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from app.application.health.health_result import (
+    ProductionReadinessResult,
+)
+
+
+class ProductionHealthService:
+    """
+    Application service exposing production health status.
+
+    Responsibilities:
+
+    - Compose approved production health checks.
+    - Execute readiness validation.
+    - Return sanitized structured results.
+
+    Does NOT:
+
+    - Render dashboards.
+    - Store monitoring data.
+    - Send notifications.
+    - Access Telegram conversations.
+    """
+
+    def __init__(
+        self,
+        *,
+        configuration: ProductionHealthConfiguration,
+    ) -> None:
+
+        if configuration is None:
+            raise ValueError(
+                "configuration cannot be None."
+            )
+
+        self._readiness_service = (
+            ProductionReadinessService(
+                checks=(
+                    configuration.build_checks()
+                )
+            )
+        )
+
+    async def check_production_health(
+        self,
+    ) -> ProductionReadinessResult:
+        """
+        Execute production dependency checks.
+        """
+
+        return await (
+            self._readiness_service
+            .check()
+        )
+
+
+__all__ = [
+    "ProductionHealthService",
+]
+
+===== OPERATIONAL DASHBOARD SERVICE =====
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .health_result import HealthStatus
+from .operational_dashboard_models import (
+    DashboardDependencyStatus,
+    DashboardIncident,
+    DashboardIncidentSummary,
+    DashboardOperationalMetrics,
+    DashboardSurfaceStatus,
+    OperationalDashboardSnapshot,
+)
+from .operational_event import OperationalEventType, OperationalSurface
+from .operational_event_service import OperationalEventService
+from .operational_health_snapshot import OperationalHealthSnapshotService
+
+
+class OperationalDashboardService:
+    """
+    Application service producing the read-only operational dashboard.
+
+    Dependency health is probed fresh for every snapshot.
+
+    Incident/event state comes from the application-owned
+    OperationalEventService.
+
+    The event service is exposed through a read-only property so dependent
+    Operations Center application APIs can explicitly reuse the same
+    authoritative operational state.
+    """
+
+    def __init__(
+        self,
+        *,
+        health_snapshot_service: OperationalHealthSnapshotService,
+        event_service: OperationalEventService,
+    ) -> None:
+        if health_snapshot_service is None:
+            raise ValueError(
+                "health_snapshot_service cannot be None."
+            )
+
+        if event_service is None:
+            raise ValueError(
+                "event_service cannot be None."
+            )
+
+        self._health_snapshot_service = (
+            health_snapshot_service
+        )
+
+        self._event_service = event_service
+
+    @property
+    def event_service(self) -> OperationalEventService:
+        """
+        Return the authoritative application-owned event service.
+
+        This does not create a new service or event store.
+
+        It allows dependent read-only Operations Center APIs to use the
+        exact same operational state as this dashboard service.
+        """
+        return self._event_service
+
+    async def create_dashboard_snapshot(
+        self,
+    ) -> OperationalDashboardSnapshot:
+        """
+        Create a fresh operational dashboard snapshot.
+
+        Dependency health and current incident state are evaluated for
+        every request.
+        """
+
+        health = (
+            await self._health_snapshot_service.create_snapshot()
+        )
+
+        incidents = self._event_service.list_incidents()
+
+        operational_events = tuple(
+            event
+            for incident in incidents
+            for event in incident.events
+        )
+
+        dashboard_incidents = tuple(
+            DashboardIncident.from_incident(
+                incident
+            )
+            for incident in incidents
+        )
+
+        private_incidents = tuple(
+            incident
+            for incident in incidents
+            if incident.surface
+            is OperationalSurface.PRIVATE_CLASSROOM
+        )
+
+        announcement_incidents = tuple(
+            incident
+            for incident in incidents
+            if incident.surface
+            is OperationalSurface.ANNOUNCEMENT_GROUP
+        )
+
+        private_events = tuple(
+            event
+            for event in operational_events
+            if event.surface
+            is OperationalSurface.PRIVATE_CLASSROOM
+        )
+
+        announcement_events = tuple(
+            event
+            for event in operational_events
+            if event.surface
+            is OperationalSurface.ANNOUNCEMENT_GROUP
+        )
+
+        return OperationalDashboardSnapshot(
+            generated_at=datetime.now(timezone.utc),
+            overall_status=health.overall_status,
+            health_score=self._calculate_health_score(
+                health.overall_status,
+                incidents,
+            ),
+            private_classroom=self._surface_status(
+                health=health,
+                surface=OperationalSurface.PRIVATE_CLASSROOM,
+                incidents=private_incidents,
+                events=private_events,
+            ),
+            announcement_group=self._surface_status(
+                health=health,
+                surface=OperationalSurface.ANNOUNCEMENT_GROUP,
+                incidents=announcement_incidents,
+                events=announcement_events,
+            ),
+            incidents=dashboard_incidents,
+        )
+
+    def list_incidents(
+        self,
+        *,
+        surface: OperationalSurface | None = None,
+    ):
+        """
+        Read current incidents through the existing operational-event
+        abstraction.
+
+        No second incident store is created.
+        """
+
+        return self._event_service.list_incidents(
+            surface=surface
+        )
+
+    def _surface_status(
+        self,
+        *,
+        health,
+        surface: OperationalSurface,
+        incidents,
+        events,
+    ) -> DashboardSurfaceStatus:
+        return DashboardSurfaceStatus(
+            surface=surface,
+            status=self._surface_health_status(
+                health=health,
+                surface=surface,
+                incidents=incidents,
+            ),
+            dependencies=self._dependency_statuses(
+                health
+            ),
+            incidents=self._incident_summary(
+                incidents
+            ),
+            metrics=self._operational_metrics(
+                events
+            ),
+        )
+
+    @staticmethod
+    def _dependency_statuses(health):
+        result = []
+
+        for name, value in health.dependency_health.items():
+            try:
+                status = HealthStatus(
+                    value.get(
+                        "status",
+                        HealthStatus.UNHEALTHY.value,
+                    )
+                )
+            except ValueError:
+                status = HealthStatus.UNHEALTHY
+
+            result.append(
+                DashboardDependencyStatus(
+                    name=name,
+                    status=status,
+                    details=dict(
+                        value.get(
+                            "details",
+                            {}
+                        )
+                    ),
+                )
+            )
+
+        return tuple(result)
+
+    @staticmethod
+    def _incident_summary(incidents):
+        return DashboardIncidentSummary(
+            total=len(incidents),
+            open=sum(
+                incident.is_open
+                for incident in incidents
+            ),
+            critical=sum(
+                incident.severity.value == "critical"
+                for incident in incidents
+            ),
+            high=sum(
+                incident.severity.value == "high"
+                for incident in incidents
+            ),
+            medium=sum(
+                incident.severity.value == "medium"
+                for incident in incidents
+            ),
+            low=sum(
+                incident.severity.value == "low"
+                for incident in incidents
+            ),
+            info=sum(
+                incident.severity.value == "info"
+                for incident in incidents
+            ),
+        )
+
+    @staticmethod
+    def _operational_metrics(events):
+        return DashboardOperationalMetrics(
+            message_failures=sum(
+                event.event_type
+                is OperationalEventType.MESSAGE_FAILURE
+                for event in events
+            ),
+            rate_limit_events=sum(
+                event.event_type
+                is OperationalEventType.RATE_LIMIT
+                for event in events
+            ),
+            abuse_events=sum(
+                event.event_type
+                is OperationalEventType.ABUSE
+                for event in events
+            ),
+        )
+
+    @staticmethod
+    def _surface_health_status(
+        *,
+        health,
+        surface,
+        incidents,
+    ):
+        if any(
+            incident.is_open
+            and incident.severity.value
+            in {"critical", "high"}
+            for incident in incidents
+        ):
+            return HealthStatus.UNHEALTHY
+
+        if surface is OperationalSurface.PRIVATE_CLASSROOM:
+            statuses = (
+                health.telegram_status,
+                health.postgresql_status,
+                health.llm_status,
+            )
+        else:
+            statuses = (
+                health.telegram_status,
+            )
+
+        if all(
+            status is HealthStatus.HEALTHY
+            for status in statuses
+        ):
+            return HealthStatus.HEALTHY
+
+        return HealthStatus.UNHEALTHY
+
+    @staticmethod
+    def _calculate_health_score(
+        overall_status,
+        incidents,
+    ) -> int:
+        score = (
+            100
+            if overall_status is HealthStatus.HEALTHY
+            else 60
+        )
+
+        critical_open = sum(
+            incident.is_open
+            and incident.severity.value == "critical"
+            for incident in incidents
+        )
+
+        high_open = sum(
+            incident.is_open
+            and incident.severity.value == "high"
+            for incident in incidents
+        )
+
+        score -= critical_open * 20
+        score -= high_open * 10
+
+        return max(
+            0,
+            min(100, score),
+        )
+
+
+__all__ = [
+    "OperationalDashboardService",
+]
+===== OPERATIONS COMPOSITION =====
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py -----
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from backend.app.application.operations_center.announcement_group_operations_api import (
+    AnnouncementGroupOperationsAPI,
+)
+from backend.app.application.operations_center.private_classroom_operations_api import (
+    PrivateClassroomOperationsAPI,
+)
+
+
+class ChatOperationsDashboardAPI:
+    """Read-only application boundary for Chat Operations."""
+
+    def __init__(
+        self,
+        *,
+        dashboard_service: OperationalDashboardService,
+        private_classroom_api: PrivateClassroomOperationsAPI | None = None,
+        announcement_group_api: AnnouncementGroupOperationsAPI | None = None,
+    ) -> None:
+        if dashboard_service is None:
+            raise ValueError("dashboard_service cannot be None.")
+
+        self._dashboard_service = dashboard_service
+        self._private_classroom_api = (
+            private_classroom_api
+            if private_classroom_api is not None
+            else PrivateClassroomOperationsAPI(
+                dashboard_service=dashboard_service,
+            )
+        )
+        self._announcement_group_api = (
+            announcement_group_api
+            if announcement_group_api is not None
+            else AnnouncementGroupOperationsAPI(
+                dashboard_service=dashboard_service,
+            )
+        )
+
+    async def get_dashboard(self) -> dict[str, Any]:
+        snapshot = await self._dashboard_service.create_dashboard_snapshot()
+        return snapshot.as_dict()
+
+    async def get_private_classroom_details(self) -> dict[str, Any]:
+        return await self._private_classroom_api.get_details()
+
+    async def get_announcement_group_details(self) -> dict[str, Any]:
+        return await self._announcement_group_api.get_details()
+
+
+__all__ = ["ChatOperationsDashboardAPI"]
+
+
+
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_api.py -----
+"""
+Operations Center Dashboard API application boundary.
+
+This layer contains no health logic and no infrastructure access.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.operations_center.dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+
+
+class OperationsCenterDashboardAPI:
+    """Read-only asynchronous application API."""
+
+    def __init__(
+        self,
+        *,
+        facade: OperationsCenterDashboardFacade,
+    ) -> None:
+        if facade is None:
+            raise ValueError("Dashboard facade cannot be None.")
+        self._facade = facade
+
+    async def get_dashboard(self) -> dict[str, Any]:
+        return await self._facade.get_dashboard()
+
+
+__all__ = ["OperationsCenterDashboardAPI"]
+
+
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py -----
+from __future__ import annotations
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from backend.app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from backend.app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from backend.app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from backend.app.application.operations_center.announcement_group_operations_api import (
+    AnnouncementGroupOperationsAPI,
+)
+from backend.app.application.operations_center.chat_operations_dashboard_api import (
+    ChatOperationsDashboardAPI,
+)
+from backend.app.application.operations_center.dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+from backend.app.application.operations_center.dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+from backend.app.application.operations_center.private_classroom_operations_api import (
+    PrivateClassroomOperationsAPI,
+)
+from backend.app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from backend.app.application.provider_management.functionality_health_service import (
+    FunctionalityHealthService,
+)
+from backend.app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from backend.app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+
+
+class OperationsCenterComposition:
+    """Application-owned, reusable Operations Center dependency graph."""
+
+    def __init__(
+        self,
+        *,
+        provider_usage_dashboard_service: (
+            ProviderUsageDashboardService | None
+        ) = None,
+        functionality_control_service: (
+            FunctionalityOperationalControlService | None
+        ) = None,
+    ) -> None:
+        configuration = ProductionHealthConfiguration()
+
+        readiness_service = ProductionReadinessService(
+            checks=configuration.build_checks(),
+        )
+
+        health_snapshot_service = OperationalHealthSnapshotService(
+            readiness_service=readiness_service,
+        )
+
+        event_service = OperationalEventService()
+
+        dashboard_service = OperationalDashboardService(
+            health_snapshot_service=health_snapshot_service,
+            event_service=event_service,
+        )
+
+        facade = OperationsCenterDashboardFacade(
+            dashboard_service=dashboard_service,
+        )
+
+        dashboard_api = OperationsCenterDashboardAPI(
+            facade=facade,
+        )
+
+        private_classroom_api = PrivateClassroomOperationsAPI(
+            dashboard_service=dashboard_service,
+        )
+
+        announcement_group_api = AnnouncementGroupOperationsAPI(
+            dashboard_service=dashboard_service,
+        )
+
+        chat_operations_api = ChatOperationsDashboardAPI(
+            dashboard_service=dashboard_service,
+            private_classroom_api=private_classroom_api,
+            announcement_group_api=announcement_group_api,
+        )
+
+        functionality_health_service = FunctionalityHealthService(
+            readiness_service=readiness_service,
+            functionality_control_service=functionality_control_service,
+        )
+
+        self._event_service = event_service
+        self._dashboard_service = dashboard_service
+        self._dashboard_api = dashboard_api
+        self._chat_operations_api = chat_operations_api
+        self._private_classroom_api = private_classroom_api
+        self._announcement_group_api = announcement_group_api
+        self._functionality_health_service = functionality_health_service
+        self._functionality_control_service = functionality_control_service
+        self._provider_usage_dashboard_service = (
+            provider_usage_dashboard_service
+        )
+
+    @property
+    def event_service(self) -> OperationalEventService:
+        return self._event_service
+
+    @property
+    def dashboard_service(self) -> OperationalDashboardService:
+        return self._dashboard_service
+
+    @property
+    def dashboard_api(self) -> OperationsCenterDashboardAPI:
+        return self._dashboard_api
+
+    @property
+    def chat_operations_api(self) -> ChatOperationsDashboardAPI:
+        return self._chat_operations_api
+
+    @property
+    def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+        return self._private_classroom_api
+
+    @property
+    def announcement_group_api(self) -> AnnouncementGroupOperationsAPI:
+        return self._announcement_group_api
+
+    @property
+    def functionality_health_service(self) -> FunctionalityHealthService:
+        return self._functionality_health_service
+
+    @property
+    def functionality_control_service(
+        self,
+    ) -> FunctionalityOperationalControlService:
+        return self._functionality_control_service
+
+    @property
+    def provider_usage_dashboard_service(
+        self,
+    ) -> ProviderUsageDashboardService | None:
+        return self._provider_usage_dashboard_service
+
+
+def create_operations_center_composition(
+    *,
+    provider_usage_dashboard_service: (
+        ProviderUsageDashboardService | None
+    ) = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+) -> OperationsCenterComposition:
+    return OperationsCenterComposition(
+        provider_usage_dashboard_service=provider_usage_dashboard_service,
+        functionality_control_service=functionality_control_service,
+    )
+
+
+def create_operations_center_dashboard_api() -> OperationsCenterDashboardAPI:
+    return OperationsCenterComposition().dashboard_api
+
+
+def create_chat_operations_dashboard_api() -> ChatOperationsDashboardAPI:
+    return OperationsCenterComposition().chat_operations_api
+
+
+def create_private_classroom_operations_api() -> PrivateClassroomOperationsAPI:
+    return OperationsCenterComposition().private_classroom_api
+
+
+def create_announcement_group_operations_api() -> AnnouncementGroupOperationsAPI:
+    return OperationsCenterComposition().announcement_group_api
+
+
+__all__ = [
+    "OperationsCenterComposition",
+    "create_operations_center_composition",
+    "create_operations_center_dashboard_api",
+    "create_chat_operations_dashboard_api",
+    "create_private_classroom_operations_api",
+    "create_announcement_group_operations_api",
+]
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_facade.py -----
+"""
+Operations Center Dashboard Facade.
+
+Read-only application boundary for the real WS-21 operational dashboard.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+
+
+class OperationsCenterDashboardFacade:
+    """Protect the HTTP/UI contract from internal dashboard services."""
+
+    def __init__(
+        self,
+        *,
+        dashboard_service: OperationalDashboardService,
+    ) -> None:
+        if dashboard_service is None:
+            raise ValueError("Dashboard service cannot be None.")
+
+        self._dashboard_service = dashboard_service
+
+    async def get_dashboard(self) -> dict[str, Any]:
+        """Return the real, sanitized operational dashboard snapshot."""
+        snapshot = await self._dashboard_service.create_dashboard_snapshot()
+        return snapshot.as_dict()
+
+
+__all__ = ["OperationsCenterDashboardFacade"]
+
+
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py -----
+"""
+WS-21.17 Private Classroom Operations composition.
+
+Creates the application-owned dependency graph for the read-only
+Private Classroom operational detail API.
+
+Architecture:
+
+    ProductionHealthConfiguration
+        -> ProductionReadinessService
+        -> OperationalHealthSnapshotService
+        -> OperationalEventService
+        -> OperationalDashboardService
+        -> PrivateClassroomOperationsAPI
+
+This composition deliberately reuses the existing Operations Center
+health and operational-event abstractions.
+
+It does not:
+
+- create a second incident store;
+- create a second event service;
+- execute agents;
+- execute providers;
+- modify Runtime state;
+- perform remediation;
+- persist operational events.
+
+The snapshot is generated fresh for every API request.
+"""
+
+from __future__ import annotations
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from backend.app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from backend.app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from backend.app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from backend.app.application.operations_center.private_classroom_operations_api import (
+    PrivateClassroomOperationsAPI,
+)
+
+
+class PrivateClassroomOperationsComposition:
+    """
+    Application-owned WS-21.17 dependency graph.
+
+    The composition owns one OperationalEventService instance so the
+    current in-memory operational state remains consistent across
+    requests within the running application process.
+    """
+
+    def __init__(self) -> None:
+        configuration = ProductionHealthConfiguration()
+
+        readiness_service = ProductionReadinessService(
+            checks=configuration.build_checks(),
+        )
+
+        health_snapshot_service = OperationalHealthSnapshotService(
+            readiness_service=readiness_service,
+        )
+
+        event_service = OperationalEventService()
+
+        dashboard_service = OperationalDashboardService(
+            health_snapshot_service=health_snapshot_service,
+            event_service=event_service,
+        )
+
+        self._event_service = event_service
+
+        self._dashboard_service = dashboard_service
+
+        self._private_classroom_api = PrivateClassroomOperationsAPI(
+            dashboard_service=dashboard_service,
+        )
+
+    @property
+    def event_service(self) -> OperationalEventService:
+        """Return the application-owned operational event service."""
+        return self._event_service
+
+    @property
+    def dashboard_service(self) -> OperationalDashboardService:
+        """Return the shared Operations Center dashboard service."""
+        return self._dashboard_service
+
+    @property
+    def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+        """Return the WS-21.17 Private Classroom application API."""
+        return self._private_classroom_api
+
+
+def create_private_classroom_operations_api() -> (
+    PrivateClassroomOperationsAPI
+):
+    """
+    Create the WS-21.17 Private Classroom application boundary.
+    """
+    return (
+        PrivateClassroomOperationsComposition()
+        .private_classroom_api
+    )
+
+
+__all__ = [
+    "PrivateClassroomOperationsComposition",
+    "create_private_classroom_operations_api",
+]
+
+
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py -----
+"""
+WS-21.17 Private Classroom Operations composition.
+
+Creates the application-owned dependency graph for the read-only
+Private Classroom operational detail API.
+
+Architecture:
+
+    ProductionHealthConfiguration
+        -> ProductionReadinessService
+        -> OperationalHealthSnapshotService
+        -> OperationalEventService
+        -> OperationalDashboardService
+        -> PrivateClassroomOperationsAPI
+
+This composition deliberately reuses the existing Operations Center
+health and operational-event abstractions.
+
+It does not:
+
+- create a second incident store;
+- create a second event service;
+- execute agents;
+- execute providers;
+- modify Runtime state;
+- perform remediation;
+- persist operational events.
+
+The snapshot is generated fresh for every API request.
+"""
+
+from __future__ import annotations
+
+from backend.app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from backend.app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from backend.app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from backend.app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from backend.app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from backend.app.application.operations_center.private_classroom_operations_api import (
+    PrivateClassroomOperationsAPI,
+)
+
+
+class PrivateClassroomOperationsComposition:
+    """
+    Application-owned WS-21.17 dependency graph.
+
+    The composition owns one OperationalEventService instance so the
+    current in-memory operational state remains consistent across
+    requests within the running application process.
+    """
+
+    def __init__(self) -> None:
+        configuration = ProductionHealthConfiguration()
+
+        readiness_service = ProductionReadinessService(
+            checks=configuration.build_checks(),
+        )
+
+        health_snapshot_service = OperationalHealthSnapshotService(
+            readiness_service=readiness_service,
+        )
+
+        event_service = OperationalEventService()
+
+        dashboard_service = OperationalDashboardService(
+            health_snapshot_service=health_snapshot_service,
+            event_service=event_service,
+        )
+
+        self._event_service = event_service
+
+        self._dashboard_service = dashboard_service
+
+        self._private_classroom_api = PrivateClassroomOperationsAPI(
+            dashboard_service=dashboard_service,
+        )
+
+    @property
+    def event_service(self) -> OperationalEventService:
+        """Return the application-owned operational event service."""
+        return self._event_service
+
+    @property
+    def dashboard_service(self) -> OperationalDashboardService:
+        """Return the shared Operations Center dashboard service."""
+        return self._dashboard_service
+
+    @property
+    def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+        """Return the WS-21.17 Private Classroom application API."""
+        return self._private_classroom_api
+
+
+def create_private_classroom_operations_api() -> (
+    PrivateClassroomOperationsAPI
+):
+    """
+    Create the WS-21.17 Private Classroom application boundary.
+    """
+    return (
+        PrivateClassroomOperationsComposition()
+        .private_classroom_api
+    )
+
+
+__all__ = [
+    "PrivateClassroomOperationsComposition",
+    "create_private_classroom_operations_api",
+]
+
+
+===== PRIVACY COMPOSITION =====
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_registry.py -----
+from __future__ import annotations
+
+from .privacy_approval_record import PrivacyApprovalRecord
+
+
+class PrivacyApprovalRegistry:
+    """Registry for explicit human approval/rejection evidence."""
+
+    def __init__(
+        self,
+        records: list[PrivacyApprovalRecord] | None = None,
+    ) -> None:
+        self._records: dict[str, PrivacyApprovalRecord] = {}
+        for record in records or []:
+            self.register(record)
+
+    def register(self, record: PrivacyApprovalRecord) -> None:
+        if record.approval_id in self._records:
+            raise ValueError(
+                f"Approval record already registered: {record.approval_id}"
+            )
+        self._records[record.approval_id] = record
+
+    def get(self, approval_id: str) -> PrivacyApprovalRecord:
+        try:
+            return self._records[approval_id]
+        except KeyError as exc:
+            raise KeyError(
+                f"Approval record not registered: {approval_id}"
+            ) from exc
+
+    def for_case(self, case_id: str) -> tuple[PrivacyApprovalRecord, ...]:
+        return tuple(
+            record
+            for record in self._records.values()
+            if record.case_id == case_id
+        )
+
+    def all(self) -> tuple[PrivacyApprovalRecord, ...]:
+        return tuple(self._records.values())
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_change_registry.py -----
+from __future__ import annotations
+
+from .privacy_change import PrivacyChange, PrivacyChangeStatus
+
+
+class PrivacyChangeRegistry:
+    """In-memory application registry for controlled privacy changes.
+
+    Beta 1 intentionally keeps this registry simple. Persistence can be
+    introduced behind the same contract once the workflow is proven.
+    """
+
+    def __init__(self) -> None:
+        self._changes: dict[str, PrivacyChange] = {}
+
+    def register(self, change: PrivacyChange) -> PrivacyChange:
+        if change is None:
+            raise ValueError("change cannot be None.")
+        if change.change_id in self._changes:
+            raise ValueError(f"Privacy change already registered: {change.change_id}")
+        self._changes[change.change_id] = change
+        return change
+
+    def get(self, change_id: str) -> PrivacyChange | None:
+        return self._changes.get(change_id)
+
+    def list_all(self) -> list[PrivacyChange]:
+        return list(self._changes.values())
+
+    def update(self, change: PrivacyChange) -> PrivacyChange:
+        if change is None:
+            raise ValueError("change cannot be None.")
+        if change.change_id not in self._changes:
+            raise KeyError(f"Unknown privacy change: {change.change_id}")
+        self._changes[change.change_id] = change
+        return change
+
+    def mark_blocked(self, change_id: str) -> PrivacyChange:
+        change = self._require(change_id)
+        updated = _replace(change, status=PrivacyChangeStatus.BLOCKED)
+        self._changes[change_id] = updated
+        return updated
+
+    def _require(self, change_id: str) -> PrivacyChange:
+        change = self.get(change_id)
+        if change is None:
+            raise KeyError(f"Unknown privacy change: {change_id}")
+        return change
+
+
+def _replace(change: PrivacyChange, **changes) -> PrivacyChange:
+    from dataclasses import replace
+    return replace(change, **changes)
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_registry.py -----
+from __future__ import annotations
+
+from .privacy_governance_case import PrivacyGovernanceCase
+
+
+class PrivacyGovernanceCaseRegistry:
+    """Beta registry for privacy governance cases."""
+
+    def __init__(
+        self,
+        cases: list[PrivacyGovernanceCase] | None = None,
+    ) -> None:
+        self._cases: dict[str, PrivacyGovernanceCase] = {}
+        for case in cases or []:
+            self.register(case)
+
+    def register(self, case: PrivacyGovernanceCase) -> None:
+        if case.case_id in self._cases:
+            raise ValueError(f"Case already registered: {case.case_id}")
+        self._cases[case.case_id] = case
+
+    def get(self, case_id: str) -> PrivacyGovernanceCase:
+        try:
+            return self._cases[case_id]
+        except KeyError as exc:
+            raise KeyError(f"Governance case not found: {case_id}") from exc
+
+    def update(self, case: PrivacyGovernanceCase) -> None:
+        if case.case_id not in self._cases:
+            raise KeyError(f"Governance case not found: {case.case_id}")
+        self._cases[case.case_id] = case
+
+    def all(self) -> tuple[PrivacyGovernanceCase, ...]:
+        return tuple(self._cases.values())
+
+    def pending(self) -> tuple[PrivacyGovernanceCase, ...]:
+        return tuple(
+            case
+            for case in self._cases.values()
+            if case.governance_status == "PENDING_DPO_GRC"
+        )
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_composition.py -----
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+from .privacy_approval_email_service import (
+    ApprovalEmailSender,
+    PrivacyApprovalEmailService,
+)
+from .privacy_approval_registry import PrivacyApprovalRegistry
+from .privacy_change_registry import PrivacyChangeRegistry
+from .privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+from .privacy_governance_case_service import (
+    PrivacyGovernanceCaseService,
+)
+from .privacy_governance_dashboard_service import (
+    PrivacyGovernanceDashboardService,
+)
+from .privacy_governance_decision_service import (
+    PrivacyGovernanceDecisionService,
+)
+from .privacy_governance_flow_service import (
+    PrivacyGovernanceFlowService,
+)
+from .privacy_governance_gate import (
+    PrivacyGovernanceGate,
+)
+from .privacy_validation_service import (
+    PrivacyValidationService,
+)
+
+
+@dataclass(slots=True)
+class PrivacyGovernanceComposition:
+    """Single composition root for the privacy governance capability.
+
+    Beta 1 uses in-memory registries.
+
+    All application services receive the same registry instances so that:
+
+    - case creation;
+    - governance decisions;
+    - approval history;
+    - dashboard reads;
+    - API reads
+
+    operate on one coherent runtime state.
+
+    Email infrastructure is optional at composition-construction time.
+    This is intentional:
+
+    - unit tests must not require external email configuration;
+    - application startup must not fail merely because email is disabled;
+    - actual escalation requires an explicitly configured email service.
+
+    Repository-backed implementations can replace the registries later
+    without changing the application service contracts.
+    """
+
+    change_registry: PrivacyChangeRegistry
+    case_registry: PrivacyGovernanceCaseRegistry
+    approval_registry: PrivacyApprovalRegistry
+
+    decision_service: PrivacyGovernanceDecisionService
+    governance_gate: PrivacyGovernanceGate
+    case_service: PrivacyGovernanceCaseService
+    flow_service: PrivacyGovernanceFlowService
+    dashboard_service: PrivacyGovernanceDashboardService
+
+
+def _build_runtime_approval_email_service(
+    *,
+    approval_email_service: PrivacyApprovalEmailService | None,
+) -> PrivacyApprovalEmailService | None:
+    """Resolve the optional runtime approval-email service.
+
+    Explicit dependency injection always wins.
+
+    When no service is injected, the service is constructed only when
+    the required runtime configuration exists.
+
+    Missing email configuration is NOT a composition-construction error.
+
+    This is important because the privacy governance application layer
+    must remain usable without an external email provider, especially in:
+
+    - unit tests;
+    - local development;
+    - provider-independent deployments;
+    - environments where email escalation is intentionally disabled.
+
+    Actual governance escalation remains protected by
+    PrivacyGovernanceGate.route_and_escalate(), which requires an
+    approval email service before attempting delivery.
+    """
+
+    if approval_email_service is not None:
+        return approval_email_service
+
+    recipient = os.getenv(
+        "PRIVACY_APPROVAL_EMAIL_TO",
+        "",
+    ).strip()
+
+    if not recipient:
+        return None
+
+    try:
+        from backend.app.infrastructure.email.resend_approval_email_sender import (
+            ResendApprovalEmailSender,
+        )
+    except ImportError:
+        # Keep the application composition provider-independent.
+        #
+        # Infrastructure may not be installed in lightweight unit-test
+        # environments.
+        return None
+
+    try:
+        sender: ApprovalEmailSender = ResendApprovalEmailSender()
+    except (RuntimeError, ValueError):
+        # Configuration/provider availability must not prevent creation
+        # of the governance application composition.
+        return None
+
+    return PrivacyApprovalEmailService(
+        sender=sender,
+        approval_recipient=recipient,
+    )
+
+
+def create_privacy_governance_composition(
+    *,
+    validation_service: PrivacyValidationService | None = None,
+    approval_email_service: PrivacyApprovalEmailService | None = None,
+) -> PrivacyGovernanceComposition:
+    """Create an isolated privacy governance composition.
+
+    This function is the primary dependency-injection boundary.
+
+    Important design rule:
+
+        Composition creation != external side effect.
+
+    Creating this composition:
+
+    - creates registries;
+    - wires application services;
+    - optionally wires configured infrastructure;
+
+    but does NOT:
+
+    - send email;
+    - call Resend;
+    - make governance decisions;
+    - modify production systems.
+    """
+
+    # ------------------------------------------------------------------
+    # Authoritative in-memory state
+    # ------------------------------------------------------------------
+
+    change_registry = PrivacyChangeRegistry()
+    case_registry = PrivacyGovernanceCaseRegistry()
+    approval_registry = PrivacyApprovalRegistry()
+
+    # ------------------------------------------------------------------
+    # Optional infrastructure
+    # ------------------------------------------------------------------
+
+    resolved_approval_email_service = (
+        _build_runtime_approval_email_service(
+            approval_email_service=approval_email_service,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Decision service
+    # ------------------------------------------------------------------
+
+    decision_service = PrivacyGovernanceDecisionService(
+        approval_registry=approval_registry,
+        change_registry=change_registry,
+        case_registry=case_registry,
+    )
+
+    # ------------------------------------------------------------------
+    # Governance gate
+    # ------------------------------------------------------------------
+
+    governance_gate = PrivacyGovernanceGate(
+        registry=change_registry,
+        validation_service=validation_service,
+        approval_email_service=resolved_approval_email_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Case application service
+    # ------------------------------------------------------------------
+
+    case_service = PrivacyGovernanceCaseService(
+        case_registry=case_registry,
+        change_registry=change_registry,
+        approval_registry=approval_registry,
+        decision_service=decision_service,
+    )
+
+    # ------------------------------------------------------------------
+    # End-to-end governance flow
+    # ------------------------------------------------------------------
+
+    flow_service = PrivacyGovernanceFlowService(
+        change_registry=change_registry,
+        governance_gate=governance_gate,
+        case_service=case_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Dashboard/read model
+    # ------------------------------------------------------------------
+
+    dashboard_service = PrivacyGovernanceDashboardService(
+        case_registry=case_registry,
+        approval_registry=approval_registry,
+    )
+
+    return PrivacyGovernanceComposition(
+        change_registry=change_registry,
+        case_registry=case_registry,
+        approval_registry=approval_registry,
+        decision_service=decision_service,
+        governance_gate=governance_gate,
+        case_service=case_service,
+        flow_service=flow_service,
+        dashboard_service=dashboard_service,
+    )
+
+
+# ----------------------------------------------------------------------
+# Runtime composition
+# ----------------------------------------------------------------------
+
+_runtime_composition: PrivacyGovernanceComposition | None = None
+
+
+def get_privacy_governance_composition() -> PrivacyGovernanceComposition:
+    """Return the process-wide Beta privacy governance composition.
+
+    The same composition instance is reused during the application
+    process so the Operations Center API and application integrations
+    observe the same in-memory governance state.
+
+    Email configuration is optional during composition creation.
+    """
+
+    global _runtime_composition
+
+    if _runtime_composition is None:
+        _runtime_composition = (
+            create_privacy_governance_composition()
+        )
+
+    return _runtime_composition
+
+
+def reset_privacy_governance_composition_for_tests() -> None:
+    """Reset the process-wide composition.
+
+    This function exists exclusively for test isolation.
+
+    Production application code must not use this function to reset
+    governance state.
+    """
+
+    global _runtime_composition
+
+    _runtime_composition = None
+
+
+__all__ = [
+    "PrivacyGovernanceComposition",
+    "create_privacy_governance_composition",
+    "get_privacy_governance_composition",
+    "reset_privacy_governance_composition_for_tests",
+]
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_registry.py -----
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .processing_activity import ProcessingActivity
+
+
+class ProcessingRegistry:
+    """Registry of processing activities exposed by the application.
+
+    The registry is intentionally deterministic and Beta 1 scoped.
+    It is a governance input, not a legal approval engine.
+    """
+
+    def __init__(self, activities: list[ProcessingActivity] | None = None) -> None:
+        self._activities: dict[str, ProcessingActivity] = {}
+        for activity in activities or []:
+            self.register(activity)
+
+    def register(self, activity: ProcessingActivity) -> None:
+        if not activity.processing_id.strip():
+            raise ValueError("processing_id is required.")
+        if activity.processing_id in self._activities:
+            raise ValueError(
+                f"Processing activity already registered: {activity.processing_id}"
+            )
+        self._activities[activity.processing_id] = activity
+
+    def get(self, processing_id: str) -> ProcessingActivity:
+        try:
+            return self._activities[processing_id]
+        except KeyError as exc:
+            raise KeyError(
+                f"Processing activity not registered: {processing_id}"
+            ) from exc
+
+    def all(self) -> tuple[ProcessingActivity, ...]:
+        return tuple(self._activities.values())
+
+    def ids(self) -> set[str]:
+        return set(self._activities)
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processor_registry.py -----
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessorRecord:
+    processor_id: str
+    provider_name: str
+    role: str
+    processor_agreement_art28: str
+    hosting_location: str
+    third_country: bool
+    safeguard_art46_47: str | None
+    dpo_status: str
+    grc_status: str
+    legal_status: str
+
+
+class ProcessorRegistry:
+    def __init__(self, records: list[ProcessorRecord] | None = None) -> None:
+        self._records = {record.processor_id: record for record in records or []}
+
+    def register(self, record: ProcessorRecord) -> None:
+        if record.processor_id in self._records:
+            raise ValueError(
+                f"Processor already registered: {record.processor_id}"
+            )
+        self._records[record.processor_id] = record
+
+    def get(self, processor_id: str) -> ProcessorRecord:
+        return self._records[processor_id]
+
+    def all(self) -> tuple[ProcessorRecord, ...]:
+        return tuple(self._records.values())
+----- C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\retention_registry.py -----
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionRule:
+    retention_id: str
+    data_domain: str
+    record_type: str
+    retention_period: str
+    trigger: str
+    deletion_action: str
+    legal_policy_basis: str
+
+
+class RetentionRegistry:
+    def __init__(self, rules: list[RetentionRule] | None = None) -> None:
+        self._rules = {rule.retention_id: rule for rule in rules or []}
+
+    def register(self, rule: RetentionRule) -> None:
+        if rule.retention_id in self._rules:
+            raise ValueError(
+                f"Retention rule already registered: {rule.retention_id}"
+            )
+        self._rules[rule.retention_id] = rule
+
+    def get(self, retention_id: str) -> RetentionRule:
+        return self._rules[retention_id]
+
+    def all(self) -> tuple[RetentionRule, ...]:
+        return tuple(self._rules.values())
+===== BOOTSTRAP =====
+
+Path                                                                                               
+----                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_service.py 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\announcement_group_...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_das...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_compositi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_compositi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_compositi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_compositi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_facade.py   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_o...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_chang...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_chang...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_regis...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_servi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_servi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_case_servi...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_compositio...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_compositio...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_compositio...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_compositio...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_compositio...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_compositio...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_dashboard_...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_s...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_s...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_operationa...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_operationa...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_s...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_s...
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_tracker_co...
+===== PCD IN-MEMORY IMPLEMENTATIONS =====
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..domain.models import ProjectControlSnapshot, ProjectDefinition, ProjectEvent
+from ..domain.ports import (
+    ProjectEventRepository,
+    ProjectRegistry,
+    SnapshotRepository,
+)
+
+
+@dataclass
+class InMemoryProjectRegistry(ProjectRegistry):
+    projects: dict[str, ProjectDefinition] = field(default_factory=dict)
+
+    def get(self, project_id: str) -> ProjectDefinition | None:
+        return self.projects.get(project_id)
+
+    def list_active(self) -> list[ProjectDefinition]:
+        return [p for p in self.projects.values() if p.active]
+
+    def save(self, project: ProjectDefinition) -> ProjectDefinition:
+        self.projects[project.project_id] = project
+        return project
+
+
+@dataclass
+class InMemorySnapshotRepository(SnapshotRepository):
+    data: dict[str, list[ProjectControlSnapshot]] = field(default_factory=dict)
+
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot:
+        self.data.setdefault(snapshot.project_id, []).insert(0, snapshot)
+        return snapshot
+
+    def list_for_project(
+        self, project_id: str, limit: int = 30
+    ) -> list[ProjectControlSnapshot]:
+        return self.data.get(project_id, [])[:limit]
+
+
+@dataclass
+class InMemoryProjectEventRepository(ProjectEventRepository):
+    data: dict[str, list[ProjectEvent]] = field(default_factory=dict)
+
+    def save(self, event: ProjectEvent) -> ProjectEvent:
+        self.data.setdefault(event.project_id, []).insert(0, event)
+        return event
+
+    def list_for_project(
+        self, project_id: str, limit: int = 100
+    ) -> list[ProjectEvent]:
+        return self.data.get(project_id, [])[:limit]
+
+

@@ -1,4 +1,4 @@
-﻿from backend.cybersecurity.decision_support.priority_engine import (
+﻿from cybersecurity.decision_support.priority_engine import (
     CybersecurityPriorityEngine,
 )
 
@@ -29,3 +29,4 @@ def test_critical_signal_receives_high_priority():
     assert result.decision_required.startswith(
         "Human review"
     )
+

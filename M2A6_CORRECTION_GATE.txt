@@ -1,0 +1,1588 @@
+===== M2-A.6 CORRECTION / PRE-INTEGRATION GATE =====
+Generated: 2026-09-14 08:35:54
+
+===== ALEMBIC =====
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+20260902_m2_3_world_catalogue
+20260907_provider_usage_events (head)
+20260910_functionality_operational_control (head)
+20260912_auth_password_reset (head)
+20260903_m4_2_r4_user_role (head)
+20260901_cmp_monitoring_plan_items (head)
+20260901_cmp_monitoring_plan_items (head)
+20260903_m4_2_r4_user_role (compliance_documentation) (head)
+20260907_provider_usage_events (provider_usage_ledger) (head)
+20260910_functionality_operational_control (functionality_operational_control) (head)
+20260912_auth_password_reset (head)
+20260914_m2_a5_runtime_world_mapping (head)
+
+===== TARGET FILES =====
+
+===== FILE: backend\app\application\uai\world\world_resolver.py =====
+"""
+World Resolver.
+
+Application service responsible for resolving
+the learner's active AI learning world.
+
+Responsibilities
+----------------
+
+- Retrieve world configuration.
+- Validate world availability.
+- Create WorldContext.
+
+Does NOT
+--------
+
+- Execute AI models.
+- Manage characters.
+- Create conversations.
+- Handle persistence directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Protocol
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class WorldRepository(Protocol):
+    """
+    Repository contract for world retrieval.
+    """
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ):
+        """
+        Retrieve a world configuration.
+        """
+        ...
+
+
+class WorldResolver:
+    """
+    Resolves a learning world into runtime context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_repository: WorldRepository,
+    ) -> None:
+        self._world_repository = world_repository
+
+    def resolve(
+        self,
+        world_id: str,
+    ) -> WorldContext:
+        """
+        Resolve world configuration.
+
+        Returns
+        -------
+        WorldContext
+            Validated world interaction context.
+        """
+
+        logger.info(
+            "Resolving world context",
+            extra={
+                "world_id": world_id,
+            },
+        )
+
+        world = (
+            self._world_repository
+            .get_by_id(world_id)
+        )
+
+        if world is None:
+            raise ValueError(
+                f"World not found: {world_id}"
+            )
+
+        return WorldContext(
+            world_id=world.id,
+            name=world.name,
+            language_code=world.language_code,
+            available_characters=(
+                tuple(
+                    world.available_characters
+                )
+            ),
+        )
+
+===== FILE: backend\app\infrastructure\persistence\database.py =====
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+
+class Base(DeclarativeBase):
+    """Canonical SQLAlchemy metadata registry for the platform."""
+
+    pass
+
+
+def database_url() -> str:
+    """Return the canonical PostgreSQL connection URL."""
+
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for PostgreSQL persistence."
+        )
+
+    return value
+
+
+def create_database_engine():
+    """Create the existing synchronous PostgreSQL engine.
+
+    This API is preserved for the existing Beta 1 persistence layer.
+    """
+
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(
+    engine,
+) -> sessionmaker[Session]:
+    """Create the existing synchronous session factory.
+
+    Preserved for existing Beta 1 repositories.
+    """
+
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
+def async_database_url() -> str:
+    """Return DATABASE_URL adapted for SQLAlchemy async PostgreSQL.
+
+    The environment remains the single source of truth. We only adapt the
+    driver at the infrastructure boundary when the configured URL uses the
+    standard PostgreSQL SQLAlchemy scheme.
+    """
+
+    value = database_url()
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    raise RuntimeError(
+        "DATABASE_URL must use a PostgreSQL URL compatible with "
+        "the synchronous or async PostgreSQL persistence boundary."
+    )
+
+
+def create_async_database_engine() -> AsyncEngine:
+    """Create the canonical asynchronous PostgreSQL engine.
+
+    This is used by durable WS-22 persistence while sharing the same
+    DATABASE_URL and canonical Base as the existing persistence layer.
+    """
+
+    return create_async_engine(
+        async_database_url(),
+        pool_pre_ping=True,
+    )
+
+
+def create_async_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    """Create the canonical asynchronous PostgreSQL session factory."""
+
+    return async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+===== FILE: backend\app\infrastructure\persistence\model_registry.py =====
+"""Explicit registration of the authoritative SQLAlchemy ORM models.
+
+This module exists solely to ensure that the canonical Base.metadata registry
+contains the application's authoritative persistence models before consumers
+such as schema diagnostics inspect it.
+
+Do not import legacy or duplicate ORM models here.
+"""
+
+from app.infrastructure.persistence.beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+from app.infrastructure.persistence.conversation_event_records import (
+    ConversationEventRecord,
+)
+from app.infrastructure.persistence.functionality_control_records import (
+    FunctionalityControlAuditRecord,
+    FunctionalityControlStateRecord,
+)
+from app.infrastructure.persistence.memory_records import (
+    ConversationMemoryRecord,
+)
+from app.infrastructure.persistence.provider_usage_records import (
+    ProviderUsageRecord,
+)
+
+__all__ = [
+    "BetaConnectionTokenRecord",
+    "BetaUserRecord",
+    "TelegramBindingRecord",
+    "ConversationEventRecord",
+    "FunctionalityControlStateRecord",
+    "FunctionalityControlAuditRecord",
+    "ConversationMemoryRecord",
+    "ProviderUsageRecord",
+]
+
+===== FILE: backend\app\infrastructure\persistence\beta_access_models.py =====
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .database import Base
+
+
+class BetaUserRecord(Base):
+    __tablename__ = "beta_users"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active_world_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    telegram_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BetaConnectionTokenRecord(Base):
+    __tablename__ = "beta_connection_tokens"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("beta_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TelegramBindingRecord(Base):
+    __tablename__ = "telegram_bindings"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", name="uq_telegram_binding_telegram_user"),
+        UniqueConstraint("user_id", name="uq_telegram_binding_beta_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("beta_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    telegram_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    chat_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+===== FILE: backend\app\infrastructure\persistence\learning_world_models.py =====
+"""SQLAlchemy model for the authoritative Learning World catalogue."""
+from __future__ import annotations
+from datetime import datetime
+from uuid import UUID
+from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy.orm import Mapped, mapped_column
+from .database import Base
+
+class LearningWorldModel(Base):
+    __tablename__ = "learning_worlds"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    identifier: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    language: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    world_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    learning_domain: Mapped[str] = mapped_column(String(100), nullable=False)
+    runtime_world_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+===== FILE: backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py =====
+"""PostgreSQL adapter for the Learning World catalogue repository."""
+from __future__ import annotations
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+from app.application.world_catalogue.models import LearningWorldCatalogueEntry
+from app.application.world_catalogue.repositories import LearningWorldCatalogueRepository
+from .learning_world_models import LearningWorldModel
+
+class PostgreSQLLearningWorldCatalogueRepository(LearningWorldCatalogueRepository):
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    def get_by_identifier(self, identifier: str) -> LearningWorldCatalogueEntry | None:
+        if not identifier or not identifier.strip():
+            raise ValueError("identifier is required.")
+        with self._session_factory() as session:
+            row = session.scalar(select(LearningWorldModel).where(LearningWorldModel.identifier == identifier.strip()))
+            return None if row is None else self._to_domain(row)
+
+    @staticmethod
+    def _to_domain(row: LearningWorldModel) -> LearningWorldCatalogueEntry:
+        return LearningWorldCatalogueEntry(
+            identifier=row.identifier, name=row.name, description=row.description,
+            language=row.language, version=row.version, status=row.status,
+            enabled=row.enabled, world_type=row.world_type,
+            learning_domain=row.learning_domain, runtime_world_id=row.runtime_world_id,
+        )
+
+===== FILE: backend\app\application\world_catalogue\models.py =====
+"""Application model for the authoritative Learning World catalogue."""
+from __future__ import annotations
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class LearningWorldCatalogueEntry:
+    identifier: str
+    name: str
+    description: str
+    language: str
+    version: str
+    status: str
+    enabled: bool
+    world_type: str
+    learning_domain: str
+    runtime_world_id: str | None
+
+    def __post_init__(self) -> None:
+        for field_name in ("identifier", "name", "version", "status", "world_type", "learning_domain"):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"Learning World catalogue {field_name} cannot be empty.")
+        if self.runtime_world_id is not None and not self.runtime_world_id.strip():
+            raise ValueError("runtime_world_id cannot be blank when provided.")
+
+===== FILE: backend\app\application\world_catalogue\repositories.py =====
+"""Repository port for the Learning World catalogue."""
+from __future__ import annotations
+from typing import Protocol
+from .models import LearningWorldCatalogueEntry
+
+class LearningWorldCatalogueRepository(Protocol):
+    def get_by_identifier(self, identifier: str) -> LearningWorldCatalogueEntry | None:
+        """Return a catalogue entry by its stable catalogue identifier."""
+        ...
+
+===== FILE: backend\app\application\world_catalogue\service.py =====
+"""Application service for catalogue-to-runtime World resolution."""
+from __future__ import annotations
+from app.application.uai.world.world_resolver import WorldResolver
+from .repositories import LearningWorldCatalogueRepository
+
+class LearningWorldCatalogueService:
+    """Apply catalogue policy and delegate runtime resolution to WorldResolver."""
+    def __init__(self, *, repository: LearningWorldCatalogueRepository, world_resolver: WorldResolver) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+        if world_resolver is None:
+            raise ValueError("world_resolver cannot be None.")
+        self._repository = repository
+        self._world_resolver = world_resolver
+
+    def get_by_identifier(self, identifier: str):
+        if not identifier or not identifier.strip():
+            raise ValueError("catalogue identifier is required.")
+        return self._repository.get_by_identifier(identifier.strip())
+
+    def resolve_runtime_world(self, catalogue_identifier: str):
+        entry = self.get_by_identifier(catalogue_identifier)
+        if entry is None:
+            raise ValueError(f"Learning World not found: {catalogue_identifier.strip()}")
+        if not entry.enabled:
+            raise ValueError(f"Learning World is disabled: {entry.identifier}")
+        if not entry.runtime_world_id:
+            raise ValueError(f"Learning World has no runtime configuration: {entry.identifier}")
+        return self._world_resolver.resolve(entry.runtime_world_id)
+
+===== FILE: backend\app\application\composition\beta_telegram_composition.py =====
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Callable
+
+from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from app.application.beta_access.beta_access_service import BetaAccessService
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
+from app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.interfaces.telegram.beta_private_chat_gate import BetaPrivateChatGate
+from app.interfaces.telegram.beta_start_handler import BetaTelegramStartHandler
+from app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
+from app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+from app.providers.llm.llm_provider_factory import LLMProviderFactory
+from src.ai_runtime.providers.usage.repository import (
+    InMemoryProviderUsageRepository,
+    ProviderUsageRepository,
+)
+from src.ai_runtime.providers.usage.service import ProviderUsageService
+
+
+@dataclass(frozen=True)
+class BetaTelegramComposition:
+    beta_access_service: BetaAccessService
+    conversation_runtime: ConversationRuntime
+    conversation_service: TelegramConversationService
+    conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_gate: BetaPrivateChatGate
+    start_handler: BetaTelegramStartHandler
+    adapter: BetaTelegramAdapter
+    runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+    provider_usage_repository: ProviderUsageRepository | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        )
+
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive number."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive number."
+        )
+
+    return value
+
+
+def create_beta_telegram_composition(
+    *,
+    user_repository: Any,
+    token_repository: Any,
+    binding_repository: Any,
+    conversation_event_repository: Any,
+    privacy_identifier_service: Any,
+    conversation_event_validator: Any,
+    expiration_minutes: int = 1440,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
+    provider_usage_capture: ProviderUsageCapture | None = None,
+    provider_usage_repository: ProviderUsageRepository | None = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+) -> BetaTelegramComposition:
+    """Create the Beta Telegram application composition.
+
+    ``functionality_control_service`` is optional at this lower-level
+    composition boundary so isolated application/unit compositions can
+    continue to construct Telegram without requiring infrastructure.
+
+    Production composition is responsible for requiring and supplying
+    the authoritative functionality-control service.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    # Application configuration root:
+    #
+    # backend/app
+    #
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[2]
+    )
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    beta_access_service = BetaAccessService(
+        user_repository=user_repository,
+        token_repository=token_repository,
+        binding_repository=binding_repository,
+        world_resolver=world_resolver,
+        expiration_minutes=expiration_minutes,
+    )
+
+    resolved_usage_repository = provider_usage_repository
+
+    if conversation_runtime is not None:
+        resolved_conversation_runtime = conversation_runtime
+
+    elif conversation_runtime_factory is not None:
+        resolved_conversation_runtime = conversation_runtime_factory()
+
+        # P1.6.1: when production supplies a durable usage repository,
+        # attach usage capture to the factory-created ConversationRuntime.
+        # Keep the existing factory API and explicit runtime injection seam.
+        if (
+            provider_usage_repository is not None
+            and provider_usage_capture is None
+            and isinstance(
+                resolved_conversation_runtime,
+                ConversationRuntime,
+            )
+            and resolved_conversation_runtime.usage_capture is None
+        ):
+            provider_usage_service = ProviderUsageService(
+                provider_usage_repository
+            )
+
+            provider_usage_capture = ProviderUsageCapture(
+                provider_usage_service
+            )
+
+            resolved_conversation_runtime = replace(
+                resolved_conversation_runtime,
+                usage_capture=provider_usage_capture,
+                usage_context=ProviderUsageContext(
+                    capability="conversation",
+                    functionality="chat",
+                    agent="conversation_agent",
+                ),
+            )
+
+    else:
+        if provider_usage_capture is None:
+            if resolved_usage_repository is None:
+                resolved_usage_repository = (
+                    InMemoryProviderUsageRepository()
+                )
+
+            provider_usage_service = ProviderUsageService(
+                resolved_usage_repository
+            )
+
+            provider_usage_capture = ProviderUsageCapture(
+                provider_usage_service
+            )
+
+        resolved_conversation_runtime = ConversationRuntime(
+            llm_provider=LLMProviderFactory.create(),
+            usage_capture=provider_usage_capture,
+            usage_context=ProviderUsageContext(
+                capability="conversation",
+                functionality="chat",
+                agent="conversation_agent",
+            ),
+        )
+
+    conversation_service = TelegramConversationService(
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+    )
+
+    resolved_rate_limiter = (
+        rate_limiter
+        or InMemoryTelegramRateLimiter(
+            max_messages=_env_positive_int(
+                "TELEGRAM_RATE_LIMIT_MAX_MESSAGES",
+                100,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS",
+                86400.0,
+            ),
+        )
+    )
+
+    resolved_abuse_protector = (
+        abuse_protector
+        or InMemoryTelegramAbuseProtector(
+            max_messages=_env_positive_int(
+                "TELEGRAM_ABUSE_MAX_MESSAGES",
+                10,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_ABUSE_WINDOW_SECONDS",
+                60.0,
+            ),
+        )
+    )
+
+    resolved_observability = (
+        observability
+        or LoggingTelegramObservability(
+            privacy_identifier_service=privacy_identifier_service,
+        )
+    )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        functionality_control_service=functionality_control_service,
+    )
+
+    private_chat_gate = BetaPrivateChatGate(
+        beta_access_service=beta_access_service
+    )
+
+    start_handler = BetaTelegramStartHandler(
+        beta_access_service=beta_access_service
+    )
+
+    adapter = BetaTelegramAdapter(
+        start_handler=start_handler,
+        private_chat_gate=private_chat_gate,
+        conversation_boundary=conversation_boundary,
+    )
+
+    runtime = TelegramBotRuntime(
+        adapter=adapter,
+        conversation_boundary=conversation_boundary,
+    )
+
+    return BetaTelegramComposition(
+        beta_access_service=beta_access_service,
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_service=conversation_service,
+        conversation_boundary=conversation_boundary,
+        private_chat_gate=private_chat_gate,
+        start_handler=start_handler,
+        adapter=adapter,
+        runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        provider_usage_repository=resolved_usage_repository,
+    )
+
+
+__all__ = [
+    "BetaTelegramComposition",
+    "create_beta_telegram_composition",
+]
+
+===== FILE: backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py =====
+"""
+M2.3 authoritative Learning World catalogue.
+
+Adds explicit World classification metadata and seeds the agreed catalogue.
+
+The data operation is intentionally insert-if-missing. Existing rows are not
+updated so administrative availability changes are not silently overwritten.
+"""
+
+from __future__ import annotations
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "20260902_m2_3_world_catalogue"
+down_revision = "8f1522bc0a08"
+branch_labels = None
+depends_on = None
+
+
+WORLD_ROWS = (
+    (
+        "french",
+        "French World",
+        "French language learning world.",
+        "fr",
+        "language",
+        "language_learning",
+        "published",
+        True,
+        "1.0.0",
+    ),
+    (
+        "spanish",
+        "Spanish World",
+        "Spanish language learning world.",
+        "es",
+        "language",
+        "language_learning",
+        "published",
+        True,
+        "1.0.0",
+    ),
+    (
+        "english",
+        "English World",
+        "English language learning world.",
+        "en",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "italian",
+        "Italian World",
+        "Italian language learning world.",
+        "it",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "german",
+        "German World",
+        "German language learning world.",
+        "de",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "russian",
+        "Russian World",
+        "Russian language learning world.",
+        "ru",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "portuguese",
+        "Portuguese World",
+        "Portuguese language learning world.",
+        "pt",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "polish",
+        "Polish World",
+        "Polish language learning world.",
+        "pl",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "chinese",
+        "Chinese World",
+        "Chinese language learning world.",
+        "zh",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "arabic",
+        "Arabic World",
+        "Arabic language learning world.",
+        "ar",
+        "language",
+        "language_learning",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "cybersecurity",
+        "Cybersecurity World",
+        "Cybersecurity learning world.",
+        "",
+        "thematic",
+        "cybersecurity",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "artificial-intelligence",
+        "Artificial Intelligence World",
+        "Artificial intelligence learning world.",
+        "",
+        "thematic",
+        "artificial_intelligence",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "science",
+        "Science World",
+        "Science learning world.",
+        "",
+        "thematic",
+        "science",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "sports",
+        "Sports World",
+        "Sports learning world.",
+        "",
+        "thematic",
+        "sports",
+        "published",
+        False,
+        "1.0.0",
+    ),
+    (
+        "technology",
+        "Technology World",
+        "Technology learning world.",
+        "",
+        "thematic",
+        "technology",
+        "published",
+        False,
+        "1.0.0",
+    ),
+)
+
+
+def upgrade() -> None:
+    op.add_column(
+        "learning_worlds",
+        sa.Column(
+            "world_type",
+            sa.String(length=50),
+            nullable=True,
+        ),
+    )
+
+    op.add_column(
+        "learning_worlds",
+        sa.Column(
+            "learning_domain",
+            sa.String(length=100),
+            nullable=True,
+        ),
+    )
+
+    # Backfill existing rows before making the new columns mandatory.
+    op.execute(
+        sa.text(
+            """
+            UPDATE learning_worlds
+            SET world_type = 'language',
+                learning_domain = 'language_learning'
+            WHERE world_type IS NULL
+               OR learning_domain IS NULL
+            """
+        )
+    )
+
+    op.alter_column(
+        "learning_worlds",
+        "world_type",
+        existing_type=sa.String(length=50),
+        nullable=False,
+        server_default="language",
+    )
+
+    op.alter_column(
+        "learning_worlds",
+        "learning_domain",
+        existing_type=sa.String(length=100),
+        nullable=False,
+        server_default="language_learning",
+    )
+
+    for (
+        identifier,
+        name,
+        description,
+        language,
+        world_type,
+        learning_domain,
+        status,
+        enabled,
+        version,
+    ) in WORLD_ROWS:
+        op.execute(
+            sa.text(
+                """
+                INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    :identifier,
+                    :name,
+                    :description,
+                    :language,
+                    :version,
+                    :status,
+                    :enabled,
+                    :world_type,
+                    :learning_domain,
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = :identifier
+                )
+                """
+            ).bindparams(
+                identifier=identifier,
+                name=name,
+                description=description,
+                language=language,
+                version=version,
+                status=status,
+                enabled=enabled,
+                world_type=world_type,
+                learning_domain=learning_domain,
+            )
+        )
+
+
+def downgrade() -> None:
+    # Catalogue rows are intentionally retained because they may have
+    # operational references after deployment.
+    op.drop_column("learning_worlds", "learning_domain")
+    op.drop_column("learning_worlds", "world_type")
+
+===== FILE: backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py =====
+"""M2-A.5 explicit catalogue-to-runtime World mapping.
+
+Revision ID: 20260914_m2_a5_runtime_world_mapping
+Revises: 20260902_m2_3_world_catalogue
+"""
+from __future__ import annotations
+from alembic import op
+import sqlalchemy as sa
+
+revision = "20260914_m2_a5_runtime_world_mapping"
+down_revision = "20260902_m2_3_world_catalogue"
+branch_labels = None
+depends_on = None
+
+RUNTIME_WORLD_MAPPINGS = (("french", "french_world"),)
+
+def upgrade() -> None:
+    op.add_column("learning_worlds", sa.Column("runtime_world_id", sa.String(length=100), nullable=True))
+    op.create_index("ix_learning_worlds_runtime_world_id", "learning_worlds", ["runtime_world_id"], unique=True)
+    for catalogue_identifier, runtime_world_id in RUNTIME_WORLD_MAPPINGS:
+        op.execute(sa.text("""
+            UPDATE learning_worlds
+            SET runtime_world_id = :runtime_world_id
+            WHERE identifier = :catalogue_identifier
+              AND runtime_world_id IS NULL
+        """).bindparams(catalogue_identifier=catalogue_identifier, runtime_world_id=runtime_world_id))
+
+def downgrade() -> None:
+    op.drop_index("ix_learning_worlds_runtime_world_id", table_name="learning_worlds")
+    op.drop_column("learning_worlds", "runtime_world_id")
+
+===== POLISH / CATALOGUE MIGRATION REFERENCES =====
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:101: "polish",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:102: "Polish World",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:103: "Polish language learning world.",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:193: "learning_worlds",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:202: "learning_worlds",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:214: UPDATE learning_worlds
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:224: "learning_worlds",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:232: "learning_worlds",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:253: INSERT INTO learning_worlds
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:281: FROM learning_worlds
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:302: op.drop_column("learning_worlds", "learning_domain")
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260902_m2_3_authoritative_world_catalogue.py:303: op.drop_column("learning_worlds", "world_type")
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:18: op.add_column("learning_worlds", sa.Column("runtime_world_id", sa.String(length=100), nullable=True))
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:19: op.create_index("ix_learning_worlds_runtime_world_id", "learning_worlds", ["runtime_world_id"], unique=True)
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:20: for catalogue_identifier, runtime_world_id in RUNTIME_WORLD_MAPPINGS:
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:22: UPDATE learning_worlds
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:23: SET runtime_world_id = :runtime_world_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:25: AND runtime_world_id IS NULL
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:26: """).bindparams(catalogue_identifier=catalogue_identifier, runtime_world_id=runtime_world_id))
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:29: op.drop_index("ix_learning_worlds_runtime_world_id", table_name="learning_worlds")
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260914_m2_a5_runtime_world_mapping.py:30: op.drop_column("learning_worlds", "runtime_world_id")
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\405914bece20_add_learning_world_id_to_events.py:24: op.create_table('learning_worlds',
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\405914bece20_add_learning_world_id_to_events.py:36: op.create_index(op.f('ix_learning_worlds_identifier'), 'learning_worlds', ['identifier'], unique=True)
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\405914bece20_add_learning_world_id_to_events.py:37: op.create_index(op.f('ix_learning_worlds_language'), 'learning_worlds', ['language'], unique=False)
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\405914bece20_add_learning_world_id_to_events.py:48: op.drop_index(op.f('ix_learning_worlds_language'), table_name='learning_worlds')
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\405914bece20_add_learning_world_id_to_events.py:49: op.drop_index(op.f('ix_learning_worlds_identifier'), table_name='learning_worlds')
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\405914bece20_add_learning_world_id_to_events.py:50: op.drop_table('learning_worlds')
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\8f1522bc0a08_add_telegram_id_to_users.py:30: op.create_foreign_key(None, 'users', 'learning_worlds', ['active_world_id'], ['id'], ondelete='SET NULL')
+
+===== MODEL REGISTRATION REFERENCES =====
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\authorization_provider_management\app\application\provider_management\functionality_control_composition.py:14: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\authorization_provider_management\app\application\provider_management\functionality_control_composition.py:20: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\authorization_provider_management\app\application\provider_management\functionality_control_composition.py:29: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\authorization_provider_management\app\application\provider_management\functionality_control_composition.py:51: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\authorization_provider_management\app\application\provider_management\functionality_control_composition.py:54: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\pi1_provider_management_20260909_080320\functionality_control_composition.py:14: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\pi1_provider_management_20260909_080320\functionality_control_composition.py:20: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\pi1_provider_management_20260909_080320\functionality_control_composition.py:29: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\pi1_provider_management_20260909_080320\functionality_control_composition.py:51: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\.namespace_backups\pi1_provider_management_20260909_080320\functionality_control_composition.py:54: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\env.py:29: from app.infrastructure.persistence import beta_access_models  # noqa: F401
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\env.py:37: target_metadata = Base.metadata
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:108: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:110: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:268: auth_session_factory = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:269: create_async_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:276: auth_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:309: metadata=Base.metadata,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:314: provider_usage_session_factory = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:315: create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:322: provider_usage_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:334: provider_usage_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:421: academy_session_factory = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:422: auth_session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:432: session_factory=academy_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:36: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:52: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:61: session_factory: async_sessionmaker[AsyncSession]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:90: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:93: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:97: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\announcements\execution\durable_execution_composition.py:112: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:27: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:71: session_factory=None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:94: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:96: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:134: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:138: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:25: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:46: session_factory: Any
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:85: session_factory: Any | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:87: session_factory_factory: Callable[[Any], Any] | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:123: session_factory is not None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:124: and session_factory_factory is not None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:127: "Provide either session_factory or "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:128: "session_factory_factory, not both."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:146: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:147: session_factory = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:148: session_factory_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:149: or create_session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:153: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:156: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:160: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:165: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:173: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:216: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:14: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:20: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:29: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:51: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:54: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:9: async_sessionmaker,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:24: session_factory: async_sessionmaker[AsyncSession],
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:26: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:34: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:68: session_factory: async_sessionmaker[AsyncSession],
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:70: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:79: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:151: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\academy\postgresql_academy_notification_repository.py:183: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py:32: def __init__(self, session_factory) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py:33: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py:34: raise ValueError("session_factory cannot be None.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py:35: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py:55: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py:63: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py:41: def __init__(self, session_factory) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py:42: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py:43: raise ValueError("session_factory cannot be None.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py:44: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py:85: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py:117: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:4: not create a second DeclarativeBase/metadata registry.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:13: from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:71: session_factory: async_sessionmaker[AsyncSession],
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:73: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:74: raise ValueError("session_factory cannot be None.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:76: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:82: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:114: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:161: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py:192: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:8: from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:43: session_factory: async_sessionmaker[AsyncSession],
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:45: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:46: raise ValueError("session_factory cannot be None.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:47: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:80: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:101: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py:106: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:10: from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:58: def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:59: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:60: raise ValueError("session_factory is required.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:61: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:64: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:72: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:81: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:114: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:147: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:190: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:247: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:282: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:344: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:448: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:482: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:498: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:529: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:557: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:588: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:602: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\auth\postgresql_auth_repository.py:618: async with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:9: async_sessionmaker,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:12: from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:46: def create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:48: ) -> sessionmaker[Session]:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:54: return sessionmaker(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:100: def create_async_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:102: ) -> async_sessionmaker[AsyncSession]:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:105: return async_sessionmaker(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py:9: class LearningWorldModel(Base):
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\model_registry.py:3: This module exists solely to ensure that the canonical Base.metadata registry
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\model_registry.py:10: from app.infrastructure.persistence.beta_access_models import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:19: from .beta_access_models import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:34: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:36: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:44: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:73: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:124: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:181: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:183: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:191: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:214: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:261: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:263: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:271: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:293: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py:315: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:53: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:55: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:57: "session_factory cannot be None."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:60: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:96: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:165: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:19: def __init__(self, session_factory) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:20: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:21: raise ValueError("session_factory is required.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:23: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:31: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:52: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py:86: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:4: from sqlalchemy.orm import Session, sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:7: from .learning_world_models import LearningWorldModel
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:10: def __init__(self, session_factory: sessionmaker[Session]) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:11: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:12: raise ValueError("session_factory cannot be None.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:13: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:18: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:19: row = session.scalar(select(LearningWorldModel).where(LearningWorldModel.identifier == identifier.strip()))
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py:23: def _to_domain(row: LearningWorldModel) -> LearningWorldCatalogueEntry:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py:41: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py:44: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py:53: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py:111: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py:145: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:10: def __init__(self, session_factory) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:11: if session_factory is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:12: raise ValueError("session_factory is required.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:14: self._session_factory = session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:20: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:42: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:55: with self._session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:17: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:57: session_factory_factory=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:58: create_session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:73: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:113: session_factory = create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:129: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:132: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:135: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:53: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:54: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:76: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:77: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:171: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:172: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:188: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:189: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:261: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:262: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:284: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_activation_registration.py:285: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:59: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:60: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:83: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:84: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:112: session_factory=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:145: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:146: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:172: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:173: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:222: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:223: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:245: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:246: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:272: session_factory=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:284: academy_kwargs["session_factory"]
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:285: is fake_session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:316: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:317: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:339: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_application_lifecycle.py:340: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_fastapi_lifespan_activation.py:39: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_fastapi_lifespan_activation.py:40: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_fastapi_lifespan_activation.py:86: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_fastapi_lifespan_activation.py:87: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_activation_integration.py:111: existing_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_activation_integration.py:112: name="existing_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_activation_integration.py:125: session_factory=existing_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_activation_integration.py:130: session_factory=existing_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:40: session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:41: name="session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:50: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:62: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:67: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:88: assert workflow._users._session_factory is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:89: assert workflow._deliveries._session_factory is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:117: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:122: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:146: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:155: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:185: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:190: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:211: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:220: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:306: session_factory=MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:307: name="session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:359: session_factory=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:384: session_factory=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:74: session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:75: name="production_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:84: session_factory=session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:94: workflow._users._session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:95: is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:99: workflow._deliveries._session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:100: is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:139: session_factory=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:169: session_factory=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:202: session_factory=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_readiness.py:232: session_factory=MagicMock(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_lifespan_scheduler_smoke.py:36: fake_session_factory = MagicMock(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_lifespan_scheduler_smoke.py:37: name="auth_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_lifespan_scheduler_smoke.py:84: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_lifespan_scheduler_smoke.py:85: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:18: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:70: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:77: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:111: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:115: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:140: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:144: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:183: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:207: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:216: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:219: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:234: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:262: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py:278: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:18: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:84: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:99: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:133: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:141: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:170: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:179: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:212: session_factory = create_async_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:216: return engine, session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:233: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:257: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:266: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:269: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:303: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:327: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:349: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:373: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:382: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:385: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:412: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_workflow.py:436: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:11: async_sessionmaker,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:65: session_factory = async_sessionmaker(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:71: return engine, session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:140: session_factory: async_sessionmaker[AsyncSession],
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:145: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:171: engine, session_factory = _create_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:190: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:239: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:306: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:326: engine, session_factory = _create_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:346: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:386: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_2x_1_postgresql_restart_idempotency.py:485: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:12: async_sessionmaker,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:61: session_factory = async_sessionmaker(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:71: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:84: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:102: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:121: session_factory = async_sessionmaker(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:131: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:144: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_4_2_durable_audit_repository.py:162: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:20: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:44: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:48: assert session_factory is not None
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:53: is Base.metadata
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:57: is Base.metadata
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:62: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:65: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:82: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:85: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:100: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:104: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:107: session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:112: assert execution_repository._session_factory is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_2_shared_async_persistence.py:113: assert audit_repository._session_factory is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_3_durable_execution_composition.py:80: composition.execution_repository._session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_3_durable_execution_composition.py:81: is composition.session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_3_durable_execution_composition.py:85: composition.audit_repository._session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_3_durable_execution_composition.py:86: is composition.session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_4_composition_execution.py:70: async with composition.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_4_composition_execution.py:121: async with composition.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_5_failure_retry_integration.py:77: async with composition.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_5_failure_retry_integration.py:123: async with composition_1.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_5_failure_retry_integration.py:175: async with composition_2.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_6_terminal_idempotency.py:71: async with composition.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_6_terminal_idempotency.py:122: async with composition_1.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_6_terminal_idempotency.py:163: async with composition_2.session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\composition\test_p1_6_4d_composition.py:61: assert not hasattr(composition, "provider_usage_session_factory")
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_persistence_models.py:1: from app.infrastructure.persistence.beta_access_models import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_persistence_models.py:14: tables = Base.metadata.tables
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_composition.py:107: "backend.application.telegram_bootstrap.create_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:21: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:92: session_factory = create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:97: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_p1_6_2b_durable_usage_completeness.py:11: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_p1_6_2b_durable_usage_completeness.py:41: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_p1_6_2b_durable_usage_completeness.py:42: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:4: from sqlalchemy.orm import sessionmaker
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:18: Base.metadata.create_all(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:26: session_factory = sessionmaker(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:31: return PostgreSQLFunctionalityControlRepository(session_factory), session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:44: repository, session_factory = create_repository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:77: with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:93: repository, session_factory = create_repository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_functionality_control_repository.py:132: with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:11: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:54: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:55: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:56: assert repository._session_factory is session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:65: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:66: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py:22: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py:63: return engine, create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py:71: engine, session_factory = _repository_if_table_exists()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py:72: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_5_4_provider_to_durable_ledger.py:98: with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_6_4c_repository_aggregation.py:10: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_6_4c_repository_aggregation.py:42: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_p1_6_4c_repository_aggregation.py:43: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:15: create_async_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:24: session_factory = create_async_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:25: return engine, session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:29: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:35: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:45: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:50: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:59: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:64: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:79: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:83: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:97: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:101: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:124: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:128: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:149: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:153: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:171: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:175: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:193: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:201: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:207: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:214: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:234: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:242: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:250: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:256: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:269: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:290: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:298: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:312: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:319: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:325: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:331: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:336: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:350: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:358: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:366: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:371: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:393: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:401: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:409: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:419: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:426: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:431: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:438: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:470: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:478: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:486: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:494: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:500: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:515: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:523: engine, session_factory = _create_test_database()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:533: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:540: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:545: repository = PostgreSQLAuthenticationRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:550: async with session_factory() as session:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:576: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\test_postgresql_auth_password_reset.py:583: session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:36: fake_session_factory = MagicMock(name="auth_session_factory")
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:44: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:45: return_value=fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:58: fake_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:71: fake_session_factory = MagicMock(name="auth_session_factory")
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:79: "app.main.create_async_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authentication_application_composition.py:80: return_value=fake_session_factory,

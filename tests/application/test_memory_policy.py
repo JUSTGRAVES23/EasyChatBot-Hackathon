@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 import pytest
 
 
-from backend.app.application.memory.memory_policy import (
+from app.application.memory.memory_policy import (
     MemoryPolicy,
 )
 

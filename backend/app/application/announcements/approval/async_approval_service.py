@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import PublicationStatus
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import PublicationStatus
 
 
 class AsyncPublicationStore(Protocol):
@@ -93,3 +93,4 @@ __all__ = [
     "AsyncAnnouncementPublicationApprovalService",
     "AsyncPublicationApprovalResult",
 ]
+

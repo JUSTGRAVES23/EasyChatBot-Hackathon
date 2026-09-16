@@ -1,4 +1,4 @@
-from backend.app.application.beta_access.beta_user_context import (
+from app.application.beta_access.beta_user_context import (
     BetaUserContext,
 )
 
@@ -11,21 +11,14 @@ class BetaContextBuilder:
         telegram_user_id: int,
     ) -> BetaUserContext:
 
-
         return BetaUserContext(
-
             user_id=user.id,
-
             telegram_user_id=telegram_user_id,
-
             email=user.email,
-
             world_id=(
                 user.active_world_id
-                or "world-fr"
+                or "french_world"
             ),
-
             character="Alix",
-
             level="B1",
         )

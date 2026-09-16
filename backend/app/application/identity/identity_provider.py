@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from backend.app.domain.identity.principal import Principal
+from app.domain.identity.principal import Principal
 
 
 class IdentityProvider(Protocol):
@@ -10,3 +10,4 @@ class IdentityProvider(Protocol):
 
     async def get_current_principal(self) -> Principal | None:
         ...
+

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from backend.app.domain.announcements.announcement import Announcement
-from backend.app.domain.announcements.publication_event import PublicationEvent, PublicationEventType
+from app.domain.announcements.announcement import Announcement
+from app.domain.announcements.publication_event import PublicationEvent, PublicationEventType
 from .announcement_repository import AnnouncementRepository
 from .publication_event_repository import PublicationEventRepository
 
@@ -90,3 +90,4 @@ class AnnouncementOperationsService:
             error_code=error_code,
             provider_message_id=provider_message_id,
         ))
+

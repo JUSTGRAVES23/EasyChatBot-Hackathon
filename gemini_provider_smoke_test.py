@@ -2,10 +2,10 @@
 
 # Import the authoritative LLM configuration first.
 # This loads the project-root .env file.
-from backend.providers.llm.config import get_gemini_model
+from providers.llm.config import get_gemini_model
 
-from backend.conversation.conversation_request import ConversationRequest
-from backend.providers.llm.gemini_provider import GeminiProvider
+from conversation.conversation_request import ConversationRequest
+from providers.llm.gemini_provider import GeminiProvider
 
 
 async def main() -> None:
@@ -42,3 +42,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

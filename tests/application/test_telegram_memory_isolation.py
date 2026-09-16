@@ -1,4 +1,4 @@
-from backend.app.application.conversation.privacy import (
+﻿from app.application.conversation.privacy import (
     pseudonymize_identifier,
 )
 
@@ -14,3 +14,4 @@ def test_raw_identifier_is_not_stored():
     value = pseudonymize_identifier("1092959244")
 
     assert value != "1092959244"
+

@@ -1,4 +1,4 @@
-from backend.app.application.privacy.validate import build_beta1_validation_service
+﻿from app.application.privacy.validate import build_beta1_validation_service
 
 
 def test_beta1_privacy_validation_detects_no_structural_gaps():
@@ -8,3 +8,4 @@ def test_beta1_privacy_validation_detects_no_structural_gaps():
     assert result.checks == 11
     assert result.blocking_failures == 0
     assert result.passed == result.checks
+

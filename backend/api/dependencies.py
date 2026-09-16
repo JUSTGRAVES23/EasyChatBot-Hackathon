@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot API Dependencies.
 
 FastAPI dependency providers.
@@ -25,11 +25,11 @@ backend.application.bootstrap
 from __future__ import annotations
 
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.runtime.external_runtime_container import (
+from runtime.external_runtime_container import (
     get_external_runtime_service,
 )
 

@@ -1,175 +1,98 @@
-"""
-LiveKit Realtime Agent Infrastructure.
-
-Infrastructure boundary between LiveKit Agents and EasyChatBot.
-
-Responsibilities:
-- Define the LiveKit Agents character wrapper.
-- Create an AgentSession.
-- Keep LiveKit Agents implementation details inside infrastructure.
-- Expose a small provider-independent application-facing boundary.
-- Receive AI Runtime dependencies through composition.
-
-Does NOT:
-- Own EasyChatBot business logic.
-- Manage call lifecycle state.
-- Persist conversations.
-- Modify production data.
-- Bypass the EasyChatBot Runtime.
-- Directly manage application authorization.
-- Call LLM providers directly.
-"""
+"""LiveKit realtime agent infrastructure."""
 
 from __future__ import annotations
 
-
 from dataclasses import dataclass
 
-
-from livekit.agents import (
-    Agent,
-    AgentSession,
-)
-
-
-from app.domain.uai.context.interaction_context import (
-    InteractionContext,
-)
-
+from livekit.agents import Agent, AgentSession
 
 from app.ai_runtime.conversation.conversation_runtime import (
     ConversationRuntime,
 )
-
-
-
-@dataclass(
-    frozen=True,
-    slots=True,
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
 )
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+from app.infrastructure.voice.livekit_conversation_llm import (
+    LiveKitConversationLLM,
+)
+from app.infrastructure.voice.livekit_stt_adapter import (
+    LiveKitSTTAdapter,
+)
+from app.infrastructure.voice.livekit_tts_adapter import (
+    LiveKitTTSAdapter,
+)
+
+
+@dataclass(frozen=True, slots=True)
 class LiveKitRealtimeAgent:
-    """
-    Infrastructure adapter for a LiveKit realtime character.
-
-    The adapter creates the LiveKit Agents objects required for
-    realtime voice execution while keeping EasyChatBot character
-    context outside the LiveKit-specific implementation.
-
-    LiveKit Agents remains an infrastructure/realtime boundary.
-
-    EasyChatBot remains responsible for:
-    - character logic
-    - runtime orchestration
-    - AI governance
-    - provider selection
-    """
+    """Infrastructure adapter for a LiveKit realtime character."""
 
     context: InteractionContext
-
     instructions: str
-
     conversation_runtime: ConversationRuntime | None = None
+    speech_runtime: VoiceSpeechRuntime | None = None
 
-
-
-    def create_agent(
-        self,
-    ) -> Agent:
-        """
-        Create the LiveKit Agent representation
-        of the character.
-
-        The AI Runtime dependency is intentionally stored
-        but not directly exposed to LiveKit yet.
-
-        A dedicated LiveKit LLM adapter will translate:
-
-            LiveKit LLM interface
-                    |
-                    v
-            ConversationRuntime
-                    |
-                    v
-            LLM Provider
-
-        in the next integration step.
-        """
-
+    def create_agent(self) -> Agent:
+        """Create the LiveKit character agent."""
 
         return Agent(
             instructions=self.instructions,
         )
 
+    def create_session(self) -> AgentSession:
+        """Create a LiveKit session with EasyChatBot AI adapters."""
 
+        if self.conversation_runtime is None:
+            raise RuntimeError(
+                "ConversationRuntime is required "
+                "for a LiveKit realtime session."
+            )
 
-    def create_session(
-        self,
-    ) -> AgentSession:
-        """
-        Create a LiveKit AgentSession.
+        if self.speech_runtime is None:
+            raise RuntimeError(
+                "VoiceSpeechRuntime is required "
+                "for a LiveKit realtime session."
+            )
 
-        Provider-specific STT, LLM and TTS configuration
-        remains outside this infrastructure wrapper.
-
-        Future composition will inject:
-
-        - STT provider
-        - LLM adapter
-        - TTS provider
-        """
-
-        return AgentSession()
-
-
-
-    def character_id(
-        self,
-    ) -> str:
-        """
-        Return the active EasyChatBot character identifier.
-        """
-
-
-        return (
-            self.context
-            .character
-            .character_id
+        llm_adapter = LiveKitConversationLLM(
+            conversation_runtime=self.conversation_runtime,
+            character_instruction=self.instructions,
         )
 
-
-
-    def language_code(
-        self,
-    ) -> str:
-        """
-        Return the active interaction language.
-        """
-
-
-        return (
-            self.context
-            .world
-            .language_code
+        stt_adapter = LiveKitSTTAdapter(
+            speech_runtime=self.speech_runtime,
+            language_code=self.language_code(),
         )
 
-
-
-    def has_conversation_runtime(
-        self,
-    ) -> bool:
-        """
-        Check whether AI Runtime conversation
-        capability is available.
-        """
-
-
-        return (
-            self.conversation_runtime
-            is not None
+        tts_adapter = LiveKitTTSAdapter(
+            speech_runtime=self.speech_runtime,
+            voice_profile=self.context.voice.voice_profile,
+            language_code=self.language_code(),
         )
 
+        return AgentSession(
+            stt=stt_adapter,
+            llm=llm_adapter,
+            tts=tts_adapter,
+        )
+
+    def character_id(self) -> str:
+        """Return the active EasyChatBot character identifier."""
+
+        return self.context.character.character_id
+
+    def language_code(self) -> str:
+        """Return the active voice language."""
+
+        return self.context.voice.language_code
+
+    def has_conversation_runtime(self) -> bool:
+        """Check whether conversation runtime is available."""
+
+        return self.conversation_runtime is not None
 
 
-__all__ = [
-    "LiveKitRealtimeAgent",
-]
+__all__ = ["LiveKitRealtimeAgent"]

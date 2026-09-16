@@ -1,6 +1,6 @@
-from types import SimpleNamespace
+﻿from types import SimpleNamespace
 
-from backend.app.application.operations_center.email_workflow_status_service import (
+from app.application.operations_center.email_workflow_status_service import (
     EmailWorkflowStatusService,
 )
 
@@ -52,3 +52,4 @@ def test_provider_status_is_non_sensitive():
         "available": True,
         "status": "ready",
     }
+

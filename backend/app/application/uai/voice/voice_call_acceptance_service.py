@@ -1,227 +1,137 @@
-﻿"""
-Voice Call Acceptance Service.
-
-Application workflow responsible for
-accepting a learner voice call invitation.
-
-Responsibilities:
-- Accept notification action.
-- Retrieve invitation.
-- Retrieve voice call.
-- Handle first connection.
-- Handle reconnect flow.
-- Create voice session.
-- Record acceptance event.
-
-Does NOT:
-- Handle HTTP.
-- Send notifications.
-- Connect LiveKit.
-- Manage providers.
-"""
-
-from __future__ import annotations
-
-
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
-
-
-from datetime import (
-    datetime,
-    timezone,
+from app.application.uai.voice.voice_call_context_factory import (
+    VoiceCallContextFactory,
 )
-
-
-
-from backend.app.application.uai.voice.voice_call_management_service import (
-    VoiceCallManagementService,
+from app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
 )
-
-
-
-from backend.app.application.uai.voice.voice_call_invitation_service import (
-    VoiceCallInvitationService,
-)
-
-
-
-from backend.app.application.uai.voice.voice_call_session_service import (
-    VoiceCallSessionService,
-)
-
-
-
-from backend.app.application.uai.notifications.voice_call_notification_service import (
-    VoiceCallNotificationService,
-)
-
-
-
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
-
-
-
-from app.domain.uai.voice.voice_call_state import (
-    VoiceCallState,
+from app.application.uai.voice.voice_call_invitation_service import (
+    VoiceCallInvitationService,
+)
+from app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+from app.application.uai.notifications.voice_call_notification_service import (
+    VoiceCallNotificationService,
+)
+from app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+from app.domain.uai.voice.voice_call import VoiceCall
+from app.domain.uai.voice.voice_call_event import VoiceCallEventType
+from app.domain.uai.voice.voice_call_state import VoiceCallState
+from app.domain.uai.notifications.voice_call_notification import (
+    VoiceCallNotification,
 )
 
 
-
-from app.domain.uai.voice.voice_call_event import (
-    VoiceCallEventType,
-)
-
-
-
-@dataclass(
-    frozen=True,
-    slots=True,
-)
+@dataclass
 class VoiceCallAcceptanceService:
     """
-    Workflow service for accepting
-    voice call notifications.
+    Application service responsible for accepting an incoming voice-call
+    notification and converging the acceptance workflow into the canonical
+    voice execution path.
+
+    Responsibilities:
+    - Resolve the actionable notification.
+    - Resolve and validate the associated invitation.
+    - Resolve the associated VoiceCall.
+    - Create or reconnect the authoritative VoiceCallSession.
+    - Build the execution context from that existing session.
+    - Delegate execution to VoiceCallExecutionCoordinator.
+    - Record the ACCEPTED lifecycle event.
+
+    This service does not:
+    - Access LiveKit directly.
+    - Construct infrastructure providers.
+    - Persist directly.
+    - Implement voice execution itself.
     """
 
-    voice_call_management_service: (
-        VoiceCallManagementService
-    )
-
-    voice_call_invitation_service: (
-        VoiceCallInvitationService
-    )
-
-    voice_call_notification_service: (
-        VoiceCallNotificationService
-    )
-
-    voice_call_session_service: (
-        VoiceCallSessionService
-    )
-
-    voice_call_event_service: (
-        VoiceCallEventService
-    )
-
-
+    voice_call_management_service: VoiceCallManagementService
+    voice_call_invitation_service: VoiceCallInvitationService
+    voice_call_notification_service: VoiceCallNotificationService
+    voice_call_session_service: VoiceCallSessionService
+    voice_call_event_service: VoiceCallEventService
+    voice_call_context_factory: VoiceCallContextFactory
+    voice_call_execution_coordinator: VoiceCallExecutionCoordinator
 
     def accept_voice_call(
         self,
-        *,
-        notification,
-    ) -> dict:
+        notification: VoiceCallNotification,
+    ) -> dict[str, object]:
         """
-        Accept notification and prepare
-        voice session.
+        Accept a voice-call notification and start the canonical execution
+        workflow using the authoritative VoiceCallSession.
         """
 
-
-
-        updated_notification = (
-            self.voice_call_notification_service
-            .action_notification(
+        actionable_notification = (
+            self.voice_call_notification_service.action_notification(
                 notification=notification,
             )
         )
 
-
-
-        invitation = (
-            self.voice_call_invitation_service
-            .get_invitation(
-                invitation_id=(
-                    notification.invitation_id
-                ),
-            )
+        invitation = self.voice_call_invitation_service.get_invitation(
+            invitation_id=actionable_notification.invitation_id,
         )
-
-
 
         if invitation is None:
-
             raise ValueError(
-                "Voice call invitation not found."
+                "Voice call invitation not found: "
+                f"{actionable_notification.invitation_id}"
             )
 
-
-
-        voice_call = (
-            self.voice_call_management_service
-            .get_call(
-                voice_call_id=(
-                    invitation.voice_call_id
-                ),
-            )
+        voice_call = self.voice_call_management_service.get_call(
+            voice_call_id=invitation.voice_call_id,
         )
-
-
 
         if voice_call is None:
-
             raise ValueError(
-                "Voice call not found."
+                f"Voice call not found: {invitation.voice_call_id}"
             )
 
-
-
-        if voice_call.state == (
-            VoiceCallState.CREATED
-        ):
-
-            session = (
-                self.voice_call_session_service
-                .create_session(
-                    voice_call=voice_call,
-                )
+        if voice_call.state == VoiceCallState.CREATED:
+            session = self.voice_call_session_service.create_session(
+                voice_call=voice_call,
             )
-
-
         elif self.voice_call_management_service.can_reconnect(
             voice_call_id=voice_call.id,
-            now=datetime.now(
-                timezone.utc
-            ),
         ):
-
-            session = (
-                self.voice_call_session_service
-                .reconnect_session(
-                    voice_call=voice_call,
-                )
+            session = self.voice_call_session_service.reconnect_session(
+                voice_call=voice_call,
             )
-
-
         else:
-
             raise ValueError(
-                "Voice call cannot be started."
+                f"Voice call cannot be accepted in state: {voice_call.state}"
             )
 
-
-
-        self.voice_call_event_service.record_event(
-            voice_call_id=voice_call.id,
-            learner_id=voice_call.learner_id,
-            character_id=voice_call.character_id,
-            event_type=(
-                VoiceCallEventType.ACCEPTED
-            ),
+        context = self.voice_call_context_factory.create_from_session(
+            session=session,
+            voice_call=voice_call,
         )
 
+        self.voice_call_execution_coordinator.start(
+            context=context,
+        )
 
+        self.voice_call_event_service.record_event(
+    voice_call_id=voice_call.id,
+    event_type=VoiceCallEventType.ACCEPTED,
+    learner_id=voice_call.learner_id,
+    character_id=voice_call.character_id,
+)
 
         return {
-            "notification": updated_notification,
+            "notification": actionable_notification,
             "voice_call": voice_call,
             "session": session,
         }
 
 
-
-__all__ = [
-    "VoiceCallAcceptanceService",
-]
+__all__ = ["VoiceCallAcceptanceService"]

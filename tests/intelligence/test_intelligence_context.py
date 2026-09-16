@@ -1,6 +1,6 @@
-import pytest
+﻿import pytest
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
 )

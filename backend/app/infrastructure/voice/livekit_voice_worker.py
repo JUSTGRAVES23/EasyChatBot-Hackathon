@@ -1,64 +1,71 @@
-﻿"""
+"""
 LiveKit Voice Worker.
 
 Infrastructure entry point for realtime voice sessions.
-
-Responsibilities:
-- Receive a LiveKit job context.
-- Read application-approved job metadata.
-- Convert metadata into a voice call request.
-- Build the existing EasyChatBot voice execution context.
-- Build the existing UAI InteractionContext.
-- Create the LiveKit realtime character agent.
-- Start the LiveKit AgentSession.
-
-Does NOT:
-- Own EasyChatBot business logic.
-- Resolve worlds or characters directly.
-- Decide learner authorization.
-- Persist conversations.
-- Manage call lifecycle state.
-- Bypass the EasyChatBot Runtime.
 """
 
 from __future__ import annotations
 
-
-# =========================================================
-# Configuration
-# =========================================================
-
 from pathlib import Path
+import json
+import logging
 import os
-
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from livekit.agents import AgentServer, JobContext, cli
 
-
-
-PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[4]
+from app.application.provider_management.functionality_control_composition import (
+    create_standalone_functionality_control_service,
+)
+from app.application.uai.voice.voice_call_context_factory import (
+    VoiceCallContextFactory,
+)
+from app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+from app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+from app.application.uai.voice.voice_ai_dependencies import (
+    build_conversation_runtime,
+    build_voice_speech_runtime,
+)
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+from app.application.uai.character.character_resolver import (
+    CharacterResolver,
+)
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+from app.infrastructure.characters.yaml_character_repository import (
+    YamlCharacterRepository,
+)
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+from app.infrastructure.voice.livekit_realtime_agent import (
+    LiveKitRealtimeAgent,
 )
 
 
-ENV_FILE = (
-    PROJECT_ROOT
-    / ".env"
-)
-
-
-load_dotenv(
-    ENV_FILE
-)
-
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def _validate_livekit_configuration() -> None:
-    """
-    Validate required LiveKit configuration.
-    """
+    """Validate required LiveKit configuration."""
 
     required = (
         "LIVEKIT_URL",
@@ -66,13 +73,11 @@ def _validate_livekit_configuration() -> None:
         "LIVEKIT_API_SECRET",
     )
 
-
     missing = [
         item
         for item in required
         if not os.getenv(item)
     ]
-
 
     if missing:
         raise RuntimeError(
@@ -81,165 +86,58 @@ def _validate_livekit_configuration() -> None:
         )
 
 
-
 _validate_livekit_configuration()
 
 
-
-# =========================================================
-# Standard library
-# =========================================================
-
-import json
-import logging
+logger = logging.getLogger(__name__)
 
 
-from dataclasses import dataclass
-
-
-
-# =========================================================
-# LiveKit
-# =========================================================
-
-from livekit.agents import (
-    AgentServer,
-    JobContext,
-    cli,
-)
-
-
-
-# =========================================================
-# Application layer
-# =========================================================
-
-from backend.app.application.uai.voice.voice_call_context_factory import (
-    VoiceCallContextFactory,
-)
-
-
-from backend.app.application.uai.voice.voice_call_request import (
-    VoiceCallRequest,
-)
-
-
-from backend.app.application.uai.voice.voice_interaction_context_service import (
-    VoiceInteractionContextService,
-)
-
-
-from backend.app.application.uai.voice.voice_dependencies import (
-    build_voice_interaction_context_service,
-)
-
-
-
-# =========================================================
-# AI Runtime
-# =========================================================
-
-from app.ai_runtime.conversation.conversation_runtime import (
-    ConversationRuntime,
-)
-
-
-from backend.app.application.uai.voice.voice_ai_dependencies import (
-    build_conversation_runtime,
-)
-
-
-
-# =========================================================
-# Infrastructure
-# =========================================================
-
-from app.infrastructure.voice.livekit_realtime_agent import (
-    LiveKitRealtimeAgent,
-)
-
-
-
-logger = logging.getLogger(
-    __name__
-)
-
-
-
-@dataclass(
-    frozen=True,
-    slots=True,
-)
+@dataclass(frozen=True, slots=True)
 class LiveKitVoiceWorker:
-    """
-    Infrastructure worker for EasyChatBot realtime voice.
-
-    Dependencies are injected through composition.
-    """
+    """Infrastructure worker for EasyChatBot realtime voice."""
 
     context_factory: VoiceCallContextFactory
-
-
-    interaction_context_service: (
-        VoiceInteractionContextService
-    )
-
-
+    interaction_context_builder: InteractionContextBuilder
     conversation_runtime: ConversationRuntime
-
-
+    speech_runtime: VoiceSpeechRuntime
 
     async def run(
         self,
         *,
         ctx: JobContext,
     ) -> None:
-        """
-        Connect to LiveKit and start
-        EasyChatBot realtime character session.
-        """
+        """Connect to LiveKit and start a realtime session."""
 
+        metadata = self._read_job_metadata(ctx)
 
-        metadata = (
-            self._read_job_metadata(
-                ctx,
-            )
+        request = self._create_voice_call_request(metadata)
+
+        execution_context = self.context_factory.create(
+            request=request,
         )
 
-
-        request = (
-            self._create_voice_call_request(
-                metadata,
-            )
+        learner = LearnerContext(
+            learner_id=request.learner_id,
+            learning_goals=("conversation",),
         )
 
-
-
-        execution_context = (
-            self.context_factory.create(
-                request=request,
-            )
+        voice = VoiceContext(
+            language_code=request.language_code,
+            voice_provider="openai",
+            voice_profile=request.character_id,
         )
 
-
-
-        interaction_context = (
-            self.interaction_context_service.build(
-                context=execution_context,
-            )
+        interaction_context = self.interaction_context_builder.build(
+            learner=learner,
+            world_id=request.world_id,
+            character_id=request.character_id,
+            voice=voice,
         )
 
-
-
-        character = (
-            interaction_context.character
-        )
-
-
+        character = interaction_context.character
 
         instructions = (
-            "You are "
-            f"{character.name}. "
+            f"You are {character.name}. "
             "You are a French learning character. "
             "Your personality reference is "
             f"{character.personality_reference}. "
@@ -249,17 +147,12 @@ class LiveKitVoiceWorker:
             "practice the target language."
         )
 
-
-
         realtime_agent = LiveKitRealtimeAgent(
             context=interaction_context,
             instructions=instructions,
-            conversation_runtime=(
-                self.conversation_runtime
-            ),
+            conversation_runtime=self.conversation_runtime,
+            speech_runtime=self.speech_runtime,
         )
-
-
 
         ctx.log_context_fields = {
             "room_name": ctx.room.name,
@@ -268,8 +161,6 @@ class LiveKitVoiceWorker:
             "character_id": request.character_id,
             "language_code": request.language_code,
         }
-
-
 
         logger.info(
             "Starting EasyChatBot LiveKit voice agent",
@@ -282,91 +173,48 @@ class LiveKitVoiceWorker:
             },
         )
 
-
-
         await ctx.connect()
 
-
-
-        agent = (
-            realtime_agent.create_agent()
-        )
-
-
-
-        session = (
-            realtime_agent.create_session()
-        )
-
-
+        agent = realtime_agent.create_agent()
+        session = realtime_agent.create_session()
 
         await session.start(
             agent=agent,
             room=ctx.room,
         )
 
-
-
     @staticmethod
     def _read_job_metadata(
         ctx: JobContext,
     ) -> dict[str, object]:
-        """
-        Read and validate LiveKit job metadata.
-        """
+        """Read and validate LiveKit job metadata."""
 
-
-        raw_metadata = (
-            ctx.job.metadata
-        )
-
-
+        raw_metadata = ctx.job.metadata
 
         if not raw_metadata:
             raise ValueError(
                 "LiveKit job metadata is required."
             )
 
-
-
         try:
-
-            metadata = json.loads(
-                raw_metadata,
-            )
-
+            metadata = json.loads(raw_metadata)
         except json.JSONDecodeError as exc:
-
             raise ValueError(
                 "LiveKit job metadata must be valid JSON."
             ) from exc
 
-
-
-        if not isinstance(
-            metadata,
-            dict,
-        ):
-
+        if not isinstance(metadata, dict):
             raise ValueError(
                 "LiveKit job metadata must be a JSON object."
             )
 
-
-
         return metadata
-
-
 
     @staticmethod
     def _create_voice_call_request(
         metadata: dict[str, object],
     ) -> VoiceCallRequest:
-        """
-        Convert LiveKit metadata into
-        application request contract.
-        """
-
+        """Convert LiveKit metadata into application request."""
 
         required_fields = (
             "learner_id",
@@ -375,44 +223,24 @@ class LiveKitVoiceWorker:
             "language_code",
         )
 
-
-
         values: dict[str, str] = {}
 
-
-
         for field in required_fields:
+            value = metadata.get(field)
 
-            value = metadata.get(
-                field,
-            )
-
-
-
-            if not isinstance(
-                value,
-                str,
-            ):
-
+            if not isinstance(value, str):
                 raise ValueError(
                     f"LiveKit metadata field "
                     f"'{field}' must be a string."
                 )
 
-
-
             if not value.strip():
-
                 raise ValueError(
                     f"LiveKit metadata field "
                     f"'{field}' cannot be empty."
                 )
 
-
-
             values[field] = value.strip()
-
-
 
         return VoiceCallRequest(
             learner_id=values["learner_id"],
@@ -422,29 +250,47 @@ class LiveKitVoiceWorker:
         )
 
 
-
-# =========================================================
-# LiveKit Server
-# =========================================================
-
 server = AgentServer()
 
-
-
-_worker = LiveKitVoiceWorker(
-    context_factory=(
-        VoiceCallContextFactory()
-    ),
-
-    interaction_context_service=(
-        build_voice_interaction_context_service()
-    ),
-
-    conversation_runtime=(
-        build_conversation_runtime()
-    ),
+_functionality_control_service, _control_engine = (
+    create_standalone_functionality_control_service()
 )
 
+_worker = LiveKitVoiceWorker(
+    context_factory=VoiceCallContextFactory(),
+    interaction_context_builder=InteractionContextBuilder(
+        world_resolver=WorldResolver(
+            world_repository=YamlWorldRepository(
+                worlds_path=(
+                    PROJECT_ROOT
+                    / "backend"
+                    / "app"
+                    / "configuration"
+                    / "worlds"
+                )
+            )
+        ),
+        character_resolver=CharacterResolver(
+            character_repository=YamlCharacterRepository(
+                profiles_path=(
+                    Path(
+                        r"C:\AI Folder\FrenchTeacherAI"
+                    )
+                    / "docs"
+                    / "specifications"
+                    / "characters"
+                    / "profiles"
+                )
+            )
+        ),
+    ),
+    conversation_runtime=build_conversation_runtime(),
+    speech_runtime=build_voice_speech_runtime(
+        functionality_control_service=(
+            _functionality_control_service
+        ),
+    ),
+)
 
 
 @server.rtc_session(
@@ -453,27 +299,18 @@ _worker = LiveKitVoiceWorker(
 async def entrypoint(
     ctx: JobContext,
 ) -> None:
-    """
-    LiveKit Agents entrypoint.
-    """
+    """LiveKit Agents entrypoint."""
 
-
-    await _worker.run(
-        ctx=ctx,
-    )
-
+    await _worker.run(ctx=ctx)
 
 
 def run() -> None:
-    """
-    Start LiveKit Agents worker.
-    """
+    """Start LiveKit Agents worker."""
 
-
-    cli.run_app(
-        server,
-    )
-
+    try:
+        cli.run_app(server)
+    finally:
+        _control_engine.dispose()
 
 
 __all__ = [
@@ -483,6 +320,7 @@ __all__ = [
 ]
 
 
-
 if __name__ == "__main__":
     run()
+
+

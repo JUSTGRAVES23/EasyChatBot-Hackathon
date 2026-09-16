@@ -1,20 +1,20 @@
-"""
+﻿"""
 Tests for Voice Call Trigger Service.
 
 Validates complete workflow:
 
 Trigger
    |
-   ↓
+   â†“
 VoiceCall
    |
-   ↓
+   â†“
 VoiceCallEvent
    |
-   ↓
+   â†“
 VoiceCallInvitation
    |
-   ↓
+   â†“
 VoiceCallNotification
 
 The same voice_call_id
@@ -260,3 +260,6 @@ def test_trigger_creates_voice_call_created_event():
     assert events[0].event_type == (
         VoiceCallEventType.CREATED
     )
+
+
+

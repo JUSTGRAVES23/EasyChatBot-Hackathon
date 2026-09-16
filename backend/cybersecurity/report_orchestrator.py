@@ -17,17 +17,17 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.cybersecurity.notifications.scheduler import (
+from cybersecurity.notifications.scheduler import (
     CybersecurityReportScheduler,
 )
 
 
-from backend.cybersecurity.email_service import (
+from cybersecurity.email_service import (
     CybersecurityEmailService,
 )
 
 
-from backend.cybersecurity.decision_support.service import (
+from cybersecurity.decision_support.service import (
     CybersecurityDecisionSupportService,
 )
 
@@ -126,3 +126,4 @@ class CybersecurityReportOrchestrator:
                 event,
 
         }
+

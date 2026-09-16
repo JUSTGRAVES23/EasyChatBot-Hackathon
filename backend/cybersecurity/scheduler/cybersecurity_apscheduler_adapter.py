@@ -1,18 +1,26 @@
-"""
+﻿"""
 Cybersecurity APScheduler Adapter.
 
 Infrastructure boundary for scheduled workflows.
 
-Phase 6J extension:
-- optionally registers the Privacy Governance reminder workflow;
-- does not own privacy governance state;
-- does not make governance decisions;
-- does not create a second scheduler.
+Responsibilities:
+- register existing cybersecurity jobs;
+- optionally register privacy governance reminders;
+- optionally register Academy notification workflows;
+- start and stop the single APScheduler instance.
+
+Does NOT:
+- own Academy eligibility;
+- own Academy delivery state;
+- send emails directly;
+- send Telegram messages directly;
+- make governance decisions;
+- create a second scheduler.
 """
 
 from __future__ import annotations
 
-from backend.cybersecurity.scheduler.scheduler_configuration import (
+from cybersecurity.scheduler.scheduler_configuration import (
     DAILY_REPORT_HOUR,
     DAILY_REPORT_MINUTE,
     WEEKLY_REPORT_DAY,
@@ -24,8 +32,10 @@ from backend.cybersecurity.scheduler.scheduler_configuration import (
 class CybersecurityAPSchedulerAdapter:
     """APScheduler implementation boundary.
 
-    The privacy reminder workflow is optional so existing cybersecurity-only
-    tests and deployments remain backwards compatible.
+    All scheduled application workflows share this single scheduler.
+
+    Optional workflows remain dependency-injected so existing
+    cybersecurity-only tests and deployments remain backwards compatible.
     """
 
     def __init__(
@@ -34,22 +44,50 @@ class CybersecurityAPSchedulerAdapter:
         workflow_service,
         governance_reminder_workflow=None,
         governance_reminder_interval_minutes: int = 60,
+        academy_one_week_workflow=None,
+        academy_one_week_hour: int = 8,
+        academy_one_week_minute: int = 15,
     ) -> None:
         if scheduler is None:
             raise ValueError("scheduler cannot be None.")
+
         if workflow_service is None:
             raise ValueError("workflow_service cannot be None.")
+
         if governance_reminder_interval_minutes <= 0:
-            raise ValueError("governance_reminder_interval_minutes must be > 0.")
+            raise ValueError(
+                "governance_reminder_interval_minutes must be > 0."
+            )
+
+        if not 0 <= academy_one_week_hour <= 23:
+            raise ValueError(
+                "academy_one_week_hour must be between 0 and 23."
+            )
+
+        if not 0 <= academy_one_week_minute <= 59:
+            raise ValueError(
+                "academy_one_week_minute must be between 0 and 59."
+            )
 
         self.scheduler = scheduler
         self.workflow_service = workflow_service
-        self.governance_reminder_workflow = governance_reminder_workflow
+
+        self.governance_reminder_workflow = (
+            governance_reminder_workflow
+        )
         self.governance_reminder_interval_minutes = (
             governance_reminder_interval_minutes
         )
 
+        self.academy_one_week_workflow = (
+            academy_one_week_workflow
+        )
+        self.academy_one_week_hour = academy_one_week_hour
+        self.academy_one_week_minute = academy_one_week_minute
+
     def register_jobs(self) -> None:
+        """Register all enabled workflows on the single scheduler."""
+
         self.scheduler.add_job(
             self.workflow_service.create_daily_report,
             trigger="cron",
@@ -78,12 +116,23 @@ class CybersecurityAPSchedulerAdapter:
                 replace_existing=True,
             )
 
+        if self.academy_one_week_workflow is not None:
+            self.scheduler.add_job(
+                self.academy_one_week_workflow.run,
+                trigger="cron",
+                hour=self.academy_one_week_hour,
+                minute=self.academy_one_week_minute,
+                id="academy_one_week_milestone",
+                replace_existing=True,
+            )
+
     def register_critical_handler(self, handler) -> None:
         self.critical_handler = handler
 
     async def trigger_critical_event(self, event: dict):
         if not hasattr(self, "critical_handler"):
             return None
+
         return await self.critical_handler(event)
 
     def start(self) -> None:
@@ -95,4 +144,6 @@ class CybersecurityAPSchedulerAdapter:
             self.scheduler.shutdown()
 
 
-__all__ = ["CybersecurityAPSchedulerAdapter"]
+__all__ = [
+    "CybersecurityAPSchedulerAdapter",
+]

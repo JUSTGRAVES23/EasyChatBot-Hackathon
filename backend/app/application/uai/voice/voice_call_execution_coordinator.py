@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Execution Coordinator.
 
 Application orchestration boundary
@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-from backend.app.application.uai.voice.voice_room_service import (
+from app.application.uai.voice.voice_room_service import (
     VoiceRoomService,
 )
 
@@ -121,3 +121,4 @@ class VoiceCallExecutionCoordinator:
 __all__ = [
     "VoiceCallExecutionCoordinator",
 ]
+

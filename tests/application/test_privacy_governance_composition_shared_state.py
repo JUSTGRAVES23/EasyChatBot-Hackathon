@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     create_privacy_governance_composition,
 )
 
@@ -49,3 +49,4 @@ def test_shared_flow_state_is_visible_without_recreating_the_composition():
     )
 
     assert composition.dashboard_service.case_list()[0]["case_id"] == result.case.case_id
+

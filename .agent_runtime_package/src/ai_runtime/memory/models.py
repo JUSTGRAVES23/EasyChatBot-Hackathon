@@ -1,0 +1,115 @@
+"""
+Hackathon Memory contracts.
+
+This module defines the minimal persistent memory model
+required by the hackathon discovery flow.
+
+This is intentionally lightweight.
+
+It is NOT the production EasyChatBot memory architecture.
+
+Hackathon responsibilities:
+
+- represent user memories
+- distinguish memory categories
+- provide stable identifiers
+- preserve timestamps
+- support future persistence
+
+Out of scope:
+
+- vector embeddings
+- semantic retrieval
+- LLM-generated memory extraction
+- autonomous memory writes
+- purchase transactions
+- production learner-memory architecture
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from uuid import uuid4
+
+
+class MemoryType(str, Enum):
+    """
+    Supported hackathon memory categories.
+    """
+
+    PREFERENCE = "preference"
+
+    DISCOVERY_CONTEXT = "discovery_context"
+
+    SAVED_ITEM = "saved_item"
+
+
+@dataclass(frozen=True)
+class MemoryEntry:
+    """
+    Persistent user memory entry.
+
+    Memory is explicit application state.
+
+    Agents must not directly mutate this object or
+    the underlying persistence layer.
+    """
+
+    user_id: str
+
+    memory_type: MemoryType
+
+    content: str
+
+    memory_id: str = field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    metadata: dict[str, str] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        """
+        Validate the memory contract.
+        """
+
+        if not self.user_id.strip():
+            raise ValueError(
+                "Memory user_id cannot be empty."
+            )
+
+        if not self.content.strip():
+            raise ValueError(
+                "Memory content cannot be empty."
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        """
+        Convert the memory entry into a persistence-safe
+        representation.
+        """
+
+        return {
+            "memory_id": self.memory_id,
+            "user_id": self.user_id,
+            "memory_type": self.memory_type.value,
+            "content": self.content,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "metadata": dict(self.metadata),
+        }

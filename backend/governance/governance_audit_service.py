@@ -1,4 +1,4 @@
-"""
+﻿"""
 Governance Audit Service.
 
 Central governance evidence collection boundary.
@@ -9,7 +9,7 @@ side-effect free apart from its in-memory audit store.
 
 from __future__ import annotations
 
-from backend.governance.audit_event import AuditEvent
+from governance.audit_event import AuditEvent
 
 
 class GovernanceAuditService:
@@ -39,3 +39,4 @@ class GovernanceAuditService:
 
     def list_events(self) -> list[AuditEvent]:
         return list(self._events)
+

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.app.application.announcements.execution.approved_publication_execution import (
+from app.application.announcements.execution.approved_publication_execution import (
     ApprovedPublicationExecutionService,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
 
@@ -44,3 +44,4 @@ __all__ = [
     "ApprovedPublicationExecutionComposition",
     "create_approved_publication_execution_composition",
 ]
+

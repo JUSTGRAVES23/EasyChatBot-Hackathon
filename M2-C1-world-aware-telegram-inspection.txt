@@ -1,0 +1,2043 @@
+﻿============================================================
+M2-C.1 WORLD-AWARE TELEGRAM INSPECTION
+============================================================
+Repository: C:\AI Folder\EasyChatBot-Hackathon
+Purpose: Inspect the existing production Telegram -> Beta
+         access -> conversation boundary before modification.
+============================================================
+
+============================================================
+FILE: backend\app\application\composition\beta_telegram_production.py
+============================================================
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.application.composition.beta_telegram_composition import (
+    BetaTelegramComposition,
+    create_beta_telegram_composition,
+)
+from app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+from app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.infrastructure.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+from app.infrastructure.persistence.postgresql_beta_access_repository import (
+    PostgreSQLBetaTokenRepository,
+    PostgreSQLBetaUserRepository,
+    PostgreSQLTelegramBindingRepository,
+)
+from app.infrastructure.persistence.postgresql_conversation_event_repository import (
+    PostgreSQLConversationEventRepository,
+)
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.application.world_catalogue.service import LearningWorldCatalogueService
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BetaTelegramProductionComposition:
+    beta_telegram: BetaTelegramComposition
+    database_engine: Any
+    session_factory: Any
+    catalogue_service: LearningWorldCatalogueService
+
+    @property
+    def runtime(self) -> Any:
+        return self.beta_telegram.runtime
+
+    @property
+    def adapter(self) -> Any:
+        return self.beta_telegram.adapter
+
+    @property
+    def beta_access_service(self) -> Any:
+        return self.beta_telegram.beta_access_service
+
+    @property
+    def conversation_runtime(self) -> Any:
+        return self.beta_telegram.conversation_runtime
+
+    @property
+    def conversation_service(self) -> Any:
+        return self.beta_telegram.conversation_service
+
+    @property
+    def conversation_boundary(self) -> Any:
+        return self.beta_telegram.conversation_boundary
+
+    @property
+    def private_chat_gate(self) -> Any:
+        return self.beta_telegram.private_chat_gate
+
+    @property
+    def start_handler(self) -> Any:
+        return self.beta_telegram.start_handler
+
+
+def create_production_beta_telegram_composition(
+    *,
+    expiration_minutes: int = 1440,
+    database_engine: Any | None = None,
+    session_factory: Any | None = None,
+    database_engine_factory: Callable[[], Any] | None = None,
+    session_factory_factory: Callable[[Any], Any] | None = None,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+) -> BetaTelegramProductionComposition:
+    """Create the production Beta Telegram composition.
+
+    Production Telegram processing requires the operational
+    functionality-control service. The service is injected from
+    the application composition; this factory never creates a
+    second control service or control repository.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if functionality_control_service is None:
+        raise ValueError(
+            "functionality_control_service is required "
+            "for production Telegram composition."
+        )
+
+    if (
+        database_engine is not None
+        and database_engine_factory is not None
+    ):
+        raise ValueError(
+            "Provide either database_engine or "
+            "database_engine_factory, not both."
+        )
+
+    if (
+        session_factory is not None
+        and session_factory_factory is not None
+    ):
+        raise ValueError(
+            "Provide either session_factory or "
+            "session_factory_factory, not both."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    if database_engine is None:
+        database_engine = (
+            database_engine_factory
+            or create_database_engine
+        )()
+
+    if session_factory is None:
+        session_factory = (
+            session_factory_factory
+            or create_session_factory
+        )(database_engine)
+
+    beta_user_repository = PostgreSQLBetaUserRepository(
+        session_factory,
+    )
+    beta_token_repository = PostgreSQLBetaTokenRepository(
+        session_factory,
+    )
+    telegram_binding_repository = (
+        PostgreSQLTelegramBindingRepository(
+            session_factory,
+        )
+    )
+    conversation_event_repository = (
+        PostgreSQLConversationEventRepository(
+            session_factory,
+        )
+    )
+
+    # Durable provider usage ledger.
+    # Accounting remains outside the Operations Center.
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            session_factory,
+        )
+    )
+
+    privacy_identifier_service = PrivacyIdentifierService()
+    conversation_event_validator = (
+        ConversationEventValidator()
+    )
+
+    # One authoritative WorldResolver is shared by Beta access and
+    # Learning World catalogue resolution.
+    app_root = Path(__file__).resolve().parents[2]
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds"
+    )
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = PostgreSQLLearningWorldCatalogueRepository(
+        session_factory
+    )
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
+
+    beta_telegram = create_beta_telegram_composition(
+        user_repository=beta_user_repository,
+        token_repository=beta_token_repository,
+        binding_repository=telegram_binding_repository,
+        conversation_event_repository=(
+            conversation_event_repository
+        ),
+        privacy_identifier_service=(
+            privacy_identifier_service
+        ),
+        conversation_event_validator=(
+            conversation_event_validator
+        ),
+        expiration_minutes=expiration_minutes,
+        conversation_runtime=conversation_runtime,
+        conversation_runtime_factory=(
+            conversation_runtime_factory
+        ),
+        provider_usage_repository=(
+            provider_usage_repository
+        ),
+        functionality_control_service=(
+            functionality_control_service
+        ),
+        world_resolver=world_resolver,
+    )
+
+    logger.info(
+        "Production Beta Telegram composition created "
+        "with durable usage ledger and functionality control."
+    )
+
+    return BetaTelegramProductionComposition(
+        beta_telegram=beta_telegram,
+        database_engine=database_engine,
+        session_factory=session_factory,
+        catalogue_service=catalogue_service,
+    )
+
+
+__all__ = [
+    "BetaTelegramProductionComposition",
+    "create_production_beta_telegram_composition",
+]
+
+
+
+
+============================================================
+FILE: backend\app\application\composition\beta_telegram_composition.py
+============================================================
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Callable
+
+from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from app.application.beta_access.beta_access_service import BetaAccessService
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
+from app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.interfaces.telegram.beta_private_chat_gate import BetaPrivateChatGate
+from app.interfaces.telegram.beta_start_handler import BetaTelegramStartHandler
+from app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
+from app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+from app.providers.llm.llm_provider_factory import LLMProviderFactory
+from src.ai_runtime.providers.usage.repository import (
+    InMemoryProviderUsageRepository,
+    ProviderUsageRepository,
+)
+from src.ai_runtime.providers.usage.service import ProviderUsageService
+
+
+@dataclass(frozen=True)
+class BetaTelegramComposition:
+    beta_access_service: BetaAccessService
+    conversation_runtime: ConversationRuntime
+    conversation_service: TelegramConversationService
+    conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_gate: BetaPrivateChatGate
+    start_handler: BetaTelegramStartHandler
+    adapter: BetaTelegramAdapter
+    runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+    provider_usage_repository: ProviderUsageRepository | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        )
+
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive number."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive number."
+        )
+
+    return value
+
+
+def create_beta_telegram_composition(
+    *,
+    user_repository: Any,
+    token_repository: Any,
+    binding_repository: Any,
+    conversation_event_repository: Any,
+    privacy_identifier_service: Any,
+    conversation_event_validator: Any,
+    expiration_minutes: int = 1440,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
+    provider_usage_capture: ProviderUsageCapture | None = None,
+    provider_usage_repository: ProviderUsageRepository | None = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+    world_resolver: WorldResolver | None = None,
+) -> BetaTelegramComposition:
+    """Create the Beta Telegram application composition.
+
+    ``functionality_control_service`` is optional at this lower-level
+    composition boundary so isolated application/unit compositions can
+    continue to construct Telegram without requiring infrastructure.
+
+    Production composition is responsible for requiring and supplying
+    the authoritative functionality-control service.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    # Application configuration root:
+    #
+    # backend/app
+    #
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[2]
+    )
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+    if world_resolver is None:
+        world_resolver = WorldResolver(
+            world_repository=world_repository,
+        )
+
+    beta_access_service = BetaAccessService(
+        user_repository=user_repository,
+        token_repository=token_repository,
+        binding_repository=binding_repository,
+        world_resolver=world_resolver,
+        expiration_minutes=expiration_minutes,
+    )
+
+    resolved_usage_repository = provider_usage_repository
+
+    if conversation_runtime is not None:
+        resolved_conversation_runtime = conversation_runtime
+
+    elif conversation_runtime_factory is not None:
+        resolved_conversation_runtime = conversation_runtime_factory()
+
+        # P1.6.1: when production supplies a durable usage repository,
+        # attach usage capture to the factory-created ConversationRuntime.
+        # Keep the existing factory API and explicit runtime injection seam.
+        if (
+            provider_usage_repository is not None
+            and provider_usage_capture is None
+            and isinstance(
+                resolved_conversation_runtime,
+                ConversationRuntime,
+            )
+            and resolved_conversation_runtime.usage_capture is None
+        ):
+            provider_usage_service = ProviderUsageService(
+                provider_usage_repository
+            )
+
+            provider_usage_capture = ProviderUsageCapture(
+                provider_usage_service
+            )
+
+            resolved_conversation_runtime = replace(
+                resolved_conversation_runtime,
+                usage_capture=provider_usage_capture,
+                usage_context=ProviderUsageContext(
+                    capability="conversation",
+                    functionality="chat",
+                    agent="conversation_agent",
+                ),
+            )
+
+    else:
+        if provider_usage_capture is None:
+            if resolved_usage_repository is None:
+                resolved_usage_repository = (
+                    InMemoryProviderUsageRepository()
+                )
+
+            provider_usage_service = ProviderUsageService(
+                resolved_usage_repository
+            )
+
+            provider_usage_capture = ProviderUsageCapture(
+                provider_usage_service
+            )
+
+        resolved_conversation_runtime = ConversationRuntime(
+            llm_provider=LLMProviderFactory.create(),
+            usage_capture=provider_usage_capture,
+            usage_context=ProviderUsageContext(
+                capability="conversation",
+                functionality="chat",
+                agent="conversation_agent",
+            ),
+        )
+
+    conversation_service = TelegramConversationService(
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+    )
+
+    resolved_rate_limiter = (
+        rate_limiter
+        or InMemoryTelegramRateLimiter(
+            max_messages=_env_positive_int(
+                "TELEGRAM_RATE_LIMIT_MAX_MESSAGES",
+                100,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS",
+                86400.0,
+            ),
+        )
+    )
+
+    resolved_abuse_protector = (
+        abuse_protector
+        or InMemoryTelegramAbuseProtector(
+            max_messages=_env_positive_int(
+                "TELEGRAM_ABUSE_MAX_MESSAGES",
+                10,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_ABUSE_WINDOW_SECONDS",
+                60.0,
+            ),
+        )
+    )
+
+    resolved_observability = (
+        observability
+        or LoggingTelegramObservability(
+            privacy_identifier_service=privacy_identifier_service,
+        )
+    )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        functionality_control_service=functionality_control_service,
+    )
+
+    private_chat_gate = BetaPrivateChatGate(
+        beta_access_service=beta_access_service
+    )
+
+    start_handler = BetaTelegramStartHandler(
+        beta_access_service=beta_access_service
+    )
+
+    adapter = BetaTelegramAdapter(
+        start_handler=start_handler,
+        private_chat_gate=private_chat_gate,
+        conversation_boundary=conversation_boundary,
+    )
+
+    runtime = TelegramBotRuntime(
+        adapter=adapter,
+        conversation_boundary=conversation_boundary,
+    )
+
+    return BetaTelegramComposition(
+        beta_access_service=beta_access_service,
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_service=conversation_service,
+        conversation_boundary=conversation_boundary,
+        private_chat_gate=private_chat_gate,
+        start_handler=start_handler,
+        adapter=adapter,
+        runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        provider_usage_repository=resolved_usage_repository,
+    )
+
+
+__all__ = [
+    "BetaTelegramComposition",
+    "create_beta_telegram_composition",
+]
+
+
+============================================================
+FILE: backend\app\application\beta_access_service.py
+============================================================
+
+FILE NOT FOUND: backend\app\application\beta_access_service.py
+
+============================================================
+FILE: backend\app\application\uai\world\world_resolver.py
+============================================================
+
+"""
+World Resolver.
+
+Application service responsible for resolving
+the learner's active AI learning world.
+
+Responsibilities
+----------------
+
+- Retrieve world configuration.
+- Validate world availability.
+- Create WorldContext.
+
+Does NOT
+--------
+
+- Execute AI models.
+- Manage characters.
+- Create conversations.
+- Handle persistence directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Protocol
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class WorldRepository(Protocol):
+    """
+    Repository contract for world retrieval.
+    """
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ):
+        """
+        Retrieve a world configuration.
+        """
+        ...
+
+
+class WorldResolver:
+    """
+    Resolves a learning world into runtime context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_repository: WorldRepository,
+    ) -> None:
+        self._world_repository = world_repository
+
+    def resolve(
+        self,
+        world_id: str,
+    ) -> WorldContext:
+        """
+        Resolve world configuration.
+
+        Returns
+        -------
+        WorldContext
+            Validated world interaction context.
+        """
+
+        logger.info(
+            "Resolving world context",
+            extra={
+                "world_id": world_id,
+            },
+        )
+
+        world = (
+            self._world_repository
+            .get_by_id(world_id)
+        )
+
+        if world is None:
+            raise ValueError(
+                f"World not found: {world_id}"
+            )
+
+        return WorldContext(
+            world_id=world.id,
+            name=world.name,
+            language_code=world.language_code,
+            available_characters=(
+                tuple(
+                    world.available_characters
+                )
+            ),
+        )
+
+
+============================================================
+FILE: backend\app\domain\uai\context\world_context.py
+============================================================
+
+"""
+World Context.
+
+Represents the active learning world
+for an AI interaction.
+
+Examples:
+
+- French World
+- Spanish World
+- Business French World
+
+The world determines:
+- language
+- learning environment
+- available experience rules
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class WorldContext:
+    """
+    Immutable learning world context.
+    """
+
+    world_id: str
+
+    name: str
+
+    language_code: str
+
+    available_characters: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """
+        Validate world context.
+        """
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        if not self.name.strip():
+            raise ValueError(
+                "world name cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+============================================================
+FILE: backend\tests\beta_access\test_ws19_production_telegram_full_stack.py
+============================================================
+
+from __future__ import annotations
+
+import logging
+from uuid import uuid4
+
+import pytest
+from dotenv import load_dotenv
+from sqlalchemy import inspect, text
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.application.composition.beta_telegram_production import (
+    BetaTelegramProductionComposition,
+    create_production_beta_telegram_composition,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+
+
+# ============================================================================
+# TEST ENVIRONMENT
+# ============================================================================
+
+# WS-19 is explicitly a production-composition integration test.
+# Load the repository .env before the composition creates its PostgreSQL
+# engine. Do NOT hard-code DATABASE_URL or any secret in this test.
+load_dotenv(".env")
+
+
+# ============================================================================
+# Deterministic LLM provider
+# ============================================================================
+
+
+class FakeProductionLLMProvider:
+    """
+    Deterministic provider used to exercise the real ConversationRuntime.
+
+    The LLM provider is the only intentionally controlled test seam.
+    PostgreSQL, Beta access, conversation service, boundary, policies,
+    adapter and Telegram runtime remain real.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_message": user_message,
+            }
+        )
+
+        return (
+            "Bonjour ! RÃ©ponse produite par le "
+            "Conversation Runtime."
+        )
+
+
+# ============================================================================
+# Functionality-control test seam
+# ============================================================================
+
+
+class FakeFunctionalityControlAuthorizer:
+    """Allow the deterministic test control service to be constructed."""
+
+    def can_control_functionality(
+        self,
+        *,
+        actor,
+        environment,
+        functionality_id,
+    ):
+        return True
+
+
+class FakeFunctionalityControlRepository:
+    """Keep WS19 control state deterministic and enabled."""
+
+    def get_availability(
+        self,
+        *,
+        environment,
+        functionality_id,
+    ):
+        return "enabled"
+
+    def get_last_action(
+        self,
+        *,
+        environment,
+        functionality_id,
+    ):
+        return None
+
+    def record_transition(self, **kwargs):
+        raise AssertionError(
+            "WS19 composition tests must not perform a control transition."
+        )
+
+
+def make_functionality_control_service():
+    return FunctionalityOperationalControlService(
+        authorizer=FakeFunctionalityControlAuthorizer(),
+        repository=FakeFunctionalityControlRepository(),
+    )
+
+
+# ============================================================================
+# Composition helpers
+# ============================================================================
+
+
+def _build_composition(
+    *,
+    provider: FakeProductionLLMProvider | None = None,
+) -> BetaTelegramProductionComposition:
+    """
+    Build the real production Telegram composition.
+
+    Only the LLM provider is replaced by a deterministic test double.
+    """
+
+    if provider is None:
+        provider = FakeProductionLLMProvider()
+
+    runtime = ConversationRuntime(
+        llm_provider=provider,
+    )
+
+    functionality_control_service = make_functionality_control_service()
+
+    return create_production_beta_telegram_composition(
+        conversation_runtime=runtime,
+        functionality_control_service=functionality_control_service,
+    )
+
+
+def _dispose_composition(
+    composition: BetaTelegramProductionComposition,
+) -> None:
+    """
+    Dispose the PostgreSQL engine after each integration test.
+    """
+
+    engine = getattr(
+        composition,
+        "database_engine",
+        None,
+    )
+
+    if engine is not None:
+        engine.dispose()
+
+
+# ============================================================================
+# PostgreSQL helpers
+# ============================================================================
+
+
+def _conversation_event_columns(
+    *,
+    engine,
+) -> set[str]:
+    """
+    Discover the real production conversation_events schema.
+
+    The test deliberately does not assume an event_id column.
+    """
+
+    inspector = inspect(engine)
+
+    return {
+        column["name"]
+        for column in inspector.get_columns(
+            "conversation_events",
+        )
+    }
+
+
+def _find_existing_telegram_identities(
+    *,
+    engine,
+    minimum: int = 1,
+) -> list[dict[str, str]]:
+    """
+    Retrieve persisted Telegram classroom identities from PostgreSQL.
+    """
+
+    columns = _conversation_event_columns(
+        engine=engine,
+    )
+
+    required = {
+        "telegram_user_hash",
+        "conversation_id",
+        "world_id",
+    }
+
+    missing = required - columns
+
+    if missing:
+        raise AssertionError(
+            "conversation_events is missing required "
+            f"columns: {sorted(missing)}"
+        )
+
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT DISTINCT
+                    telegram_user_hash,
+                    conversation_id,
+                    world_id
+                FROM conversation_events
+                WHERE telegram_user_hash IS NOT NULL
+                  AND world_id IS NOT NULL
+                ORDER BY telegram_user_hash
+                """
+            )
+        ).mappings().all()
+
+    identities = [
+        {
+            "telegram_user_hash": row[
+                "telegram_user_hash"
+            ],
+            "conversation_id": row[
+                "conversation_id"
+            ],
+            "world_id": row[
+                "world_id"
+            ],
+        }
+        for row in rows
+    ]
+
+    if len(identities) < minimum:
+        raise RuntimeError(
+            "WS-19 requires at least "
+            f"{minimum} persisted Telegram identity "
+            "in PostgreSQL."
+        )
+
+    return identities
+
+
+def _find_recent_event(
+    *,
+    engine,
+    telegram_user_hash: str,
+):
+    """
+    Retrieve the most recent persisted conversation event.
+
+    The production table has no event_id column, so ordering uses created_at.
+    """
+
+    columns = _conversation_event_columns(
+        engine=engine,
+    )
+
+    required = {
+        "telegram_user_hash",
+        "conversation_id",
+        "world_id",
+        "role",
+        "content",
+        "created_at",
+    }
+
+    missing = required - columns
+
+    if missing:
+        raise AssertionError(
+            "conversation_events is missing required "
+            f"columns: {sorted(missing)}"
+        )
+
+    with engine.connect() as connection:
+        return connection.execute(
+            text(
+                """
+                SELECT
+                    telegram_user_hash,
+                    conversation_id,
+                    world_id,
+                    role,
+                    content,
+                    created_at
+                FROM conversation_events
+                WHERE telegram_user_hash = :telegram_user_hash
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "telegram_user_hash":
+                    telegram_user_hash,
+            },
+        ).mappings().first()
+
+
+# ============================================================================
+# WS-19.1 â€” Production composition
+# ============================================================================
+
+
+def test_ws19_production_composition_creates():
+    """
+    AC1:
+        Production composition creates successfully.
+    """
+
+    composition = _build_composition()
+
+    try:
+        assert composition is not None
+
+        assert (
+            composition.conversation_boundary
+            is not None
+        )
+
+        assert (
+            composition.conversation_service
+            is not None
+        )
+
+        assert (
+            composition.conversation_runtime
+            is not None
+        )
+
+        assert composition.adapter is not None
+
+        assert composition.runtime is not None
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.2 â€” Production policy wiring
+# ============================================================================
+
+
+def test_ws19_production_policies_are_injected():
+    """
+    AC2:
+        Real policies are attached to the production boundary.
+    """
+
+    composition = _build_composition()
+
+    try:
+        boundary = (
+            composition.conversation_boundary
+        )
+
+        assert getattr(
+            boundary,
+            "_rate_limiter",
+            None,
+        ) is not None
+
+        assert getattr(
+            boundary,
+            "_abuse_protector",
+            None,
+        ) is not None
+
+        assert getattr(
+            boundary,
+            "_observability",
+            None,
+        ) is not None
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.3 â€” PostgreSQL integration
+# ============================================================================
+
+
+def test_ws19_postgresql_contains_telegram_identity():
+    """
+    AC3:
+        PostgreSQL contains persisted Telegram classroom identity data.
+    """
+
+    composition = _build_composition()
+
+    try:
+        identities = (
+            _find_existing_telegram_identities(
+                engine=composition.database_engine,
+            )
+        )
+
+        assert identities
+
+        assert all(
+            identity["telegram_user_hash"]
+            for identity in identities
+        )
+
+        assert all(
+            identity["world_id"]
+            for identity in identities
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.4 â€” Active World
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws19_active_world_is_resolved():
+    """
+    AC4:
+        The persisted Telegram conversation has an active World.
+    """
+
+    composition = _build_composition()
+
+    try:
+        identities = (
+            _find_existing_telegram_identities(
+                engine=composition.database_engine,
+            )
+        )
+
+        identity = identities[0]
+
+        assert identity["world_id"]
+        assert identity["world_id"].strip()
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.5 â€” Conversation Runtime
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws19_message_reaches_real_conversation_runtime():
+    """
+    AC5:
+        The real ConversationRuntime is integrated into the production
+        conversation service.
+    """
+
+    provider = FakeProductionLLMProvider()
+
+    composition = _build_composition(
+        provider=provider,
+    )
+
+    try:
+        assert (
+            composition.conversation_runtime
+            is not None
+        )
+
+        assert (
+            composition.conversation_service
+            is not None
+        )
+
+        service = (
+            composition.conversation_service
+        )
+
+        service_runtime = getattr(
+            service,
+            "_runtime",
+            None,
+        )
+
+        if service_runtime is not None:
+            assert (
+                service_runtime
+                is composition.conversation_runtime
+            )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.6 â€” Persistence
+# ============================================================================
+
+
+def test_ws19_conversation_events_are_persisted():
+    """
+    AC6:
+        PostgreSQL contains persisted Telegram conversation events.
+
+    The actual production schema is used. No event_id assumption is made.
+    """
+
+    composition = _build_composition()
+
+    try:
+        identities = (
+            _find_existing_telegram_identities(
+                engine=composition.database_engine,
+            )
+        )
+
+        identity = identities[0]
+
+        event = _find_recent_event(
+            engine=composition.database_engine,
+            telegram_user_hash=(
+                identity["telegram_user_hash"]
+            ),
+        )
+
+        assert event is not None
+
+        assert (
+            event["telegram_user_hash"]
+            == identity["telegram_user_hash"]
+        )
+
+        assert (
+            event["conversation_id"]
+            == identity["conversation_id"]
+        )
+
+        assert (
+            event["world_id"]
+            == identity["world_id"]
+        )
+
+        assert event["role"] is not None
+        assert event["content"] is not None
+        assert event["created_at"] is not None
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.7 â€” User and assistant conversation
+# ============================================================================
+
+
+def test_ws19_user_and_assistant_share_conversation():
+    """
+    AC7:
+        User and assistant events share the same conversation_id.
+    """
+
+    composition = _build_composition()
+
+    try:
+        columns = _conversation_event_columns(
+            engine=composition.database_engine,
+        )
+
+        assert {
+            "telegram_user_hash",
+            "conversation_id",
+            "role",
+        }.issubset(columns)
+
+        with composition.database_engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT
+                        telegram_user_hash,
+                        conversation_id,
+                        role
+                    FROM conversation_events
+                    WHERE telegram_user_hash IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 100
+                    """
+                )
+            ).mappings().all()
+
+        assert rows
+
+        conversations: dict[
+            tuple[str, str],
+            set[str],
+        ] = {}
+
+        for row in rows:
+            key = (
+                row["telegram_user_hash"],
+                row["conversation_id"],
+            )
+
+            conversations.setdefault(
+                key,
+                set(),
+            ).add(row["role"])
+
+        assert any(
+            {"user", "assistant"}.issubset(
+                roles,
+            )
+            for roles in conversations.values()
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.8 â€” Conversation continuity
+# ============================================================================
+
+
+def test_ws19_persisted_history_is_available():
+    """
+    AC8:
+        Persisted history is available for a Telegram conversation.
+    """
+
+    composition = _build_composition()
+
+    try:
+        identities = (
+            _find_existing_telegram_identities(
+                engine=composition.database_engine,
+            )
+        )
+
+        identity = identities[0]
+
+        with composition.database_engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT
+                        conversation_id,
+                        role,
+                        content
+                    FROM conversation_events
+                    WHERE telegram_user_hash = :user_hash
+                    ORDER BY created_at ASC
+                    """
+                ),
+                {
+                    "user_hash":
+                        identity[
+                            "telegram_user_hash"
+                        ],
+                },
+            ).mappings().all()
+
+        assert rows
+
+        conversation_ids = {
+            row["conversation_id"]
+            for row in rows
+        }
+
+        assert conversation_ids
+
+        assert all(
+            row["content"] is not None
+            for row in rows
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.9 â€” Cross-user isolation
+# ============================================================================
+
+
+def test_ws19_different_users_remain_isolated():
+    """
+    AC9:
+        Different Telegram identities do not share persisted conversations.
+    """
+
+    composition = _build_composition()
+
+    try:
+        identities = (
+            _find_existing_telegram_identities(
+                engine=composition.database_engine,
+                minimum=2,
+            )
+        )
+
+        first = identities[0]
+        second = identities[1]
+
+        with composition.database_engine.connect() as connection:
+            first_rows = connection.execute(
+                text(
+                    """
+                    SELECT
+                        telegram_user_hash,
+                        conversation_id,
+                        world_id,
+                        role,
+                        content
+                    FROM conversation_events
+                    WHERE telegram_user_hash = :user_hash
+                    """
+                ),
+                {
+                    "user_hash":
+                        first[
+                            "telegram_user_hash"
+                        ],
+                },
+            ).mappings().all()
+
+            second_rows = connection.execute(
+                text(
+                    """
+                    SELECT
+                        telegram_user_hash,
+                        conversation_id,
+                        world_id,
+                        role,
+                        content
+                    FROM conversation_events
+                    WHERE telegram_user_hash = :user_hash
+                    """
+                ),
+                {
+                    "user_hash":
+                        second[
+                            "telegram_user_hash"
+                        ],
+                },
+            ).mappings().all()
+
+        assert first_rows
+        assert second_rows
+
+        assert (
+            first["telegram_user_hash"]
+            != second["telegram_user_hash"]
+        )
+
+        first_conversations = {
+            row["conversation_id"]
+            for row in first_rows
+        }
+
+        second_conversations = {
+            row["conversation_id"]
+            for row in second_rows
+        }
+
+        assert first_conversations
+        assert second_conversations
+
+        assert not (
+            first_conversations
+            & second_conversations
+        )
+
+        assert all(
+            row["telegram_user_hash"]
+            == first["telegram_user_hash"]
+            for row in first_rows
+        )
+
+        assert all(
+            row["telegram_user_hash"]
+            == second["telegram_user_hash"]
+            for row in second_rows
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.10 â€” Rate limiting
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws19_rate_limiter_is_identity_scoped(
+    monkeypatch,
+):
+    """
+    AC10:
+        Rate limiting is scoped per Telegram identity.
+    """
+
+    monkeypatch.setenv(
+        "TELEGRAM_RATE_LIMIT_MAX_MESSAGES",
+        "1",
+    )
+
+    monkeypatch.setenv(
+        "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS",
+        "60",
+    )
+
+    composition = _build_composition()
+
+    try:
+        limiter = (
+            composition.conversation_boundary
+            ._rate_limiter
+        )
+
+        first_user = (
+            910000
+            + int(uuid4().int % 10000)
+        )
+
+        second_user = (
+            920000
+            + int(uuid4().int % 10000)
+        )
+
+        assert await limiter.allow(
+            telegram_user_id=first_user,
+        )
+
+        assert not await limiter.allow(
+            telegram_user_id=first_user,
+        )
+
+        assert await limiter.allow(
+            telegram_user_id=second_user,
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.11 â€” Abuse protection
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws19_abuse_protection_is_identity_scoped(
+    monkeypatch,
+):
+    """
+    AC11:
+        Abuse protection is independently scoped per Telegram identity.
+    """
+
+    monkeypatch.setenv(
+        "TELEGRAM_ABUSE_MAX_MESSAGES",
+        "1",
+    )
+
+    monkeypatch.setenv(
+        "TELEGRAM_ABUSE_WINDOW_SECONDS",
+        "60",
+    )
+
+    composition = _build_composition()
+
+    try:
+        protector = (
+            composition.conversation_boundary
+            ._abuse_protector
+        )
+
+        first_user = (
+            930000
+            + int(uuid4().int % 10000)
+        )
+
+        second_user = (
+            940000
+            + int(uuid4().int % 10000)
+        )
+
+        assert await protector.allow(
+            telegram_user_id=first_user,
+        )
+
+        assert not await protector.allow(
+            telegram_user_id=first_user,
+        )
+
+        assert await protector.allow(
+            telegram_user_id=second_user,
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.12 â€” World-language policy
+# ============================================================================
+
+
+def test_ws19_policy_messages_use_world_language():
+    """
+    AC12:
+        Policy messages use the active World language.
+    """
+
+    from app.application.beta_access.policies.telegram_policy_messages import (
+        TelegramPolicyMessageService,
+    )
+
+    service = TelegramPolicyMessageService()
+
+    class FrenchContext:
+        world_id = "world-fr"
+        name = "French World"
+        language_code = "fr"
+        character = "Alix"
+        level = "B1"
+
+    response = service.rate_limit_message(
+        context=FrenchContext(),
+        retry_after_seconds=30,
+    )
+
+    assert (
+        "limite de messages"
+        in response.lower()
+    )
+
+    assert (
+        "30 secondes"
+        in response.lower()
+    )
+
+    assert "token" not in response.lower()
+    assert "tokens" not in response.lower()
+
+
+# ============================================================================
+# WS-19.13 â€” Observability
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws19_observability_does_not_log_raw_identity_or_content(
+    caplog,
+):
+    """
+    AC13 + AC15:
+        Operational telemetry must not expose raw Telegram identity or
+        learner message content.
+    """
+
+    composition = _build_composition()
+
+    try:
+        observability = (
+            composition.conversation_boundary
+            ._observability
+        )
+
+        telegram_user_id = (
+            950000
+            + int(uuid4().int % 10000)
+        )
+
+        learner_content = (
+            f"WS19-secret-{uuid4().hex}"
+        )
+
+        caplog.set_level(
+            logging.INFO,
+        )
+
+        await observability.record(
+            event_type=(
+                "telegram_classroom_message"
+            ),
+            telegram_user_id=telegram_user_id,
+            outcome="accepted",
+            metadata={
+                "world_id": "world-fr",
+                "character": "Alix",
+                "level": "B1",
+            },
+        )
+
+        log_text = "\n".join(
+            record.getMessage()
+            for record in caplog.records
+        )
+
+        assert (
+            str(telegram_user_id)
+            not in log_text
+        )
+
+        assert learner_content not in log_text
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.14 â€” Safe runtime failure
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ws19_runtime_failure_returns_safe_response():
+    """
+    AC14:
+        A runtime failure produces the safe learner-facing response.
+
+    The authorization seam is replaced only for this test so that the
+    message can reach the runtime failure path.
+    """
+
+    composition = _build_composition()
+
+    try:
+        boundary = (
+            composition.conversation_boundary
+        )
+
+        service = (
+            composition.conversation_service
+        )
+
+        class FakeApprovedContext:
+            world_id = "world-fr"
+            name = "French World"
+            language_code = "fr"
+            character = "Alix"
+            level = "B1"
+
+        async def approved_context(
+            telegram_user_id: int,
+        ):
+            return FakeApprovedContext()
+
+        monkeypatch = pytest.MonkeyPatch()
+
+        try:
+            monkeypatch.setattr(
+                composition.beta_access_service,
+                "get_conversation_context",
+                approved_context,
+            )
+
+            runtime_attribute = None
+
+            for name in (
+                "_runtime",
+                "_conversation_runtime",
+            ):
+                if hasattr(service, name):
+                    runtime_attribute = name
+                    break
+
+            if runtime_attribute is None:
+                pytest.skip(
+                    "Conversation service does not expose "
+                    "a replaceable runtime seam."
+                )
+
+            class FailingRuntime:
+                async def respond(
+                    self,
+                    **kwargs,
+                ):
+                    raise RuntimeError(
+                        "database password=WS19-secret"
+                    )
+
+            monkeypatch.setattr(
+                service,
+                runtime_attribute,
+                FailingRuntime(),
+            )
+
+            response = await boundary.handle_message(
+                telegram_user_id=960001,
+                message="Bonjour",
+            )
+
+            assert (
+                response
+                == boundary.SAFE_ERROR_RESPONSE
+            )
+
+            assert "WS19-secret" not in response
+            assert "password" not in response.lower()
+
+        finally:
+            monkeypatch.undo()
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.15 â€” Real Telegram adapter
+# ============================================================================
+
+
+def test_ws19_real_telegram_adapter_is_composed():
+    """
+    Verify the real Telegram adapter is in the production graph.
+    """
+
+    composition = _build_composition()
+
+    try:
+        assert composition.adapter is not None
+
+        assert (
+            composition.adapter.__class__.__name__
+            == "BetaTelegramAdapter"
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.16 â€” Real Telegram runtime
+# ============================================================================
+
+
+def test_ws19_real_telegram_runtime_is_composed():
+    """
+    Verify the real TelegramBotRuntime is in the production graph.
+    """
+
+    composition = _build_composition()
+
+    try:
+        assert composition.runtime is not None
+
+        assert (
+            composition.runtime.__class__.__name__
+            == "TelegramBotRuntime"
+        )
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.17 â€” Dependency graph
+# ============================================================================
+
+
+def test_ws19_dependency_graph_is_integrated():
+    """
+    Verify the real production dependency graph.
+
+    Only public composition dependencies are asserted. Internal repository
+    implementation details are intentionally not required.
+    """
+
+    composition = _build_composition()
+
+    try:
+        assert (
+            composition.beta_access_service
+            is not None
+        )
+
+        assert (
+            composition.conversation_runtime
+            is not None
+        )
+
+        assert (
+            composition.conversation_service
+            is not None
+        )
+
+        assert (
+            composition.conversation_boundary
+            is not None
+        )
+
+        assert (
+            composition.private_chat_gate
+            is not None
+        )
+
+        assert (
+            composition.start_handler
+            is not None
+        )
+
+        assert composition.adapter is not None
+        assert composition.runtime is not None
+
+    finally:
+        _dispose_composition(composition)
+
+
+# ============================================================================
+# WS-19.18 â€” PostgreSQL schema integrity
+# ============================================================================
+
+
+def test_ws19_postgresql_conversation_schema_is_ready():
+    """
+    Verify the actual production conversation_events schema.
+
+    event_id is deliberately NOT required because the production table
+    does not expose that column.
+    """
+
+    composition = _build_composition()
+
+    try:
+        columns = _conversation_event_columns(
+            engine=composition.database_engine,
+        )
+
+        required = {
+            "telegram_user_hash",
+            "conversation_id",
+            "world_id",
+            "role",
+            "content",
+            "created_at",
+        }
+
+        assert required.issubset(columns)
+
+    finally:
+        _dispose_composition(composition)
+

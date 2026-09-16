@@ -20,15 +20,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.cybersecurity.cybersecurity_email_generator import (
+from cybersecurity.cybersecurity_email_generator import (
     CybersecurityEmailGenerator,
 )
 
-from backend.cybersecurity.email.email_circuit_breaker import (
+from cybersecurity.email.email_circuit_breaker import (
     EmailCircuitBreaker,
 )
 
-from backend.cybersecurity.email.email_provider_manager import (
+from cybersecurity.email.email_provider_manager import (
     EmailProviderManager,
 )
 
@@ -169,3 +169,4 @@ class CybersecurityEmailService:
 __all__ = [
     "CybersecurityEmailService",
 ]
+

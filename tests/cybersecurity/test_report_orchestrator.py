@@ -1,7 +1,7 @@
 ﻿import pytest
 
 
-from backend.cybersecurity.report_orchestrator import (
+from cybersecurity.report_orchestrator import (
     CybersecurityReportOrchestrator,
 )
 
@@ -96,3 +96,4 @@ async def test_critical_alert_detection():
         ==
         "CRITICAL"
     )
+

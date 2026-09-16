@@ -1,5 +1,5 @@
-"""
-H3-04C — Memory Persistence Isolation Tests.
+﻿"""
+H3-04C â€” Memory Persistence Isolation Tests.
 
 Purpose
 -------
@@ -19,11 +19,11 @@ No LLM, provider, agent, or external service is used.
 
 from __future__ import annotations
 
-from backend.memory.memory_service import (
+from memory.memory_service import (
     MemoryService,
 )
 
-from backend.memory.memory_store import (
+from memory.memory_store import (
     MemoryStore,
 )
 

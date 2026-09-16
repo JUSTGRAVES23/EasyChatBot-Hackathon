@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -564,3 +564,4 @@ async def test_ws12_users_remain_isolated_after_one_user_is_flooded():
             "message": "Second user",
         },
     ]
+

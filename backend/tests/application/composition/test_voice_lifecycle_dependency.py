@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Lifecycle Dependency Builder.
 
 Validates the application dependency
@@ -52,3 +52,4 @@ def test_build_voice_call_lifecycle_service():
         .execution_runtime
         is not None
     )
+

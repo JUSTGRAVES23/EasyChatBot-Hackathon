@@ -1,6 +1,6 @@
-import pytest
+﻿import pytest
 
-from backend.demo.demo_runner import DemoRunner
+from demo.demo_runner import DemoRunner
 
 
 @pytest.mark.asyncio
@@ -16,3 +16,4 @@ async def test_demo_runner():
 
     assert result.audit["status"] == "recorded"
     assert result.timeline["evidence_available"] is True
+

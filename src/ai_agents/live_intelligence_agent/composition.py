@@ -1,4 +1,4 @@
-"""
+﻿"""
 Live Intelligence Composition Root.
 
 Creates the production Live Intelligence Agent.
@@ -33,7 +33,6 @@ Does not:
 
 from __future__ import annotations
 
-
 from src.ai_agents.live_intelligence_agent.handler import (
     LiveIntelligenceAgent,
 )
@@ -46,10 +45,9 @@ from src.providers.search_provider.parallel_adapter import (
     ParallelSearchProvider,
 )
 
-from backend.providers.llm.gemini_provider import (
+from providers.llm.gemini_provider import (
     GeminiProvider,
 )
-
 
 
 def create_live_intelligence_agent(
@@ -57,7 +55,7 @@ def create_live_intelligence_agent(
     gemini_model: str = "gemini-3.6-flash",
 ) -> LiveIntelligenceAgent:
     """
-    Create production Live Intelligence Agent.
+    Create the production Live Intelligence Agent.
 
     The returned agent owns the complete flow:
 
@@ -68,27 +66,20 @@ def create_live_intelligence_agent(
               |
               v
         Structured Intelligence
+
+    Provider-specific implementation details remain behind
+    their respective provider boundaries.
     """
 
+    search_provider = ParallelSearchProvider()
 
-    search_provider = (
-        ParallelSearchProvider()
+    llm_provider = GeminiProvider(
+        model=gemini_model,
     )
 
-
-    llm_provider = (
-        GeminiProvider(
-            model=gemini_model
-        )
+    processor = GeminiIntelligenceProcessor(
+        llm_provider=llm_provider,
     )
-
-
-    processor = (
-        GeminiIntelligenceProcessor(
-            llm_provider=llm_provider
-        )
-    )
-
 
     return LiveIntelligenceAgent(
         search_provider=search_provider,

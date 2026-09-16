@@ -1,4 +1,4 @@
-"""
+﻿"""
 Parallel Provider Tests.
 
 These tests validate the provider layer
@@ -10,15 +10,15 @@ through the hackathon demo flow.
 
 import pytest
 
-from backend.providers.parallel.parallel_provider import (
+from providers.parallel.parallel_provider import (
     ParallelSearchProvider,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

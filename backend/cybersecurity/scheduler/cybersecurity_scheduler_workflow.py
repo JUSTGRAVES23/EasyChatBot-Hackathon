@@ -32,7 +32,7 @@ from __future__ import annotations
 
 
 
-from backend.cybersecurity.control.cybersecurity_delivery_control import (
+from cybersecurity.control.cybersecurity_delivery_control import (
     CybersecurityDeliveryControl,
 )
 
@@ -224,3 +224,4 @@ class CybersecuritySchedulerWorkflow:
                 },
 
         }
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for H3-01 MemoryContextBuilder.
 
 The builder consumes the application-facing
@@ -7,7 +7,7 @@ MemoryRecord contract returned by MemoryService.
 No LLM, provider, database, or external service is used.
 """
 
-from backend.memory.memory_record import (
+from memory.memory_record import (
     MemoryRecord,
 )
 

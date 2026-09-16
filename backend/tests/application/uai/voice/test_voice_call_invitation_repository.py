@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Invitation Repository.
 
 Validates the repository contract
@@ -229,3 +229,6 @@ def test_repository_is_abstract():
     ):
 
         VoiceCallInvitationRepository()
+
+
+

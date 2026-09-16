@@ -1,16 +1,16 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
 
-from backend.app.application.announcements.execution.approved_publication_execution import (
+from app.application.announcements.execution.approved_publication_execution import (
     ApprovedPublicationExecutionService,
 )
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionStatus,
 )
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import (
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import (
     PublicationStatus,
     PublicationType,
 )
@@ -133,3 +133,4 @@ async def test_non_approved_publication_is_not_sent_directly() -> None:
             idempotency_key="ws23-1-4-test-key",
             correlation_id="ws23-1-4-correlation",
         )
+

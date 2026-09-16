@@ -1,7 +1,7 @@
-from backend.governance.governance_audit_service import (
+﻿from governance.governance_audit_service import (
     GovernanceAuditService,
 )
-from backend.provider_management.control.provider_delivery_control import (
+from provider_management.control.provider_delivery_control import (
     ProviderDeliveryControl,
 )
 
@@ -24,3 +24,4 @@ def test_provider_pause_creates_audit_event():
     assert len(events) == 1
     assert events[0].event == "PROVIDER_PAUSED"
     assert events[0].actor == "security_admin"
+

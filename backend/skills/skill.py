@@ -1,4 +1,4 @@
-"""
+﻿"""
 Generic Skill Contract.
 
 Skills are bounded capabilities used by AI Agents.
@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend.skills.skill_result import SkillResult
+from skills.skill_result import SkillResult
 
 
 @dataclass(frozen=True)
@@ -58,3 +58,4 @@ class Skill(ABC):
         perform uncontrolled external side effects.
         """
         raise NotImplementedError
+

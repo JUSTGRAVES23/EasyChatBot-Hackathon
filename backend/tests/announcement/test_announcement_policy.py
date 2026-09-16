@@ -1,10 +1,10 @@
-import pytest
+﻿import pytest
 
-from backend.app.application.announcement.announcement_policy import (
+from app.application.announcement.announcement_policy import (
     AnnouncementPolicy,
     AnnouncementPolicyError,
 )
-from backend.app.application.announcement.models import Announcement, AnnouncementType
+from app.application.announcement.models import Announcement, AnnouncementType
 
 
 def test_valid_announcement_passes():
@@ -55,4 +55,5 @@ def test_body_length_is_limited():
                 body="x" * 1801,
             )
         )
+
 

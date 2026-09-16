@@ -1,31 +1,31 @@
-import pytest
+﻿import pytest
 
-from backend.agents.agent_result import (
+from agents.agent_result import (
     AgentResult,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
 )
 
-from backend.memory.memory_service import (
+from memory.memory_service import (
     MemoryService,
 )
 
-from backend.memory.memory_store import (
+from memory.memory_store import (
     MemoryStore,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.services.companion_service import (
+from services.companion_service import (
     CompanionService,
 )
 

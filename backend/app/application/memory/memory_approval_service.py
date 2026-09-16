@@ -4,11 +4,11 @@ import logging
 
 from typing import Any
 
-from backend.app.application.memory.memory_candidate import (
+from app.application.memory.memory_candidate import (
     MemoryCandidate,
 )
 
-from backend.app.application.memory.memory_policy import (
+from app.application.memory.memory_policy import (
     MemoryPolicy,
 )
 

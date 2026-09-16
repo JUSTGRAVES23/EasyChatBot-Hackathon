@@ -1,49 +1,49 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 
 import pytest
 
-from backend.app.application.privacy.data_processing_map import (
+from app.application.privacy.data_processing_map import (
     DataProcessingMap,
     DataProcessingMapEntry,
 )
-from backend.app.application.privacy.dpia_screening import (
+from app.application.privacy.dpia_screening import (
     DPIAScreening,
     DPIAScreeningRegistry,
 )
-from backend.app.application.privacy.processing_activity import (
+from app.application.privacy.processing_activity import (
     ProcessingActivity,
 )
-from backend.app.application.privacy.processing_registry import (
+from app.application.privacy.processing_registry import (
     ProcessingRegistry,
 )
-from backend.app.application.privacy.processor_registry import (
+from app.application.privacy.processor_registry import (
     ProcessorRecord,
     ProcessorRegistry,
 )
-from backend.app.application.privacy.privacy_approval_email_service import (
+from app.application.privacy.privacy_approval_email_service import (
     PrivacyApprovalEmailService,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_change_registry import (
+from app.application.privacy.privacy_change_registry import (
     PrivacyChangeRegistry,
 )
-from backend.app.application.privacy.privacy_governance_gate import (
+from app.application.privacy.privacy_governance_gate import (
     PrivacyGovernanceGate,
 )
-from backend.app.application.privacy.privacy_validation_service import (
+from app.application.privacy.privacy_validation_service import (
     PrivacyValidationService,
 )
-from backend.app.application.privacy.retention_registry import (
+from app.application.privacy.retention_registry import (
     RetentionRegistry,
     RetentionRule,
 )
-from backend.app.infrastructure.email.resend_approval_email_sender import (
+from app.infrastructure.email.resend_approval_email_sender import (
     ResendApprovalEmailSender,
 )
 

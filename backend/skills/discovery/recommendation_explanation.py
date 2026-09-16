@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Recommendation Explanation Skill.
 
 Produces concise, evidence-based explanations for ranked
@@ -38,14 +38,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.skills.discovery.recommendation_ranking import (
+from skills.discovery.recommendation_ranking import (
     RankedRecommendation,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

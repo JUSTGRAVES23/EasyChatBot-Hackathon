@@ -1,0 +1,302 @@
+﻿=== P1.5.4 PROVIDER → DURABLE LEDGER AUDIT ===
+
+=== CONVERSATION RUNTIME ===
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from backend.app.providers.llm.llm_provider import LLMProvider
+from backend.app.providers.provider_result import ProviderResult
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRuntime:
+    """Execute conversation requests and optionally capture provider usage."""
+
+    llm_provider: LLMProvider
+    usage_capture: ProviderUsageCapture | None = None
+    usage_context: ProviderUsageContext | None = None
+
+    async def respond(
+        self,
+        *,
+        character_instruction: str,
+        learner_message: str,
+    ) -> str:
+        result = await self.llm_provider.generate(
+            system_prompt=character_instruction,
+            user_message=learner_message,
+        )
+
+        if isinstance(result, ProviderResult):
+            if self.usage_capture is not None:
+                if self.usage_context is None:
+                    raise RuntimeError(
+                        "Provider usage capture requires usage context."
+                    )
+                self.usage_capture.capture(
+                    result=result,
+                    context=self.usage_context,
+                )
+
+            if not result.success:
+                raise RuntimeError(result.error or "Provider request failed.")
+            return result.content
+
+        if isinstance(result, str):
+            return result
+
+        raise TypeError(
+            "LLM provider must return ProviderResult or str, "
+            f"got {type(result).__name__}"
+        )
+
+
+=== PROVIDER RESULT ===
+"""Canonical provider execution result for the live application provider path."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    """Provider-neutral execution usage metadata.
+
+    Values are optional because not every provider exposes every metric.
+    Providers must never invent token counts or request IDs.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("total_tokens", self.total_tokens),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} cannot be negative.")
+
+        if (
+            self.total_tokens is not None
+            and self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens < self.input_tokens + self.output_tokens
+        ):
+            raise ValueError(
+                "total_tokens cannot be less than input_tokens + output_tokens."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderResult:
+    """Provider-independent result returned by every live LLM adapter.
+
+    Provider SDK objects must never cross this boundary.
+
+    ``content`` is the canonical generated text. ``output`` is retained as
+    a compatibility property for consumers that already use that name.
+    """
+
+    success: bool
+    provider_id: str
+    model: str
+    content: str = ""
+    usage: ProviderUsage = field(default_factory=ProviderUsage)
+    provider_request_id: str | None = None
+    latency_ms: float | None = None
+    completed_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("ProviderResult requires provider_id.")
+        if not self.model.strip():
+            raise ValueError("ProviderResult requires model.")
+        if self.latency_ms is not None and self.latency_ms < 0:
+            raise ValueError("latency_ms cannot be negative.")
+        if self.success and not self.content.strip():
+            raise ValueError(
+                "Successful ProviderResult requires non-empty content."
+            )
+        if not self.success and not self.error:
+            raise ValueError(
+                "Failed ProviderResult requires an error."
+            )
+
+    @property
+    def output(self) -> str:
+        """Backward-compatible alias for canonical ``content``."""
+        return self.content
+
+
+=== DURABLE REPOSITORY ===
+from __future__ import annotations
+
+from src.ai_runtime.providers.usage.models import ProviderUsageEvent
+from src.ai_runtime.providers.usage.repository import ProviderUsageRepository
+
+from .provider_usage_records import ProviderUsageRecord
+
+
+class PostgreSQLProviderUsageRepository(ProviderUsageRepository):
+    """PostgreSQL implementation of the provider usage repository.
+
+    Uses the existing synchronous SQLAlchemy session boundary because the
+    ProviderUsageRepository contract is synchronous.
+    """
+
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    def save(self, event: ProviderUsageEvent) -> None:
+        if event is None:
+            raise ValueError("Provider usage event cannot be None.")
+
+        with self._session_factory() as session:
+            session.add(
+                ProviderUsageRecord(
+                    provider=event.provider,
+                    model=event.model,
+                    capability=event.capability,
+                    functionality=event.functionality,
+                    agent=event.agent,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    latency_ms=event.latency_ms,
+                    estimated_cost=event.estimated_cost,
+                    quality_score=event.quality_score,
+                    success=event.success,
+                    created_at=event.created_at,
+                )
+            )
+            session.commit()
+
+    def get_all(self) -> list[ProviderUsageEvent]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ProviderUsageRecord)
+                .order_by(ProviderUsageRecord.created_at.asc(), ProviderUsageRecord.id.asc())
+                .all()
+            )
+
+        return [_event_from_record(row) for row in rows]
+
+    def clear(self) -> None:
+        with self._session_factory() as session:
+            session.query(ProviderUsageRecord).delete()
+            session.commit()
+
+
+def _event_from_record(row: ProviderUsageRecord) -> ProviderUsageEvent:
+    return ProviderUsageEvent(
+        provider=row.provider,
+        model=row.model,
+        capability=row.capability,
+        functionality=row.functionality,
+        agent=row.agent,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        latency_ms=row.latency_ms,
+        estimated_cost=row.estimated_cost,
+        quality_score=float(row.quality_score),
+        success=row.success,
+        created_at=row.created_at,
+    )
+
+
+=== DATABASE TABLE ===
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, Integer, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from backend.app.infrastructure.persistence.database import Base
+
+
+class ProviderUsageRecord(Base):
+    """SQLAlchemy persistence record for one provider usage event.
+
+    This model is deliberately infrastructure-only. The application
+    usage contract remains ProviderUsageEvent.
+    """
+
+    __tablename__ = "provider_usage_events"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    capability: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    functionality: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    agent: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimated_cost: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8),
+        nullable=False,
+    )
+    quality_score: Mapped[float] = mapped_column(
+        Numeric(5, 2),
+        nullable=False,
+    )
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
+=== EXISTING E2E USAGE TESTS ===
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\composition\test_p1_5_3_durable_usage_wiring.py:9: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\composition\test_p1_5_3_durable_usage_wiring.py:67: capture = MagicMock(spec=ProviderUsageCapture)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:6: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:9: from backend.app.providers.provider_result import ProviderResult, ProviderUsage
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:16: def create_capture() -> tuple[ProviderUsageCapture, InMemoryProviderUsageRepository]:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:19: return ProviderUsageCapture(service), repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:25: result = ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:66: result = ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:93: with pytest.raises(ValueError, match="ProviderResult cannot be None"):
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:105: result=ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py:6: from backend.app.providers.provider_result import ProviderResult
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py:11: return ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_provider_result.py:48: return ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:7: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:11: from backend.app.providers.provider_result import ProviderResult, ProviderUsage
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:17: def __init__(self, result: ProviderResult):
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:27: return ProviderUsageCapture(service), repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:33: result = ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:69: result = ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:14: PostgreSQLProviderUsageRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:55: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:66: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:72: "SELECT to_regclass('public.provider_usage_events')"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:78: "provider_usage_events table is not migrated yet; "
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_usage_migration_definition.py:13: / "20260906_provider_usage_events.py"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_provider_usage_migration_definition.py:32: assert migration.revision == "20260906_provider_usage_events"
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py:4: ProviderResult,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py:22: result = ProviderResult(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\test_app_provider_result_contract.py:34: ProviderResult(

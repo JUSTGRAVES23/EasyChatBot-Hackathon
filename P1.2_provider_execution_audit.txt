@@ -1,0 +1,1311 @@
+==============================================
+P1.2 PROVIDER EXECUTION PATH AUDIT
+==============================================
+Generated: 2026-09-06 09:56:41
+
+=== OPENAI PROVIDER SOURCE FILES ===
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py
+
+=== OPENAI PROVIDER CONTENT ===
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py ---
+"""
+OpenAI LLM Provider.
+
+Infrastructure implementation of LLM provider.
+"""
+
+
+from __future__ import annotations
+
+
+import os
+
+
+from openai import AsyncOpenAI
+
+
+from app.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+
+
+class OpenAILLMProvider(
+    LLMProvider
+):
+
+
+    def __init__(
+        self,
+    ):
+        api_key = os.getenv(
+            "OPENAI_API_KEY"
+        )
+
+
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY missing"
+            )
+
+
+        self.client = AsyncOpenAI(
+            api_key=api_key
+        )
+
+
+
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+
+
+        response = await self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_message,
+                },
+            ],
+        )
+
+
+        return (
+            response
+            .choices[0]
+            .message
+            .content
+            or ""
+        )
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py ---
+"""
+OpenAI Speech Provider.
+
+Concrete speech provider implementation for OpenAI.
+
+Responsibilities:
+- Transcribe audio using OpenAI speech-to-text.
+- Synthesize speech using OpenAI text-to-speech.
+- Hide OpenAI SDK details behind SpeechProvider.
+
+Does NOT:
+- Handle HTTP.
+- Manage application workflows.
+- Manage LiveKit.
+- Persist conversations.
+- Execute AI agents.
+"""
+
+from __future__ import annotations
+
+
+import io
+
+
+import os
+
+
+from typing import Any
+
+
+from openai import OpenAI
+
+
+from app.providers.speech.speech_provider import (
+    SpeechProvider,
+)
+
+
+
+class OpenAISpeechProvider(
+    SpeechProvider,
+):
+    """
+    OpenAI implementation of the speech provider contract.
+
+    The OpenAI client is created lazily so that importing
+    the provider and running unit tests does not require
+    OPENAI_API_KEY to be present.
+
+    A client can also be injected for testing.
+    """
+
+
+    DEFAULT_TRANSCRIPTION_MODEL = (
+        "gpt-4o-mini-transcribe"
+    )
+
+
+    DEFAULT_TTS_MODEL = (
+        "gpt-4o-mini-tts"
+    )
+
+
+    DEFAULT_VOICE = (
+        "alloy"
+    )
+
+
+    def __init__(
+        self,
+        *,
+        client: Any | None = None,
+        transcription_model: str | None = None,
+        tts_model: str | None = None,
+    ) -> None:
+        """
+        Initialize the OpenAI speech provider.
+
+        Parameters
+        ----------
+        client:
+            Optional OpenAI client.
+
+            Primarily intended for tests and dependency
+            injection.
+
+        transcription_model:
+            Optional OpenAI transcription model.
+
+        tts_model:
+            Optional OpenAI text-to-speech model.
+        """
+
+        self._client = client
+
+        self._transcription_model = (
+            transcription_model
+            or os.getenv(
+                "OPENAI_TRANSCRIPTION_MODEL",
+                self.DEFAULT_TRANSCRIPTION_MODEL,
+            )
+        )
+
+        self._tts_model = (
+            tts_model
+            or os.getenv(
+                "OPENAI_TTS_MODEL",
+                self.DEFAULT_TTS_MODEL,
+            )
+        )
+
+
+    @property
+    def client(self) -> OpenAI:
+        """
+        Return the configured OpenAI client.
+
+        The client is initialized lazily.
+        """
+
+        if self._client is None:
+
+            api_key = os.getenv(
+                "OPENAI_API_KEY"
+            )
+
+            if not api_key:
+
+                raise RuntimeError(
+                    "OPENAI_API_KEY is not configured."
+                )
+
+            self._client = OpenAI(
+                api_key=api_key,
+            )
+
+        return self._client
+
+
+    def transcribe(
+        self,
+        *,
+        audio: bytes,
+        language_code: str,
+    ) -> str:
+        """
+        Transcribe audio into text.
+
+        Parameters
+        ----------
+        audio:
+            Raw audio bytes.
+
+        language_code:
+            ISO language code, for example ``fr``.
+
+        Returns
+        -------
+        str
+            Transcribed text.
+        """
+
+        if not audio:
+
+            raise ValueError(
+                "audio cannot be empty."
+            )
+
+
+        if not language_code.strip():
+
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+
+        audio_file = io.BytesIO(
+            audio
+        )
+
+
+        audio_file.name = (
+            "voice_input.wav"
+        )
+
+
+        response = (
+            self.client
+            .audio
+            .transcriptions
+            .create(
+                model=(
+                    self._transcription_model
+                ),
+                file=audio_file,
+                language=(
+                    language_code
+                ),
+            )
+        )
+
+
+        text = getattr(
+            response,
+            "text",
+            None,
+        )
+
+
+        if text is None:
+
+            raise RuntimeError(
+                "OpenAI transcription response "
+                "did not contain text."
+            )
+
+
+        return str(text)
+
+
+
+    def synthesize(
+        self,
+        *,
+        text: str,
+        voice_profile: str,
+        language_code: str,
+    ) -> bytes:
+        """
+        Generate speech audio.
+
+        Parameters
+        ----------
+        text:
+            Text to synthesize.
+
+        voice_profile:
+            Character voice profile.
+
+        language_code:
+            Language requested by the caller.
+
+        Returns
+        -------
+        bytes
+            Generated audio bytes.
+        """
+
+        if not text.strip():
+
+            raise ValueError(
+                "text cannot be empty."
+            )
+
+
+        if not voice_profile.strip():
+
+            raise ValueError(
+                "voice_profile cannot be empty."
+            )
+
+
+        if not language_code.strip():
+
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+
+        # Character voice profiles are currently mapped
+        # to provider-supported voices at the infrastructure
+        # boundary. This prevents provider-specific voice
+        # identifiers from leaking into the domain/runtime.
+        voice = self._resolve_voice(
+            voice_profile
+        )
+
+
+        response = (
+            self.client
+            .audio
+            .speech
+            .create(
+                model=(
+                    self._tts_model
+                ),
+                voice=voice,
+                input=text,
+            )
+        )
+
+
+        audio_content = getattr(
+            response,
+            "content",
+            None,
+        )
+
+
+        if audio_content is not None:
+
+            return bytes(
+                audio_content
+            )
+
+
+        if hasattr(
+            response,
+            "read",
+        ):
+
+            return bytes(
+                response.read()
+            )
+
+
+        raise RuntimeError(
+            "OpenAI speech response "
+            "did not contain audio content."
+        )
+
+
+
+    @classmethod
+    def _resolve_voice(
+        cls,
+        voice_profile: str,
+    ) -> str:
+        """
+        Map an application character voice profile
+        to an OpenAI-supported voice.
+
+        Character identifiers such as ``yeti`` must not
+        be sent directly to the provider because they are
+        application concepts rather than provider voice IDs.
+        """
+
+        normalized = (
+            voice_profile
+            .strip()
+            .lower()
+        )
+
+
+        voice_mapping = {
+            "yeti": "onyx",
+        }
+
+
+        return voice_mapping.get(
+            normalized,
+            normalized
+            if normalized in {
+                "alloy",
+                "ash",
+                "ballad",
+                "coral",
+                "echo",
+                "fable",
+                "nova",
+                "onyx",
+                "sage",
+                "shimmer",
+                "verse",
+                "marin",
+                "cedar",
+            }
+            else cls.DEFAULT_VOICE,
+        )
+
+
+
+__all__ = [
+    "OpenAISpeechProvider",
+]
+
+--- FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py ---
+"""
+OpenAI LLM Provider.
+
+Concrete LLM provider implementation for the EasyChatBot
+hackathon runtime.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+OpenAIProvider
+|
+v
+OpenAI Responses API
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- execute ConversationRequest through OpenAI
+- use the configured OpenAI model
+- translate the OpenAI response into ProviderResult
+- isolate the OpenAI SDK from the application layer
+
+Does not:
+
+- build prompts
+- manage characters
+- manage memory
+- perform research
+- perform routing
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from openai import AsyncOpenAI
+
+from backend.conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from backend.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIProvider(LLMProvider):
+    """
+    OpenAI implementation of the LLMProvider contract.
+
+    The OpenAI SDK is deliberately isolated inside this
+    infrastructure adapter.
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5-mini",
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        """
+        Initialise the OpenAI provider.
+
+        Parameters
+        ----------
+        model:
+            OpenAI model identifier.
+
+        client:
+            Optional injected AsyncOpenAI client.
+
+            Dependency injection allows unit tests to
+            provide a fake client without making a real
+            API call.
+        """
+
+        super().__init__(
+            provider_id="openai",
+        )
+
+        if not isinstance(
+            model,
+            str,
+        ):
+            raise ValueError(
+                "OpenAI model must be a string."
+            )
+
+        model = model.strip()
+
+        if not model:
+            raise ValueError(
+                "OpenAI model cannot be empty."
+            )
+
+        self.model = model
+
+        if client is not None:
+            self._client = client
+            return
+
+        api_key = os.getenv(
+            "OPENAI_API_KEY"
+        )
+
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is not configured."
+            )
+
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+        )
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate a response using OpenAI.
+
+        The provider translates the provider-independent
+        ConversationRequest into the OpenAI Responses API
+        request.
+
+        Parameters
+        ----------
+        request:
+            Provider-independent conversation request.
+
+        Returns
+        -------
+        ProviderResult
+            Provider-independent execution result.
+
+        Raises
+        ------
+        ValueError
+            If request is None.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": request.system_instruction,
+            },
+        ]
+
+        if request.conversation_context:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Additional context:\n"
+                        f"{request.conversation_context}"
+                    ),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": request.user_prompt,
+            }
+        )
+
+        try:
+            response = (
+                await self._client.responses.create(
+                    model=self.model,
+                    input=messages,
+                )
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "OpenAI provider execution failed."
+            )
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=str(exc),
+            )
+
+        output_text = getattr(
+            response,
+            "output_text",
+            None,
+        )
+
+        if not output_text:
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=(
+                    "OpenAI returned an empty response."
+                ),
+            )
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output=output_text,
+        )
+
+=== PROVIDER CONTRACT FILES ===
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\llm_provider_health_check.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\provider_result.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py
+
+=== PROVIDER RESULT / USAGE REFERENCES ===
+
+Path                                                                                                                    LineNumber Line                                                                      
+----                                                                                                                    ---------- ----                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\review_parallel_runtime_files.txt                                                    22 from backend.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\backend\review_parallel_runtime_files.txt                                                    60     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\review_parallel_runtime_files.txt                                                    69             ProviderResult containing provider output.                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\review_parallel_runtime_files.txt                                                    91 class ProviderResult:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\review_parallel_runtime_files.txt                                                  1657 - platform usage                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\review_parallel_runtime_files.txt                                                  1829     The Skill does not retrieve memory or usage data itself.              
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                       533             request_id=result["request_id"],                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                       541         request_id=result.request_id,                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                       622             "request_id": result["request_id"],                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                       629         "request_id": result.request_id,                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                       699             request_id=result["request_id"],                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                       706         request_id=result.request_id,                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                      136     request_id: str                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                      186     request_id: str | None = None                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\schemas.py                                                                      251     request_id: str | None = None                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\governance\change_management\change_type.py                                           7     USAGE_COST = "USAGE_COST"                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py                                                           19 from backend.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py                                                           57     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\base_provider.py                                                           66             ProviderResult containing provider output.                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\provider_result.py                                                         16 class ProviderResult:                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                     24       ProviderResult                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                     29 - translate Gemini responses into ProviderResult                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                     58     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                    172     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                    176         Returns a provider-independent ProviderResult and never           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                    211             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                    225             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                    232         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                        24 ProviderResult                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                        52     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                        92     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider.py                                                       101             ProviderResult containing the generated                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                     24 ProviderResult                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                     30 - translate the OpenAI response into ProviderResult                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                     59     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                    136     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                    151         ProviderResult                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                    203             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                    216             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                    224         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                              13     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                              61     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                              74             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\parallel\parallel_provider.py                                              82             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\runtime\models\model_capabilities.py                                                 20     tool_usage: bool = False                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\learning_service.py                                                         60         request_id: str,                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\learning_service.py                                                         82             request_id=request_id,                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                              21 ProviderResult                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                              27 - return the provider-independent ProviderResult                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                              56     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                              97     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                             112         ProviderResult                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\runtime\runtime_application_service.py                                     152             request_id=str(                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\preference_source.py                                                11 - platform usage                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\skills\discovery\preference_understanding.py                                         86     The Skill does not retrieve memory or usage data itself.              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_dashboard_service.py                10 Provider Usage Intelligence                                               
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_dashboard_service.py                60     total_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_dashboard_service.py                77     - usage analytics;                                                    
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_dashboard_service.py               130             total_tokens=(                                                
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_dashboard_service.py               131                 analytics.total_tokens                                    
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                          13 Provider Usage Repository                                                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                          27 - aggregate provider usage intelligence;                                  
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                          47 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                          48     ProviderUsageRepository,                                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                          60     total_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         104     the common usage model.                                               
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         109         repository: ProviderUsageRepository,                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         114                 "ProviderUsageRepository cannot be None."                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         134         total_tokens = sum(                                               
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         136                 event.input_tokens                                        
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         137                 + event.output_tokens                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         174             total_tokens=(                                                
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_analytics_service.py                         175                 total_tokens                                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                        12 ProviderUsageRepository                                                   
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                        41 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                        42     ProviderUsageRepository,                                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                        60     total_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                        89         repository: ProviderUsageRepository,                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                        94                 "ProviderUsageRepository cannot be None."                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                       135         total_tokens = sum(                                               
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                       137                 event.input_tokens                                        
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                       138                 + event.output_tokens                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                       156             total_tokens=(                                                
+C:\AI Folder\EasyChatBot-Hackathon\app\application\analytics\ai_platform\provider_performance_service.py                       157                 total_tokens                                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\capability_optimisation_service.py                        8 Provider Usage                                                            
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\capability_optimisation_service.py                       51 Quality remains available in the provider usage model and                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                            8 Provider Usage Analytics                                                  
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           47 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           48     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           71     total_input_tokens: int                                               
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           73     total_output_tokens: int                                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           75     total_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           88     The service operates on supplied usage events and                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                           95         events: list[ProviderUsageEvent],                                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          110                 "Usage events cannot be None."                            
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          115             list[ProviderUsageEvent],                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          151             total_input_tokens = sum(                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          152                 event.input_tokens                                        
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          156             total_output_tokens = sum(                                    
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          157                 event.output_tokens                                       
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          161             total_tokens = (                                              
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          162                 total_input_tokens                                        
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          163                 + total_output_tokens                                     
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          208                     total_input_tokens=(                                  
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          209                         total_input_tokens                                
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          211                     total_output_tokens=(                                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          212                         total_output_tokens                               
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          214                     total_tokens=(                                        
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          215                         total_tokens                                      
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_comparison_service.py                          233         events: list[ProviderUsageEvent],                                 
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_manager_service.py                               8 Provider Usage                                                            
+C:\AI Folder\EasyChatBot-Hackathon\app\application\provider_management\provider_manager_service.py                             145             Usage Events                                                  
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\flashcard_generation_executor.py                                162             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\gateway.py                                                      167                 request_id=request.request_id,                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\listening_proposal_executor.py                                  175             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\live_intelligence_executor.py                                   125             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                                                       134     request_id: str                                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                                                       150             self.request_id,                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                                                       154                 "Capability request_id must be a string."                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                                                       157         if not self.request_id.strip():                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                                                       159                 "Capability request_id cannot be empty."                  
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\models.py                                                       228     request_id: str                                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\podcast_discovery_executor.py                                   179             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\capabilities\podcast_learning_challenge_executor.py                          147             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\learning\flashcard.py                                                         61         Optional usage example.                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                      20 ProviderUsageEvent                                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                      48     This represents already captured usage data.                          
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                      57     input_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                      59     output_tokens: int                                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                      76         if self.input_tokens < 0:                                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                      81         if self.output_tokens < 0:                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                     104     input_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\models.py                                                     106     output_tokens: int                                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                     62         usage: CostCalculationInput,                                      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                     83         if usage is None:                                                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                    100                 usage.input_tokens                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                    109                 usage.output_tokens                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                    117             provider=usage.provider,                                      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                    119             model=usage.model,                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                    121             input_tokens=usage.input_tokens,                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\cost\service.py                                                    123             output_tokens=usage.output_tokens,                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                      2 AI Runtime usage intelligence domain models.                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                     13 It only defines usage intelligence contracts.                             
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                     20 AI Runtime Usage Event                                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                     37 class ProviderUsageEvent:                                                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                     54         Usage Event                                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                     67     input_tokens: int                                                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                     69     output_tokens: int                                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    101         if self.input_tokens < 0:                                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    106         if self.output_tokens < 0:                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    128 class ProviderUsageSummary:                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    130     Aggregated AI Runtime usage intelligence.                             
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    142     total_input_tokens: int                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    144     total_output_tokens: int                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    155     def total_tokens(self) -> int:                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    157             self.total_input_tokens                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\models.py                                                    158             + self.total_output_tokens                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                  2 AI Runtime provider usage repository.                                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                  5 usage intelligence.                                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 16 - store usage events;                                                     
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 17 - retrieve usage events.                                                  
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 21 ProviderUsageService                                                      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 24 ProviderUsageRepository                                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 45 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 46     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 50 class ProviderUsageRepository(ABC):                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 52     Persistence contract for provider usage events.                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 61         event: ProviderUsageEvent,                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 64         Store one provider usage event.                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 74     ) -> list[ProviderUsageEvent]:                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 76         Retrieve stored provider usage events.                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 88         Remove stored usage events.                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 98 class InMemoryProviderUsageRepository(                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                 99     ProviderUsageRepository,                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                119             ProviderUsageEvent                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                124         event: ProviderUsageEvent,                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                127         Save a usage event.                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                132                 "Provider usage event cannot be None."                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                141     ) -> list[ProviderUsageEvent]:                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                143         Return all stored usage events.                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\repository.py                                                157         Remove all stored usage events.                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                     2 AI Runtime provider usage service.                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                     5 and aggregating AI Runtime usage events.                                  
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                     9 - record usage events;                                                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    10 - retrieve usage events through repository;                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    11 - generate usage summaries.                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    30 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    31     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    32     ProviderUsageSummary,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    35 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    36     ProviderUsageRepository,                                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    40 class ProviderUsageService:                                               
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    42     Application service for AI Runtime usage intelligence.                
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    56         repository: ProviderUsageRepository,                              
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    61                 "ProviderUsageRepository cannot be None."                 
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    68         event: ProviderUsageEvent,                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    71         Record one Runtime usage event.                                   
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    84                 "Provider usage event cannot be None."                    
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    93     ) -> ProviderUsageSummary:                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                    95         Generate aggregated usage information.                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   106         total_input_tokens = sum(                                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   107             event.input_tokens                                            
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   111         total_output_tokens = sum(                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   112             event.output_tokens                                           
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   144         return ProviderUsageSummary(                                      
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   148             total_input_tokens=(                                          
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   149                 total_input_tokens                                        
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   151             total_output_tokens=(                                         
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   152                 total_output_tokens                                       
+C:\AI Folder\EasyChatBot-Hackathon\src\ai_runtime\providers\usage\service.py                                                   176         on clearing runtime usage history.                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_executor.py                                               34             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_executor.py                                               60         request_id="req-executor-001",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_executor.py                                               74         result.request_id                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_flashcard_generation_executor.py                          45         request_id="flashcard-test-001",                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_flashcard_generation_executor.py                          85         request_id="flashcard-test-002",                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_flashcard_generation_executor.py                         112         request_id="flashcard-test-003",                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               105             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               153         request_id="gateway-001",                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               197         request_id="gateway-002",                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               244         request_id="gateway-003",                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               292         request_id="gateway-004",                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               323         request_id="gateway-error-001",                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_gateway.py                                               356         request_id="gateway-error-002",                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                            82         request_id="listening-proposal-001",                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           120     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           224         request_id=request.request_id,                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           257         request_id="wrong-capability-001",                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           282         request_id="missing-recommendation-001",                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           306         request_id="invalid-recommendation-001",                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           333         request_id="missing-language-001",                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           357         request_id="empty-language-001",                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           382         request_id="missing-level-001",                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           406         request_id="empty-level-001",                                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_listening_proposal_executor.py                           431         request_id="invalid-action-001",                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py                             65         request_id="live-runtime-001",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py                            110         request_id="live-runtime-002",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py                            144         request_id="live-runtime-003",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py                            178         request_id="live-runtime-004",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py                            195         request_id="live-runtime-005",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_live_intelligence_executor.py                            212         request_id="live-runtime-006",                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 17         request_id="req-001",                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 28     assert request.request_id == "req-001"                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 41         request_id="req-002",                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 59 def test_empty_request_id_is_rejected():                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 64             request_id="",                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 68         assert "request_id" in str(exc)                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 71             "Expected empty request_id to be rejected."                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 80             request_id="req-003",                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                 95         request_id="req-004",                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                111         request_id="req-005",                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                125         request_id="req-006",                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_models.py                                                139         request_id="req-007",                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_discovery_gateway.py                             178         request_id="podcast-gateway-001",                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_discovery_gateway.py                             243     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_executor.py                    66         request_id="challenge-001",                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_executor.py                    91     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_executor.py                   166         request_id="challenge-002",                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_executor.py                   185         request_id="challenge-003",                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_executor.py                   208         request_id="challenge-004",                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_gateway.py                    149         request_id="challenge-gateway-001",                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_podcast_learning_challenge_gateway.py                    195     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_registry.py                                               46             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_registry.py                                               70             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\ai_runtime\capabilities\test_registry.py                                               94             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\api\test_podcast_discovery_endpoint.py                                                 65         request_id="podcast-api-test-001",                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_external_runtime_service.py                                           39         request_id="application-runtime-test-001",                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_external_runtime_service.py                                           59         request_id="application-runtime-test-001",                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_learning_service.py                                                   61             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_learning_service.py                                                   86         request_id="learning-test-001",                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_learning_service.py                                                  133             request_id="learning-test-002",                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_runtime_api_route.py                                                  54             "request_id": "test-runtime-request",                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_runtime_api_route.py                                                 144         body["request_id"]                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_runtime_application_factory.py                                        57             "request_id": "factory-test",                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_runtime_application_flow.py                                           50             "request_id": "runtime-service-test",                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_runtime_end_to_end_flow.py                                            61             "request_id": "e2e-runtime-test",                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\test_runtime_end_to_end_flow.py                                           116         body["request_id"]                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py          6 Provider Usage Events                                                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         12 Usage Analytics   Performance Analytics                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         36 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         37     InMemoryProviderUsageRepository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         40 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         41     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         62 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         64     Create deterministic provider usage event.                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         67     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         73         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         74         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py         85     repository: InMemoryProviderUsageRepository,                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py        105 def test_provider_dashboard_combines_usage_cost_and_performance() -> None:
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py        111         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py        138     assert dashboard.total_tokens == 3000                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py        160         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py        192         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_dashboard_service.py        205     assert dashboard.total_tokens == 0                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                    6 Provider Usage Events                                                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                    9 Provider Usage Repository                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   23 - modify runtime usage data.                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   29 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   30     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   33 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   34     InMemoryProviderUsageRepository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   42 def create_repository() -> InMemoryProviderUsageRepository:               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   47     return InMemoryProviderUsageRepository()                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   54 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   56     Create deterministic provider usage event.                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   59     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   65         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                   66         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                  103     assert summary.total_tokens == 3000                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_analytics_service.py                  165     assert summary.total_tokens == 0                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                  6 Provider Usage Events                                                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                  9 Provider Usage Repository                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 23 - modify usage data.                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 29 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 30     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 33 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 34     InMemoryProviderUsageRepository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 46 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 48     Create deterministic provider usage event.                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 51     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 57         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 58         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                 73     repository = InMemoryProviderUsageRepository()                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                101     assert summary.total_tokens == 3000                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                111     repository = InMemoryProviderUsageRepository()                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                140     repository = InMemoryProviderUsageRepository()                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\analytics\ai_platform\test_provider_performance_service.py                152     assert summary.total_tokens == 0                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                 6 Provider Usage                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                42 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                43     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                55 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                57     Create deterministic provider usage evidence.                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                60     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                66         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_capability_optimisation_service.py                67         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       27 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       28     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       31 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       32     InMemoryProviderUsageRepository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       58 def create_usage_event(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       62 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       64     Create deterministic provider usage data.                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       67     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       73         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       74         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       83     usage_repository: InMemoryProviderUsageRepository,                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                       91         repository=usage_repository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      105     usage_repository = (                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      106         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      113     usage_repository.save(                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      114         create_usage_event(                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      119     usage_repository.save(                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      120         create_usage_event(                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      126         usage_repository,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      153     usage_repository = (                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      154         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      161     usage_repository.save(                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      162         create_usage_event(                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      196         usage_repository,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      220     usage_repository = (                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      221         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      228     usage_repository.save(                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      229         create_usage_event(                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      291         usage_repository,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      313     usage_repository = (                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      314         InMemoryProviderUsageRepository()                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      321     usage_repository.save(                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      322         create_usage_event(                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      328     usage_repository.save(                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      329         create_usage_event(                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_health_dashboard_service.py                      336         usage_repository,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                     6 Provider Usage Events                                                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    35 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    36     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    45     input_tokens: int,                                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    46     output_tokens: int,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    50 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    52     Create deterministic provider usage data.                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    55     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    61         input_tokens=input_tokens,                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    62         output_tokens=output_tokens,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    83             input_tokens=1000,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    84             output_tokens=500,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    92             input_tokens=1200,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                    93             output_tokens=600,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   101             input_tokens=900,                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   102             output_tokens=400,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   110             input_tokens=900,                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   111             output_tokens=300,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   163             input_tokens=1000,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   164             output_tokens=500,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   173             input_tokens=1200,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   174             output_tokens=600,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   201     assert comparison.total_input_tokens == 2200                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   203     assert comparison.total_output_tokens == 1100                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   205     assert comparison.total_tokens == 3300                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   234             input_tokens=1000,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   235             output_tokens=500,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   243             input_tokens=900,                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   244             output_tokens=400,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   252             input_tokens=800,                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   253             output_tokens=300,                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   301     Validate required usage-event input.                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\application\provider_management\test_provider_comparison_service.py                   308         match="Usage events cannot be None.",                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                                18     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                                39         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_conversation_agent_provider_integration.py                            18     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_conversation_agent_provider_integration.py                            43         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_hackathon_runtime_flow.py                                             62         "request_id": "hackathon-test-001",                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_capability.py                                     150         request_id="listening-gateway-001",                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_capability.py                                     207     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_registry_gateway.py                               141         request_id="registry-gateway-request-001",                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_registry_gateway.py                               222     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_registry_gateway.py                               295 async def test_registry_gateway_preserves_request_identity():             
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_registry_gateway.py                               314     assert result.request_id == (                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_listening_proposal_registry_gateway.py                               315         request.request_id                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_memory_flashcard_learning_flow.py                                    177         request_id=(                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_memory_flashcard_learning_flow.py                                    266         request_id=(                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_parallel_runtime_flow.py                                              83         request_id=(                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_parallel_runtime_flow.py                                             125         result.request_id                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_podcast_discovery_learning_listening_flow.py                         162         request_id="e2e-listening-001",                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_podcast_discovery_learning_listening_flow.py                         361         request_id="e2e-invalid-discovery-001",                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_podcast_discovery_to_learning_challenge.py                           184         request_id="podcast-flow-discovery-001",                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_podcast_discovery_to_learning_challenge.py                           218         request_id="podcast-flow-learning-001",                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      12 Usage Capture                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      25 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      26     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      29 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      30     InMemoryProviderUsageRepository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      33 from src.ai_runtime.providers.usage.service import (                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      34     ProviderUsageService,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      38 def test_provider_usage_vertical_slice() -> None:                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      40     Validate provider usage tracking lifecycle.                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      42     The usage service is responsible for:                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      58     usage_service = ProviderUsageService(                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      60             InMemoryProviderUsageRepository()                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      64     event = ProviderUsageEvent(                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      75         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      77         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      90     usage_service.record(                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                      94     report = usage_service.summary()                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_provider_usage_vertical_slice.py                                     102     assert report.total_tokens == 1500                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                              23 ProviderResult                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                              40     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                              64     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                              67         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                             179         ) -> ProviderResult:                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                             180             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                     111     """Successful OpenAI response should become ProviderResult."""        
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                     238     """OpenAI exceptions should become failed ProviderResult."""          
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_parallel_provider.py                                                    18     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_parallel_provider.py                                                    69         ProviderResult,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           33 def create_usage_input() -> CostCalculationInput:                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           35     Create deterministic usage input.                                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           41         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           42         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           54         usage=create_usage_input(),                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           69     assert result.input_tokens == 1000                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           71     assert result.output_tokens == 500                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           88     Validate zero token usage.                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           94         usage=CostCalculationInput(                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           97             input_tokens=0,                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                           98             output_tokens=0,                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\cost\test_provider_cost_service.py                                          124             usage=create_usage_input(),                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                          2 Provider usage service unit tests.                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                          6 ProviderUsageEvent                                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                          9 ProviderUsageRepository                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         12 ProviderUsageService                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         15 ProviderUsageSummary                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         27 from src.ai_runtime.providers.usage.models import (                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         28     ProviderUsageEvent,                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         31 from src.ai_runtime.providers.usage.repository import (                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         32     InMemoryProviderUsageRepository,                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         35 from src.ai_runtime.providers.usage.service import (                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         36     ProviderUsageService,                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         40 def create_service() -> ProviderUsageService:                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         45     return ProviderUsageService(                                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         47             InMemoryProviderUsageRepository()                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         56 ) -> ProviderUsageEvent:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         58     Create deterministic usage event data.                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         61     return ProviderUsageEvent(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         67         input_tokens=1000,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         68         output_tokens=500,                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         78 def test_record_single_usage_event() -> None:                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                         89     assert summary.total_tokens == 1500                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\usage\test_provider_usage_service.py                                        140     assert summary.total_tokens == 0                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                            15 ProviderResult                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                            31     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                            49         result: ProviderResult,                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                            57     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                            95         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                           162         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                           243         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_model_descriptor.py                                                       27             tool_usage=True,                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_model_descriptor.py                                                       36     assert descriptor.capabilities.tool_usage is True                     
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_provider_contracts.py                                                      4 from backend.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_provider_contracts.py                                                     13     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_provider_contracts.py                                                     15         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_research_agent.py                                                         13     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_research_agent.py                                                         33         return ProviderResult(                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_research_agent.py                                                        117             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_research_agent.py                                                        162             return ProviderResult(                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                           15 ProviderResult                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                           27     ProviderResult,                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                           42         result: ProviderResult,                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                           50     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                           95         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                          129     as ProviderResult.                                                    
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                          133         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                          169         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_runtime_application_service.py                                           60             request_id=request.request_id,                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_runtime_application_service.py                                          111     assert result.request_id is not None                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                               9 from backend.providers.provider_result import ProviderResult              
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                              28         result: ProviderResult,                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                              36     ) -> ProviderResult:                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                              44         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                             101         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                             158         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                             182         ProviderResult(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\skills\discovery\test_parallel_gateway.py                                             223         ProviderResult(                                                   
+
+
+
+
+=== OPENAI IMPORT REFERENCES ===
+
+Path                                                                                                LineNumber Line                                                                                                                             
+----                                                                                                ---------- ----                                                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_Backend_Diagnosis.txt                                      408 C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_COMPOSITION_INSPECTION.txt                                2443 C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py:27: from backend.app.providers.llm.openai...
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                    69     LLMProviderFactory,                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                   368     provider = LLMProviderFactory.create()                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py         37     LLMProviderFactory,                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py        142             llm_provider=LLMProviderFactory.create(),                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py           7     LLMProviderFactory,                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py          30             LLMProviderFactory.create()                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py               35     LLMProviderFactory,                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py               56         LLMProviderFactory.create()                                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py                        27 from backend.app.providers.llm.openai_llm_provider import (                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py                        28     OpenAILLMProvider,                                                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py                        36 class LLMProviderFactory:                                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py                        54             return OpenAILLMProvider()                                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\openai_llm_provider.py                         23 class OpenAILLMProvider(                                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                            14 LLMProviderFactory                                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                            19 +--> OpenAIProvider                                                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                            52 from backend.providers.llm.openai_provider import (                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                            53     OpenAIProvider,                                                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                            61 class LLMProviderFactory:                                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                           119             return OpenAIProvider(                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                 18 OpenAIProvider                                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                 66 class OpenAIProvider(LLMProvider):                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\test_openai_speech_provider.py           101 def test_openai_provider_implements_contract():                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\providers\speech\test_speech_provider_factory.py           24 def test_factory_creates_openai_provider():                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                             5 LLMService through the LLMProviderFactory and injects                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                           120         routes.LLMProviderFactory,                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                              4     LLMProviderFactory,                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                              7 from backend.providers.llm.openai_provider import (                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                              8     OpenAIProvider,                                                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                             12 def test_factory_creates_openai_provider():                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                             15         LLMProviderFactory.create(                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                             22         OpenAIProvider,                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                             32         LLMProviderFactory.create(                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                             43         LLMProviderFactory.create(                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                   2 Tests for OpenAIProvider.                                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                  18 from backend.providers.llm.openai_provider import (                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                  19     OpenAIProvider,                                                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                  80 def test_openai_provider_initialises():                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                  85     provider = OpenAIProvider(                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                  94 def test_openai_provider_rejects_empty_model():                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 103         OpenAIProvider(                                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 110 async def test_openai_provider_generates_response():                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 121     provider = OpenAIProvider(                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 140 async def test_openai_provider_builds_correct_request():                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 151     provider = OpenAIProvider(                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 204 async def test_openai_provider_without_context():                                                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 215     provider = OpenAIProvider(                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 237 async def test_openai_provider_handles_api_error():                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 246     provider = OpenAIProvider(                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 265 async def test_openai_provider_handles_empty_response():                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 276     provider = OpenAIProvider(                                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 295 async def test_openai_provider_rejects_none_request():                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                 300     provider = OpenAIProvider(                                                                                                   
+
+
+
+
+=== ACTIVE APPLICATION ENTRYPOINTS ===
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\main.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.core.remote.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\bootstrap.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\factory.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\runtime\runtime_engine.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\run_telegram_runtime.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\runtime\runtime_application_service.py
+
+=== DONE ===

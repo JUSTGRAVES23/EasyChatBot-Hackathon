@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Event Repository Contract.
 
 Validates:
@@ -22,3 +22,6 @@ def test_repository_is_abstract():
     ):
 
         VoiceCallEventRepository()
+
+
+

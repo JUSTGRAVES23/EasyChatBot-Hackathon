@@ -1,19 +1,19 @@
-import pytest
+﻿import pytest
 
-from backend.agents.research_agent import (
+from agents.research_agent import (
     ResearchAgent,
 )
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

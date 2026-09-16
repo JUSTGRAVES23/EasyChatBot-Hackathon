@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
-WS-21.3 — Operational Failure Resilience
+WS-21.3 â€” Operational Failure Resilience
 
 Focused failure-injection regression tests for the production Telegram
 classroom boundary.
 
 Engineering rule:
-    Reproduce → Root cause → Fix → Regression test → Validate.
+    Reproduce â†’ Root cause â†’ Fix â†’ Regression test â†’ Validate.
 
 These tests intentionally keep the production boundary real while replacing
 individual downstream dependencies with deterministic failure doubles.
@@ -193,7 +193,7 @@ def make_boundary(
 
 
 # ============================================================================
-# WS-21.3.1 — Beta authorization / PostgreSQL-facing failure
+# WS-21.3.1 â€” Beta authorization / PostgreSQL-facing failure
 # ============================================================================
 
 
@@ -231,7 +231,7 @@ async def test_ws21_3_beta_access_dependency_failure_is_contained():
 
 
 # ============================================================================
-# WS-21.3.2 — Conversation persistence/runtime failure
+# WS-21.3.2 â€” Conversation persistence/runtime failure
 # ============================================================================
 
 
@@ -269,7 +269,7 @@ async def test_ws21_3_conversation_dependency_failure_returns_safe_response():
 
 
 # ============================================================================
-# WS-21.3.3 — LLM/provider failure
+# WS-21.3.3 â€” LLM/provider failure
 # ============================================================================
 
 
@@ -306,7 +306,7 @@ async def test_ws21_3_llm_provider_failure_is_contained_at_boundary():
 
 
 # ============================================================================
-# WS-21.3.4 — Rate-limit policy dependency failure
+# WS-21.3.4 â€” Rate-limit policy dependency failure
 # ============================================================================
 
 
@@ -343,7 +343,7 @@ async def test_ws21_3_rate_limiter_failure_is_contained():
 
 
 # ============================================================================
-# WS-21.3.5 — Abuse-protection dependency failure
+# WS-21.3.5 â€” Abuse-protection dependency failure
 # ============================================================================
 
 
@@ -379,7 +379,7 @@ async def test_ws21_3_abuse_protector_failure_is_contained():
 
 
 # ============================================================================
-# WS-21.3.6 — Observability failure
+# WS-21.3.6 â€” Observability failure
 # ============================================================================
 
 
@@ -415,7 +415,7 @@ async def test_ws21_3_observability_failure_does_not_break_classroom():
 
 
 # ============================================================================
-# WS-21.3.7 — Failure isolation between identities
+# WS-21.3.7 â€” Failure isolation between identities
 # ============================================================================
 
 
@@ -462,7 +462,7 @@ async def test_ws21_3_failure_for_one_identity_does_not_affect_another():
 
 
 # ============================================================================
-# WS-21.3.8 — Recovery after transient failure
+# WS-21.3.8 â€” Recovery after transient failure
 # ============================================================================
 
 
@@ -517,7 +517,7 @@ async def test_ws21_3_classroom_recovers_after_transient_failure():
 
 
 # ============================================================================
-# WS-21.3.9 — No exception/detail leakage
+# WS-21.3.9 â€” No exception/detail leakage
 # ============================================================================
 
 
@@ -570,7 +570,7 @@ async def test_ws21_3_internal_failure_details_never_reach_telegram(
 
 
 # ============================================================================
-# WS-21.3.10 — Input validation remains before dependencies
+# WS-21.3.10 â€” Input validation remains before dependencies
 # ============================================================================
 
 
@@ -612,7 +612,7 @@ async def test_ws21_3_invalid_input_does_not_touch_failure_dependencies():
 
 
 # ============================================================================
-# WS-21.3.11 — Successful path remains unchanged
+# WS-21.3.11 â€” Successful path remains unchanged
 # ============================================================================
 
 
@@ -646,3 +646,4 @@ async def test_ws21_3_healthy_classroom_path_remains_unchanged():
             "context": FakeConversationContext(),
         }
     ]
+

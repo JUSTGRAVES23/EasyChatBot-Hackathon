@@ -1,4 +1,4 @@
-"""
+﻿"""
 G7 JUDGE DEMO VALIDATION
 
 Final technical smoke test for the EasyChatBot hackathon journey.
@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from backend.memory.memory_service import MemoryService
+from memory.memory_service import MemoryService
 
 from src.ai_agents.live_intelligence_agent.handler import (
     LiveIntelligenceResponse,
@@ -113,21 +113,21 @@ def build_validated_intelligence(topic: str) -> LiveIntelligenceResponse:
     return LiveIntelligenceResponse(
         topic=topic,
         summary=(
-            "L'intelligence artificielle évolue rapidement vers des "
-            "modèles multimodaux capables de traiter le texte, l'image "
+            "L'intelligence artificielle Ã©volue rapidement vers des "
+            "modÃ¨les multimodaux capables de traiter le texte, l'image "
             "et l'audio. L'industrie se concentre aussi sur des agents "
-            "autonomes capables d'exécuter des tâches complexes. En "
-            "parallèle, les petits modèles permettent d'utiliser l'IA "
+            "autonomes capables d'exÃ©cuter des tÃ¢ches complexes. En "
+            "parallÃ¨le, les petits modÃ¨les permettent d'utiliser l'IA "
             "directement sur des appareils personnels."
         ),
         sources=VALIDATED_SOURCES,
         key_information=[
-            "Les modèles récents développent des capacités multimodales "
+            "Les modÃ¨les rÃ©cents dÃ©veloppent des capacitÃ©s multimodales "
             "et de raisonnement approfondi.",
-            "Les petits modèles permettent davantage de traitement local "
+            "Les petits modÃ¨les permettent davantage de traitement local "
             "directement sur les appareils personnels.",
-            "L'industrie développe des systèmes plus autonomes capables "
-            "d'exécuter des tâches complexes.",
+            "L'industrie dÃ©veloppe des systÃ¨mes plus autonomes capables "
+            "d'exÃ©cuter des tÃ¢ches complexes.",
         ],
     )
 
@@ -145,23 +145,23 @@ def build_challenge(
         summary=intelligence.summary,
         vocabulary=[
             VocabularyItem(
-                term="modèle multimodal",
+                term="modÃ¨le multimodal",
                 definition=(
-                    "Modèle d'intelligence artificielle capable de "
-                    "traiter plusieurs formats de données."
+                    "ModÃ¨le d'intelligence artificielle capable de "
+                    "traiter plusieurs formats de donnÃ©es."
                 ),
             ),
             VocabularyItem(
                 term="agent autonome",
                 definition=(
-                    "Système intelligent capable d'exécuter des "
-                    "tâches de manière indépendante."
+                    "SystÃ¨me intelligent capable d'exÃ©cuter des "
+                    "tÃ¢ches de maniÃ¨re indÃ©pendante."
                 ),
             ),
             VocabularyItem(
                 term="traitement local",
                 definition=(
-                    "Traitement effectué directement sur un appareil "
+                    "Traitement effectuÃ© directement sur un appareil "
                     "personnel."
                 ),
             ),
@@ -169,14 +169,14 @@ def build_challenge(
         discussion_questions=[
             DiscussionQuestion(
                 question=(
-                    "Quels sont les principaux développements de l'IA "
-                    "présentés dans ce résumé ?"
+                    "Quels sont les principaux dÃ©veloppements de l'IA "
+                    "prÃ©sentÃ©s dans ce rÃ©sumÃ© ?"
                 ),
                 difficulty="B2",
             ),
             DiscussionQuestion(
                 question=(
-                    "Pourquoi les petits modèles peuvent-ils être "
+                    "Pourquoi les petits modÃ¨les peuvent-ils Ãªtre "
                     "utiles sur les appareils personnels ?"
                 ),
                 difficulty="B2",

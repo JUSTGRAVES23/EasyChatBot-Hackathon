@@ -1,12 +1,12 @@
-import pytest
+﻿import pytest
 
-from backend.agents.cybersecurity_intelligence_agent import (
+from agents.cybersecurity_intelligence_agent import (
     CybersecurityIntelligenceAgent,
 )
-from backend.cybersecurity.intelligence_models import (
+from cybersecurity.intelligence_models import (
     CybersecuritySignal,
 )
-from backend.runtime.context.execution_context import ExecutionContext
+from runtime.context.execution_context import ExecutionContext
 
 
 @pytest.mark.asyncio
@@ -62,3 +62,4 @@ async def test_agent_requires_security_signals():
 
     assert result.success is False
     assert "cybersecurity_signals" in result.error
+

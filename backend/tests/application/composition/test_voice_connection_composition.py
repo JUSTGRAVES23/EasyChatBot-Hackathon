@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Connection Composition.
 
 Validates that the composition root
@@ -66,3 +66,4 @@ def test_build_voice_connection_service():
 
 
     assert service.token_service is not None
+

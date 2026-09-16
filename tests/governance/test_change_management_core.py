@@ -1,9 +1,9 @@
-from backend.governance.change_management.change_management_service import (
+﻿from governance.change_management.change_management_service import (
     ChangeManagementService,
 )
-from backend.governance.change_management.change_risk import ChangeRisk
-from backend.governance.change_management.change_status import ChangeStatus
-from backend.governance.change_management.change_type import ChangeType
+from governance.change_management.change_risk import ChangeRisk
+from governance.change_management.change_status import ChangeStatus
+from governance.change_management.change_type import ChangeType
 
 
 def test_provider_change_is_created_pending_approval():
@@ -82,3 +82,4 @@ def test_change_management_does_not_execute_controls():
     assert record.status == ChangeStatus.PROPOSED
     assert not hasattr(service, "execute")
     assert not hasattr(service, "pause_provider")
+

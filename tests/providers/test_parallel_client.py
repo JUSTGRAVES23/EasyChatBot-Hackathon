@@ -1,6 +1,6 @@
-import pytest
+﻿import pytest
 
-from backend.providers.parallel.parallel_client import (
+from providers.parallel.parallel_client import (
     ParallelClientWrapper,
 )
 

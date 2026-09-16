@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import sys
@@ -26,7 +26,8 @@ sys.path.insert(
 )
 
 from app.infrastructure.persistence.database import Base, database_url
-from app.infrastructure.persistence import beta_access_models  # noqa: F401
+from app.infrastructure.persistence import beta_access_models
+from app.infrastructure.persistence import learning_world_models  # noqa: F401
 
 
 config = context.config

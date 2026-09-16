@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     create_privacy_governance_composition,
 )
 
@@ -151,3 +151,4 @@ def test_flow_is_idempotent_for_same_case_identifier():
 
     assert second.case is first.case
     assert len(composition.case_registry.all()) == 1
+

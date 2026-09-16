@@ -1,10 +1,10 @@
-import pytest
+﻿import pytest
 
-from backend.providers.llm.llm_provider_factory import (
+from providers.llm.llm_provider_factory import (
     LLMProviderFactory,
 )
 
-from backend.providers.llm.openai_provider import (
+from providers.llm.openai_provider import (
     OpenAIProvider,
 )
 

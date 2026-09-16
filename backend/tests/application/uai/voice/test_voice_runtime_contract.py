@@ -1,17 +1,17 @@
-"""
+﻿"""
 Voice Runtime Contract Tests.
 
 Validates the boundary between:
 
 VoiceCallSession
         |
-        ↓
+        â†“
 VoiceCallExecutionContext
         |
-        ↓
+        â†“
 VoiceCallExecutionCoordinator
         |
-        ↓
+        â†“
 VoiceCallExecutionRuntime
 
 
@@ -280,3 +280,6 @@ def test_runtime_does_not_modify_session_identity():
     assert result["session"].character_id == (
         original_character
     )
+
+
+

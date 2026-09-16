@@ -1,8 +1,8 @@
-import pytest
+﻿import pytest
 
-from backend.providers.base_provider import BaseProvider
-from backend.providers.provider_result import ProviderResult
-from backend.runtime.context.execution_context import ExecutionContext
+from providers.base_provider import BaseProvider
+from providers.provider_result import ProviderResult
+from runtime.context.execution_context import ExecutionContext
 
 
 class DemoProvider(BaseProvider):

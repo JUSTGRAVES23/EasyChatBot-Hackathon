@@ -39,21 +39,21 @@ Does not:
 
 from __future__ import annotations
 
-from backend.providers.llm.config import (
+from providers.llm.config import (
     get_gemini_model,
     get_llm_model,
     get_llm_provider_name,
 )
 
-from backend.providers.llm.llm_provider import (
+from providers.llm.llm_provider import (
     LLMProvider,
 )
 
-from backend.providers.llm.openai_provider import (
+from providers.llm.openai_provider import (
     OpenAIProvider,
 )
 
-from backend.providers.llm.gemini_provider import (
+from providers.llm.gemini_provider import (
     GeminiProvider,
 )
 
@@ -131,3 +131,4 @@ class LLMProviderFactory:
                 f"{provider_name}"
             )
         )
+

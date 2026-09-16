@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Calls API Router.
 
 HTTP boundary for preparing
@@ -21,6 +21,7 @@ Does NOT:
 
 from __future__ import annotations
 
+from functools import lru_cache
 
 from fastapi import (
     APIRouter,
@@ -28,29 +29,23 @@ from fastapi import (
     HTTPException,
 )
 
-
 from pydantic import BaseModel
 
-
-from backend.app.application.uai.voice.voice_call_request import (
+from app.application.uai.voice.voice_call_request import (
     VoiceCallRequest,
 )
 
-
-from backend.app.application.uai.voice.voice_call_lifecycle_service import (
+from app.application.uai.voice.voice_call_lifecycle_service import (
     VoiceCallLifecycleService,
 )
 
-
-from backend.app.application.uai.voice.voice_call_context_factory import (
+from app.application.uai.voice.voice_call_context_factory import (
     VoiceCallContextFactory,
 )
 
-
-from backend.app.application.composition.voice_lifecycle_composition import (
+from app.application.composition.voice_call_lifecycle_composition import (
     build_voice_call_lifecycle_service,
 )
-
 
 
 router = APIRouter(
@@ -61,7 +56,6 @@ router = APIRouter(
 )
 
 
-
 class VoiceCallRequestModel(
     BaseModel
 ):
@@ -70,13 +64,9 @@ class VoiceCallRequestModel(
     """
 
     learner_id: str
-
     world_id: str
-
     character_id: str
-
     language_code: str
-
 
 
 class VoiceCallResponseModel(
@@ -87,21 +77,15 @@ class VoiceCallResponseModel(
     """
 
     room_name: str
-
     character_id: str
-
     language_code: str
-
     provider: str
-
     state: str
-
     token: str
-
     expires_at: str
 
 
-
+@lru_cache(maxsize=1)
 def get_voice_call_lifecycle_service(
 ) -> VoiceCallLifecycleService:
     """
@@ -116,7 +100,6 @@ def get_voice_call_lifecycle_service(
     )
 
 
-
 def get_voice_call_context_factory(
 ) -> VoiceCallContextFactory:
     """
@@ -127,7 +110,6 @@ def get_voice_call_context_factory(
     """
 
     return VoiceCallContextFactory()
-
 
 
 @router.post(
@@ -145,11 +127,13 @@ def prepare_voice_call(
 ) -> VoiceCallResponseModel:
     """
     Prepare and start a character voice call.
+
+    A persistent VoiceCall is created first so that
+    the execution context retains the business
+    identity throughout the lifecycle.
     """
 
-
     try:
-
         call_request = VoiceCallRequest(
             learner_id=request.learner_id,
             world_id=request.world_id,
@@ -157,13 +141,21 @@ def prepare_voice_call(
             language_code=request.language_code,
         )
 
+        voice_call = (
+            service.create_voice_call(
+                learner_id=call_request.learner_id,
+                character_id=call_request.character_id,
+                world_id=call_request.world_id,
+                language_code=call_request.language_code,
+            )
+        )
 
         context = (
             context_factory.create(
                 request=call_request,
+                voice_call=voice_call,
             )
         )
-
 
         result = (
             service.start_call(
@@ -171,13 +163,9 @@ def prepare_voice_call(
             )
         )
 
-
         room = result["room"]
-
         session = result["session"]
-
         connection = result["connection"]
-
 
         return VoiceCallResponseModel(
             room_name=room["room_name"],
@@ -192,17 +180,18 @@ def prepare_voice_call(
             ),
         )
 
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
         ) from exc
 
 
-
 __all__ = [
     "router",
 ]
+
+
+
+
 

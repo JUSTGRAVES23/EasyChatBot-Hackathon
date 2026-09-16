@@ -1,5 +1,5 @@
-from backend.demo.demo_runner import DemoRunner
-from backend.demo.demo_scenarios import CYBERSECURITY_SCENARIO
+﻿from demo.demo_runner import DemoRunner
+from demo.demo_scenarios import CYBERSECURITY_SCENARIO
 
 
 class CybersecurityDemoRunner:
@@ -10,3 +10,4 @@ class CybersecurityDemoRunner:
             "cybersecurity",
             CYBERSECURITY_SCENARIO,
         )
+

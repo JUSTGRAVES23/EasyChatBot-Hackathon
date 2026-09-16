@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery User Choice & Controlled Handoff Skill.
 
 Presents verified recommendations and converts an explicit
@@ -37,17 +37,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.skills.discovery.personalised_content_adaptation import (
+from skills.discovery.personalised_content_adaptation import (
     PersonalisedRecommendation,
 )
-from backend.skills.discovery.discovery_quality_verification import (
+from skills.discovery.discovery_quality_verification import (
     VerifiedRecommendation,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

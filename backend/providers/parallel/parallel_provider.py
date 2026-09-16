@@ -1,19 +1,19 @@
-"""
+﻿"""
 Parallel Search Provider.
 
 Provides live world information
 through the Parallel Search API.
 """
 
-from backend.providers.base_provider import (
+from providers.base_provider import (
     BaseProvider,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
@@ -46,7 +46,7 @@ class ParallelSearchProvider(BaseProvider):
 
         if self.client is None:
 
-            from backend.providers.parallel.parallel_client import (
+            from providers.parallel.parallel_client import (
                 ParallelClientWrapper,
             )
 

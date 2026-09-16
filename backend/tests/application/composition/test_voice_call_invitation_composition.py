@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Invitation Composition.
 
 Validates:
@@ -80,13 +80,13 @@ def test_composed_service_can_create_invitation():
 
         Composition
               |
-              ↓
+              â†“
         Application Service
               |
-              ↓
+              â†“
         Repository
               |
-              ↓
+              â†“
         Stored Invitation
     """
 
@@ -129,3 +129,4 @@ def test_composed_service_can_create_invitation():
     assert stored.voice_call_id == (
         "vc-001"
     )
+

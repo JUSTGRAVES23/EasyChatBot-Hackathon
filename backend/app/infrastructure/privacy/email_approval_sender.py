@@ -1,12 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
-from backend.app.application.privacy.privacy_approval_email_service import (
+from app.application.privacy.privacy_approval_email_service import (
     ApprovalEmailRequest,
 )
 
-from backend.cybersecurity.email.email_provider_manager import (
+from cybersecurity.email.email_provider_manager import (
     EmailProviderManager,
 )
 
@@ -17,13 +17,13 @@ class ResendApprovalEmailSender:
     Delivery path:
 
         PrivacyApprovalEmailService
-            ↓
+            â†“
         ResendApprovalEmailSender
-            ↓
+            â†“
         EmailProviderManager
-            ↓
+            â†“
         ResendEmailProvider
-            ↓
+            â†“
         Resend
 
     This adapter is responsible only for translating the privacy
@@ -90,3 +90,4 @@ class ResendApprovalEmailSender:
             request.subject,
             content,
         )
+

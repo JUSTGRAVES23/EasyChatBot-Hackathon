@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.app.application.beta_access.beta_access_service import (
+from app.application.beta_access.beta_access_service import (
     BetaAccessService,
 )
 

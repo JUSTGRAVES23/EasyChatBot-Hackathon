@@ -1,4 +1,4 @@
-"""
+﻿"""
 Hackathon Memory Mapper.
 
 Converts persistence-layer memory objects into
@@ -43,7 +43,7 @@ from src.ai_runtime.memory.models import (
     MemoryEntry,
 )
 
-from backend.memory.memory_record import (
+from memory.memory_record import (
     MemoryRecord,
 )
 

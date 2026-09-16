@@ -1,0 +1,1369 @@
+﻿===== MAIN.PY =====
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import os
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+from app.application.composition.conversation_composition import (
+    create_conversation_runtime,
+)
+from app.application.composition.private_chat_composition import (
+    build_private_chat_service_factory,
+)
+from app.application.identity.authentication_email_service import (
+    AuthenticationEmailService,
+)
+from app.application.identity.authentication_service import (
+    AuthenticationService,
+)
+from app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+from app.application.developer_admin.developer_admin_service import (
+    DeveloperAdminService,
+)
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+from app.application.operations_center.dashboard_composition import (
+    create_operations_center_composition,
+)
+from app.application.persistence_operations import PersistenceDiagnosticsService
+from app.application.privacy.privacy_governance_composition import (
+    get_privacy_governance_composition,
+)
+from app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+from app.api.academy_questionnaires import (
+    router as academy_questionnaires_router,
+)
+from app.api.private_chat import router as private_chat_router
+from app.api.authentication import (
+    router as authentication_router,
+)
+from app.api.dependencies.authorization import require_permission
+from app.api.operations_center import (
+    create_operations_center_router,
+)
+from app.api.routes.persistence_operations_routes import (
+    create_persistence_operations_router,
+)
+from app.api.routes.developer_admin_routes import (
+    router as developer_admin_router,
+)
+from app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+from app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+from app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+from app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+from app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+from app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+from app.application.privacy.screening.service import (
+    ScreeningService,
+)
+from app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from app.infrastructure.email.authentication_email_sender import (
+    AuthenticationEmailSenderAdapter,
+)
+from app.infrastructure.persistence.database import (
+    Base,
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from app.infrastructure.persistence.postgresql_functionality_control_repository import (
+    PostgreSQLFunctionalityControlRepository,
+)
+from app.domain.authorization.permissions import Permission
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+from app.project_control_center.api.project_control_router import (
+    create_project_control_router,
+)
+from app.project_control_center.infrastructure.composition import (
+    create_project_control_service,
+)
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+from cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+from governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+from governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+from governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+from governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+def _required_environment(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for authentication email composition."
+        )
+
+    return value
+
+
+def _create_announcement_components():
+    telegram_client = TelegramAnnouncementClient()
+
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    return (
+        telegram_client,
+        announcement_publisher,
+    )
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+    finally:
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+
+        if telegram_client is not None:
+            try:
+                await telegram_client.close()
+            except Exception as exc:
+                print(
+                    "Telegram announcement client shutdown failed:",
+                    exc,
+                )
+
+        auth_engine = getattr(
+            application.state,
+            "auth_engine",
+            None,
+        )
+
+        if auth_engine is not None:
+            try:
+                await auth_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL authentication engine shutdown failed:",
+                    exc,
+                )
+
+        provider_usage_engine = getattr(
+            application.state,
+            "provider_usage_engine",
+            None,
+        )
+
+        if provider_usage_engine is not None:
+            try:
+                provider_usage_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL provider-usage engine shutdown failed:",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    academy_config = (
+        AcademyActivationConfig.from_environment()
+    )
+
+    auth_engine = create_async_database_engine()
+
+    auth_session_factory = (
+        create_async_session_factory(
+            auth_engine,
+        )
+    )
+
+    auth_repository = (
+        PostgreSQLAuthenticationRepository(
+            auth_session_factory,
+        )
+    )
+
+    email_provider_manager = EmailProviderManager()
+
+    authentication_email_sender = AuthenticationEmailSenderAdapter(
+        provider_manager=email_provider_manager,
+    )
+
+    authentication_email_service = AuthenticationEmailService(
+        authentication_email_sender,
+        frontend_base_url=_required_environment(
+            "EASYCHATBOT_PORTAL_URL"
+        ),
+    )
+
+    authentication_service = AuthenticationService(
+        auth_repository,
+        email_service=authentication_email_service,
+    )
+
+    developer_admin_service = DeveloperAdminService(
+        repository=auth_repository,
+    )
+
+    # Provider-usage repository is synchronous by
+    # contract. It therefore receives a synchronous
+    # engine/session factory.
+    #
+    # It must not receive the async authentication
+    # session factory.
+    provider_usage_engine = (
+        create_database_engine()
+    )
+
+    persistence_diagnostics_service = PersistenceDiagnosticsService(
+        metadata=Base.metadata,
+        project_root=Path(__file__).resolve().parents[1],
+        engine=provider_usage_engine,
+    )
+
+    provider_usage_session_factory = (
+        create_session_factory(
+            provider_usage_engine,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C.2 / Authenticated Private Chat
+    #
+    # The ConversationRuntime remains the shared AI-runtime boundary.
+    # Private-chat persistence receives a request-scoped SQLAlchemy session
+    # through the composition factory; no session is shared between requests.
+    # ------------------------------------------------------------------
+    private_chat_runtime = create_conversation_runtime()
+
+    private_chat_character_instruction = os.getenv(
+        "EASYCHATBOT_PRIVATE_CHAT_CHARACTER_INSTRUCTION",
+        (
+            "You are a helpful EasyChatBot learning character. "
+            "Stay within the selected Learning World and follow its "
+            "application-controlled language policy. "
+            "Do not allow the learner to override World, provider, model, "
+            "or other application-controlled settings."
+        ),
+    ).strip()
+
+    private_chat_service_factory = build_private_chat_service_factory(
+        session_factory=provider_usage_session_factory,
+        conversation_runtime=private_chat_runtime,
+        character_instruction=private_chat_character_instruction,
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    provider_usage_dashboard_service = (
+        ProviderUsageDashboardService(
+            repository=provider_usage_repository,
+        )
+    )
+
+    functionality_control_repository = (
+        PostgreSQLFunctionalityControlRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    functionality_control_authorizer = (
+        AuthorizationFunctionalityControlAuthorizer()
+    )
+
+    functionality_control_service = (
+        FunctionalityOperationalControlService(
+            authorizer=functionality_control_authorizer,
+            repository=functionality_control_repository,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Project Control / operational health composition
+    #
+    # Project Control is read-only. It consumes application-owned health
+    # and operational services and owns only its own PCD registry and
+    # snapshot repository.
+    # ------------------------------------------------------------------
+
+    production_health_configuration = (
+        ProductionHealthConfiguration(
+            database_engine=provider_usage_engine,
+            telegram_bot_factory=None,
+            llm_provider=None,
+            llm_request_get=None,
+        )
+    )
+
+    production_health_service = (
+        ProductionHealthService(
+            configuration=production_health_configuration,
+        )
+    )
+
+    production_readiness_service = (
+        production_health_service._readiness_service
+    )
+
+    operational_health_snapshot_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=production_readiness_service,
+        )
+    )
+
+    operational_event_service = (
+        OperationalEventService()
+    )
+
+    operational_dashboard_service = (
+        OperationalDashboardService(
+            health_snapshot_service=operational_health_snapshot_service,
+            event_service=operational_event_service,
+        )
+    )
+
+    privacy_governance_composition = (
+        get_privacy_governance_composition()
+    )
+
+    project_registry = (
+        InMemoryProjectRegistry()
+    )
+
+    project_snapshot_repository = (
+        InMemorySnapshotRepository()
+    )
+
+    project_control_service = (
+        create_project_control_service(
+            registry=project_registry,
+            snapshots=project_snapshot_repository,
+            health_service=production_health_service,
+            dashboard_service=operational_dashboard_service,
+            case_registry=(
+                privacy_governance_composition.case_registry
+            ),
+        )
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = (
+            auth_session_factory
+        )
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = (
+            create_academy_one_week_workflow(
+                session_factory=academy_session_factory,
+                telegram_bot=announcement_telegram_client,
+            )
+        )
+
+    scheduler_runtime = (
+        create_cybersecurity_scheduler_runtime(
+            academy_one_week_workflow=academy_one_week_workflow,
+        )
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = (
+        scheduler_runtime
+    )
+
+    application.state.auth_repository = (
+        auth_repository
+    )
+
+    application.state.authentication_service = (
+        authentication_service
+    )
+
+    application.state.developer_admin_service = (
+        developer_admin_service
+    )
+
+    application.state.auth_engine = (
+        auth_engine
+    )
+
+    application.state.provider_usage_engine = (
+        provider_usage_engine
+    )
+
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+
+    application.state.private_chat_service_factory = (
+        private_chat_service_factory
+    )
+
+    application.state.private_chat_character_instruction = (
+        private_chat_character_instruction
+    )
+
+    application.state.project_control_service = (
+        project_control_service
+    )
+
+    application.state.production_health_service = (
+        production_health_service
+    )
+
+    application.state.operational_dashboard_service = (
+        operational_dashboard_service
+    )
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.include_router(
+        authentication_router,
+    )
+
+    application.include_router(
+        private_chat_router,
+    )
+
+    application.include_router(
+        developer_admin_router,
+    )
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    operations_center_composition = (
+        create_operations_center_composition(
+            provider_usage_dashboard_service=(
+                provider_usage_dashboard_service
+            ),
+            functionality_control_service=(
+                functionality_control_service
+            ),
+        )
+    )
+
+    application.include_router(
+        create_operations_center_router(
+            composition=operations_center_composition,
+        ),
+    )
+
+    application.include_router(
+        create_persistence_operations_router(
+            persistence_diagnostics_service,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        )
+    )
+
+    application.include_router(
+        create_project_control_router(
+            project_control=project_control_service,
+        ),
+    )
+
+    application.include_router(
+        create_email_workflows_router(),
+    )
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    processing_registry = (
+        create_beta1_processing_registry()
+    )
+
+    screening_service = ScreeningService()
+
+    screening_adapter = (
+        ProcessingActivityScreeningAdapter(
+            screening_service,
+        )
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    # Academy World ? Static Questionnaires
+    #
+    # This exposes:
+    # GET /api/academy/worlds/{world_id}/questionnaires
+    #
+    # Questionnaire content remains controlled/static.
+    # Recommendation metadata is handled separately.
+    application.include_router(
+        academy_questionnaires_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]
+
+
+===== PRIVATE CHAT API =====
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+
+from app.api.dependencies.identity import get_current_principal
+from app.api.schemas.private_chat import (
+    CreatePrivateChatRequest,
+    CreatePrivateChatResponse,
+    SendPrivateChatMessageRequest,
+    SendPrivateChatMessageResponse,
+)
+from app.domain.identity.principal import Principal
+
+router = APIRouter(
+    prefix="/private-chat",
+    tags=["private-chat"],
+)
+
+
+def _get_private_chat_service(request: Request):
+    factory = getattr(
+        request.app.state,
+        "private_chat_service_factory",
+        None,
+    )
+    if factory is None:
+        raise RuntimeError("private_chat_service_factory is not configured")
+    return factory()
+
+
+@router.post(
+    "/conversations",
+    response_model=CreatePrivateChatResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_private_chat(
+    payload: CreatePrivateChatRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> CreatePrivateChatResponse:
+    service = _get_private_chat_service(request)
+    try:
+        conversation = service.create_conversation(
+            user_id=str(principal.user_id),
+            world_id=payload.world_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from None
+    finally:
+        service.close()
+
+    return CreatePrivateChatResponse(
+        conversation_id=conversation.conversation_id,
+        world_id=conversation.world_id,
+    )
+
+
+@router.post(
+    "/messages",
+    response_model=SendPrivateChatMessageResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def send_private_chat_message(
+    payload: SendPrivateChatMessageRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> SendPrivateChatMessageResponse:
+    service = _get_private_chat_service(request)
+    try:
+        result = await service.send_message(
+            user_id=str(principal.user_id),
+            conversation_id=payload.conversation_id,
+            message=payload.message,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if detail in {"Conversation not found", "World not found"}
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(
+            status_code=code,
+            detail=detail,
+        ) from None
+    finally:
+        service.close()
+
+    return SendPrivateChatMessageResponse(
+        conversation_id=result.conversation.conversation_id,
+        world_id=result.conversation.world_id,
+        response=result.assistant_message.content,
+        response_language=result.response_language,
+    )
+
+===== PRIVATE CHAT COMPOSITION =====
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from app.application.private_chat.service import PrivateChatService
+from app.application.uai.language.language_detector import LanguageDetector
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.infrastructure.persistence.postgresql_private_chat_repository import (
+    PostgreSQLPrivateChatRepository,
+)
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+
+
+def build_private_chat_service_factory(
+    *,
+    session_factory: sessionmaker[Session],
+    conversation_runtime: ConversationRuntime,
+    character_instruction: str,
+    language_detector: LanguageDetector | None = None,
+) -> Callable[[], PrivateChatService]:
+    """Build a request-scoped private-chat service factory.
+
+    Every invocation creates exactly one SQLAlchemy Session. The returned
+    service closes that session through its repository when the HTTP request
+    finishes. No database session is shared between requests.
+    """
+
+    if session_factory is None:
+        raise ValueError("session_factory is required.")
+    if conversation_runtime is None:
+        raise ValueError("conversation_runtime is required.")
+    if not character_instruction or not character_instruction.strip():
+        raise ValueError("character_instruction is required.")
+
+    app_root = Path(__file__).resolve().parents[2]
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds",
+    )
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+    language_response_policy = LanguageResponsePolicy()
+
+    def factory() -> PrivateChatService:
+        session = session_factory()
+        repository = PostgreSQLPrivateChatRepository(session)
+
+        return PrivateChatService(
+            repository=repository,
+            world_resolver=world_resolver,
+            language_response_policy=language_response_policy,
+            language_detector=language_detector,
+            conversation_runtime=conversation_runtime,
+            character_instruction=character_instruction,
+        )
+
+    return factory
+
+===== PRIVATE CHAT REPOSITORY =====
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.application.private_chat.models import (
+    PrivateChatConversation,
+    PrivateChatMessage,
+)
+from app.application.private_chat.repository import PrivateChatRepository
+from app.infrastructure.persistence.private_chat_models import (
+    PrivateChatConversationRecord,
+    PrivateChatMessageRecord,
+)
+
+
+class PostgreSQLPrivateChatRepository(PrivateChatRepository):
+    """PostgreSQL adapter for authenticated private-chat persistence."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_conversation_for_user(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+    ) -> PrivateChatConversation | None:
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+            )
+        )
+
+        if record is None:
+            return None
+
+        return self._to_conversation(record)
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation:
+        now = datetime.now(timezone.utc)
+
+        record = PrivateChatConversationRecord(
+            user_id=user_id,
+            world_id=world_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(record)
+        self._session.flush()
+
+        return self._to_conversation(record)
+
+    def save_message(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        message: PrivateChatMessage,
+    ) -> PrivateChatMessage:
+        record = PrivateChatMessageRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+            role=message.role,
+            content=message.content,
+            created_at=message.created_at,
+        )
+        self._session.add(record)
+        self._session.flush()
+
+        return self._to_message(record)
+
+    def get_recent_messages(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[PrivateChatMessage]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        records = self._session.scalars(
+            select(PrivateChatMessageRecord)
+            .where(
+                PrivateChatMessageRecord.conversation_id == conversation_id,
+                PrivateChatMessageRecord.user_id == user_id,
+                PrivateChatMessageRecord.world_id == world_id,
+            )
+            .order_by(PrivateChatMessageRecord.created_at.desc())
+            .limit(limit)
+        ).all()
+
+        return [self._to_message(record) for record in reversed(records)]
+
+    def touch_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> None:
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+        if record is None:
+            raise ValueError("Private chat conversation not found")
+
+        record.updated_at = datetime.now(timezone.utc)
+        self._session.flush()
+
+    def commit(self) -> None:
+        self._session.commit()
+
+    def rollback(self) -> None:
+        self._session.rollback()
+
+    def close(self) -> None:
+        self._session.close()
+
+    @staticmethod
+    def _to_conversation(
+        record: PrivateChatConversationRecord,
+    ) -> PrivateChatConversation:
+        return PrivateChatConversation(
+            conversation_id=record.conversation_id,
+            user_id=record.user_id,
+            world_id=record.world_id,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    @staticmethod
+    def _to_message(
+        record: PrivateChatMessageRecord,
+    ) -> PrivateChatMessage:
+        return PrivateChatMessage(
+            conversation_id=record.conversation_id,
+            role=record.role,
+            content=record.content,
+            created_at=record.created_at,
+        )
+
+===== PRIVATE CHAT MODELS =====
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import uuid4
+
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.infrastructure.persistence.database import Base
+
+
+class PrivateChatConversationRecord(Base):
+    """Durable ownership boundary for an authenticated private chat."""
+
+    __tablename__ = "private_chat_conversations"
+
+    conversation_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    world_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    messages: Mapped[list["PrivateChatMessageRecord"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PrivateChatMessageRecord.created_at",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_private_chat_conversations_user_world",
+            "user_id",
+            "world_id",
+        ),
+    )
+
+
+class PrivateChatMessageRecord(Base):
+    """A message belonging to one owned private-chat conversation."""
+
+    __tablename__ = "private_chat_messages"
+
+    id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+
+    conversation_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "private_chat_conversations.conversation_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    world_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    conversation: Mapped[PrivateChatConversationRecord] = relationship(
+        back_populates="messages",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_private_chat_messages_conversation_created",
+            "conversation_id",
+            "created_at",
+        ),
+        Index(
+            "ix_private_chat_messages_user_conversation",
+            "user_id",
+            "conversation_id",
+        ),
+    )
+
+===== ALEMBIC VERSIONS =====
+
+Name                                                   Length LastWriteTime        
+----                                                   ------ -------------        
+1bead328cddf_create_events_table.py                       900 7/28/2026 11:23:42 PM
+1c33dbcd7217_create_platform_state_table.py               777 7/31/2026 6:00:26 PM 
+20260821_beta_telegram_access.py                         3169 8/22/2026 1:00:39 PM 
+20260821_beta_telegram_token.py                          1511 8/22/2026 1:02:07 PM 
+20260822_beta_access_repair.py                           2850 8/22/2026 1:16:02 PM 
+20260822_create_conversation_events.py                   2187 8/22/2026 3:24:49 PM 
+20260822_create_conversation_memory.py                    674 8/22/2026 3:24:33 PM 
+20260822_fix_beta_token_user_id.py                       1577 8/22/2026 1:24:11 PM 
+20260822_privacy_event_governance.py                     3139 8/22/2026 4:51:57 PM 
+20260822_privacy_event_model_update.py                   3681 8/22/2026 4:19:59 PM 
+20260826_auth_persistence_integration.py                 4629 8/26/2026 11:26:05 PM
+20260826_ws22_3_2x_create_publication_executions.py      1320 8/26/2026 12:06:24 PM
+20260826_ws22_3_4_2_create_publication_audit_events.py   1967 8/26/2026 2:01:10 PM 
+20260826_ws23_1_3_approval_audit_events.py               1595 8/26/2026 4:29:35 PM 
+20260826_ws23_1_3_create_publication_state.py            1459 8/26/2026 3:47:54 PM 
+20260830_g84324l_report_execution_audit.py               3032 8/30/2026 5:37:55 PM 
+20260830_g84328_cmp_authoritative_controls.py            3400 8/30/2026 2:08:42 PM 
+20260901_cmp_monitoring_plan_items.py                    3120 9/1/2026 4:17:05 PM  
+20260902_m2_3_authoritative_world_catalogue.py           7072 9/2/2026 11:26:04 AM 
+20260902_m4_0_document_foundation.py                     3011 9/2/2026 4:44:18 PM  
+20260902_m4_1_document_security_versioning.py            1841 9/2/2026 5:41:56 PM  
+20260902_m4_2_r2_document_markup_persistence.py          2735 9/2/2026 8:28:26 PM  
+20260903_m4_2_r4_user_role.py                             593 9/3/2026 7:24:12 AM  
+20260907_provider_usage_events.py                        4462 9/7/2026 8:57:29 AM  
+20260910_functionality_operational_control.py            6264 9/10/2026 7:44:04 PM 
+20260912_auth_password_reset.py                          2721 9/12/2026 12:24:47 PM
+20260914_m2_a5_runtime_world_mapping.py                  1231 9/14/2026 6:28:14 AM 
+20260914_m2_d4_runtime_world_portfolio_mapping.py        2356 9/14/2026 10:17:52 AM
+20260915_m2_c_private_chat.py                            5045 9/15/2026 9:15:10 AM 
+3ab2941f5340_create_compliance_execution_tables.py       6281 8/29/2026 5:42:57 PM 
+405914bece20_add_learning_world_id_to_events.py          2147 7/29/2026 12:07:55 AM
+50cff2b5eb93_merge_cmp_and_report_execution_audit_.py     736 9/1/2026 12:15:18 PM 
+536722d48314_create_events_table.py                      1758 7/28/2026 10:49:58 PM
+6c7d8e9f0a1b_create_compliance_report_snapshots.py       1695 8/29/2026 7:09:00 PM 
+8659a97d744b_add_conversation_event_retrieval_index.py   1007 8/25/2026 1:50:50 PM 
+8f1522bc0a08_add_telegram_id_to_users.py                 2062 7/29/2026 12:31:45 AM
+9f4b2a6d7c8a_add_compliance_findings_table.py            2154 8/29/2026 6:06:42 PM 
+ACADEMY_NOTIFICATION_DELIVERY_TEMPLATE.py                2089 8/27/2026 5:14:57 PM 
+b05eeafe5f14_add_compliance_finding_remediation_.py      5669 8/29/2026 6:42:31 PM 
+bca56284c755_merge_conversation_event_privacy_.py         396 8/22/2026 4:22:31 PM 
+ca4b137f646c_merge_authentication_persistence_into_.py    777 8/26/2026 11:29:57 PM
+d355a996cfdd_create_events_table.py                       769 7/28/2026 11:26:09 PM
+db461433a79d_create_worlds_table.py                      1666 7/28/2026 11:38:15 PM
+e75bf3e7c80b_create_users_table.py                       2145 7/28/2026 11:42:00 PM
+
+===== PRIVATE CHAT MIGRATION SEARCH =====
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:3: Revision ID: 20260915_m2_c_private_chat
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:15: revision: str = "20260915_m2_c_private_chat"
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:28:         "private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:58:             name="pk_private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:63:         "ix_private_chat_conversations_user_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:64:         "private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:70:         "ix_private_chat_conversations_world_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:71:         "private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:77:         "ix_private_chat_conversations_user_world",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:78:         "private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:84:         "private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:123:             ["private_chat_conversations.conversation_id"],
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:124:             name="fk_private_chat_messages_conversation",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:129:             name="pk_private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:134:         "ix_private_chat_messages_user_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:135:         "private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:141:         "ix_private_chat_messages_world_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:142:         "private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:148:         "ix_private_chat_messages_conversation_created",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:149:         "private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:155:         "ix_private_chat_messages_user_conversation",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:156:         "private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:164:         "ix_private_chat_messages_user_conversation",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:165:         table_name="private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:169:         "ix_private_chat_messages_conversation_created",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:170:         table_name="private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:174:         "ix_private_chat_messages_world_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:175:         table_name="private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:179:         "ix_private_chat_messages_user_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:180:         table_name="private_chat_messages",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:183:     op.drop_table("private_chat_messages")
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:186:         "ix_private_chat_conversations_user_world",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:187:         table_name="private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:191:         "ix_private_chat_conversations_world_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:192:         table_name="private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:196:         "ix_private_chat_conversations_user_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:197:         table_name="private_chat_conversations",
+C:\AI Folder\EasyChatBot-Hackathon\backend\alembic\versions\20260915_m2_c_private_chat.py:200:     op.drop_table("private_chat_conversations")
+
+===== PRIVATE CHAT API TESTS =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+from uuid import UUID, uuid4
+
+import pytest
+
+
+@dataclass
+class FakeConversation:
+    conversation_id: UUID
+    user_id: str
+    world_id: str
+
+
+@dataclass
+class FakeAssistantMessage:
+    content: str
+
+
+@dataclass
+class FakeResult:
+    conversation: FakeConversation
+    assistant_message: FakeAssistantMessage
+    response_language: str
+
+
+class AsyncFakePrivateChatService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.conversation = FakeConversation(
+            conversation_id=uuid4(),
+            user_id="user-1",
+            world_id="polish_world",
+        )
+
+    def create_conversation(self, *, user_id: str, world_id: str):
+        self.calls.append(
+            {
+                "operation": "create",
+                "user_id": user_id,
+                "world_id": world_id,
+            }
+        )
+        return self.conversation
+
+    async def send_message(
+        self,
+        *,
+        user_id: str,
+        conversation_id: UUID,
+        message: str,
+        character_instruction: str,
+    ):
+        self.calls.append(
+            {
+                "operation": "send",
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "message": message,
+                "character_instruction": character_instruction,
+            }
+        )
+        return FakeResult(
+            conversation=self.conversation,
+            assistant_message=FakeAssistantMessage("DzieÅ„ dobry!"),
+            response_language="pl",
+        )
+
+
+def test_async_fake_service_contract_is_awaitable():
+    service = AsyncFakePrivateChatService()
+
+    async def run():
+        result = await service.send_message(
+            user_id="user-1",
+            conversation_id=service.conversation.conversation_id,
+            message="CzeÅ›Ä‡!",
+            character_instruction="Yeti",
+        )
+        assert result.response_language == "pl"
+
+    import asyncio
+    asyncio.run(run())
+
+
+def test_message_contract_has_no_client_world_or_ai_controls():
+    from app.api.schemas.private_chat import SendPrivateChatMessageRequest
+
+    with pytest.raises(Exception):
+        SendPrivateChatMessageRequest(
+            conversation_id=uuid4(),
+            message="CzeÅ›Ä‡!",
+            world_id="french_world",
+        )
+
+    with pytest.raises(Exception):
+        SendPrivateChatMessageRequest(
+            conversation_id=uuid4(),
+            message="CzeÅ›Ä‡!",
+            provider="openai",
+        )
+
+    with pytest.raises(Exception):
+        SendPrivateChatMessageRequest(
+            conversation_id=uuid4(),
+            message="CzeÅ›Ä‡!",
+            language="en",
+        )
+
+===== CURRENT ALEMBIC REVISION =====
+FAILED: No 'script_location' key found in configuration.
+
+===== ALEMBIC HEADS =====
+FAILED: No 'script_location' key found in configuration.
+
+

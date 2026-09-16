@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -563,3 +563,4 @@ async def test_ws14_policy_change_requires_no_application_code_change():
             "message": "Two",
         },
     ]
+

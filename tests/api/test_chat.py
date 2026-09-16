@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 
 from httpx import ASGITransport, AsyncClient
 
-from backend.api.main import app
-from backend.api import routes
+from api.main import app
+from api import routes
 
 
 class FakeCompanionService:

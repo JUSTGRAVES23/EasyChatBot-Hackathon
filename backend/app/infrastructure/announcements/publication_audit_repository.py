@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import DateTime, String, Text, select
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.app.infrastructure.persistence.database import Base
+from app.infrastructure.persistence.database import Base
 
 
 class PublicationAuditEventModel(Base):
@@ -117,3 +117,4 @@ class SqlAlchemyPublicationAuditRepository:
         async with self._session_factory() as session:
             session.add(event)
             await session.commit()
+

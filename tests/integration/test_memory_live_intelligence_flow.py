@@ -1,5 +1,5 @@
-"""
-H3-03 — Memory + Live Intelligence Integration Tests.
+﻿"""
+H3-03 â€” Memory + Live Intelligence Integration Tests.
 
 Purpose
 -------
@@ -18,16 +18,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.agents.agent_result import AgentResult
-from backend.characters.character_profile import CharacterProfile
-from backend.intelligence.intelligence_context import (
+from agents.agent_result import AgentResult
+from characters.character_profile import CharacterProfile
+from intelligence.intelligence_context import (
     IntelligenceContext,
 )
-from backend.memory.memory_record import MemoryRecord
-from backend.runtime.context.execution_context import (
+from memory.memory_record import MemoryRecord
+from runtime.context.execution_context import (
     ExecutionContext,
 )
-from backend.services.companion_service import (
+from services.companion_service import (
     CompanionService,
 )
 

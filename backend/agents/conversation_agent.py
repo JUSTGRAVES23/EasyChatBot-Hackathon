@@ -29,35 +29,35 @@ LLMProvider
 
 from __future__ import annotations
 
-from backend.agents.agent_manifest import (
+from agents.agent_manifest import (
     AgentManifest,
 )
 
-from backend.agents.agent_result import (
+from agents.agent_result import (
     AgentResult,
 )
 
-from backend.agents.base_agent import (
+from agents.base_agent import (
     BaseAgent,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.llm.llm_provider import (
+from providers.llm.llm_provider import (
     LLMProvider,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.services.llm_service import (
+from services.llm_service import (
     LLMService,
 )
 
@@ -373,3 +373,4 @@ class ConversationAgent(BaseAgent):
             ),
             output=output,
         )
+

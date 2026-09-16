@@ -1,15 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from backend.app.application.privacy.privacy_governance_operational_followup import (
+from app.application.privacy.privacy_governance_operational_followup import (
     create_privacy_governance_operational_follow_up,
 )
-from backend.app.application.privacy.privacy_governance_reminder_policy import (
+from app.application.privacy.privacy_governance_reminder_policy import (
     GovernanceReminderPolicy,
 )
-from backend.app.application.privacy.privacy_governance_reminder_scheduler import (
+from app.application.privacy.privacy_governance_reminder_scheduler import (
     InMemoryGovernanceReminderState,
 )
 
@@ -166,3 +166,4 @@ def test_job_is_read_only_against_case_registry():
 
     assert case.governance_status == "PENDING_DPO_GRC"
     assert case.change_id == "PCR-6J-OPS-001"
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7,10 +7,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.application.announcement.announcement_composer import (
+from app.application.announcement.announcement_composer import (
     AnnouncementComposer,
 )
-from backend.app.application.announcement.announcement_publisher import (
+from app.application.announcement.announcement_publisher import (
     ControlledAnnouncementPublisher,
 )
 from app.api.announcement_controls import (
@@ -142,7 +142,7 @@ def test_admin_can_publish_announcement(
 
     published_text = telegram_client.calls[0]["text"]
 
-    assert "🛠️ MAINTENANCE" in published_text
+    assert '🛠️ MAINTENANCE' in published_text
     assert "Planned maintenance" in published_text
     assert "Academy will be temporarily unavailable" in published_text
     assert "EasyWorld" in published_text
@@ -259,3 +259,6 @@ def test_announcement_type_is_validated(
 
     assert response.status_code == 422
     assert telegram_client.calls == []
+
+
+

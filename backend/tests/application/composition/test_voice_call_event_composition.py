@@ -1,14 +1,14 @@
-"""
+﻿"""
 Tests for Voice Call Event Composition.
 
 Validates:
 
 Composition Root
         |
-        ↓
+        â†“
 VoiceCallEventService
         |
-        ↓
+        â†“
 Repository
 
 
@@ -72,3 +72,4 @@ def test_event_service_has_repository():
         service.repository,
         InMemoryVoiceCallEventRepository,
     )
+

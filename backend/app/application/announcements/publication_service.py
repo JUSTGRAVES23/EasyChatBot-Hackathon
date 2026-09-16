@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from backend.app.application.announcements.repositories import PublicationRepository
-from backend.app.application.announcements.template_registry import AnnouncementTemplateRegistry
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import PublicationStatus
+from app.application.announcements.repositories import PublicationRepository
+from app.application.announcements.template_registry import AnnouncementTemplateRegistry
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import PublicationStatus
 
 
 @dataclass(frozen=True)
@@ -111,3 +111,4 @@ class AnnouncementPublicationService:
         publication.publish_success()
         self._publications.save(publication)
         return publication
+

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
 )
 from src.ai_runtime.memory.context_builder import (
@@ -79,3 +79,4 @@ class ExecutionContext:
         Return True when live intelligence is available.
         """
         return self.intelligence_context is not None
+

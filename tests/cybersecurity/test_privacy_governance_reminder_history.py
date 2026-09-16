@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.app.application.privacy.privacy_governance_reminder_history import (
+from app.application.privacy.privacy_governance_reminder_history import (
     PrivacyGovernanceReminderHistory,
 )
 
@@ -19,3 +19,4 @@ def test_history_records_last_reminder():
     )
 
     assert history.get_last_sent("CASE-001") == record
+

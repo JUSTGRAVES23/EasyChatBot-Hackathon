@@ -1,14 +1,14 @@
-"""
+﻿"""
 Tests for Voice Call End Service.
 
 Validates:
 
 VoiceCall
       |
-      ↓
+      â†“
 End Workflow
       |
-      ↓
+      â†“
 VOICE_CALL_COMPLETED Event
 
 
@@ -232,3 +232,6 @@ def test_end_voice_call_creates_single_event():
     assert events[0].event_type == (
         VoiceCallEventType.COMPLETED
     )
+
+
+

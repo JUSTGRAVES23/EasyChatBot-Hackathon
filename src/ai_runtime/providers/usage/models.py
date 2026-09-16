@@ -35,94 +35,66 @@ from decimal import Decimal
 
 @dataclass(frozen=True, slots=True)
 class ProviderUsageEvent:
-    """
-    Immutable record of one AI Runtime execution.
-
-    Created after a Runtime capability execution.
-
-    Example:
-
-        Capability
-             |
-             v
-        Agent
-             |
-             v
-        Provider
-             |
-             v
-        Usage Event
-    """
+    """Immutable canonical record of provider usage."""
 
     provider: str
-
     model: str
-
     capability: str
-
     functionality: str
-
     agent: str
-
-    input_tokens: int
-
-    output_tokens: int
-
-    latency_ms: int
-
+    input_tokens: int | None
+    output_tokens: int | None
+    latency_ms: int | None
     estimated_cost: Decimal
-
     quality_score: float
-
     success: bool
-
-    created_at: datetime = field(
-        default_factory=lambda:
-            datetime.now(timezone.utc)
-    )
+    total_tokens: int | None = None
+    provider_request_id: str | None = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
 
     def __post_init__(self) -> None:
+        for name, value in (
+            ("provider", self.provider),
+            ("model", self.model),
+            ("capability", self.capability),
+            ("functionality", self.functionality),
+            ("agent", self.agent),
+        ):
+            if not value or not value.strip():
+                raise ValueError(f"{name} is required.")
 
-        required_fields = {
-            "provider": self.provider,
-            "model": self.model,
-            "capability": self.capability,
-            "functionality": self.functionality,
-            "agent": self.agent,
-        }
+        for name, value in (
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("total_tokens", self.total_tokens),
+            ("latency_ms", self.latency_ms),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} cannot be negative.")
 
-        for name, value in required_fields.items():
-
-            if not value.strip():
+        if self.total_tokens is not None:
+            if (
+                self.input_tokens is not None
+                and self.output_tokens is not None
+                and self.total_tokens < self.input_tokens + self.output_tokens
+            ):
                 raise ValueError(
-                    f"{name} cannot be empty."
+                    "total_tokens cannot be less than input_tokens + output_tokens."
                 )
 
-        if self.input_tokens < 0:
-            raise ValueError(
-                "Input tokens cannot be negative."
-            )
-
-        if self.output_tokens < 0:
-            raise ValueError(
-                "Output tokens cannot be negative."
-            )
-
-        if self.latency_ms < 0:
-            raise ValueError(
-                "Latency cannot be negative."
-            )
-
         if self.estimated_cost < 0:
-            raise ValueError(
-                "Estimated cost cannot be negative."
-            )
+            raise ValueError("estimated_cost cannot be negative.")
 
         if not 0 <= self.quality_score <= 100:
-            raise ValueError(
-                "Quality score must be between 0 and 100."
-            )
+            raise ValueError("quality_score must be between 0 and 100.")
 
+        if (
+            self.provider_request_id is not None
+            and not self.provider_request_id.strip()
+        ):
+            raise ValueError(
+                "provider_request_id cannot be blank when supplied."
+            )
 
 @dataclass(frozen=True, slots=True)
 class ProviderUsageSummary:

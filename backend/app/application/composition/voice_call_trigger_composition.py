@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Trigger Composition.
 
 Composition root for the complete
@@ -24,37 +24,37 @@ from __future__ import annotations
 
 
 
-from backend.app.application.uai.voice.voice_call_trigger_service import (
+from app.application.uai.voice.voice_call_trigger_service import (
     VoiceCallTriggerService,
 )
 
 
 
-from backend.app.application.uai.voice.voice_call_management_service import (
+from app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
 
-from backend.app.application.uai.voice.voice_call_invitation_service import (
+from app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
 
 
 
-from backend.app.application.uai.notifications.voice_call_notification_service import (
+from app.application.uai.notifications.voice_call_notification_service import (
     VoiceCallNotificationService,
 )
 
 
 
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
 
 
 
-from backend.app.application.composition.voice_call_dependencies import (
+from app.application.composition.voice_call_dependencies import (
     voice_call_repository,
     voice_call_invitation_repository,
     voice_call_notification_repository,
@@ -62,7 +62,7 @@ from backend.app.application.composition.voice_call_dependencies import (
 
 
 
-from backend.app.application.composition.voice_event_composition import (
+from app.application.composition.voice_event_composition import (
     build_voice_call_event_service,
 )
 
@@ -155,4 +155,6 @@ __all__ = [
     "create_voice_call_trigger_service",
     "build_voice_call_trigger_service",
 ]
+
+
 

@@ -1,6 +1,6 @@
-"""Tests for YETI governance interpretation."""
+﻿"""Tests for YETI governance interpretation."""
 
-from backend.cybersecurity.governance.yeti_governance_service import (
+from cybersecurity.governance.yeti_governance_service import (
     YetiGovernanceService,
 )
 
@@ -16,7 +16,7 @@ def test_yeti_explains_provider_pause():
         }
     )
 
-    assert result.title == "YETI — Governance Guardian"
+    assert result.title == "YETI â€” Governance Guardian"
     assert "paused" in result.summary.lower()
     assert "human-controlled" in result.interpretation.lower()
     assert "authorised operator" in result.action_required.lower()
@@ -50,3 +50,4 @@ def test_yeti_is_deterministic():
     second = YetiGovernanceService().explain(event)
 
     assert first == second
+

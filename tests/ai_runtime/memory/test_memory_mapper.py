@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the MemoryEntry -> MemoryRecord mapping boundary.
 """
 
@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.memory.memory_record import (
+from memory.memory_record import (
     MemoryRecord,
 )
 

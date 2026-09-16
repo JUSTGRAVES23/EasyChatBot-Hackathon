@@ -1,0 +1,3450 @@
+============================================================
+M2.4 VOICE � R4 USE-CASE / CALL TOPOLOGY RECONCILIATION
+Generated: 2026-09-10 08:45:33
+Root: C:\AI Folder\EasyChatBot-Hackathon
+============================================================
+
+============================================================
+FILE: backend\app\domain\uai\voice\voice_call.py
+============================================================
+"""
+Voice Call Domain Aggregate.
+
+Represents a persistent AI character
+voice call identity.
+
+Responsibilities:
+- Maintain voice call identity.
+- Track lifecycle state.
+- Validate reconnect availability.
+- Support disconnect/reconnect lifecycle.
+
+Does NOT:
+- Handle HTTP.
+- Manage LiveKit.
+- Generate tokens.
+- Manage providers.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass, replace
+
+
+from datetime import datetime, timezone
+
+
+from backend.app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCall:
+    """
+    Persistent voice call aggregate.
+
+    A VoiceCall represents the business
+    identity of a conversation.
+
+    Multiple execution sessions can exist
+    for the same VoiceCall.
+    """
+
+    id: str
+
+    learner_id: str
+
+    character_id: str
+
+    world_id: str
+
+    language_code: str
+
+    state: VoiceCallState
+
+    created_at: datetime
+
+    expires_at: datetime
+
+
+
+    def __post_init__(
+        self,
+    ) -> None:
+        """
+        Validate aggregate invariants.
+        """
+
+
+        if not self.id:
+            raise ValueError(
+                "Voice call id is required."
+            )
+
+
+        if not self.learner_id:
+            raise ValueError(
+                "Learner id is required."
+            )
+
+
+        if not self.character_id:
+            raise ValueError(
+                "Character id is required."
+            )
+
+
+        if not self.world_id:
+            raise ValueError(
+                "World id is required."
+            )
+
+
+        if self.expires_at < self.created_at:
+            raise ValueError(
+                "Voice call expiration "
+                "cannot be before creation."
+            )
+
+
+
+    def can_reconnect(
+        self,
+        *,
+        now: datetime,
+    ) -> bool:
+        """
+        Check whether this voice call
+        can reconnect.
+
+        Allowed states:
+
+        ACTIVE
+        DISCONNECTED
+        RECONNECTABLE
+
+        The reconnect window must
+        not have expired.
+        """
+
+
+        now = self._ensure_utc(
+            now
+        )
+
+
+        expires_at = self._ensure_utc(
+            self.expires_at
+        )
+
+
+        return (
+            now < expires_at
+            and self.state
+            in {
+                VoiceCallState.ACTIVE,
+                VoiceCallState.DISCONNECTED,
+                VoiceCallState.RECONNECTABLE,
+            }
+        )
+
+
+
+    def mark_disconnected(
+        self,
+    ) -> "VoiceCall":
+        """
+        Mark current execution as
+        temporarily disconnected.
+        """
+
+
+        return replace(
+            self,
+            state=VoiceCallState.DISCONNECTED,
+        )
+
+
+
+    def mark_reconnectable(
+        self,
+    ) -> "VoiceCall":
+        """
+        Mark voice call as available
+        for reconnection.
+        """
+
+
+        return replace(
+            self,
+            state=VoiceCallState.RECONNECTABLE,
+        )
+
+
+
+    def mark_active(
+        self,
+    ) -> "VoiceCall":
+        """
+        Mark voice call active again
+        after reconnect.
+        """
+
+
+        return replace(
+            self,
+            state=VoiceCallState.ACTIVE,
+        )
+
+
+
+    def mark_completed(
+        self,
+    ) -> "VoiceCall":
+        """
+        Complete voice call lifecycle.
+        """
+
+
+        return replace(
+            self,
+            state=VoiceCallState.COMPLETED,
+        )
+
+
+
+    def mark_failed(
+        self,
+    ) -> "VoiceCall":
+        """
+        Mark voice call as failed.
+        """
+
+
+        return replace(
+            self,
+            state=VoiceCallState.FAILED,
+        )
+
+
+
+    @staticmethod
+    def _ensure_utc(
+        value: datetime,
+    ) -> datetime:
+        """
+        Normalize datetime values.
+
+        Existing code may still create
+        naive datetime values.
+
+        Domain boundary normalizes them
+        to UTC.
+        """
+
+
+        if value.tzinfo is None:
+
+            return value.replace(
+                tzinfo=timezone.utc
+            )
+
+
+        return value.astimezone(
+            timezone.utc
+        )
+
+
+
+__all__ = [
+    "VoiceCall",
+]
+
+============================================================
+FILE: backend\app\domain\uai\voice\voice_call_session.py
+============================================================
+"""
+Voice Call Session Domain Model.
+
+Represents a prepared voice interaction.
+
+Does NOT:
+- connect providers;
+- manage LiveKit;
+- execute AI.
+
+It only represents validated
+voice call state.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from backend.app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallSession:
+    """
+    Immutable voice call session.
+    """
+
+    session_id: str
+
+    learner_id: str
+
+    character_id: str
+
+    world_id: str
+
+    language_code: str
+
+    state: VoiceCallState = (
+        VoiceCallState.CREATED
+    )
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate session.
+        """
+
+        if not self.session_id.strip():
+            raise ValueError(
+                "session_id cannot be empty."
+            )
+
+
+        if not self.learner_id.strip():
+            raise ValueError(
+                "learner_id cannot be empty."
+            )
+
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "character_id cannot be empty."
+            )
+
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+
+    def is_active(self) -> bool:
+        """
+        Return whether call is active.
+        """
+
+        return (
+            self.state
+            ==
+            VoiceCallState.ACTIVE
+        )
+
+
+    def is_finished(self) -> bool:
+        """
+        Return whether call finished.
+        """
+
+        return self.state in {
+            VoiceCallState.ENDED,
+            VoiceCallState.FAILED,
+        }
+
+============================================================
+FILE: backend\app\domain\uai\voice\voice_session.py
+============================================================
+"""
+Voice Session Domain Model.
+
+Represents one character voice interaction.
+
+Does NOT:
+- Connect to LiveKit.
+- Generate tokens.
+- Execute AI.
+- Handle audio.
+
+It is only the domain state.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceSession:
+    """
+    Immutable voice session state.
+    """
+
+    session_id: str
+
+    room_name: str
+
+    character_id: str
+
+    language_code: str
+
+    status: str = "created"
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate session state.
+        """
+
+        if not self.session_id.strip():
+            raise ValueError(
+                "session_id cannot be empty."
+            )
+
+        if not self.room_name.strip():
+            raise ValueError(
+                "room_name cannot be empty."
+            )
+
+        if not self.character_id.strip():
+            raise ValueError(
+                "character_id cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+============================================================
+FILE: backend\app\domain\uai\voice\voice_call_participant.py
+============================================================
+"""
+Voice Call Participant Domain Model.
+
+Represents a participant inside
+a voice call.
+
+Responsibilities:
+- Define participant identity.
+- Define participant role.
+
+Does NOT:
+- Connect providers.
+- Manage LiveKit.
+- Execute AI.
+- Handle networking.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+
+class VoiceParticipantRole(
+    str,
+    Enum,
+):
+    """
+    Participant roles in a voice call.
+    """
+
+    LEARNER = "learner"
+
+    CHARACTER = "character"
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallParticipant:
+    """
+    Immutable voice call participant.
+    """
+
+    participant_id: str
+
+    role: VoiceParticipantRole
+
+    display_name: str
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate participant.
+        """
+
+        if not self.participant_id.strip():
+            raise ValueError(
+                "participant_id cannot be empty."
+            )
+
+
+        if not self.display_name.strip():
+            raise ValueError(
+                "display_name cannot be empty."
+            )
+
+============================================================
+FILE: backend\app\domain\uai\voice\voice_call_room.py
+============================================================
+"""
+Voice Call Room Domain Model.
+
+Represents the logical room composition
+for a voice call.
+
+Responsibilities:
+- Define room identity.
+- Hold call participants.
+- Validate participant composition.
+
+Does NOT:
+- Connect to LiveKit.
+- Manage audio streams.
+- Execute AI.
+- Manage providers.
+- Handle networking.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from backend.app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallRoom:
+    """
+    Immutable voice call room.
+
+    Supports:
+
+    Beta:
+        Learner + Character
+
+    Future:
+        Learner + Learner + Character
+    """
+
+    room_id: str
+
+    participants: tuple[
+        VoiceCallParticipant,
+        ...
+
+    ]
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate room composition.
+        """
+
+        if not self.room_id.strip():
+            raise ValueError(
+                "room_id cannot be empty."
+            )
+
+
+        if not self.participants:
+            raise ValueError(
+                "Voice call room requires "
+                "at least one participant."
+            )
+
+
+        character_count = sum(
+            1
+            for participant in self.participants
+            if participant.role
+            ==
+            VoiceParticipantRole.CHARACTER
+        )
+
+
+        if character_count > 1:
+            raise ValueError(
+                "Voice call room supports "
+                "only one character participant."
+            )
+
+
+    def has_character(self) -> bool:
+        """
+        Check whether a character exists
+        in the room.
+        """
+
+        return any(
+            participant.role
+            ==
+            VoiceParticipantRole.CHARACTER
+            for participant in self.participants
+        )
+
+
+    def learner_count(self) -> int:
+        """
+        Return number of learners.
+        """
+
+        return sum(
+            1
+            for participant in self.participants
+            if participant.role
+            ==
+            VoiceParticipantRole.LEARNER
+        )
+
+============================================================
+FILE: backend\domain\uai\voice\voice_call_invitation.py
+============================================================
+MISSING FILE: backend\domain\uai\voice\voice_call_invitation.py
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_orchestrator.py
+============================================================
+"""
+Voice Call Orchestrator.
+
+Coordinates the preparation of a voice call.
+
+Responsibilities:
+- Build interaction context.
+- Create character voice session.
+- Create domain voice call session.
+- Apply voice call runtime lifecycle.
+
+Does NOT:
+- Execute AI providers.
+- Manage LiveKit.
+- Handle HTTP.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.app.application.uai.context.interaction_context_builder import (
+    InteractionContextBuilder,
+)
+from backend.app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+from backend.app.application.uai.voice.voice_character_session_service import (
+    VoiceCharacterSessionService,
+)
+
+from backend.app.ai_runtime.voice.voice_call_runtime import (
+    VoiceCallRuntime,
+)
+from backend.app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+from backend.app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+from backend.app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallOrchestrator:
+    """
+    Voice call workflow coordinator.
+    """
+
+    context_builder: InteractionContextBuilder
+
+    session_service: VoiceCharacterSessionService
+
+    voice_runtime: VoiceCallRuntime = (
+        VoiceCallRuntime()
+    )
+
+    def prepare_call(
+        self,
+        *,
+        request: VoiceCallRequest,
+    ) -> VoiceCallSession:
+        """
+        Prepare voice call session.
+
+        Flow:
+
+        Request
+          |
+          ↓
+        Interaction Context
+          |
+          ↓
+        Character Voice Session
+          |
+          ↓
+        Voice Call Session
+          |
+          ↓
+        Runtime Preparation
+          |
+          ↓
+        READY state
+        """
+
+        learner = LearnerContext(
+            learner_id=request.learner_id,
+            learning_goals=[
+                "conversation",
+            ],
+        )
+
+        voice = VoiceContext(
+            language_code=request.language_code,
+            voice_provider="openai",
+            voice_profile=request.character_id,
+        )
+
+        context = (
+            self.context_builder
+            .build(
+                learner=learner,
+                world_id=request.world_id,
+                character_id=request.character_id,
+                voice=voice,
+            )
+        )
+
+        voice_session = (
+            self.session_service
+            .create_session(
+                context=context,
+            )
+        )
+
+        call_session = VoiceCallSession(
+            session_id=(
+                voice_session.session_id
+            ),
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+        )
+
+        return (
+            self.voice_runtime
+            .prepare(
+                session=call_session,
+            )
+        )
+
+
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_session_orchestrator.py
+============================================================
+"""
+Voice Session Orchestrator.
+
+Coordinates the creation of a complete
+voice interaction preparation flow.
+
+Responsibilities:
+- Create voice session.
+- Prepare voice infrastructure.
+- Return call configuration.
+
+Does NOT:
+- Run AI agents.
+- Handle audio streams.
+- Manage LiveKit lifecycle.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from backend.app.application.uai.voice.voice_session_service import (
+    VoiceSessionService,
+)
+
+from backend.app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+from backend.app.infrastructure.voice.livekit_adapter import (
+    LiveKitAdapter,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class VoiceSessionOrchestrator:
+    """
+    Coordinates voice session preparation.
+    """
+
+    def __init__(
+        self,
+        *,
+        voice_session_service: VoiceSessionService,
+        livekit_adapter: LiveKitAdapter,
+    ) -> None:
+
+        self._voice_session_service = (
+            voice_session_service
+        )
+
+        self._livekit_adapter = (
+            livekit_adapter
+        )
+
+
+    def prepare_session(
+        self,
+        *,
+        interaction_context: InteractionContext,
+    ) -> dict[str, str]:
+        """
+        Prepare a voice session.
+
+        Returns provider configuration
+        required to start a call.
+        """
+
+        session = (
+            self._voice_session_service
+            .create_session(
+                interaction_context=interaction_context,
+            )
+        )
+
+
+        configuration = (
+            self._livekit_adapter
+            .create_room_configuration(
+                session=session,
+            )
+        )
+
+
+        logger.info(
+            "Voice session prepared",
+            extra={
+                "session_id": session.session_id,
+            },
+        )
+
+
+        return configuration
+
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_character_session_service.py
+============================================================
+"""
+Voice Character Session Service.
+
+Application service responsible for
+creating character voice sessions.
+
+Responsibilities:
+- Coordinate character runtime.
+- Coordinate speech runtime.
+- Create domain voice session.
+- Request LiveKit room configuration.
+
+Does NOT:
+- Call speech providers directly.
+- Manage LiveKit directly.
+- Store configuration.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+from uuid import uuid4
+
+
+from backend.app.ai_runtime.voice.voice_character_runtime import (
+    VoiceCharacterRuntime,
+)
+
+
+from backend.app.ai_runtime.voice.voice_speech_runtime import (
+    VoiceSpeechRuntime,
+)
+
+
+from backend.app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+
+from backend.app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCharacterSessionService:
+    """
+    Creates voice sessions for AI characters.
+    """
+
+    livekit_adapter: object
+
+    speech_runtime: VoiceSpeechRuntime
+
+
+
+    def create_session(
+        self,
+        *,
+        context: InteractionContext,
+    ) -> VoiceSession:
+        """
+        Create a character voice session.
+        """
+
+
+        character_runtime = (
+            VoiceCharacterRuntime(
+                context=context,
+                speech_runtime=(
+                    self.speech_runtime
+                ),
+            )
+        )
+
+
+        character_id = (
+            character_runtime
+            .character_id()
+        )
+
+
+        session = VoiceSession(
+            session_id=str(
+                uuid4()
+            ),
+            room_name=(
+                f"{character_id}-voice-room"
+            ),
+            character_id=character_id,
+            language_code=(
+                context.voice.language_code
+            ),
+        )
+
+
+        self.livekit_adapter.create_room_configuration(
+            session=session,
+        )
+
+
+        return session
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_session_service.py
+============================================================
+"""
+Voice Session Service.
+
+Application service responsible for creating
+voice interaction sessions.
+
+Responsibilities:
+- Create VoiceSession domain objects.
+- Translate InteractionContext into
+  voice session state.
+- Prepare data for voice infrastructure.
+
+Does NOT:
+- Connect to LiveKit.
+- Create rooms.
+- Generate tokens.
+- Handle audio.
+"""
+
+from __future__ import annotations
+
+import uuid
+import logging
+
+from backend.app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+from backend.app.domain.uai.voice.voice_session import (
+    VoiceSession,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class VoiceSessionService:
+    """
+    Creates voice sessions from interaction context.
+    """
+
+    def create_session(
+        self,
+        *,
+        interaction_context: InteractionContext,
+    ) -> VoiceSession:
+        """
+        Create a new voice session.
+
+        Parameters
+        ----------
+        interaction_context:
+            Complete UAI interaction context.
+
+        Returns
+        -------
+        VoiceSession
+            Created voice session.
+        """
+
+        session_id = (
+            str(
+                uuid.uuid4()
+            )
+        )
+
+
+        character_id = (
+            interaction_context
+            .character
+            .character_id
+        )
+
+
+        language_code = (
+            interaction_context
+            .world
+            .language_code
+        )
+
+
+        room_name = (
+            f"{character_id}-{session_id[:8]}"
+        )
+
+
+        session = VoiceSession(
+            session_id=session_id,
+            room_name=room_name,
+            character_id=character_id,
+            language_code=language_code,
+        )
+
+
+        logger.info(
+            "Voice session created",
+            extra={
+                "session_id": session_id,
+                "character_id": character_id,
+            },
+        )
+
+
+        return session
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_session_service.py
+============================================================
+"""
+Voice Call Session Service.
+
+Application service responsible for
+creating execution sessions linked to
+persistent voice calls.
+
+Responsibilities:
+- Create runtime voice call sessions.
+- Link VoiceCall identity with execution.
+- Retrieve existing voice call sessions.
+- Preserve separation between:
+    VoiceCall
+    VoiceCallSession
+
+Does NOT:
+- Handle HTTP.
+- Manage LiveKit.
+- Generate tokens.
+- Execute AI providers.
+- Persist directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from backend.app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+from backend.app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+
+from backend.app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallSessionService:
+    """
+    Creates execution sessions
+    from persistent voice calls.
+    """
+
+
+
+    def create_session(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Create a runtime execution session.
+
+        The persistent VoiceCall ID remains
+        the source identity.
+        """
+
+
+        return VoiceCallSession(
+            session_id=(
+                f"{voice_call.id}-session"
+            ),
+            learner_id=voice_call.learner_id,
+            character_id=voice_call.character_id,
+            world_id=voice_call.world_id,
+            language_code=voice_call.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+
+    def reconnect_session(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Recreate execution session for
+        an existing voice call.
+
+        The VoiceCall identity remains
+        unchanged.
+        """
+
+
+        if voice_call.state not in {
+            VoiceCallState.ACTIVE,
+            VoiceCallState.DISCONNECTED,
+            VoiceCallState.RECONNECTABLE,
+        }:
+            raise ValueError(
+                "Voice call cannot reconnect "
+                "from current state."
+            )
+
+
+        return VoiceCallSession(
+            session_id=(
+                f"{voice_call.id}-reconnect"
+            ),
+            learner_id=voice_call.learner_id,
+            character_id=voice_call.character_id,
+            world_id=voice_call.world_id,
+            language_code=voice_call.language_code,
+            state=VoiceCallState.READY,
+        )
+
+
+
+__all__ = [
+    "VoiceCallSessionService",
+]
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_lifecycle_service.py
+============================================================
+"""
+Voice Call Lifecycle Service.
+
+Application facade for the complete
+voice call lifecycle.
+
+Responsibilities:
+- Coordinate voice call execution.
+- Create persistent voice call identity.
+- Create execution sessions.
+- Generate voice connections.
+- Handle reconnect lifecycle.
+- Record lifecycle events.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers directly.
+- Connect LiveKit directly.
+- Persist directly.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.app.application.uai.voice.voice_call_execution_coordinator import (
+    VoiceCallExecutionCoordinator,
+)
+
+from backend.app.application.uai.voice.voice_connection_service import (
+    VoiceConnectionService,
+)
+
+from backend.app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+
+from backend.app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+from backend.app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+from backend.app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+from backend.app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+from backend.app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+from backend.app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallLifecycleService:
+    """
+    Application lifecycle facade.
+    """
+
+    execution_coordinator: (
+        VoiceCallExecutionCoordinator
+    )
+
+    connection_service: (
+        VoiceConnectionService | None
+    ) = None
+
+    voice_call_management_service: (
+        VoiceCallManagementService | None
+    ) = None
+
+    voice_call_session_service: (
+        VoiceCallSessionService | None
+    ) = None
+
+    voice_call_event_service: (
+        VoiceCallEventService | None
+    ) = None
+
+    def start_call(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room, execute call,
+        create connection and record event.
+
+        Identity rules
+        --------------
+        VoiceCall.id:
+            Persistent business/lifecycle identity.
+
+        VoiceCallSession.session_id:
+            Execution/session identity.
+
+        Lifecycle events must use the persistent
+        VoiceCall.id when a VoiceCall is available.
+        """
+
+        result = (
+            self.execution_coordinator
+            .start(
+                context=context,
+            )
+        )
+
+        session = result["session"]
+
+        if self.voice_call_event_service is not None:
+            voice_call_id = (
+                context.voice_call.id
+                if context.voice_call is not None
+                else session.session_id
+            )
+
+            self.voice_call_event_service.record_event(
+                voice_call_id=voice_call_id,
+                learner_id=session.learner_id,
+                character_id=session.character_id,
+                event_type=VoiceCallEventType.STARTED,
+            )
+
+        if self.connection_service is not None:
+            connection = (
+                self.connection_service
+                .create_connection(
+                    room_name=(
+                        result["room"]["room_name"]
+                    ),
+                )
+            )
+
+            result["connection"] = connection
+
+        return result
+
+    def create_voice_call(
+        self,
+        *,
+        learner_id: str,
+        character_id: str,
+        world_id: str,
+        language_code: str,
+    ) -> VoiceCall:
+        """
+        Create persistent voice identity.
+        """
+
+        if (
+            self.voice_call_management_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call management service "
+                "not configured."
+            )
+
+        return (
+            self.voice_call_management_service
+            .create_call(
+                learner_id=learner_id,
+                character_id=character_id,
+                world_id=world_id,
+                language_code=language_code,
+            )
+        )
+
+    def create_session(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Create execution session.
+        """
+
+        if (
+            self.voice_call_session_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call session service "
+                "not configured."
+            )
+
+        return (
+            self.voice_call_session_service
+            .create_session(
+                voice_call=voice_call,
+            )
+        )
+
+    def reconnect_call(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCallSession:
+        """
+        Reconnect existing voice call.
+        """
+
+        if (
+            self.voice_call_session_service
+            is None
+        ):
+            raise RuntimeError(
+                "Voice call session service "
+                "not configured."
+            )
+
+        session = (
+            self.voice_call_session_service
+            .reconnect_session(
+                voice_call=voice_call,
+            )
+        )
+
+        if self.voice_call_event_service is not None:
+            self.voice_call_event_service.record_event(
+                voice_call_id=voice_call.id,
+                learner_id=voice_call.learner_id,
+                character_id=voice_call.character_id,
+                event_type=VoiceCallEventType.RECONNECTED,
+            )
+
+        return session
+
+
+__all__ = [
+    "VoiceCallLifecycleService",
+]
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_execution_coordinator.py
+============================================================
+"""
+Voice Call Execution Coordinator.
+
+Application orchestration boundary
+for voice call execution.
+
+Responsibilities:
+- Prepare voice room.
+- Coordinate runtime execution.
+
+Does NOT:
+- Handle HTTP.
+- Manage providers.
+- Persist data.
+- Connect LiveKit directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from backend.app.application.uai.voice.voice_room_service import (
+    VoiceRoomService,
+)
+
+
+from backend.app.ai_runtime.voice.voice_call_execution_runtime import (
+    VoiceCallExecutionRuntime,
+)
+
+
+from backend.app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallExecutionCoordinator:
+    """
+    Coordinates voice call execution.
+
+    Keeps compatibility with the current
+    application contracts.
+
+    Future migration target:
+
+        Lifecycle
+            |
+            â†“
+        ExecutionService
+            |
+            â†“
+        Runtime
+    """
+
+
+    room_service: VoiceRoomService
+
+    execution_runtime: VoiceCallExecutionRuntime
+
+
+
+    def start(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room and execute runtime.
+        """
+
+
+        room = (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+        session = (
+            self.execution_runtime
+            .start(
+                context=context,
+            )
+        )
+
+
+        return {
+            "room": room,
+            "session": session,
+        }
+
+
+
+    def prepare(
+        self,
+        *,
+        context: VoiceCallExecutionContext,
+    ) -> dict:
+        """
+        Prepare room only.
+        """
+
+
+        return (
+            self.room_service
+            .prepare_room(
+                context=context,
+            )
+        )
+
+
+
+__all__ = [
+    "VoiceCallExecutionCoordinator",
+]
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_acceptance_service.py
+============================================================
+"""
+Voice Call Acceptance Service.
+
+Application workflow responsible for
+accepting a learner voice call invitation.
+
+Responsibilities:
+- Accept notification action.
+- Retrieve invitation.
+- Retrieve voice call.
+- Handle first connection.
+- Handle reconnect flow.
+- Create voice session.
+- Record acceptance event.
+
+Does NOT:
+- Handle HTTP.
+- Send notifications.
+- Connect LiveKit.
+- Manage providers.
+"""
+
+from __future__ import annotations
+
+
+
+from dataclasses import dataclass
+
+
+
+from datetime import (
+    datetime,
+    timezone,
+)
+
+
+
+from backend.app.application.uai.voice.voice_call_management_service import (
+    VoiceCallManagementService,
+)
+
+
+
+from backend.app.application.uai.voice.voice_call_invitation_service import (
+    VoiceCallInvitationService,
+)
+
+
+
+from backend.app.application.uai.voice.voice_call_session_service import (
+    VoiceCallSessionService,
+)
+
+
+
+from backend.app.application.uai.notifications.voice_call_notification_service import (
+    VoiceCallNotificationService,
+)
+
+
+
+from backend.app.application.uai.voice.voice_call_event_service import (
+    VoiceCallEventService,
+)
+
+
+
+from backend.app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+
+from backend.app.domain.uai.voice.voice_call_event import (
+    VoiceCallEventType,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallAcceptanceService:
+    """
+    Workflow service for accepting
+    voice call notifications.
+    """
+
+    voice_call_management_service: (
+        VoiceCallManagementService
+    )
+
+    voice_call_invitation_service: (
+        VoiceCallInvitationService
+    )
+
+    voice_call_notification_service: (
+        VoiceCallNotificationService
+    )
+
+    voice_call_session_service: (
+        VoiceCallSessionService
+    )
+
+    voice_call_event_service: (
+        VoiceCallEventService
+    )
+
+
+
+    def accept_voice_call(
+        self,
+        *,
+        notification,
+    ) -> dict:
+        """
+        Accept notification and prepare
+        voice session.
+        """
+
+
+
+        updated_notification = (
+            self.voice_call_notification_service
+            .action_notification(
+                notification=notification,
+            )
+        )
+
+
+
+        invitation = (
+            self.voice_call_invitation_service
+            .get_invitation(
+                invitation_id=(
+                    notification.invitation_id
+                ),
+            )
+        )
+
+
+
+        if invitation is None:
+
+            raise ValueError(
+                "Voice call invitation not found."
+            )
+
+
+
+        voice_call = (
+            self.voice_call_management_service
+            .get_call(
+                voice_call_id=(
+                    invitation.voice_call_id
+                ),
+            )
+        )
+
+
+
+        if voice_call is None:
+
+            raise ValueError(
+                "Voice call not found."
+            )
+
+
+
+        if voice_call.state == (
+            VoiceCallState.CREATED
+        ):
+
+            session = (
+                self.voice_call_session_service
+                .create_session(
+                    voice_call=voice_call,
+                )
+            )
+
+
+        elif self.voice_call_management_service.can_reconnect(
+            voice_call_id=voice_call.id,
+            now=datetime.now(
+                timezone.utc
+            ),
+        ):
+
+            session = (
+                self.voice_call_session_service
+                .reconnect_session(
+                    voice_call=voice_call,
+                )
+            )
+
+
+        else:
+
+            raise ValueError(
+                "Voice call cannot be started."
+            )
+
+
+
+        self.voice_call_event_service.record_event(
+            voice_call_id=voice_call.id,
+            learner_id=voice_call.learner_id,
+            character_id=voice_call.character_id,
+            event_type=(
+                VoiceCallEventType.ACCEPTED
+            ),
+        )
+
+
+
+        return {
+            "notification": updated_notification,
+            "voice_call": voice_call,
+            "session": session,
+        }
+
+
+
+__all__ = [
+    "VoiceCallAcceptanceService",
+]
+
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_invitation_service.py
+============================================================
+"""
+Voice Call Invitation Service.
+
+Application service responsible for
+creating and managing voice call invitations.
+
+Responsibilities:
+- Create invitations.
+- Link invitations to VoiceCall identity.
+- Manage invitation lifecycle.
+- Validate expiration.
+- Coordinate invitation repository.
+
+Does NOT:
+- Send emails.
+- Send notifications.
+- Execute voice calls.
+- Manage LiveKit.
+- Persist directly.
+"""
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
+
+
+import uuid
+
+
+
+from backend.app.application.uai.voice.voice_call_invitation_repository import (
+    VoiceCallInvitationRepository,
+)
+
+
+from backend.app.domain.uai.voice.voice_call_invitation import (
+    VoiceCallInvitation,
+    VoiceCallInvitationStatus,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallInvitationService:
+    """
+    Application service for voice
+    call invitation lifecycle.
+    """
+
+    repository: VoiceCallInvitationRepository
+
+
+
+    def create_invitation(
+        self,
+        *,
+        voice_call_id: str,
+        learner_id: str,
+        character_id: str,
+        channel: str,
+        expires_minutes: int = 30,
+    ) -> VoiceCallInvitation:
+        """
+        Create a new invitation.
+        """
+
+
+        if expires_minutes <= 0:
+
+            raise ValueError(
+                "expires_minutes must be positive."
+            )
+
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+
+        invitation = VoiceCallInvitation(
+            id=(
+                f"inv-{uuid.uuid4()}"
+            ),
+            voice_call_id=voice_call_id,
+            learner_id=learner_id,
+            character_id=character_id,
+            channel=channel,
+            status=(
+                VoiceCallInvitationStatus.CREATED
+            ),
+            created_at=now,
+            expires_at=(
+                now
+                +
+                timedelta(
+                    minutes=expires_minutes,
+                )
+            ),
+        )
+
+
+        return (
+            self.repository
+            .save(
+                invitation=invitation,
+            )
+        )
+
+
+
+    def get_invitation(
+        self,
+        *,
+        invitation_id: str,
+    ) -> VoiceCallInvitation | None:
+        """
+        Retrieve invitation.
+        """
+
+
+        return (
+            self.repository
+            .get_by_id(
+                invitation_id=invitation_id,
+            )
+        )
+
+
+
+    def mark_sent(
+        self,
+        *,
+        invitation: VoiceCallInvitation,
+    ) -> VoiceCallInvitation:
+        """
+        Mark invitation as sent.
+        """
+
+
+        updated = (
+            invitation
+            .mark_sent()
+        )
+
+
+        return (
+            self.repository
+            .save(
+                invitation=updated,
+            )
+        )
+
+
+
+    def accept_invitation(
+        self,
+        *,
+        invitation: VoiceCallInvitation,
+        now: datetime | None = None,
+    ) -> VoiceCallInvitation:
+        """
+        Accept invitation.
+
+        Optional time injection keeps
+        lifecycle behaviour testable.
+        """
+
+
+        if now is None:
+
+            now = datetime.now(
+                timezone.utc
+            )
+
+
+        if invitation.is_expired(
+            now=now,
+        ):
+
+            raise ValueError(
+                "Invitation expired."
+            )
+
+
+        updated = (
+            invitation
+            .mark_accepted()
+        )
+
+
+        return (
+            self.repository
+            .save(
+                invitation=updated,
+            )
+        )
+
+
+
+    def cancel_invitation(
+        self,
+        *,
+        invitation: VoiceCallInvitation,
+    ) -> VoiceCallInvitation:
+        """
+        Cancel invitation.
+        """
+
+
+        updated = (
+            invitation
+            .mark_cancelled()
+        )
+
+
+        return (
+            self.repository
+            .save(
+                invitation=updated,
+            )
+        )
+
+
+
+    def delete_invitation(
+        self,
+        *,
+        invitation_id: str,
+    ) -> None:
+        """
+        Delete invitation.
+        """
+
+
+        self.repository.delete(
+            invitation_id=invitation_id,
+        )
+
+
+
+__all__ = [
+    "VoiceCallInvitationService",
+]
+
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_management_service.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+from backend.app.application.uai.voice.voice_call_repository import (
+    VoiceCallRepository,
+)
+from backend.app.domain.uai.voice.voice_call import VoiceCall
+from backend.app.domain.uai.voice.voice_call_state import VoiceCallState
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceCallManagementService:
+    """Application service for voice-call lifecycle management."""
+
+    repository: VoiceCallRepository
+
+    def create_call(
+        self,
+        *,
+        learner_id: str,
+        character_id: str,
+        world_id: str,
+        language_code: str,
+    ) -> VoiceCall:
+        """
+        Create and persist a new active voice call.
+
+        VoiceCall owns the lifecycle state and invariants.
+        The application service is responsible for creation,
+        persistence and orchestration only.
+        """
+
+        now = datetime.now(timezone.utc)
+
+        voice_call = VoiceCall(
+            id=f"vc-{uuid4()}",
+            learner_id=learner_id,
+            character_id=character_id,
+            world_id=world_id,
+            language_code=language_code,
+            state=VoiceCallState.CREATED,
+            created_at=now,
+            expires_at=now + timedelta(minutes=30),
+        )
+
+        return self.repository.save(
+            voice_call=voice_call,
+        )
+
+    def get_call(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> VoiceCall | None:
+        """Retrieve a voice call by persistent identity."""
+
+        return self.repository.get_by_id(
+            voice_call_id=voice_call_id,
+        )
+
+    def can_reconnect(
+        self,
+        *,
+        voice_call_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Determine whether an existing call can reconnect."""
+
+        voice_call = self.get_call(
+            voice_call_id=voice_call_id,
+        )
+
+        if voice_call is None:
+            return False
+
+        current_time = (
+            now
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
+
+        return voice_call.can_reconnect(
+            now=current_time,
+        )
+
+    def mark_disconnected(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> VoiceCall:
+        """Mark an existing voice call as disconnected."""
+
+        voice_call = self.get_call(
+            voice_call_id=voice_call_id,
+        )
+
+        if voice_call is None:
+            raise ValueError(
+                f"Unknown voice call: {voice_call_id}"
+            )
+
+        disconnected_call = (
+            voice_call.mark_disconnected()
+        )
+
+        return self.repository.save(
+            voice_call=disconnected_call,
+        )
+
+    def complete_call(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> VoiceCall:
+        """Complete an existing voice call."""
+
+        voice_call = self.get_call(
+            voice_call_id=voice_call_id,
+        )
+
+        if voice_call is None:
+            raise ValueError(
+                f"Unknown voice call: {voice_call_id}"
+            )
+
+        completed_call = (
+            voice_call.mark_completed()
+        )
+
+        return self.repository.save(
+            voice_call=completed_call,
+        )
+
+
+__all__ = [
+    "VoiceCallManagementService",
+]
+
+
+
+============================================================
+FILE: backend\app\application\uai\voice\voice_call_context_factory.py
+============================================================
+"""
+Voice Call Context Factory.
+
+Application factory responsible for
+creating voice execution contexts.
+
+Responsibilities:
+- Convert voice call requests into
+  domain execution context.
+- Create voice sessions.
+- Create room participants.
+- Build validated execution boundary.
+- Preserve an existing persistent
+  VoiceCall identity when supplied.
+
+Does NOT:
+- Handle HTTP.
+- Execute runtime.
+- Connect LiveKit.
+- Select providers.
+- Persist data.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from backend.app.application.uai.voice.voice_call_request import (
+    VoiceCallRequest,
+)
+
+from backend.app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+from backend.app.domain.uai.voice.voice_call_execution_context import (
+    VoiceCallExecutionContext,
+)
+
+from backend.app.domain.uai.voice.voice_call_participant import (
+    VoiceCallParticipant,
+    VoiceParticipantRole,
+)
+
+from backend.app.domain.uai.voice.voice_call_room import (
+    VoiceCallRoom,
+)
+
+from backend.app.domain.uai.voice.voice_call_session import (
+    VoiceCallSession,
+)
+
+from backend.app.domain.uai.voice.voice_call_state import (
+    VoiceCallState,
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class VoiceCallContextFactory:
+    """
+    Creates voice execution contexts.
+
+    The factory does not create or persist
+    VoiceCall aggregates. When a persistent
+    VoiceCall already exists, its identity may
+    be supplied so the execution context can
+    retain the business identity alongside
+    the runtime session.
+    """
+
+    def create(
+        self,
+        *,
+        request: VoiceCallRequest,
+        voice_call: VoiceCall | None = None,
+    ) -> VoiceCallExecutionContext:
+        """
+        Create an execution context.
+
+        Lifecycle starts:
+
+            READY
+              |
+              ↓
+          Runtime ACTIVE
+
+        When ``voice_call`` is supplied, the
+        persistent VoiceCall identity is preserved
+        in the execution context.
+        """
+
+        session = VoiceCallSession(
+            session_id=(
+                f"{request.character_id}-"
+                f"{request.learner_id}"
+            ),
+            learner_id=request.learner_id,
+            character_id=request.character_id,
+            world_id=request.world_id,
+            language_code=request.language_code,
+            state=VoiceCallState.READY,
+        )
+
+        room = VoiceCallRoom(
+            room_id=session.session_id,
+            participants=(
+                VoiceCallParticipant(
+                    participant_id=request.learner_id,
+                    role=VoiceParticipantRole.LEARNER,
+                    display_name="Learner",
+                ),
+                VoiceCallParticipant(
+                    participant_id=request.character_id,
+                    role=VoiceParticipantRole.CHARACTER,
+                    display_name=request.character_id,
+                ),
+            ),
+        )
+
+        return VoiceCallExecutionContext(
+            session=session,
+            room=room,
+            voice_call=voice_call,
+        )
+
+
+__all__ = [
+    "VoiceCallContextFactory",
+]
+
+
+============================================================
+VOICE PARTICIPANT / CALL / SESSION REFERENCES
+============================================================
+
+--- SEARCH: VoiceCallParticipant ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:41:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:110:VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:115:VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:53:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:93:learner = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:104:character = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:31:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:69:learner = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:80:character = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:44:class VoiceCallParticipant:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:27:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:53:VoiceCallParticipant,
+
+--- SEARCH: VoiceCallInvitation ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:39:VoiceCallInvitationService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:99:VoiceCallInvitationService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_dependencies.py:27:InMemoryVoiceCallInvitationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_dependencies.py:50:InMemoryVoiceCallInvitationRepository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:24:VoiceCallInvitationService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:29:InMemoryVoiceCallInvitationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:41:# PostgreSQLVoiceCallInvitationRepository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:47:InMemoryVoiceCallInvitationRepository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:53:) -> VoiceCallInvitationService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:59:return VoiceCallInvitationService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_invitation_composition.py:68:) -> VoiceCallInvitationService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_trigger_composition.py:40:VoiceCallInvitationService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_trigger_composition.py:90:VoiceCallInvitationService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:45:VoiceCallInvitationService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:95:VoiceCallInvitationService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:30:VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:35:class VoiceCallInvitationRepository(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:40:VoiceCallInvitation aggregates.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:49:invitation: VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:50:) -> VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:66:) -> VoiceCallInvitation | None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_repository.py:92:"VoiceCallInvitationRepository",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:40:VoiceCallInvitationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:45:VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:46:VoiceCallInvitationStatus,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:55:class VoiceCallInvitationService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:61:repository: VoiceCallInvitationRepository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:73:) -> VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:91:invitation = VoiceCallInvitation(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:100:VoiceCallInvitationStatus.CREATED
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:126:) -> VoiceCallInvitation | None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:144:invitation: VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:145:) -> VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:169:invitation: VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:171:) -> VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:214:invitation: VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:215:) -> VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:253:"VoiceCallInvitationService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:36:VoiceCallInvitationService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:79:VoiceCallInvitationService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\notifications\voice_call_notification.py:96:VoiceCallInvitation
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:34:class VoiceCallInvitationStatus(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:60:class VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:85:status: VoiceCallInvitationStatus
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:166:) -> "VoiceCallInvitation":
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:175:VoiceCallInvitationStatus.SENT
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:183:) -> "VoiceCallInvitation":
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:192:VoiceCallInvitationStatus.OPENED
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:200:) -> "VoiceCallInvitation":
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:209:VoiceCallInvitationStatus.ACCEPTED
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:217:) -> "VoiceCallInvitation":
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:226:VoiceCallInvitationStatus.CANCELLED
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:233:"VoiceCallInvitation",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:234:"VoiceCallInvitationStatus",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:5:VoiceCallInvitationRepository port.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:24:VoiceCallInvitationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:29:VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:34:class InMemoryVoiceCallInvitationRepository(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:35:VoiceCallInvitationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:42:PostgreSQLVoiceCallInvitationRepository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:55:VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:63:invitation: VoiceCallInvitation,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:64:) -> VoiceCallInvitation:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:83:) -> VoiceCallInvitation | None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py:127:"InMemoryVoiceCallInvitationRepository",
+
+--- SEARCH: VoiceCallSession ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:30:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:53:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:79:active_session = VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:105:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:125:ended_session = VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:151:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:158:failed_session = VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:28:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:52:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:53:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:79:return VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:93:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:94:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:116:return VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:130:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:131:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:152:return VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:166:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:167:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:173:return VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:45:VoiceCallSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:142:VoiceCallSessionService()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:46:VoiceCallSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:81:voice_call_session_service = VoiceCallSessionService()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:41:VoiceCallSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:101:VoiceCallSessionService()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:51:VoiceCallSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:103:VoiceCallSessionService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:50:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:95:session = VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:48:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:79:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:139:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:141:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:165:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:167:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:191:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:193:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:39:VoiceCallSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:55:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:85:VoiceCallSessionService | None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:106:VoiceCallSession.session_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:185:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:210:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:43:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:68:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:122:call_session = VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:37:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:56:session: VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:14:VoiceCallSession
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:36:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:50:class VoiceCallSessionService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:62:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:71:return VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:88:) -> VoiceCallSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:109:return VoiceCallSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:123:"VoiceCallSessionService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:38:VoiceCallSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:60:session: VoiceCallSession
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:72:VoiceCallSession
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:31:class VoiceCallSession:
+
+--- SEARCH: VoiceSession ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:42:VoiceSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:66:) -> VoiceSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:88:session = VoiceSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_orchestrator.py:23:VoiceSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_orchestrator.py:38:class VoiceSessionOrchestrator:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_orchestrator.py:46:voice_session_service: VoiceSessionService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:8:- Create VoiceSession domain objects.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:30:VoiceSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:37:class VoiceSessionService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:46:) -> VoiceSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:57:VoiceSession
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:87:session = VoiceSession(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:24:class VoiceSession:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:28:VoiceSession,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:58:session: VoiceSession,
+
+--- SEARCH: VoiceCallRoom ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:46:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:107:room = VoiceCallRoom(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:43:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:117:room = VoiceCallRoom(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:26:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:46:class VoiceCallRoomService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:57:) -> VoiceCallRoom:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:93:return VoiceCallRoom(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:33:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:63:room: VoiceCallRoom
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:37:class VoiceCallRoom:
+
+--- SEARCH: participant ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:76:"a character participant."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:11:- Create room participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:40:from backend.app.domain.uai.voice.voice_call_participant import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:41:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:42:VoiceParticipantRole,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:109:participants=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:110:VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:111:participant_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:112:role=VoiceParticipantRole.LEARNER,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:115:VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:116:participant_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:117:role=VoiceParticipantRole.CHARACTER,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:52:from backend.app.domain.uai.voice.voice_call_participant import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:53:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:54:VoiceParticipantRole,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:93:learner = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:94:participant_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:98:VoiceParticipantRole.LEARNER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:104:character = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:105:participant_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:109:VoiceParticipantRole.CHARACTER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:121:participants=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:8:- Create call participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:30:from backend.app.domain.uai.voice.voice_call_participant import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:31:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:32:VoiceParticipantRole,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:69:learner = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:70:participant_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:74:VoiceParticipantRole.LEARNER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:80:character = VoiceCallParticipant(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:81:participant_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:85:VoiceParticipantRole.CHARACTER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:97:participants=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:11:- Hold execution participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:70:def participant_count(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:74:Return number of participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:79:self.room.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:2:Voice Call Participant Domain Model.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:4:Represents a participant inside
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:8:- Define participant identity.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:9:- Define participant role.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:26:class VoiceParticipantRole(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:31:Participant roles in a voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:44:class VoiceCallParticipant:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:46:Immutable voice call participant.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:49:participant_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:51:role: VoiceParticipantRole
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:58:Validate participant.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:61:if not self.participant_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_participant.py:63:"participant_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:9:- Hold call participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:10:- Validate participant composition.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:26:from backend.app.domain.uai.voice.voice_call_participant import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:27:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:28:VoiceParticipantRole,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:52:participants: tuple[
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:53:VoiceCallParticipant,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:70:if not self.participants:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:73:"at least one participant."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:79:for participant in self.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:80:if participant.role
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:82:VoiceParticipantRole.CHARACTER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:89:"only one character participant."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:100:participant.role
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:102:VoiceParticipantRole.CHARACTER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:103:for participant in self.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:114:for participant in self.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:115:if participant.role
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:117:VoiceParticipantRole.LEARNER
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:18:- Generate participant tokens.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:21:- Generate participant tokens.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:5:real LiveKit participant access tokens.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:9:- Grant participant access to a specific room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:65:Create a signed LiveKit participant token.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:70:LiveKit room the participant may join.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:73:Unique LiveKit participant identity.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:97:participant_identity = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:105:if not participant_identity:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:158:participant_identity,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:161:participant_identity,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:51:"participants": [
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:52:participant.participant_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:53:for participant
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:54:in context.room.participants
+
+--- SEARCH: participants ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:11:- Create room participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:109:participants=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:121:participants=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:8:- Create call participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:97:participants=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:11:- Hold execution participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:74:Return number of participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:79:self.room.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:9:- Hold call participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:52:participants: tuple[
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:70:if not self.participants:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:79:for participant in self.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:103:for participant in self.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:114:for participant in self.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:51:"participants": [
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:54:in context.room.participants
+
+--- SEARCH: character_id ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:82:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:93:"character_id": active_session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:128:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:139:"character_id": ended_session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:161:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:172:"character_id": failed_session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:82:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:119:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:155:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:176:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_character_agent.py:44:def get_character_id(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_character_agent.py:54:.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_character_runtime.py:76:def character_id(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_character_runtime.py:86:.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:68:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:80:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:140:character_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:147:character_id=call_request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:172:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:66:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:123:character_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:141:character_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:142:voice_call.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:106:character_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:107:voice_call.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:29:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:65:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:89:character_id: str | None = None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:58:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:65:character_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:81:"character_id": character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:88:.get_by_id(character_id)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:94:f"Character not found: {character_id}"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:115:character_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\character\character_resolver.py:149:"character_id": character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\context\interaction_context_builder.py:78:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\context\interaction_context_builder.py:89:"character_id": character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\context\interaction_context_builder.py:102:.resolve(character_id)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\notifications\voice_call_notification_service.py:70:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\notifications\voice_call_notification_service.py:91:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:209:character_id=voice_call.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:97:f"{request.character_id}-"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:101:character_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:116:participant_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:118:display_name=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_end_service.py:90:character_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_end_service.py:91:completed_voice_call.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_event_service.py:26:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_event_service.py:33:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:106:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:112:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:70:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:97:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:132:character_id=session.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:154:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:175:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:235:character_id=voice_call.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_management_service.py:24:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_management_service.py:41:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:102:voice_profile=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:110:character_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:127:character_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_request.py:27:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_request.py:44:if not self.character_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_request.py:46:"character_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:82:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:88:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_service.py:69:"character_id": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_service.py:70:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:76:character_id=voice_call.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:114:character_id=voice_call.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:98:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:113:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:161:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:174:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:189:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:82:character_id = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:84:.character_id()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:93:f"{character_id}-voice-room"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:95:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:68:character_id = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:71:.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:83:f"{character_id}-{session_id[:8]}"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:90:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:99:"character_id": character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\context\character_context.py:27:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\context\character_context.py:42:if not self.character_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\context\character_context.py:44:"character_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\notifications\voice_call_notification.py:110:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\notifications\voice_call_notification.py:156:if not self.character_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call.py:55:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call.py:89:if not self.character_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:99:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:136:if not self.character_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:139:"character_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:168:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:180:character_id=character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:81:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:119:if not self.character_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:40:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:68:if not self.character_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:70:"character_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:33:character_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:55:if not self.character_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:57:"character_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\characters\yaml_character_repository.py:57:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\characters\yaml_character_repository.py:64:character_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\characters\yaml_character_repository.py:75:/ f"{character_id}.yaml"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:84:if not session.character_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:102:"character_id": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:103:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:117:"character_id": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:118:session.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:68:character_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:85:character_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:119:character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:120:"character_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:163:"character_id": character_id.strip(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:184:"character_id": character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_realtime_agent.py:82:def character_id(self) -> str:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_realtime_agent.py:85:return self.context.character.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:127:voice_profile=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:133:character_id=request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:161:"character_id": request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:171:"character_id": request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:222:"character_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:248:character_id=values["character_id"],
+
+--- SEARCH: learner_id ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:81:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:92:"learner_id": active_session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:127:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:138:"learner_id": ended_session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:160:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:171:"learner_id": failed_session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:81:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:118:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:154:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_runtime.py:175:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:66:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:138:learner_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:146:learner_id=call_request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:64:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:122:learner_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:137:learner_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:138:voice_call.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:27:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:63:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_approval_service.py:114:learner_id = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_approval_service.py:115:candidate.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_approval_service.py:173:"learner_id": learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_approval_service.py:237:learner_id = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_approval_service.py:238:candidate.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_approval_service.py:261:"learner_id": learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_candidate.py:26:learner_id: str | None = None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_candidate.py:97:def normalized_learner_id(self) -> str:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_candidate.py:102:this becomes learner_id only.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\memory\memory_candidate.py:106:self.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy_governance\deletion_workflow_service.py:11:async def execute(self, learner_id: str) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\notifications\voice_call_notification_service.py:69:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\notifications\voice_call_notification_service.py:90:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:208:learner_id=voice_call.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:98:f"{request.learner_id}"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:100:learner_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:111:participant_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_end_service.py:86:learner_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_end_service.py:87:completed_voice_call.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_event_service.py:25:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_event_service.py:32:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:95:session.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:69:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:96:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:131:learner_id=session.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:153:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:174:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:234:learner_id=voice_call.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_management_service.py:23:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_management_service.py:40:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:93:learner_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_orchestrator.py:126:learner_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_request.py:23:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_request.py:34:if not self.learner_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_request.py:36:"learner_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:71:session.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:75:learner_id=voice_call.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_session_service.py:113:learner_id=voice_call.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:97:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:112:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:160:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:173:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_trigger_service.py:188:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\context\learner_context.py:30:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\context\learner_context.py:43:if not self.learner_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\context\learner_context.py:45:"learner_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\notifications\voice_call_notification.py:108:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\notifications\voice_call_notification.py:149:if not self.learner_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call.py:53:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call.py:83:if not self.learner_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:97:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:129:if not self.learner_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:132:"learner_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:167:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:179:learner_id=learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:79:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:113:if not self.learner_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:38:learner_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:62:if not self.learner_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_session.py:64:"learner_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:66:learner_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:79:learner_id:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:109:learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:110:"learner_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:161:"learner_id": learner_id.strip(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:182:"learner_id": learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:120:learner_id=request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:159:"learner_id": request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:169:"learner_id": request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:220:"learner_id",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:246:learner_id=values["learner_id"],
+
+--- SEARCH: initiator ---
+
+--- SEARCH: caller ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_policy_messages.py:111:This method keeps the policy service compatible with callers
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\dependency_checks.py:31:Caller-provided sanitized health result.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_email_service.py:110:callers and tests retain their established contract.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_decision_service.py:54:# Without this check a caller could theoretically submit:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_operational_followup.py:68:The caller owns the lifecycle of the state and email adapters. In
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_policy.py:142:callers.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:24:The caller owns the database engine/session lifecycle.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\functionality_control_composition.py:47:the caller can dispose the engine during shutdown.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\announcements\template_models_ws22_2x_additive.py:8:# They are deliberately optional to preserve all existing WS-22.1 callers.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:134:callers and contracts remain compatible.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py:144:callers can construct conversation context safely.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:48:The returned response is provided to the direct caller for
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:51:The caller MUST NOT send the returned response to Telegram again.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:204:The caller may inspect the returned response but MUST NOT
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\openai_speech_provider.py:241:Language requested by the caller.
+
+--- SEARCH: callee ---
+
+--- SEARCH: invite ---
+
+--- SEARCH: accept ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.core.remote.py:167:from backend.app.api.voice_notification_acceptance import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.core.remote.py:168:router as voice_notification_acceptance_router,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.core.remote.py:311:voice_notification_acceptance_router,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:106:from backend.app.api.voice_notification_acceptance import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:107:router as voice_notification_acceptance_router,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:364:voice_notification_acceptance_router,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:2:Voice Notification Acceptance API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:4:HTTP boundary for accepting
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:8:- Receive acceptance request.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:28:from backend.app.application.composition.voice_call_acceptance_composition import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:29:build_voice_call_acceptance_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:33:from backend.app.application.uai.voice.voice_call_acceptance_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:34:VoiceCallAcceptanceService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:39:VoiceCallAcceptanceResponseSchema,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:53:def get_voice_call_acceptance_service(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:54:) -> VoiceCallAcceptanceService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:60:build_voice_call_acceptance_service()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:66:"/notification/{notification_id}/accept",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:67:response_model=VoiceCallAcceptanceResponseSchema,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:69:def accept_voice_notification(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:71:service: VoiceCallAcceptanceService = Depends(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:72:get_voice_call_acceptance_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:74:) -> VoiceCallAcceptanceResponseSchema:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:76:Accept voice notification.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:106:service.accept_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:132:return VoiceCallAcceptanceResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:54:class VoiceCallAcceptanceResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:58:Response after accepting voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:102:"VoiceCallAcceptanceResponseSchema",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:341:# Accepted classroom message
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:346:outcome="accepted",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:2:Voice Call Acceptance Composition.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:5:acceptance workflow.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:8:- Build acceptance dependencies.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:26:from backend.app.application.uai.voice.voice_call_acceptance_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:27:VoiceCallAcceptanceService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:76:def create_voice_call_acceptance_service(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:77:) -> VoiceCallAcceptanceService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:79:Create configured acceptance workflow.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:82:acceptance and reconnect flows
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:124:return VoiceCallAcceptanceService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:153:def build_voice_call_acceptance_service(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:154:) -> VoiceCallAcceptanceService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:163:create_voice_call_acceptance_service()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:169:"create_voice_call_acceptance_service",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_acceptance_composition.py:170:"build_voice_call_acceptance_service",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_event_service.py:26:- accept sanitized operational events
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:2:Voice Call Acceptance Service.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:5:accepting a learner voice call invitation.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:8:- Accept notification action.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:14:- Record acceptance event.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:84:class VoiceCallAcceptanceService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:86:Workflow service for accepting
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:112:def accept_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:118:Accept notification and prepare
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:211:VoiceCallEventType.ACCEPTED
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_acceptance_service.py:226:"VoiceCallAcceptanceService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:166:def accept_invitation(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:173:Accept invitation.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_invitation_service.py:198:.mark_accepted()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\notifications\voice_call_notification.py:221:Mark learner accepted
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:52:ACCEPTED = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_event.py:53:"voice_call_accepted"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:48:ACCEPTED = "accepted"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:198:def mark_accepted(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:202:Mark invitation accepted.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_invitation.py:209:VoiceCallInvitationStatus.ACCEPTED
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:67:The domain therefore accepts both forms
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py:265:"status": "accepted",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\academy_notification_telegram.py:45:"status": "accepted",
+
+--- SEARCH: room ---
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:73:if not context.room.has_character():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\voice\voice_call_execution_runtime.py:75:"Voice call room requires "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\operations_center.py:81:@router.get("/chat-operations/private-classroom")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\operations_center.py:82:async def get_private_classroom_operations() -> dict[str, Any]:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\operations_center.py:83:return await chat_operations_api.get_private_classroom_details()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:79:room_name: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:166:room = result["room"]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:171:room_name=room["room_name"],
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:174:provider=room["provider"],
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:60:"Sorry, the Telegram classroom is temporarily unavailable. "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:152:event_type="telegram_classroom_functionality_control",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:167:# permit Telegram classroom processing.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:173:event_type="telegram_classroom_functionality_control",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:211:event_type="telegram_classroom_authorization",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:220:event_type="telegram_classroom_authorization",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:257:event_type="telegram_classroom_rate_limit",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:273:event_type="telegram_classroom_rate_limit",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:303:"telegram_classroom_abuse_protection"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:321:"telegram_classroom_abuse_protection"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:341:# Accepted classroom message
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:344:event_type="telegram_classroom_message",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:382:event_type="telegram_classroom_conversation",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py:401:event_type="telegram_classroom_conversation",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\email_workflow.py:13:classroom_url: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\email_workflow.py:35:classroom_url = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\email_workflow.py:42:classroom_url=classroom_url,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\email_workflow.py:44:return classroom_url
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\models.py:65:User can enter private Telegram classroom.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py:29:Application service for Beta Telegram classroom conversations.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_observability.py:15:"""Non-blocking operational telemetry for the Telegram classroom.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_observability.py:59:"Telegram classroom event type=%s outcome=%s "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_policy_messages.py:54:"You have reached the classroom message "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_policy_messages.py:199:f"You can continue your classroom "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\policies\telegram_policy_messages.py:205:f"You can continue your classroom "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\livekit_voice_composition.py:16:- Connect to LiveKit rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:48:from backend.app.application.uai.voice.voice_room_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:49:VoiceRoomService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:54:from backend.app.infrastructure.voice.voice_room_adapter import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:55:VoiceRoomAdapter,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:64:room_service = VoiceRoomService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:65:room_adapter=VoiceRoomAdapter(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_call_lifecycle_composition.py:71:room_service=room_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:8:- Build room services.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:27:from backend.app.application.uai.voice.voice_room_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:28:VoiceRoomService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:32:from backend.app.infrastructure.voice.voice_room_adapter import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:33:VoiceRoomAdapter,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:50:room_service = VoiceRoomService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:51:room_adapter=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:52:VoiceRoomAdapter()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_execution_coordinator_composition.py:63:room_service=room_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:32:from backend.app.application.uai.voice.voice_room_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:33:VoiceRoomService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:56:from backend.app.infrastructure.voice.voice_room_adapter import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:57:VoiceRoomAdapter,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:71:room_service = VoiceRoomService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:72:room_adapter=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:73:VoiceRoomAdapter()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\voice_lifecycle_composition.py:83:room_service=room_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_models.py:154:private_classroom: DashboardSurfaceStatus
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_models.py:171:"private_classroom": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_models.py:172:self.private_classroom.as_dict()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_service.py:100:is OperationalSurface.PRIVATE_CLASSROOM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_service.py:114:is OperationalSurface.PRIVATE_CLASSROOM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_service.py:131:private_classroom=self._surface_status(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_service.py:133:surface=OperationalSurface.PRIVATE_CLASSROOM,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_dashboard_service.py:283:if surface is OperationalSurface.PRIVATE_CLASSROOM:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_event.py:13:Private classroom and announcement-group operations
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_event.py:17:PRIVATE_CLASSROOM = "private_classroom"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_event_service.py:212:"private_classroom_incidents": sum(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_event_service.py:214:== "private_classroom"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py:47:private_classroom_events: tuple[
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py:102:"private_classroom_events": [
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py:104:for event in self.private_classroom_events
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py:170:is OperationalSurface.PRIVATE_CLASSROOM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\health\operational_health_snapshot.py:190:private_classroom_events=private_events,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:11:from backend.app.application.operations_center.private_classroom_operations_api import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:12:PrivateClassroomOperationsAPI,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:23:private_classroom_api: PrivateClassroomOperationsAPI | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:30:self._private_classroom_api = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:31:private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:32:if private_classroom_api is not None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:33:else PrivateClassroomOperationsAPI(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:49:async def get_private_classroom_details(self) -> dict[str, Any]:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\chat_operations_dashboard_api.py:50:return await self._private_classroom_api.get_details()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:30:from backend.app.application.operations_center.private_classroom_operations_api import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:31:PrivateClassroomOperationsAPI,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:85:private_classroom_api = PrivateClassroomOperationsAPI(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:95:private_classroom_api=private_classroom_api,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:108:self._private_classroom_api = private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:133:def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:134:return self._private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:180:def create_private_classroom_operations_api() -> PrivateClassroomOperationsAPI:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:181:return OperationsCenterComposition().private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\dashboard_composition.py:193:"create_private_classroom_operations_api",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:2:WS-21.17 Private Classroom Operations application API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:4:Read-only, fresh operational detail for the Private Classroom surface.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:26:_PRIVATE_CLASSROOM_SURFACE = "private_classroom"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:29:class PrivateClassroomOperationsAPI:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:46:Build a fresh Private Classroom operational snapshot.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:70:== _PRIVATE_CLASSROOM_SURFACE
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:81:"surface": _PRIVATE_CLASSROOM_SURFACE,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:82:"status": snapshot.private_classroom.status.value,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:87:in snapshot.private_classroom.dependencies
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:90:snapshot.private_classroom
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:96:snapshot.private_classroom
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_api.py:187:"PrivateClassroomOperationsAPI",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:2:WS-21.17 Private Classroom Operations composition.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:5:Private Classroom operational detail API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:14:-> PrivateClassroomOperationsAPI
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:49:from backend.app.application.operations_center.private_classroom_operations_api import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:50:PrivateClassroomOperationsAPI,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:54:class PrivateClassroomOperationsComposition:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:85:self._private_classroom_api = PrivateClassroomOperationsAPI(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:100:def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:101:"""Return the WS-21.17 Private Classroom application API."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:102:return self._private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:105:def create_private_classroom_operations_api() -> (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:106:PrivateClassroomOperationsAPI
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:109:Create the WS-21.17 Private Classroom application boundary.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:112:PrivateClassroomOperationsComposition()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:113:.private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:118:"PrivateClassroomOperationsComposition",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\private_classroom_operations_composition.py:119:"create_private_classroom_operations_api",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:2:WS-21.17 Private Classroom Operations composition.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:5:Private Classroom operational detail API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:14:-> PrivateClassroomOperationsAPI
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:49:from backend.app.application.operations_center.private_classroom_operations_api import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:50:PrivateClassroomOperationsAPI,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:54:class PrivateClassroomOperationsComposition:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:85:self._private_classroom_api = PrivateClassroomOperationsAPI(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:100:def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:101:"""Return the WS-21.17 Private Classroom application API."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:102:return self._private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:105:def create_private_classroom_operations_api() -> (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:106:PrivateClassroomOperationsAPI
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:109:Create the WS-21.17 Private Classroom application boundary.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:112:PrivateClassroomOperationsComposition()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:113:.private_classroom_api
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:118:"PrivateClassroomOperationsComposition",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__init__.py:119:"create_private_classroom_operations_api",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py:16:- Manage LiveKit rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:11:- Create room participants.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:45:from backend.app.domain.uai.voice.voice_call_room import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:46:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:107:room = VoiceCallRoom(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:108:room_id=session.session_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_context_factory.py:125:room=room,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:8:- Prepare voice room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:24:from backend.app.application.uai.voice.voice_room_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:25:VoiceRoomService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:63:room_service: VoiceRoomService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:75:Prepare room and execute runtime.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:79:room = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:80:self.room_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:81:.prepare_room(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:96:"room": room,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:108:Prepare room only.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:113:self.room_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_coordinator.py:114:.prepare_room(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:42:from backend.app.domain.uai.voice.voice_call_room import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:43:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:117:room = VoiceCallRoom(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:118:room_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_execution_service.py:130:room=room,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:98:Prepare room, execute call,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:140:room_name=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_lifecycle_service.py:141:result["room"]["room_name"]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:2:Voice Call Room Service.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:5:creating logical voice call rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:9:- Build voice room composition.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:10:- Return domain room model.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:25:from backend.app.domain.uai.voice.voice_call_room import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:26:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:46:class VoiceCallRoomService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:48:Creates voice call rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:53:def create_room(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:57:) -> VoiceCallRoom:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:59:Create room for a voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:93:return VoiceCallRoom(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_room_service.py:94:room_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_call_service.py:66:"room_name": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:11:- Request LiveKit room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:92:room_name=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:93:f"{character_id}-voice-room"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_character_session_service.py:102:self.livekit_adapter.create_room_configuration(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_connection_service.py:52:room_name: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_connection_service.py:62:room_name=room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:2:Voice Room Service.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:5:preparing voice room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:9:- Request room preparation.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:11:room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:26:from backend.app.infrastructure.voice.voice_room_adapter import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:27:VoiceRoomAdapter,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:41:class VoiceRoomService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:44:voice room preparation.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:47:room_adapter: VoiceRoomAdapter
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:51:def prepare_room(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:57:Prepare room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:62:self.room_adapter
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_room_service.py:63:.create_room_configuration(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_orchestrator.py:81:.create_room_configuration(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:15:- Create rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:82:room_name = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_session_service.py:89:room_name=room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:10:- Hold voice call room information.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:32:from backend.app.domain.uai.voice.voice_call_room import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:33:VoiceCallRoom,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:63:room: VoiceCallRoom
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_execution_context.py:79:self.room.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:2:Voice Call Room Domain Model.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:4:Represents the logical room composition
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:8:- Define room identity.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:37:class VoiceCallRoom:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:39:Immutable voice call room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:50:room_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:61:Validate room composition.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:64:if not self.room_id.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:66:"room_id cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:72:"Voice call room requires "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:88:"Voice call room supports "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call_room.py:96:in the room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:5:required to connect to a voice room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:9:- Preserve room and provider information.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:46:room_name: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:82:if not self.room_name.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_connection_token.py:85:"room_name cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:31:room_name: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:50:if not self.room_name.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_session.py:52:"room_name cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\in_memory_beta_email_sender.py:12:classroom_url: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\in_memory_beta_email_sender.py:17:"classroom_url": classroom_url,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\telegram_health_check.py:18:No classroom or announcement-group message is sent.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_announcement_client.py:25:- execute classroom conversations;
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:38:- deliver classroom responses returned by the adapter;
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:57:The adapter owns Telegram classroom response delivery.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:4:Infrastructure boundary for LiveKit room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:43:into LiveKit room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:55:def create_room_configuration(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:61:Prepare LiveKit room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:71:LiveKit room metadata.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:76:if not session.room_name.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:79:"Voice room name cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:94:"Preparing LiveKit room configuration",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:99:"room_name": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:100:session.room_name
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:114:"room_name": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_adapter.py:115:session.room_name
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:65:room_name: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:72:Dispatch the EasyChatBot voice agent to a room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:76:room_name:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:77:LiveKit room that the agent must join.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:104:room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:105:"room_name",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:180:"room_name": room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:206:room=room_name.strip(),
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_agent_dispatcher.py:219:"room_name": room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:9:- Grant participant access to a specific room.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:60:room_name: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:69:room_name:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:70:LiveKit room the participant may join.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:81:if not room_name.strip():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:84:"room_name cannot be empty."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:170:room_join=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:171:room=room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_token_service.py:189:room_name=room_name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_runtime_adapter.py:18:- Manage LiveKit rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:158:"room_name": ctx.room.name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:168:"room_name": ctx.room.name,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py:183:room=ctx.room,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:2:Voice Room Infrastructure Adapter.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:4:Infrastructure boundary for voice rooms.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:7:- Prepare room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:8:- Abstract voice room provider details.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:26:class VoiceRoomAdapter:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:28:Provider-independent voice room adapter.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:31:- Generates room metadata only.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:37:def create_room_configuration(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:43:Create room configuration.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:48:"room_name": (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:49:context.room.room_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\voice_room_adapter.py:54:in context.room.participants
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_private_chat_gate.py:9:"""Authorization boundary for Beta classroom Telegram interactions.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_private_chat_gate.py:39:"""Return whether the Telegram user may use the private classroom."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_private_chat_gate.py:63:"Beta classroom access is only available "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py:58:"your classroom."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py:67:"Your classroom connection link is "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py:102:"?? Your EasyChatBot classroom is now connected.\n\n"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:19:Telegram transport adapter for the Beta private classroom.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:23:- enforce private-chat-only classroom access;
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:45:The adapter is the SINGLE owner of classroom Telegram response
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:171:# Private classroom message flow
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:180:Process one Telegram classroom message.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:335:"Telegram classroom conversation processing failed."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py:342:"your classroom message. "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\private_chat_gate.py:7:"""Authorization gate for all Beta classroom interactions."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\private_chat_gate.py:38:"Beta classroom access is only available in a private Telegram chat."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\operations_source.py:104:value=dashboard.private_classroom.incidents.open
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\operations_source.py:112:value=dashboard.private_classroom.incidents.critical
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\operations_source.py:121:dashboard.private_classroom.metrics.message_failures
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\operations_source.py:131:dashboard.private_classroom.metrics.rate_limit_events
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\operations_source.py:141:dashboard.private_classroom.metrics.abuse_events
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\speech\speech_provider.py:22:- Manage LiveKit rooms.
+
+============================================================
+API / TRIGGER ENTRY POINTS
+============================================================
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_controls.py:3:from collections.abc import Awaitable, Callable
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_controls.py:37:AdminAuthorizer = Callable[[], Awaitable[bool]]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_operations_approval.py:3:from collections.abc import Awaitable, Callable
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_operations_approval.py:13:AdminAuthorizer = Callable[[], Awaitable[bool]]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\cybersecurity_intelligence.py:42:- no direct provider calls from the API;
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:2:Voice Calls API Router.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:5:character voice calls.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:34:from backend.app.application.uai.voice.voice_call_request import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:35:VoiceCallRequest,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:38:from backend.app.application.uai.voice.voice_call_lifecycle_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:39:VoiceCallLifecycleService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:42:from backend.app.application.uai.voice.voice_call_context_factory import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:43:VoiceCallContextFactory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:46:from backend.app.application.composition.voice_call_lifecycle_composition import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:47:build_voice_call_lifecycle_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:52:prefix="/voice",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:54:"voice",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:59:class VoiceCallRequestModel(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:72:class VoiceCallResponseModel(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:89:def get_voice_call_lifecycle_service(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:90:) -> VoiceCallLifecycleService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:99:build_voice_call_lifecycle_service()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:103:def get_voice_call_context_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:104:) -> VoiceCallContextFactory:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:112:return VoiceCallContextFactory()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:116:"/call",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:117:response_model=VoiceCallResponseModel,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:119:def prepare_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:120:request: VoiceCallRequestModel,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:121:service: VoiceCallLifecycleService = Depends(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:122:get_voice_call_lifecycle_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:124:context_factory: VoiceCallContextFactory = Depends(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:125:get_voice_call_context_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:127:) -> VoiceCallResponseModel:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:129:Prepare and start a character voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:131:A persistent VoiceCall is created first so that
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:137:call_request = VoiceCallRequest(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:144:voice_call = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:145:service.create_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:146:learner_id=call_request.learner_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:147:character_id=call_request.character_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:148:world_id=call_request.world_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:149:language_code=call_request.language_code,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:155:request=call_request,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:156:voice_call=voice_call,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:161:service.start_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py:170:return VoiceCallResponseModel(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:2:Voice Call Trigger API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:5:voice call invitation workflows.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:14:- Execute voice runtime.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:32:from backend.app.application.uai.voice.voice_call_trigger_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:33:VoiceCallTriggerService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:37:from backend.app.application.composition.voice_call_trigger_composition import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:38:build_voice_call_trigger_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:42:from backend.app.domain.uai.notifications.voice_call_notification import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:43:VoiceCallNotificationChannel,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:49:prefix="/voice",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:51:"voice-trigger",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:57:class VoiceCallTriggerRequest(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:72:channel: VoiceCallNotificationChannel = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:73:VoiceCallNotificationChannel.INBOX
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:78:class VoiceCallTriggerResponse(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:85:voice_call_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:93:def get_voice_call_trigger_service(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:94:) -> VoiceCallTriggerService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:100:build_voice_call_trigger_service()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:107:response_model=VoiceCallTriggerResponse,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:109:def trigger_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:110:request: VoiceCallTriggerRequest,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:111:service: VoiceCallTriggerService = Depends(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:112:get_voice_call_trigger_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:114:) -> VoiceCallTriggerResponse:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:116:Trigger a voice call workflow.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:121:service.trigger_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:131:return VoiceCallTriggerResponse(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:132:voice_call_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_call_trigger.py:133:result["voice_call"].id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:2:Voice Notification Acceptance API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:4:HTTP boundary for accepting
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:5:voice call notifications.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:8:- Receive acceptance request.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:28:from backend.app.application.composition.voice_call_acceptance_composition import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:29:build_voice_call_acceptance_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:33:from backend.app.application.uai.voice.voice_call_acceptance_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:34:VoiceCallAcceptanceService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:38:from backend.app.api.schemas.voice_call import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:39:VoiceCallAcceptanceResponseSchema,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:45:prefix="/voice",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:47:"voice-notification",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:53:def get_voice_call_acceptance_service(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:54:) -> VoiceCallAcceptanceService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:60:build_voice_call_acceptance_service()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:66:"/notification/{notification_id}/accept",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:67:response_model=VoiceCallAcceptanceResponseSchema,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:69:def accept_voice_notification(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:71:service: VoiceCallAcceptanceService = Depends(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:72:get_voice_call_acceptance_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:74:) -> VoiceCallAcceptanceResponseSchema:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:76:Accept voice notification.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:81:service.voice_call_notification_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:98:"Voice notification not found."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:106:service.accept_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:121:voice_call = result[
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:122:"voice_call"
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:132:return VoiceCallAcceptanceResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:133:voice_call_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:134:voice_call.id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:138:voice_call.learner_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_notification_acceptance.py:142:voice_call.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:2:Voice Call Reconnect API.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:5:existing voice calls.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:26:from backend.app.application.composition.voice_lifecycle_composition import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:27:build_voice_call_lifecycle_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:30:from backend.app.api.schemas.voice_call import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:31:VoiceReconnectResponseSchema,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:36:prefix="/voice",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:38:"voice-reconnect",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:44:"/call/{voice_call_id}/reconnect",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:45:response_model=VoiceReconnectResponseSchema,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:47:def reconnect_voice_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:48:voice_call_id: str,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:49:) -> VoiceReconnectResponseSchema:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:51:Reconnect an existing voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:59:build_voice_call_lifecycle_service()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:62:if service.voice_call_management_service is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:64:"Voice call management service "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:68:if service.voice_call_session_service is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:70:"Voice call session service "
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:74:voice_call = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:75:service.voice_call_management_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:76:.get_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:77:voice_call_id=voice_call_id,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:81:if voice_call is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:85:"Voice call not found."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:91:service.reconnect_call(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:92:voice_call=voice_call,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:102:return VoiceReconnectResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:103:voice_call_id=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:104:voice_call.id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:107:voice_call.character_id
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_reconnect_router.py:110:voice_call.language_code
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:2:Voice Call API Schemas.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:20:class VoiceCallTriggerRequestSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:24:Request to trigger voice workflow.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:39:class VoiceCallTriggerResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:43:Response after triggering voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:46:voice_call_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:54:class VoiceCallAcceptanceResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:58:Response after accepting voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:61:voice_call_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:73:class VoiceReconnectResponseSchema(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:77:Response for reconnecting voice call.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:79:Returns restored voice identity
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:83:voice_call_id: str
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:100:"VoiceCallTriggerRequestSchema",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:101:"VoiceCallTriggerResponseSchema",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:102:"VoiceCallAcceptanceResponseSchema",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\voice_call.py:103:"VoiceReconnectResponseSchema",

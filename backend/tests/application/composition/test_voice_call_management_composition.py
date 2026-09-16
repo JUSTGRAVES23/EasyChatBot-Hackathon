@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Management Composition.
 
 Validates that the composition root
@@ -107,3 +107,4 @@ def test_repository_can_store_voice_call():
     assert result.id == (
         voice_call.id
     )
+

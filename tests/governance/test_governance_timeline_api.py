@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 
 from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
 
-from backend.governance.api.governance_timeline_api import router
+from governance.api.governance_timeline_api import router
 
 
 @pytest.mark.asyncio
@@ -23,3 +23,4 @@ async def test_timeline_api():
 
     assert response.status_code == 200
     assert "events" in response.json()
+

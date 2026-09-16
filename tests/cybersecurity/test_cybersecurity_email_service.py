@@ -5,7 +5,7 @@ Tests for Cybersecurity Email Service.
 import pytest
 
 
-from backend.cybersecurity.email.cybersecurity_email_service import (
+from cybersecurity.email.cybersecurity_email_service import (
     CybersecurityEmailService,
 )
 
@@ -83,4 +83,5 @@ async def test_email_service_prepares_critical_alert():
         ==
         "davdbarbero1999@gmail.com"
     )
+
 

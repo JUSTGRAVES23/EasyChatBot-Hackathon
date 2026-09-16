@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import AnnouncementTemplate
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import AnnouncementTemplate
 
 
 class AnnouncementTemplateRepository(ABC):
@@ -32,3 +32,4 @@ class PublicationRepository(ABC):
     @abstractmethod
     def list_all(self) -> tuple[Publication, ...]:
         raise NotImplementedError
+

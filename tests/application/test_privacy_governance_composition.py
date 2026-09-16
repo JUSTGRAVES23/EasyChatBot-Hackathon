@@ -1,16 +1,16 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from unittest.mock import Mock
 
-from backend.app.application.privacy.privacy_approval_email_service import (
+from app.application.privacy.privacy_approval_email_service import (
     PrivacyApprovalEmailService,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     PrivacyGovernanceComposition,
     create_privacy_governance_composition,
     reset_privacy_governance_composition_for_tests,
 )
-from backend.app.application.privacy.privacy_governance_gate import (
+from app.application.privacy.privacy_governance_gate import (
     PrivacyGovernanceGate,
 )
 
@@ -105,7 +105,7 @@ def test_explicit_validation_service_is_injected() -> None:
 def test_runtime_composition_is_singleton() -> None:
     reset_privacy_governance_composition_for_tests()
 
-    from backend.app.application.privacy.privacy_governance_composition import (
+    from app.application.privacy.privacy_governance_composition import (
         get_privacy_governance_composition,
     )
 
@@ -120,7 +120,7 @@ def test_runtime_composition_is_singleton() -> None:
 def test_runtime_composition_can_be_reset_for_tests() -> None:
     reset_privacy_governance_composition_for_tests()
 
-    from backend.app.application.privacy.privacy_governance_composition import (
+    from app.application.privacy.privacy_governance_composition import (
         get_privacy_governance_composition,
     )
 

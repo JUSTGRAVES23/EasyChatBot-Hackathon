@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Query Generation Skill.
 
 Generates bounded, provider-independent discovery queries from
@@ -45,14 +45,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     DiscoveryProfile,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

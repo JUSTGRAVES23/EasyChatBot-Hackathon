@@ -2,7 +2,7 @@
 Tests for cybersecurity notification policy.
 """
 
-from backend.cybersecurity.notifications.policy import (
+from cybersecurity.notifications.policy import (
     CybersecurityNotificationPolicy,
 )
 
@@ -55,4 +55,5 @@ def test_notification_policy_blocks_critical_alert_when_disabled():
         )
         is False
     )
+
 

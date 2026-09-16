@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 
-from backend.app.application.identity.authentication_service import (
+from app.application.identity.authentication_service import (
     AuthenticationError,
     AuthenticationService,
 )
@@ -139,3 +139,4 @@ async def logout(
         key="easychatbot_session",
         path="/",
     )
+

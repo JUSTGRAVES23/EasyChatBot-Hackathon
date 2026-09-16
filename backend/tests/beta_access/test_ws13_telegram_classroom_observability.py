@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -626,3 +626,4 @@ async def test_ws13_observability_event_does_not_modify_conversation_response():
 
     assert response == "Bonjour !"
     assert observability.events[0]["outcome"] == "success"
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 API test composition fixtures.
 
 Provides controlled application dependencies
@@ -23,11 +23,11 @@ from src.ai_runtime.capabilities.gateway import (
     CapabilityGateway,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.api.routes import (
+from api.routes import (
     configure_external_runtime_service,
 )
 

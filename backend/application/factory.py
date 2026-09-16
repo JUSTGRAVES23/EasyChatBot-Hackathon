@@ -21,10 +21,10 @@ from src.ai_runtime.composition import (
     create_external_runtime_gateway,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
-from backend.services.runtime.runtime_application_service import (
+from services.runtime.runtime_application_service import (
     RuntimeApplicationService,
 )
 
@@ -112,3 +112,4 @@ class ApplicationFactory:
         return RuntimeApplicationService(
             runtime_service=runtime_service,
         )
+

@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.publication_status import (
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.publication_status import (
     PublicationStatus,
 )
-from backend.app.domain.announcements.template_models import (
+from app.domain.announcements.template_models import (
     PublicationStatus as TemplatePublicationStatus,
     PublicationType,
 )

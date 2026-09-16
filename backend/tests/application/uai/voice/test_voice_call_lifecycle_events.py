@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Lifecycle Events.
 
 Validates business lifecycle audit trail.
@@ -7,16 +7,16 @@ Flow:
 
 VoiceCall
     |
-    ↓
+    â†“
 Created
     |
-    ↓
+    â†“
 Accepted
     |
-    ↓
+    â†“
 Reconnected
     |
-    ↓
+    â†“
 Events
 
 
@@ -234,3 +234,6 @@ def test_voice_events_are_isolated_per_call():
     assert len(first_events) == 1
 
     assert second_events == []
+
+
+

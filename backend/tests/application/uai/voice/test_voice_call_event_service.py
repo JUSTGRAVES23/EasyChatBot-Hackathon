@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Event Service.
 
 Validates:
@@ -206,3 +206,6 @@ def test_events_are_isolated_by_voice_call():
     assert events[0].voice_call_id == (
         "vc-001"
     )
+
+
+

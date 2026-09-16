@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime startup composition tests.
 
 Validates application startup wiring.
@@ -31,12 +31,12 @@ from __future__ import annotations
 import pytest
 
 
-from backend.application.bootstrap import (
+from application.bootstrap import (
     bootstrap_application,
     reset_bootstrap,
 )
 
-from backend.runtime.external_runtime_container import (
+from runtime.external_runtime_container import (
     get_external_runtime_service,
 )
 

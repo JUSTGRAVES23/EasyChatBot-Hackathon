@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from backend.governance.api.governance_change_api import router
+from governance.api.governance_change_api import router
 
 
 @pytest.mark.asyncio
@@ -38,3 +38,4 @@ async def test_create_change_api():
     assert body["change_type"] == "PROVIDER"
     assert body["risk"] == "CRITICAL"
     assert body["status"] == "PENDING_APPROVAL"
+

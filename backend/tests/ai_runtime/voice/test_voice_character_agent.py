@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Character Agent.
 """
 
@@ -101,3 +101,5 @@ def test_voice_character_agent_keeps_character_identity():
     assert agent.get_language_code() == (
         "fr"
     )
+
+

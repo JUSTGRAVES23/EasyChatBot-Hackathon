@@ -1,0 +1,1354 @@
+======================================================================
+M2-C.2 NEXT CURRENT SOURCE INSPECTION
+======================================================================
+Repository: C:\AI Folder\EasyChatBot-Hackathon\backend
+Generated: 2026-09-15 11:50:10
+
+
+======================================================================
+FILE: .\app\application\private_chat\repository.py
+======================================================================
+from __future__ import annotations
+
+from typing import Protocol
+from uuid import UUID
+
+from .models import PrivateChatConversation, PrivateChatMessage
+
+
+class PrivateChatRepository(Protocol):
+    def get_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation | None:
+        ...
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation:
+        ...
+
+    def save_message(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        message: PrivateChatMessage,
+    ) -> PrivateChatMessage:
+        ...
+
+    def get_recent_messages(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[PrivateChatMessage]:
+        ...
+
+    def touch_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> None:
+        ...
+
+======================================================================
+FILE: .\app\application\private_chat\service.py
+======================================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.application.private_chat.models import (
+    PrivateChatConversation,
+    PrivateChatMessage,
+    PrivateChatResponse,
+)
+from app.application.private_chat.repository import PrivateChatRepository
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+
+
+MAX_PRIVATE_CHAT_MESSAGE_LENGTH = 10_000
+
+
+class PrivateChatService:
+    """
+    Application service for authenticated World private chat.
+
+    Security boundaries:
+    - user identity is supplied by the authenticated application layer;
+    - conversation ownership is enforced by user_id + world_id;
+    - World configuration is resolved server-side;
+    - response language is resolved server-side;
+    - client input cannot select provider, character, or response language;
+    - message length is enforced before runtime execution or persistence;
+    - conversation activity timestamps are persisted through the repository.
+    """
+
+    def __init__(
+        self,
+        *,
+        repository: PrivateChatRepository,
+        world_resolver: WorldResolver,
+        language_response_policy: LanguageResponsePolicy,
+        conversation_runtime: ConversationRuntime,
+    ) -> None:
+        self._repository = repository
+        self._world_resolver = world_resolver
+        self._language_response_policy = language_response_policy
+        self._conversation_runtime = conversation_runtime
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation:
+        """
+        Create a new private conversation for an authenticated user.
+
+        The World is resolved before persistence so that an invalid or
+        unknown World cannot create a conversation.
+        """
+        if not user_id or not user_id.strip():
+            raise ValueError("user_id is required")
+
+        if not world_id or not world_id.strip():
+            raise ValueError("world_id is required")
+
+        normalized_user_id = user_id.strip()
+        normalized_world_id = world_id.strip()
+
+        self._world_resolver.resolve(normalized_world_id)
+
+        return self._repository.create_conversation(
+            user_id=normalized_user_id,
+            world_id=normalized_world_id,
+        )
+
+    async def send_message(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+        conversation_id: UUID,
+        message: str,
+        character_instruction: str,
+    ) -> PrivateChatResponse:
+        """
+        Process one authenticated private-chat message.
+
+        Processing order:
+
+        1. Validate application invariants.
+        2. Resolve the canonical World.
+        3. Verify conversation ownership and World isolation.
+        4. Resolve response language from World policy.
+        5. Execute the asynchronous conversation runtime.
+        6. Persist the user message.
+        7. Persist the assistant message.
+        8. Persist conversation activity timestamp.
+        9. Return the application response.
+
+        Provider execution happens before message persistence so a failed
+        provider/runtime call does not create a successful-looking
+        assistant message.
+        """
+        if not user_id or not user_id.strip():
+            raise ValueError("user_id is required")
+
+        if not world_id or not world_id.strip():
+            raise ValueError("world_id is required")
+
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("message is required")
+
+        if len(message) > MAX_PRIVATE_CHAT_MESSAGE_LENGTH:
+            raise ValueError(
+                "message exceeds the maximum allowed length of "
+                f"{MAX_PRIVATE_CHAT_MESSAGE_LENGTH} characters"
+            )
+
+        if not character_instruction or not character_instruction.strip():
+            raise ValueError("character_instruction is required")
+
+        normalized_user_id = user_id.strip()
+        normalized_world_id = world_id.strip()
+        normalized_message = message.strip()
+        normalized_character_instruction = character_instruction.strip()
+
+        # Resolve the canonical World before accessing the conversation.
+        world = self._world_resolver.resolve(normalized_world_id)
+
+        # The repository enforces both ownership and World isolation.
+        conversation = self._repository.get_conversation(
+            conversation_id=conversation_id,
+            user_id=normalized_user_id,
+            world_id=normalized_world_id,
+        )
+
+        if conversation is None:
+            raise ValueError("Conversation not found")
+
+        # Response language remains an application-controlled setting.
+        response_language = (
+            self._language_response_policy.resolve_response_language(
+                world=world,
+                user_message=normalized_message,
+            )
+        )
+
+        # ConversationRuntime is asynchronous because provider execution
+        # is asynchronous. Never persist messages before this succeeds.
+        response = await self._conversation_runtime.respond(
+            character_instruction=normalized_character_instruction,
+            learner_message=normalized_message,
+        )
+
+        now = datetime.now(timezone.utc)
+
+        user_message = PrivateChatMessage(
+            conversation_id=conversation_id,
+            role="user",
+            content=normalized_message,
+            created_at=now,
+        )
+
+        assistant_message = PrivateChatMessage(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=response,
+            created_at=now,
+        )
+
+        self._repository.save_message(
+            conversation_id=conversation_id,
+            user_id=normalized_user_id,
+            world_id=normalized_world_id,
+            message=user_message,
+        )
+
+        self._repository.save_message(
+            conversation_id=conversation_id,
+            user_id=normalized_user_id,
+            world_id=normalized_world_id,
+            message=assistant_message,
+        )
+
+        # Persist updated_at in the database.
+        self._repository.touch_conversation(
+            conversation_id=conversation_id,
+            user_id=normalized_user_id,
+            world_id=normalized_world_id,
+        )
+
+        updated_conversation = PrivateChatConversation(
+            conversation_id=conversation.conversation_id,
+            user_id=conversation.user_id,
+            world_id=conversation.world_id,
+            created_at=conversation.created_at,
+            updated_at=now,
+        )
+
+        return PrivateChatResponse(
+            conversation=updated_conversation,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            response_language=response_language,
+        )
+
+======================================================================
+FILE: .\app\application\composition\private_chat_composition.py
+======================================================================
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from app.application.private_chat.service import PrivateChatService
+from app.application.uai.language.language_detector import LanguageDetector
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.infrastructure.persistence.postgresql_private_chat_repository import (
+    PostgreSQLPrivateChatRepository,
+)
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+
+
+def build_private_chat_service_factory(
+    *,
+    session_factory: sessionmaker[Session],
+    conversation_runtime: ConversationRuntime,
+    language_detector: LanguageDetector,
+    character_instruction: str,
+) -> Callable[[], PrivateChatService]:
+    """Build a request-scoped private-chat service factory.
+
+    The SQLAlchemy Session is created for each request and owned by the
+    returned service factory invocation. The service itself must not outlive
+    the request.
+    """
+
+    if session_factory is None:
+        raise ValueError("session_factory is required.")
+    if conversation_runtime is None:
+        raise ValueError("conversation_runtime is required.")
+    if language_detector is None:
+        raise ValueError("language_detector is required.")
+    if not character_instruction.strip():
+        raise ValueError("character_instruction is required.")
+
+    app_root = Path(__file__).resolve().parents[2]
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds",
+    )
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    language_response_policy = LanguageResponsePolicy()
+
+    def factory() -> PrivateChatService:
+        session = session_factory()
+        repository = PostgreSQLPrivateChatRepository(session)
+
+        # The FastAPI boundary owns the session lifetime. The service uses the
+        # synchronous repository only for short persistence operations.
+        return PrivateChatService(
+            repository=repository,
+            world_resolver=world_resolver,
+            language_response_policy=language_response_policy,
+            language_detector=language_detector,
+            conversation_runtime=conversation_runtime,
+            character_instruction=character_instruction,
+            session=session,
+        )
+
+    return factory
+
+======================================================================
+FILE: .\app\infrastructure\persistence\postgresql_private_chat_repository.py
+======================================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.application.private_chat.models import (
+    PrivateChatConversation,
+    PrivateChatMessage,
+)
+from app.application.private_chat.repository import PrivateChatRepository
+from app.infrastructure.persistence.private_chat_models import (
+    PrivateChatConversationRecord,
+    PrivateChatMessageRecord,
+)
+
+
+class PostgreSQLPrivateChatRepository(PrivateChatRepository):
+    """PostgreSQL adapter for authenticated private-chat persistence."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation | None:
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+
+        if record is None:
+            return None
+
+        return self._to_conversation(record)
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation:
+        now = datetime.now(timezone.utc)
+
+        record = PrivateChatConversationRecord(
+            user_id=user_id,
+            world_id=world_id,
+            created_at=now,
+            updated_at=now,
+        )
+
+        self._session.add(record)
+        self._session.flush()
+
+        return self._to_conversation(record)
+
+    def save_message(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        message: PrivateChatMessage,
+    ) -> PrivateChatMessage:
+        record = PrivateChatMessageRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+            role=message.role,
+            content=message.content,
+            created_at=message.created_at,
+        )
+
+        self._session.add(record)
+        self._session.flush()
+
+        return self._to_message(record)
+
+    def get_recent_messages(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[PrivateChatMessage]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        records = self._session.scalars(
+            select(PrivateChatMessageRecord)
+            .where(
+                PrivateChatMessageRecord.conversation_id
+                == conversation_id,
+                PrivateChatMessageRecord.user_id == user_id,
+                PrivateChatMessageRecord.world_id == world_id,
+            )
+            .order_by(
+                PrivateChatMessageRecord.created_at.desc(),
+            )
+            .limit(limit)
+        ).all()
+
+        return [
+            self._to_message(record)
+            for record in reversed(records)
+        ]
+
+    def touch_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> None:
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+
+        if record is None:
+            raise ValueError("Private chat conversation not found")
+
+        record.updated_at = datetime.now(timezone.utc)
+        self._session.flush()
+
+    @staticmethod
+    def _to_conversation(
+        record: PrivateChatConversationRecord,
+    ) -> PrivateChatConversation:
+        return PrivateChatConversation(
+            conversation_id=record.conversation_id,
+            user_id=record.user_id,
+            world_id=record.world_id,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    @staticmethod
+    def _to_message(
+        record: PrivateChatMessageRecord,
+    ) -> PrivateChatMessage:
+        return PrivateChatMessage(
+            conversation_id=record.conversation_id,
+            role=record.role,
+            content=record.content,
+            created_at=record.created_at,
+        )
+
+======================================================================
+FILE: .\app\api\private_chat.py
+======================================================================
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+
+from app.api.dependencies.identity import get_current_principal
+from app.api.schemas.private_chat import (
+    CreatePrivateChatRequest,
+    CreatePrivateChatResponse,
+    SendPrivateChatMessageRequest,
+    SendPrivateChatMessageResponse,
+)
+from app.domain.identity.principal import Principal
+
+router = APIRouter(
+    prefix="/private-chat",
+    tags=["private-chat"],
+)
+
+
+def _get_private_chat_service(request: Request):
+    factory = getattr(
+        request.app.state,
+        "private_chat_service_factory",
+        None,
+    )
+    if factory is None:
+        raise RuntimeError(
+            "private_chat_service_factory is not configured"
+        )
+    return factory()
+
+
+def _get_character_instruction(request: Request) -> str:
+    instruction = getattr(
+        request.app.state,
+        "private_chat_character_instruction",
+        None,
+    )
+    if not instruction:
+        raise RuntimeError(
+            "private_chat_character_instruction is not configured"
+        )
+    return instruction
+
+
+@router.post(
+    "/conversations",
+    response_model=CreatePrivateChatResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_private_chat(
+    payload: CreatePrivateChatRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> CreatePrivateChatResponse:
+    try:
+        conversation = _get_private_chat_service(request).create_conversation(
+            user_id=str(principal.user_id),
+            world_id=payload.world_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from None
+
+    return CreatePrivateChatResponse(
+        conversation_id=conversation.conversation_id,
+        world_id=conversation.world_id,
+    )
+
+
+@router.post(
+    "/messages",
+    response_model=SendPrivateChatMessageResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def send_private_chat_message(
+    payload: SendPrivateChatMessageRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> SendPrivateChatMessageResponse:
+    try:
+        result = await _get_private_chat_service(request).send_message(
+            user_id=str(principal.user_id),
+            conversation_id=payload.conversation_id,
+            message=payload.message,
+            character_instruction=_get_character_instruction(request),
+        )
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail in {
+            "Conversation not found",
+            "World not found",
+        }:
+            code = status.HTTP_404_NOT_FOUND
+        else:
+            code = status.HTTP_400_BAD_REQUEST
+
+        raise HTTPException(
+            status_code=code,
+            detail=detail,
+        ) from None
+
+    return SendPrivateChatMessageResponse(
+        conversation_id=result.conversation.conversation_id,
+        world_id=result.conversation.world_id,
+        response=result.assistant_message.content,
+        response_language=result.response_language,
+    )
+
+======================================================================
+FILE: .\app\api\schemas\private_chat.py
+======================================================================
+from __future__ import annotations
+
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class CreatePrivateChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    world_id: str = Field(min_length=1, max_length=255)
+
+    @field_validator("world_id")
+    @classmethod
+    def validate_world_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("world_id must not be blank")
+        return value
+
+
+class CreatePrivateChatResponse(BaseModel):
+    conversation_id: UUID
+    world_id: str
+
+
+class SendPrivateChatMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: UUID
+    message: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message must not be blank")
+        return value
+
+
+class SendPrivateChatMessageResponse(BaseModel):
+    conversation_id: UUID
+    world_id: str
+    response: str
+    response_language: str
+
+======================================================================
+FILE: .\tests\application\private_chat\test_private_chat_service.py
+======================================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
+import asyncio
+
+import pytest
+
+from app.application.private_chat.models import (
+    PrivateChatConversation,
+    PrivateChatMessage,
+)
+from app.application.private_chat.service import PrivateChatService
+
+
+def run_async(coro):
+    return asyncio.run(coro)
+
+
+@dataclass
+class FakeWorld:
+    id: str
+    language_code: str | None = None
+
+
+class FakeWorldResolver:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def resolve(self, world_id: str) -> FakeWorld:
+        self.calls.append(world_id)
+
+        worlds = {
+            "polish_world": FakeWorld(
+                id="polish_world",
+                language_code="pl",
+            ),
+            "french_world": FakeWorld(
+                id="french_world",
+                language_code="fr",
+            ),
+        }
+
+        world = worlds.get(world_id)
+
+        if world is None:
+            raise ValueError(f"World not found: {world_id}")
+
+        return world
+
+
+class FakeLanguageResponsePolicy:
+    def __init__(self, response_language: str = "pl") -> None:
+        self.response_language = response_language
+        self.calls: list[tuple[object, str]] = []
+
+    def resolve_response_language(
+        self,
+        *,
+        world,
+        user_message: str,
+    ) -> str:
+        self.calls.append((world, user_message))
+        return self.response_language
+
+
+class FakeConversationRuntime:
+    def __init__(self, response: str = "Dzień dobry!") -> None:
+        self.response = response
+        self.calls: list[tuple[str, str]] = []
+
+    async def respond(
+        self,
+        *,
+        character_instruction: str,
+        learner_message: str,
+    ) -> str:
+        self.calls.append(
+            (
+                character_instruction,
+                learner_message,
+            )
+        )
+
+        return self.response
+
+
+class FakePrivateChatRepository:
+    def __init__(self) -> None:
+        self.conversations: dict[UUID, PrivateChatConversation] = {}
+        self.messages: list[PrivateChatMessage] = []
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation:
+        now = datetime.now(timezone.utc)
+
+        conversation = PrivateChatConversation(
+            conversation_id=uuid4(),
+            user_id=user_id,
+            world_id=world_id,
+            created_at=now,
+            updated_at=now,
+        )
+
+        self.conversations[conversation.conversation_id] = conversation
+
+        return conversation
+
+    def get_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation | None:
+        conversation = self.conversations.get(conversation_id)
+
+        if conversation is None:
+            return None
+
+        if conversation.user_id != user_id:
+            return None
+
+        if conversation.world_id != world_id:
+            return None
+
+        return conversation
+
+    def save_message(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        message: PrivateChatMessage,
+    ) -> PrivateChatMessage:
+        conversation = self.get_conversation(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        if conversation is None:
+            raise ValueError("Conversation not found")
+
+        self.messages.append(message)
+
+        return message
+
+    def touch_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> None:
+        conversation = self.get_conversation(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        if conversation is None:
+            raise ValueError("Conversation not found")
+
+        self.conversations[conversation_id] = PrivateChatConversation(
+            conversation_id=conversation.conversation_id,
+            user_id=conversation.user_id,
+            world_id=conversation.world_id,
+            created_at=conversation.created_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def get_recent_messages(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[PrivateChatMessage]:
+        conversation = self.get_conversation(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        if conversation is None:
+            return []
+
+        return [
+            message
+            for message in self.messages
+            if message.conversation_id == conversation_id
+        ][-limit:]
+
+
+@pytest.fixture
+def repository() -> FakePrivateChatRepository:
+    return FakePrivateChatRepository()
+
+
+@pytest.fixture
+def world_resolver() -> FakeWorldResolver:
+    return FakeWorldResolver()
+
+
+@pytest.fixture
+def language_policy() -> FakeLanguageResponsePolicy:
+    return FakeLanguageResponsePolicy(
+        response_language="pl",
+    )
+
+
+@pytest.fixture
+def runtime() -> FakeConversationRuntime:
+    return FakeConversationRuntime(
+        response="Dzień dobry!",
+    )
+
+
+@pytest.fixture
+def service(
+    repository,
+    world_resolver,
+    language_policy,
+    runtime,
+) -> PrivateChatService:
+    return PrivateChatService(
+        repository=repository,
+        world_resolver=world_resolver,
+        language_response_policy=language_policy,
+        conversation_runtime=runtime,
+    )
+
+
+def test_authenticated_user_can_create_polish_conversation(
+    service,
+    repository,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    assert conversation.world_id == "polish_world"
+    assert conversation.user_id == "user-1"
+    assert conversation.conversation_id in repository.conversations
+
+
+def test_world_is_resolved_through_world_resolver(
+    service,
+    world_resolver,
+):
+    service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    assert world_resolver.calls == ["polish_world"]
+
+
+def test_polish_world_produces_pl(
+    service,
+    language_policy,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    result = run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message="Dzień dobry!",
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    assert result.response_language == "pl"
+    assert language_policy.calls[0][0].id == "polish_world"
+
+
+def test_conversation_is_owned_by_user(
+    service,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    result = run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message="Cześć!",
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    assert result.conversation.user_id == "user-1"
+
+
+def test_conversation_activity_timestamp_is_persisted(
+    service,
+    repository,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+    original_updated_at = conversation.updated_at
+
+    result = run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message="Cześć!",
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    persisted = repository.conversations[conversation.conversation_id]
+
+    assert persisted.updated_at >= original_updated_at
+    assert persisted.updated_at >= result.conversation.updated_at
+
+
+def test_another_user_cannot_access_conversation(
+    service,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Conversation not found",
+    ):
+        run_async(
+            service.send_message(
+                user_id="user-2",
+                world_id="polish_world",
+                conversation_id=conversation.conversation_id,
+                message="Cześć!",
+                character_instruction="You are Yeti.",
+            )
+        )
+
+
+def test_another_world_cannot_access_conversation(
+    service,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Conversation not found",
+    ):
+        run_async(
+            service.send_message(
+                user_id="user-1",
+                world_id="french_world",
+                conversation_id=conversation.conversation_id,
+                message="Bonjour!",
+                character_instruction="You are Yeti.",
+            )
+        )
+
+
+def test_empty_message_is_rejected(
+    service,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="message is required",
+    ):
+        run_async(
+            service.send_message(
+                user_id="user-1",
+                world_id="polish_world",
+                conversation_id=conversation.conversation_id,
+                message="   ",
+                character_instruction="You are Yeti.",
+            )
+        )
+
+
+def test_oversized_message_is_rejected(
+    service,
+    runtime,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    oversized_message = "x" * 10_001
+
+    with pytest.raises(
+        ValueError,
+        match="message exceeds the maximum allowed length",
+    ):
+        run_async(
+            service.send_message(
+                user_id="user-1",
+                world_id="polish_world",
+                conversation_id=conversation.conversation_id,
+                message=oversized_message,
+                character_instruction="You are Yeti.",
+            )
+        )
+
+    # Oversized input must be rejected before reaching the AI runtime.
+    assert runtime.calls == []
+
+
+def test_message_at_maximum_length_is_accepted(
+    service,
+    runtime,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    message = "x" * 10_000
+
+    result = run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message=message,
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    assert result.response_language == "pl"
+
+    assert runtime.calls == [
+        (
+            "You are Yeti.",
+            message,
+        )
+    ]
+
+
+def test_unknown_world_is_rejected(
+    service,
+):
+    with pytest.raises(
+        ValueError,
+        match="World not found",
+    ):
+        service.create_conversation(
+            user_id="user-1",
+            world_id="does_not_exist",
+        )
+
+
+def test_response_language_cannot_be_client_controlled(
+    service,
+    language_policy,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    result = run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message="Hello, please answer in English.",
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    assert result.response_language == "pl"
+    assert language_policy.response_language == "pl"
+
+
+def test_runtime_is_called(
+    service,
+    runtime,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message="Dzień dobry!",
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    assert runtime.calls == [
+        (
+            "You are Yeti.",
+            "Dzień dobry!",
+        )
+    ]
+
+
+def test_user_and_assistant_messages_are_persisted(
+    service,
+    repository,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    run_async(
+        service.send_message(
+            user_id="user-1",
+            world_id="polish_world",
+            conversation_id=conversation.conversation_id,
+            message="Dzień dobry!",
+            character_instruction="You are Yeti.",
+        )
+    )
+
+    assert len(repository.messages) == 2
+
+    assert repository.messages[0].role == "user"
+    assert repository.messages[0].content == "Dzień dobry!"
+
+    assert repository.messages[1].role == "assistant"
+    assert repository.messages[1].content == "Dzień dobry!"
+
+======================================================================
+FILE: .\tests\api\test_private_chat_m2_c2.py
+======================================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from uuid import UUID, uuid4
+
+import pytest
+
+
+@dataclass
+class FakeConversation:
+    conversation_id: UUID
+    user_id: str
+    world_id: str
+
+
+@dataclass
+class FakeAssistantMessage:
+    content: str
+
+
+@dataclass
+class FakeResult:
+    conversation: FakeConversation
+    assistant_message: FakeAssistantMessage
+    response_language: str
+
+
+class AsyncFakePrivateChatService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.conversation = FakeConversation(
+            conversation_id=uuid4(),
+            user_id="user-1",
+            world_id="polish_world",
+        )
+
+    def create_conversation(self, *, user_id: str, world_id: str):
+        self.calls.append(
+            {
+                "operation": "create",
+                "user_id": user_id,
+                "world_id": world_id,
+            }
+        )
+        return self.conversation
+
+    async def send_message(
+        self,
+        *,
+        user_id: str,
+        conversation_id: UUID,
+        message: str,
+        character_instruction: str,
+    ):
+        self.calls.append(
+            {
+                "operation": "send",
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "message": message,
+                "character_instruction": character_instruction,
+            }
+        )
+        return FakeResult(
+            conversation=self.conversation,
+            assistant_message=FakeAssistantMessage("Dzień dobry!"),
+            response_language="pl",
+        )
+
+
+def test_async_fake_service_contract_is_awaitable():
+    service = AsyncFakePrivateChatService()
+
+    async def run():
+        result = await service.send_message(
+            user_id="user-1",
+            conversation_id=service.conversation.conversation_id,
+            message="Cześć!",
+            character_instruction="Yeti",
+        )
+        assert result.response_language == "pl"
+
+    import asyncio
+    asyncio.run(run())
+
+
+def test_message_contract_has_no_client_world_or_ai_controls():
+    from app.api.schemas.private_chat import SendPrivateChatMessageRequest
+
+    with pytest.raises(Exception):
+        SendPrivateChatMessageRequest(
+            conversation_id=uuid4(),
+            message="Cześć!",
+            world_id="french_world",
+        )
+
+    with pytest.raises(Exception):
+        SendPrivateChatMessageRequest(
+            conversation_id=uuid4(),
+            message="Cześć!",
+            provider="openai",
+        )
+
+    with pytest.raises(Exception):
+        SendPrivateChatMessageRequest(
+            conversation_id=uuid4(),
+            message="Cześć!",
+            language="en",
+        )

@@ -33,8 +33,15 @@ export interface CreatedDraftPublication {
   created_at: string | null;
 }
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+/*
+ * EasyChatBot frontend is Vite.
+ *
+ * API requests intentionally use relative /api URLs so Vite's
+ * development proxy can route them to the backend.
+ *
+ * This avoids browser-side process.env / Next.js configuration.
+ */
+const API_BASE = "";
 
 async function request<T>(
   path: string,
@@ -55,6 +62,7 @@ async function request<T>(
 
     try {
       const body = (await response.json()) as { detail?: string };
+
       if (body.detail) {
         detail = body.detail;
       }

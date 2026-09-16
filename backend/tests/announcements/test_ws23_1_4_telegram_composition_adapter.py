@@ -1,8 +1,8 @@
-from uuid import uuid4
+﻿from uuid import uuid4
 
 import pytest
 
-from backend.app.infrastructure.announcements.execution.telegram_publication_publisher_adapter import (
+from app.infrastructure.announcements.execution.telegram_publication_publisher_adapter import (
     TelegramPublicationPublisherAdapter,
 )
 

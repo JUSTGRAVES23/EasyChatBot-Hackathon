@@ -15,10 +15,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.app.application.health.operational_dashboard_service import (
+from app.application.health.operational_dashboard_service import (
     OperationalDashboardService,
 )
-from backend.app.application.health.operational_incident import (
+from app.application.health.operational_incident import (
     OperationalIncident,
 )
 
@@ -186,3 +186,7 @@ def _event_to_dict(event: Any) -> dict[str, Any]:
 __all__ = [
     "PrivateClassroomOperationsAPI",
 ]
+
+
+
+

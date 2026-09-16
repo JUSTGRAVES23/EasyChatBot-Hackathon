@@ -1,0 +1,789 @@
+==============================================
+P1.2.3 LIVE BETA PROVIDER PATH AUDIT
+==============================================
+Generated: 2026-09-06 10:00:13
+
+=== CONVERSATION RUNTIME ===
+"""
+Conversation Runtime.
+
+Coordinates AI responses.
+
+Does NOT:
+- Call vendors directly.
+- Manage LiveKit.
+- Store conversations.
+"""
+
+
+from __future__ import annotations
+
+
+from dataclasses import dataclass
+
+
+from app.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class ConversationRuntime:
+
+
+    llm_provider: LLMProvider
+
+
+
+    async def respond(
+        self,
+        *,
+        character_instruction: str,
+        learner_message: str,
+    ) -> str:
+
+
+        return await self.llm_provider.generate(
+            system_prompt=character_instruction,
+            user_message=learner_message,
+        )
+
+=== BETA TELEGRAM COMPOSITION ===
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from backend.app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from backend.app.application.beta_access.beta_access_service import (
+    BetaAccessService,
+)
+from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from backend.app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
+from backend.app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+from backend.app.interfaces.telegram.beta_private_chat_gate import (
+    BetaPrivateChatGate,
+)
+from backend.app.interfaces.telegram.beta_start_handler import (
+    BetaTelegramStartHandler,
+)
+from backend.app.interfaces.telegram.beta_telegram_adapter import (
+    BetaTelegramAdapter,
+)
+from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+    TelegramBotRuntime,
+)
+from backend.app.providers.llm.llm_provider_factory import (
+    LLMProviderFactory,
+)
+
+
+@dataclass(frozen=True)
+class BetaTelegramComposition:
+    """Fully composed Beta Telegram classroom application graph."""
+
+    beta_access_service: BetaAccessService
+    conversation_runtime: ConversationRuntime
+    conversation_service: TelegramConversationService
+    conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_gate: BetaPrivateChatGate
+    start_handler: BetaTelegramStartHandler
+    adapter: BetaTelegramAdapter
+    runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        )
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive number."
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive number."
+        )
+    return value
+
+
+def create_beta_telegram_composition(
+    *,
+    user_repository: Any,
+    token_repository: Any,
+    binding_repository: Any,
+    conversation_event_repository: Any,
+    privacy_identifier_service: Any,
+    conversation_event_validator: Any,
+    expiration_minutes: int = 1440,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: (
+        Callable[[], ConversationRuntime] | None
+    ) = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
+) -> BetaTelegramComposition:
+    """Compose the production Beta Telegram classroom graph.
+
+    Policy components are injected at the application boundary and never
+    placed inside TelegramConversationService.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    beta_access_service = BetaAccessService(
+        user_repository=user_repository,
+        token_repository=token_repository,
+        binding_repository=binding_repository,
+        expiration_minutes=expiration_minutes,
+    )
+
+    if conversation_runtime is not None:
+        resolved_conversation_runtime = conversation_runtime
+    elif conversation_runtime_factory is not None:
+        resolved_conversation_runtime = conversation_runtime_factory()
+    else:
+        resolved_conversation_runtime = ConversationRuntime(
+            llm_provider=LLMProviderFactory.create(),
+        )
+
+    conversation_service = TelegramConversationService(
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+    )
+
+    resolved_rate_limiter = rate_limiter
+    resolved_abuse_protector = abuse_protector
+    resolved_observability = observability
+
+    # Defaults are created here, at the composition boundary, so unit tests
+    # can inject controlled doubles without changing application policy.
+    if resolved_rate_limiter is None:
+        resolved_rate_limiter = InMemoryTelegramRateLimiter(
+            max_messages=_env_positive_int(
+                "TELEGRAM_RATE_LIMIT_MAX_MESSAGES",
+                100,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS",
+                86400.0,
+            ),
+        )
+
+    if resolved_abuse_protector is None:
+        resolved_abuse_protector = InMemoryTelegramAbuseProtector(
+            max_messages=_env_positive_int(
+                "TELEGRAM_ABUSE_MAX_MESSAGES",
+                10,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_ABUSE_WINDOW_SECONDS",
+                60.0,
+            ),
+        )
+
+    if resolved_observability is None:
+        resolved_observability = LoggingTelegramObservability(
+            privacy_identifier_service=privacy_identifier_service,
+        )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+    )
+
+    private_chat_gate = BetaPrivateChatGate(
+        beta_access_service=beta_access_service,
+    )
+
+    start_handler = BetaTelegramStartHandler(
+        beta_access_service=beta_access_service,
+    )
+
+    adapter = BetaTelegramAdapter(
+        start_handler=start_handler,
+        private_chat_gate=private_chat_gate,
+        conversation_boundary=conversation_boundary,
+    )
+
+    runtime = TelegramBotRuntime(
+        adapter=adapter,
+        conversation_boundary=conversation_boundary,
+    )
+
+    return BetaTelegramComposition(
+        beta_access_service=beta_access_service,
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_service=conversation_service,
+        conversation_boundary=conversation_boundary,
+        private_chat_gate=private_chat_gate,
+        start_handler=start_handler,
+        adapter=adapter,
+        runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+    )
+
+
+__all__ = [
+    "BetaTelegramComposition",
+    "create_beta_telegram_composition",
+]
+
+=== CONVERSATION COMPOSITION ===
+from __future__ import annotations
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.providers.llm.llm_provider_factory import (
+    LLMProviderFactory,
+)
+
+
+def create_conversation_runtime() -> ConversationRuntime:
+    """
+    Create shared ConversationRuntime.
+
+    Composition layer responsibility.
+
+    Channels:
+    - Telegram
+    - Voice
+    - Future channels
+
+    This function does not:
+    - execute conversations
+    - store memory
+    - manage transport
+    """
+
+    return ConversationRuntime(
+        llm_provider=(
+            LLMProviderFactory.create()
+        )
+    )
+
+=== APP PROVIDER CONTRACT ===
+"""
+LLM Provider Contract.
+
+Defines abstraction for language model providers.
+
+Supported providers:
+- OpenAI
+- Ollama
+- Future enterprise providers
+
+Does NOT:
+- Manage conversations.
+- Manage users.
+- Manage memory.
+- Manage LiveKit.
+"""
+
+
+from __future__ import annotations
+
+
+from abc import ABC, abstractmethod
+
+
+class LLMProvider(
+    ABC
+):
+    """
+    Abstract LLM provider.
+    """
+
+
+    @abstractmethod
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+        """
+        Generate model response.
+        """
+
+        raise NotImplementedError
+
+=== APP PROVIDER FACTORY ===
+"""
+LLM Provider Factory.
+
+Responsible only for selecting the configured LLM provider.
+
+Supported providers:
+- openai
+- ollama
+
+Configuration:
+
+LLM_PROVIDER=openai
+
+or
+
+LLM_PROVIDER=ollama
+"""
+
+from __future__ import annotations
+
+import os
+
+from backend.app.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from backend.app.providers.llm.openai_llm_provider import (
+    OpenAILLMProvider,
+)
+
+from backend.app.providers.llm.ollama_llm_provider import (
+    OllamaLLMProvider,
+)
+
+
+class LLMProviderFactory:
+    """
+    Factory for creating LLM providers.
+
+    Provider selection is configuration driven.
+    """
+
+    @staticmethod
+    def create() -> LLMProvider:
+
+        provider = os.getenv(
+            "LLM_PROVIDER",
+            "ollama",
+        ).lower()
+
+
+        if provider == "openai":
+
+            return OpenAILLMProvider()
+
+
+        if provider == "ollama":
+
+            return OllamaLLMProvider()
+
+
+        raise ValueError(
+            f"Unsupported LLM provider: {provider}"
+        )
+
+=== APP OPENAI PROVIDER ===
+"""
+OpenAI LLM Provider.
+
+Infrastructure implementation of LLM provider.
+"""
+
+
+from __future__ import annotations
+
+
+import os
+
+
+from openai import AsyncOpenAI
+
+
+from app.providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+
+
+class OpenAILLMProvider(
+    LLMProvider
+):
+
+
+    def __init__(
+        self,
+    ):
+        api_key = os.getenv(
+            "OPENAI_API_KEY"
+        )
+
+
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY missing"
+            )
+
+
+        self.client = AsyncOpenAI(
+            api_key=api_key
+        )
+
+
+
+    async def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+
+
+        response = await self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_message,
+                },
+            ],
+        )
+
+
+        return (
+            response
+            .choices[0]
+            .message
+            .content
+            or ""
+        )
+
+=== PROVIDER FACTORY REFERENCES ===
+
+Path                                                                                                                 LineNumber Line                                                                                                            
+----                                                                                                                 ---------- ----                                                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_COMPOSITION_INSPECTION.txt                                                   24 11: def create_conversation_runtime() -> ConversationRuntime:                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\M1_2_COMPOSITION_INSPECTION.txt                                                 2756 C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py:11: def cr...
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\conversation_agent.py                                                      24 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\conversation_agent.py                                                      61     LLMService,                                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\conversation_agent.py                                                      96         llm_service: LLMService | None = None,                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\agents\conversation_agent.py                                                     126             self.llm_service = LLMService(                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                     69     LLMProviderFactory,                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                     89     LLMService,                                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                    363 def create_llm_service() -> LLMService:                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                    368     provider = LLMProviderFactory.create()                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\api\routes.py                                                                    370     return LLMService(                                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py                               29 class ConversationRuntime:                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py                37 class BetaTelegramConversationBoundary:                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py               461     "BetaTelegramConversationBoundary",                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py.backup         14 class BetaTelegramConversationBoundary:                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\beta_telegram_conversation_boundary.py.backup        207     "BetaTelegramConversationBoundary",                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\email_workflow.py                                     17 class BetaTelegramInvitationService:                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py                       8     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py                      39     - delegate AI execution to ConversationRuntime.                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py                      54         conversation_runtime: ConversationRuntime,                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py                     158         The retrieved history is supplied to ConversationRuntime                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py                     374                 "ConversationRuntime must return a string response."                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py.backup                8     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py.backup               34     - delegate AI execution to ConversationRuntime.                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py.backup               54         ConversationRuntime                                                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py.backup               60         conversation_runtime: ConversationRuntime,                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\beta_access\telegram_conversation_service.py.backup              255                 "ConversationRuntime must return a string response."                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                           8     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          14     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          28     BetaTelegramStartHandler,                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          31     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          37     LLMProviderFactory,                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          42 class BetaTelegramComposition:                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          46     conversation_runtime: ConversationRuntime                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          48     conversation_boundary: BetaTelegramConversationBoundary                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          50     start_handler: BetaTelegramStartHandler                                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                          51     adapter: BetaTelegramAdapter                                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         101     conversation_runtime: ConversationRuntime | None = None,                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         103         Callable[[], ConversationRuntime] | None                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         108 ) -> BetaTelegramComposition:                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         141         resolved_conversation_runtime = ConversationRuntime(                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         142             llm_provider=LLMProviderFactory.create(),                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         187     conversation_boundary = BetaTelegramConversationBoundary(                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         199     start_handler = BetaTelegramStartHandler(                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         203     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         214     return BetaTelegramComposition(                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py                         230     "BetaTelegramComposition",                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                            8     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                           11     BetaTelegramComposition,                                                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                           38 class BetaTelegramProductionComposition:                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                           67     beta_telegram: BetaTelegramComposition                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                          111     conversation_runtime: ConversationRuntime | None = None,                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                          113         Callable[[], ConversationRuntime] | None                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                          115 ) -> BetaTelegramProductionComposition:                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                          260     return BetaTelegramProductionComposition(                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py                          268     "BetaTelegramProductionComposition",                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py                            4     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py                            7     LLMProviderFactory,                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py                           11 def create_conversation_runtime() -> ConversationRuntime:                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py                           13     Create shared ConversationRuntime.                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py                           28     return ConversationRuntime(                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\conversation_composition.py                           30             LLMProviderFactory.create()                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py                                25     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py                                35     LLMProviderFactory,                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py                                50 def build_conversation_runtime() -> ConversationRuntime:                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py                                56         LLMProviderFactory.create()                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\uai\voice\voice_ai_dependencies.py                                60     return ConversationRuntime(                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                               17     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                               31     - delegation to BetaTelegramAdapter;                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                               50         BetaTelegramAdapter                                                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                               83         adapter: BetaTelegramAdapter,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                              255             # BetaTelegramAdapter:                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py                              280             # by BetaTelegramAdapter.                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py.backup                        17     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py.backup                        31     - delegation to BetaTelegramAdapter.                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py.backup                        46         BetaTelegramAdapter                                                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py.backup                        64         adapter: BetaTelegramAdapter,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py.backup                       206             # BetaTelegramAdapter:                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py.backup                       231             # by BetaTelegramAdapter.                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_conversation_llm.py                              10 - Forward requests to ConversationRuntime.                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_conversation_llm.py                              31     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_conversation_llm.py                              44     Adapter exposing EasyChatBot ConversationRuntime                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_conversation_llm.py                              49     conversation_runtime: ConversationRuntime                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_realtime_agent.py                                41     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_realtime_agent.py                                71     conversation_runtime: ConversationRuntime | None = None                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_realtime_agent.py                                90             ConversationRuntime                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py                                 143     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\voice\livekit_voice_worker.py                                 188     conversation_runtime: ConversationRuntime                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py                                     15 class BetaTelegramStartHandler:                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py                                    121     "BetaTelegramStartHandler",                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py.backup                              15 class BetaTelegramStartHandler:                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py.backup                             121     "BetaTelegramStartHandler",                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                                   7     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                                  17 class BetaTelegramAdapter:                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                                  25     - forward authorized messages to BetaTelegramConversationBoundary;                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                                  36         BetaTelegramAdapter                                                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                                  67             BetaTelegramConversationBoundary | None                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py                                 424     "BetaTelegramAdapter",                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py.backup                            7     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py.backup                           17 class BetaTelegramAdapter:                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py.backup                           25     - forward authorized messages to BetaTelegramConversationBoundary;                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py.backup                           36         BetaTelegramAdapter                                                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py.backup                           67             BetaTelegramConversationBoundary | None                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_adapter.py.backup                          424     "BetaTelegramAdapter",                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_private_chat_gate.py                         6 class BetaTelegramPrivateChatGate(BetaPrivateChatGate):                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_telegram_private_chat_gate.py                        14 __all__ = ["BetaTelegramPrivateChatGate"]                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\llm_provider_factory.py                                         36 class LLMProviderFactory:                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\providers\llm\ollama_llm_provider.py                                          73         Compatible with ConversationRuntime contract:                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py                                                  6     BetaTelegramProductionComposition,                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py                                                 25     BetaTelegramProductionComposition | None                                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py                                                106     BetaTelegramProductionComposition                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                  18       GeminiProvider                                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                  65 class GeminiProvider(LLMProvider):                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\gemini_provider.py                                                 123                 "GeminiProvider. Install it with: "                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                             14 LLMProviderFactory                                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                             19 +--> OpenAIProvider                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                             21 +--> GeminiProvider                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                             53     OpenAIProvider,                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                             57     GeminiProvider,                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                             61 class LLMProviderFactory:                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                            119             return OpenAIProvider(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\llm_provider_factory.py                                            124             return GeminiProvider(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                  12 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                  18 OpenAIProvider                                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\providers\llm\openai_provider.py                                                  66 class OpenAIProvider(LLMProvider):                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\companion_service.py                                                     38 |   LLMService                                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                           12 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\services\llm_service.py                                                           63 class LLMService:                                                                                               
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_phase_b1_telegram_transport.py                            120         BetaTelegramAdapter,                                                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_phase_b1_telegram_transport.py                            133     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_private_chat_gate.py                                      120         BetaTelegramAdapter,                                                                                    
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_private_chat_gate.py                                      133     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_composition.py                                     9 class FakeConversationRuntime:                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_composition.py                                    64         lambda: FakeConversationRuntime(),                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_conversation_service.py                           12 class FakeConversationRuntime:                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_conversation_service.py                          150     runtime = FakeConversationRuntime()                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_conversation_service.py                          451             conversation_runtime=FakeConversationRuntime(),                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_conversation_service.py                          468             conversation_runtime=FakeConversationRuntime(),                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_conversation_service.py                          485             conversation_runtime=FakeConversationRuntime(),                                                     
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_runtime_integration.py                            51         # The real BetaTelegramAdapter owns Telegram response                                                   
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws03_private_classroom_flow.py                             11     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws03_private_classroom_flow.py                            101     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws03_private_classroom_flow.py                            155     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws03_private_classroom_flow.py                            194     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws03_private_classroom_flow.py                            243     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws03_private_classroom_flow.py                            277     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws04_private_classroom_conversation.py                      9     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws04_private_classroom_conversation.py                     48 class FakeConversationRuntime:                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws04_private_classroom_conversation.py                     49     """Deterministic ConversationRuntime test double."""                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws04_private_classroom_conversation.py                    184     runtime = FakeConversationRuntime()                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws04_private_classroom_conversation.py                    221     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws05_conversation_persistence.py                            8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws05_conversation_persistence.py                           88     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws06_telegram_error_resilience.py                           8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws06_telegram_error_resilience.py                          85     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws07_private_classroom_response_delivery.py                 8     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws07_private_classroom_response_delivery.py               136     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws08_private_classroom_session_continuity.py                8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws08_private_classroom_session_continuity.py              111     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws09_telegram_classroom_security.py                         8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws09_telegram_classroom_security.py                       112     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws10_telegram_classroom_input_controls.py                   8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws10_telegram_classroom_input_controls.py                  65     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py                    8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py                  122         self._conversation_boundary = BetaTelegramConversationBoundary(                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py                 8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py               122         self._conversation_boundary = BetaTelegramConversationBoundary(                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws13_telegram_classroom_observability.py                    8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws14_telegram_classroom_policy_controls.py                  8     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws14_telegram_classroom_policy_controls.py                182         self._conversation_boundary = BetaTelegramConversationBoundary(                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws14_telegram_classroom_policy_controls.py                195         BetaTelegramConversationBoundary._validate_telegram_user_id(                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws14_telegram_classroom_policy_controls.py                200             BetaTelegramConversationBoundary._validate_message(                                                 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py               11     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py              137         BetaTelegramConversationBoundary,                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py              140     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py              145     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws16_beta_telegram_production_smoke.py                     11     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws16_beta_telegram_production_smoke.py                    133         BetaTelegramConversationBoundary,                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws16_beta_telegram_production_smoke.py                    142     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws16_beta_telegram_production_smoke.py                    147     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws17_telegram_policy_wiring.py                              6     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws17_telegram_policy_wiring.py                             91     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws17_telegram_policy_wiring.py                            135     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws17_telegram_policy_wiring.py                            236     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py                      28 class FakeConversationRuntime:                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py                     492     runtime = FakeConversationRuntime()                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                     11     ConversationRuntime,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                     14     BetaTelegramProductionComposition,                                                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                     36     Deterministic provider used to exercise the real ConversationRuntime.                                       
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                     73 ) -> BetaTelegramProductionComposition:                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                     83     runtime = ConversationRuntime(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                     93     composition: BetaTelegramProductionComposition,                                                             
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                    412         The real ConversationRuntime is integrated into the production                                          
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py                   1087             == "BetaTelegramAdapter"                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_3_operational_failure_resilience.py                   29     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_3_operational_failure_resilience.py                  179     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_3_operational_failure_resilience.py                  432     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_3_operational_failure_resilience.py                  484     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_3_operational_failure_resilience.py                  596     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_4_failure_recovery.py                                 23     BetaTelegramConversationBoundary,                                                                           
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws21_4_failure_recovery.py                                171     boundary = BetaTelegramConversationBoundary(                                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\beta_access\test_beta_telegram_access_e2e.py                                         6     BetaTelegramPrivateChatGate,                                                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\beta_access\test_beta_telegram_access_e2e.py                                       135         BetaTelegramPrivateChatGate(                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\beta_access\test_beta_telegram_access_e2e.py                                       146     gate = BetaTelegramPrivateChatGate(                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\beta_access\test_beta_telegram_access_e2e.py                                       168     gate = BetaTelegramPrivateChatGate(                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_chat_flow.py                                                   21 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                              5 LLMService through the LLMProviderFactory and injects                                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                             21     LLMService,                                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                             50     Captures the injected LLMService so the API                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                             87     Verify API composition creates an LLMService                                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                            120         routes.LLMProviderFactory,                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_api_provider_wiring.py                                            159         LLMService,                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                            2 ConversationAgent -> LLMService integration test.                                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                            5 LLMService boundary correctly.                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                           17 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                           48     LLMService,                                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                           55     ConversationAgent -> LLMService -> Provider flow.                                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                          102     Verify the complete ConversationAgent -> LLMService                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                          108     llm_service = LLMService(                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                          171     LLMService and are converted into a failed                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\integration\test_real_llm_service_flow.py                                          186     service = LLMService(                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_start_handler.py                                       6     BetaTelegramStartHandler,                                                                                   
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_start_handler.py                                      22     handler = BetaTelegramStartHandler(beta_access_service=access)                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_start_handler.py                                      40     handler = BetaTelegramStartHandler(beta_access_service=access)                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_start_handler.py                                      61     handler = BetaTelegramStartHandler(beta_access_service=access)                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_start_handler.py                                      93     handler = BetaTelegramStartHandler(                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                    8     BetaTelegramAdapter,                                                                                        
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                   98     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                  113     # BetaTelegramAdapter owns Telegram response delivery.                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                  145     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                  184     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                  218     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                  246     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\interfaces\telegram\test_beta_telegram_adapter.py                                  289     adapter = BetaTelegramAdapter(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                                               4     LLMProviderFactory,                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                                               8     OpenAIProvider,                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                                              15         LLMProviderFactory.create(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                                              22         OpenAIProvider,                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                                              32         LLMProviderFactory.create(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_llm_provider_factory.py                                              43         LLMProviderFactory.create(                                                                              
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                    2 Tests for OpenAIProvider.                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                   19     OpenAIProvider,                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                   85     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  103         OpenAIProvider(                                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  121     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  151     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  215     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  246     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  276     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\providers\test_openai_provider.py                                                  300     provider = OpenAIProvider(                                                                                  
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                          9 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                         44     therefore wrapped by LLMService internally.                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                         91     through the LLMService boundary.                                                                            
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                        239     injection when both LLMService and LLMProvider are supplied.                                                
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                        251         LLMService,                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\runtime\test_conversation_agent_provider.py                                        254     service = LLMService(                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                         2 Unit tests for LLMService.                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                         9 LLMService                                                                                                      
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                        31     LLMService,                                                                                                 
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                        75     LLMService must require a provider.                                                                         
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                        82         LLMService(                                                                                             
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                        90     LLMService should delegate the request to the                                                               
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                       102     service = LLMService(                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                       140     service = LLMService(                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                       164     LLMService should reject a missing request before                                                           
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                       176     service = LLMService(                                                                                       
+C:\AI Folder\EasyChatBot-Hackathon\tests\services\test_llm_service.py                                                       202     service = LLMService(                                                                                       
+
+
+
+
+=== END ===

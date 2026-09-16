@@ -1,4 +1,4 @@
-"""
+﻿"""
 Memory Service.
 
 Application-layer memory service.
@@ -41,11 +41,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backend.memory.memory_record import (
+from memory.memory_record import (
     MemoryRecord,
 )
 
-from backend.memory.memory_store import (
+from memory.memory_store import (
     MemoryStore,
 )
 

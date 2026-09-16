@@ -1,0 +1,268 @@
+﻿====================================================================================================
+EASYCHATBOT ACADEMY
+FINAL ARCHITECTURE + SECURITY GATE
+====================================================================================================
+
+READ-ONLY STATIC VERIFICATION
+NO DATABASE
+NO MIGRATION
+NO EMAIL
+NO TELEGRAM
+NO SCHEDULER START
+
+====================================================================================================
+1. SCHEDULER CREATION REFERENCES
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:55: scheduler = AsyncIOScheduler(
+
+====================================================================================================
+2. TELEGRAM CLIENT CREATION REFERENCES
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\telegram_health_check.py:48: bot = Bot(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_announcement_client.py:47: def _get_bot(self) -> Bot:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_announcement_client.py:55: self._bot = Bot(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_announcement_client.py:74: bot = self._get_bot()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:150: def bot(self) -> Any:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:110: def test_academy_composition_does_not_require_telegram_bot():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:140: def test_academy_composition_reuses_existing_telegram_bot():
+
+====================================================================================================
+3. ACADEMY PRODUCTION COMPOSITION
+====================================================================================================
+
+from __future__ import annotations
+
+import os
+
+from backend.app.application.academy_notification_formatters import (
+    AcademyEmailFormatter,
+    AcademyTelegramFormatter,
+)
+
+from backend.app.application.academy_notification_ports import (
+    TelegramNotificationSender,
+)
+
+from backend.app.application.academy_notification_service import (
+    OneWeekNotificationOrchestrator,
+)
+from backend.app.application.academy.academy_one_week_workflow import (
+    AcademyOneWeekWorkflow,
+)
+from backend.app.infrastructure.academy.postgresql_academy_notification_repository import (
+    PostgreSQLAcademyDeliveryRepository,
+    PostgreSQLAcademyUserQuery,
+)
+from backend.app.infrastructure.email.academy_email_notification_sender import (
+    AcademyEmailNotificationSender,
+)
+from backend.app.infrastructure.telegram.academy_notification_telegram import (
+    ExistingBotTelegramNotificationSender,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+class DisabledAcademyTelegramSender:
+    """Safe default when no existing Telegram Bot is supplied.
+
+    Academy email delivery remains independently testable.
+    No second Telegram Bot is created.
+    """
+
+    async def send(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        portal_url: str,
+    ) -> dict:
+        return {
+            "provider": "telegram",
+            "status": "not_configured",
+            "message_id": None,
+        }
+
+
+def _required_config(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for Academy production composition."
+        )
+
+    return value
+
+
+def create_academy_one_week_workflow(
+    *,
+    session_factory=None,
+    email_provider_manager: EmailProviderManager | None = None,
+    telegram_bot=None,
+    portal_url: str | None = None,
+    registration_email: str | None = None,
+) -> AcademyOneWeekWorkflow:
+    """Compose the production Academy one-week workflow.
+
+    Composition:
+
+        PostgreSQL
+            ↓
+        AcademyOneWeekWorkflow
+            ↓
+        OneWeekNotificationOrchestrator
+            ↓
+        EmailProviderManager
+            ↓
+        Existing Telegram Bot adapter
+
+    The scheduler itself is intentionally not created here.
+    """
+
+    if session_factory is None:
+        engine = create_async_database_engine()
+        session_factory = create_async_session_factory(engine)
+
+    resolved_portal_url = (
+        portal_url.strip()
+        if portal_url is not None
+        else _required_config("EASYCHATBOT_PORTAL_URL")
+    )
+
+    resolved_registration_email = (
+        registration_email.strip()
+        if registration_email is not None
+        else _required_config("EASYCHATBOT_REGISTRATION_EMAIL")
+    )
+
+    email_sender = AcademyEmailNotificationSender(
+        provider_manager=email_provider_manager
+        or EmailProviderManager()
+    )
+
+    if telegram_bot is not None:
+        telegram_sender: TelegramNotificationSender = (
+            ExistingBotTelegramNotificationSender(
+                telegram_bot,
+            )
+        )
+    else:
+        telegram_sender = DisabledAcademyTelegramSender()
+
+    notifications = OneWeekNotificationOrchestrator(
+        email_sender=email_sender,
+        telegram_sender=telegram_sender,
+        email_formatter=AcademyEmailFormatter(),
+        telegram_formatter=AcademyTelegramFormatter(),
+        registration_email=resolved_registration_email,
+        portal_url=resolved_portal_url,
+    )
+
+    users = PostgreSQLAcademyUserQuery(
+        session_factory,
+    )
+
+    deliveries = PostgreSQLAcademyDeliveryRepository(
+        session_factory,
+    )
+
+    return AcademyOneWeekWorkflow(
+        users=users,
+        deliveries=deliveries,
+        notifications=notifications,
+    )
+
+
+__all__ = [
+    "create_academy_one_week_workflow",
+]
+
+
+====================================================================================================
+4. SCHEDULER ADAPTER ACADEMY REGISTRATION
+====================================================================================================
+
+        academy_one_week_workflow=None,
+        self.academy_one_week_workflow = (
+            academy_one_week_workflow
+        self.scheduler.add_job(
+        self.scheduler.add_job(
+            self.scheduler.add_job(
+        if self.academy_one_week_workflow is not None:
+            self.scheduler.add_job(
+                self.academy_one_week_workflow.run,
+                id="academy_one_week_milestone",
+
+====================================================================================================
+5. ACADEMY EXTERNAL DELIVERY BOUNDARIES
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\cybersecurity_intelligence.py:33: EmailProviderManager
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:25: AcademyEmailNotificationSender,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:28: ExistingBotTelegramNotificationSender,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:35: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:74: email_provider_manager: EmailProviderManager | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:89: EmailProviderManager
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:112: email_sender = AcademyEmailNotificationSender(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:114: or EmailProviderManager()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\academy_production.py:119: ExistingBotTelegramNotificationSender(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:6: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:10: class AcademyEmailNotificationSender:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:14: Provider selection remains owned by EmailProviderManager.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:26: provider_manager: EmailProviderManager | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:31: else EmailProviderManager()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:64: "AcademyEmailNotificationSender",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py:13: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py:26: EmailProviderManager
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\resend_approval_email_sender.py:46: provider_manager: EmailProviderManager | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\email_approval_sender.py:10: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\email_approval_sender.py:23: EmailProviderManager
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\email_approval_sender.py:43: provider_manager: EmailProviderManager | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\email_approval_sender.py:47: or EmailProviderManager()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\privacy_governance_reminder_email_sender.py:13: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\privacy_governance_reminder_email_sender.py:82: EmailProviderManager
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\privacy_governance_reminder_email_sender.py:122: provider_manager: EmailProviderManager | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\privacy_governance_reminder_email_sender.py:137: self._provider_manager = EmailProviderManager(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\privacy\privacy_governance_reminder_email_sender.py:156: The shared EmailProviderManager contract is:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\academy_notification_telegram.py:6: class ExistingBotTelegramNotificationSender:
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\email\cybersecurity_email_service.py:32: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\email\cybersecurity_email_service.py:49: provider_manager: EmailProviderManager | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\email\cybersecurity_email_service.py:61: or EmailProviderManager()
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\email\email_provider_manager.py:28: class EmailProviderManager:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:23: AcademyEmailNotificationSender,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:26: ExistingBotTelegramNotificationSender,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:29: EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:45: spec=EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:98: AcademyEmailNotificationSender,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:170: ExistingBotTelegramNotificationSender,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:310: spec=EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:361: spec=EmailProviderManager,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_production_composition.py:386: spec=EmailProviderManager,
+
+====================================================================================================
+6. FINAL REGRESSION
+====================================================================================================
+
+.........................................                                [100%]
+41 passed in 12.79s
+
+====================================================================================================
+FINAL ENGINEERING DECISION
+====================================================================================================
+
+PYTEST EXIT CODE: 0
+
+REAL EMAIL: NOT SENT
+REAL TELEGRAM: NOT SENT
+PRODUCTION SCHEDULER: NOT STARTED
+
+ACADEMY FINAL REGRESSION: PASSED
+FINAL GATE: READY FOR ARCHITECTURE/SECURITY SIGN-OFF

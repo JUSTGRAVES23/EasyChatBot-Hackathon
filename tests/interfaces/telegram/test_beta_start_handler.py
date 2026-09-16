@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.interfaces.telegram.beta_start_handler import (
+from app.interfaces.telegram.beta_start_handler import (
     BetaTelegramStartHandler,
 )
 
@@ -107,3 +107,4 @@ async def test_start_surfaces_binding_rejection():
     )
 
     assert replies == ["Beta access is not approved."]
+

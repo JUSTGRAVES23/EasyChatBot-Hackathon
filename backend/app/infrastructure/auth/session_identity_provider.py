@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.app.application.identity.identity_provider import IdentityProvider
-from backend.app.domain.identity.principal import AccountStatus, Principal
+from app.application.identity.identity_provider import IdentityProvider
+from app.domain.identity.principal import AccountStatus, Principal
 
 
 class SessionIdentityProvider(IdentityProvider):
@@ -53,3 +53,6 @@ class SessionIdentityProvider(IdentityProvider):
             account_status=status,
             roles=frozenset(roles),
         )
+
+
+

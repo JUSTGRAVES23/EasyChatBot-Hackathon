@@ -1,0 +1,773 @@
+============================================================
+EASYCHATBOT — MAIN APPLICATION COMPOSITION DIAGNOSTIC
+Generated: 2026-09-15 21:08:00
+============================================================
+
+===== 1. MAIN.PY TOTAL LINES =====
+768
+
+===== 2. CREATE_APPLICATION DEFINITION =====
+
+  backend\app\main.py:286:                    "PostgreSQL provider-usage engine shutdown failed:",
+  backend\app\main.py:287:                    exc,
+  backend\app\main.py:288:                )
+  backend\app\main.py:289:
+  backend\app\main.py:290:
+> backend\app\main.py:291:def create_application() -> FastAPI:
+  backend\app\main.py:292:    academy_config = (
+  backend\app\main.py:293:        AcademyActivationConfig.from_environment()
+  backend\app\main.py:294:    )
+  backend\app\main.py:295:
+  backend\app\main.py:296:    auth_engine = create_async_database_engine()
+  backend\app\main.py:297:
+  backend\app\main.py:298:    auth_session_factory = (
+  backend\app\main.py:299:        create_async_session_factory(
+  backend\app\main.py:542:        create_cybersecurity_scheduler_runtime(
+  backend\app\main.py:543:            academy_one_week_workflow=academy_one_week_workflow,
+  backend\app\main.py:544:        )
+  backend\app\main.py:545:    )
+  backend\app\main.py:546:
+> backend\app\main.py:547:    application = FastAPI(
+  backend\app\main.py:548:        title="EasyChatBot API",
+  backend\app\main.py:549:        description="AI character learning platform API",
+  backend\app\main.py:550:        version="0.1.0",
+  backend\app\main.py:551:        lifespan=lifespan,
+  backend\app\main.py:552:    )
+  backend\app\main.py:553:
+  backend\app\main.py:554:    application.state.scheduler_runtime = (
+  backend\app\main.py:555:        scheduler_runtime
+  backend\app\main.py:754:
+  backend\app\main.py:755:    application.include_router(
+  backend\app\main.py:756:        academy_questionnaires_router,
+  backend\app\main.py:757:    )
+  backend\app\main.py:758:
+> backend\app\main.py:759:    return application
+  backend\app\main.py:760:
+  backend\app\main.py:761:
+> backend\app\main.py:762:app = create_application()
+  backend\app\main.py:763:
+  backend\app\main.py:764:
+  backend\app\main.py:765:__all__ = [
+  backend\app\main.py:766:    "app",
+  backend\app\main.py:767:    "create_application",
+  backend\app\main.py:768:]
+
+
+
+
+===== 3. FULL CREATE_APPLICATION SOURCE =====
+def create_application() -> FastAPI:
+    academy_config = (
+        AcademyActivationConfig.from_environment()
+    )
+
+    auth_engine = create_async_database_engine()
+
+    auth_session_factory = (
+        create_async_session_factory(
+            auth_engine,
+        )
+    )
+
+    auth_repository = (
+        PostgreSQLAuthenticationRepository(
+            auth_session_factory,
+        )
+    )
+
+    email_provider_manager = EmailProviderManager()
+
+    authentication_email_sender = AuthenticationEmailSenderAdapter(
+        provider_manager=email_provider_manager,
+    )
+
+    authentication_email_service = AuthenticationEmailService(
+        authentication_email_sender,
+        frontend_base_url=_required_environment(
+            "EASYCHATBOT_PORTAL_URL",
+        ),
+    )
+
+    authentication_service = AuthenticationService(
+        auth_repository,
+        email_service=authentication_email_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Developer Administration
+    #
+    # Production path:
+    #
+    #   DeveloperAdminService
+    #          |
+    #          +--> DeveloperAdminUnitOfWorkFactory
+    #                  |
+    #                  +--> fresh PostgreSQLDeveloperAdminUnitOfWork
+    #                          |
+    #                          +--> fresh AsyncSession
+    #                          |
+    #                          +--> fresh transaction
+    #                          |
+    #                          +--> auth_user_roles
+    #                          |
+    #                          +--> developer_admin_audit_events
+    #          |
+    #          +--> DeveloperAdminAuditService
+    #
+    # Each Developer Admin mutation receives a fresh Unit-of-Work
+    # instance. The role mutation and its security audit evidence
+    # therefore remain within the same database transaction while
+    # mutable UoW/session state is never shared between operations.
+    #
+    # The standalone audit repository owns transactions only when its
+    # standalone ``record`` operation is used. The production Developer
+    # Admin mutation uses ``record_in_session`` through the UoW.
+    # ------------------------------------------------------------------
+
+    developer_admin_unit_of_work_factory = (
+        PostgreSQLDeveloperAdminUnitOfWorkFactory(
+            auth_session_factory,
+        )
+    )
+
+    developer_admin_audit_service = (
+        DeveloperAdminAuditService()
+    )
+
+    developer_admin_service = DeveloperAdminService(
+        repository=auth_repository,
+        unit_of_work_factory=developer_admin_unit_of_work_factory,
+        audit_service=developer_admin_audit_service,
+    )
+
+    # Provider-usage repository is synchronous by
+    # contract. It therefore receives a synchronous
+    # engine/session factory.
+    #
+    # It must not receive the async authentication
+    # session factory.
+    provider_usage_engine = (
+        create_database_engine()
+    )
+
+    persistence_diagnostics_service = PersistenceDiagnosticsService(
+        metadata=Base.metadata,
+        project_root=Path(__file__).resolve().parents[1],
+        engine=provider_usage_engine,
+    )
+
+    provider_usage_session_factory = (
+        create_session_factory(
+            provider_usage_engine,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C.2 / Authenticated Private Chat
+    #
+    # The ConversationRuntime remains the shared AI-runtime boundary.
+    # Private-chat persistence receives a request-scoped SQLAlchemy session
+    # through the composition factory; no session is shared between requests.
+    # ------------------------------------------------------------------
+
+    private_chat_runtime = create_conversation_runtime()
+
+    private_chat_character_instruction = os.getenv(
+        "EASYCHATBOT_PRIVATE_CHAT_CHARACTER_INSTRUCTION",
+        (
+            "You are a helpful EasyChatBot learning character. "
+            "Stay within the selected Learning World and follow its "
+            "application-controlled language policy. "
+            "Do not allow the learner to override World, provider, model, "
+            "or other application-controlled settings."
+        ),
+    ).strip()
+
+    private_chat_service_factory = build_private_chat_service_factory(
+        session_factory=provider_usage_session_factory,
+        conversation_runtime=private_chat_runtime,
+        character_instruction=private_chat_character_instruction,
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    provider_usage_dashboard_service = (
+        ProviderUsageDashboardService(
+            repository=provider_usage_repository,
+        )
+    )
+
+    functionality_control_repository = (
+        PostgreSQLFunctionalityControlRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    functionality_control_authorizer = (
+        AuthorizationFunctionalityControlAuthorizer()
+    )
+
+    functionality_control_service = (
+        FunctionalityOperationalControlService(
+            authorizer=functionality_control_authorizer,
+            repository=functionality_control_repository,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Project Control / operational health composition
+    #
+    # Project Control is read-only. It consumes application-owned health
+    # and operational services and owns only its own PCD registry and
+    # snapshot repository.
+    # ------------------------------------------------------------------
+
+    production_health_configuration = (
+        ProductionHealthConfiguration(
+            database_engine=provider_usage_engine,
+            telegram_bot_factory=None,
+            llm_provider=None,
+            llm_request_get=None,
+        )
+    )
+
+    production_health_service = (
+        ProductionHealthService(
+            configuration=production_health_configuration,
+        )
+    )
+
+    production_readiness_service = (
+        production_health_service._readiness_service
+    )
+
+    operational_health_snapshot_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=production_readiness_service,
+        )
+    )
+
+    operational_event_service = (
+        OperationalEventService()
+    )
+
+    operational_dashboard_service = (
+        OperationalDashboardService(
+            health_snapshot_service=operational_health_snapshot_service,
+            event_service=operational_event_service,
+        )
+    )
+
+    privacy_governance_composition = (
+        get_privacy_governance_composition()
+    )
+
+    project_registry = (
+        InMemoryProjectRegistry()
+    )
+
+    project_snapshot_repository = (
+        InMemorySnapshotRepository()
+    )
+
+    project_control_service = (
+        create_project_control_service(
+            registry=project_registry,
+            snapshots=project_snapshot_repository,
+            health_service=production_health_service,
+            dashboard_service=operational_dashboard_service,
+            case_registry=(
+                privacy_governance_composition.case_registry
+            ),
+        )
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = (
+            auth_session_factory
+        )
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = (
+            create_academy_one_week_workflow(
+                session_factory=academy_session_factory,
+                telegram_bot=announcement_telegram_client,
+            )
+        )
+
+    scheduler_runtime = (
+        create_cybersecurity_scheduler_runtime(
+            academy_one_week_workflow=academy_one_week_workflow,
+        )
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = (
+        scheduler_runtime
+    )
+
+    application.state.auth_repository = (
+        auth_repository
+    )
+
+    application.state.authentication_service = (
+        authentication_service
+    )
+
+    application.state.developer_admin_service = (
+        developer_admin_service
+    )
+
+    application.state.auth_engine = (
+        auth_engine
+    )
+
+    application.state.provider_usage_engine = (
+        provider_usage_engine
+    )
+
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+
+    application.state.private_chat_service_factory = (
+        private_chat_service_factory
+    )
+
+    application.state.private_chat_character_instruction = (
+        private_chat_character_instruction
+    )
+
+    application.state.project_control_service = (
+        project_control_service
+    )
+
+    application.state.production_health_service = (
+        production_health_service
+    )
+
+    application.state.operational_dashboard_service = (
+        operational_dashboard_service
+    )
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.include_router(
+        authentication_router,
+    )
+
+    application.include_router(
+        private_chat_router,
+        prefix="/api",
+    )
+
+    application.include_router(
+        developer_admin_router,
+    )
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    operations_center_composition = (
+        create_operations_center_composition(
+            provider_usage_dashboard_service=(
+                provider_usage_dashboard_service
+            ),
+            functionality_control_service=(
+                functionality_control_service
+            ),
+        )
+    )
+
+    application.include_router(
+        create_operations_center_router(
+            composition=operations_center_composition,
+        ),
+    )
+
+    application.include_router(
+        create_persistence_operations_router(
+            persistence_diagnostics_service,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        )
+    )
+
+    application.include_router(
+        create_project_control_router(
+            project_control=project_control_service,
+        ),
+    )
+
+    application.include_router(
+        create_email_workflows_router(),
+    )
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    processing_registry = (
+        create_beta1_processing_registry()
+    )
+
+    screening_service = ScreeningService()
+
+    screening_adapter = (
+        ProcessingActivityScreeningAdapter(
+            screening_service,
+        )
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    # Academy World - Static Questionnaires
+    #
+    # This exposes:
+    # GET /api/academy/worlds/{world_id}/questionnaires
+    #
+    # Questionnaire content remains controlled/static.
+    # Recommendation metadata is handled separately.
+
+    application.include_router(
+        academy_questionnaires_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+===== 4. ALL INCLUDE_ROUTER CALLS =====
+
+  backend\app\main.py:621:    )
+  backend\app\main.py:622:
+> backend\app\main.py:623:    application.include_router(
+  backend\app\main.py:624:        authentication_router,
+  backend\app\main.py:625:    )
+  backend\app\main.py:626:
+> backend\app\main.py:627:    application.include_router(
+  backend\app\main.py:628:        private_chat_router,
+  backend\app\main.py:629:        prefix="/api",
+  backend\app\main.py:630:    )
+  backend\app\main.py:631:
+> backend\app\main.py:632:    application.include_router(
+  backend\app\main.py:633:        developer_admin_router,
+  backend\app\main.py:634:    )
+  backend\app\main.py:635:
+> backend\app\main.py:636:    application.include_router(
+  backend\app\main.py:637:        voice_calls_router,
+  backend\app\main.py:638:    )
+  backend\app\main.py:639:
+> backend\app\main.py:640:    application.include_router(
+  backend\app\main.py:641:        voice_reconnect_router,
+  backend\app\main.py:642:    )
+  backend\app\main.py:643:
+> backend\app\main.py:644:    application.include_router(
+  backend\app\main.py:645:        voice_call_trigger_router,
+  backend\app\main.py:646:    )
+  backend\app\main.py:647:
+> backend\app\main.py:648:    application.include_router(
+  backend\app\main.py:649:        voice_notification_acceptance_router,
+  backend\app\main.py:650:    )
+  backend\app\main.py:651:
+  backend\app\main.py:652:    operations_center_composition = (
+  backend\app\main.py:653:        create_operations_center_composition(
+  backend\app\main.py:661:    )
+  backend\app\main.py:662:
+> backend\app\main.py:663:    application.include_router(
+  backend\app\main.py:664:        create_operations_center_router(
+  backend\app\main.py:665:            composition=operations_center_composition,
+  backend\app\main.py:666:        ),
+  backend\app\main.py:667:    )
+  backend\app\main.py:668:
+> backend\app\main.py:669:    application.include_router(
+  backend\app\main.py:670:        create_persistence_operations_router(
+  backend\app\main.py:671:            persistence_diagnostics_service,
+  backend\app\main.py:672:            operator_dependency=require_permission(
+  backend\app\main.py:673:                Permission.INTERNAL_DATA_READ,
+  backend\app\main.py:674:            ),
+  backend\app\main.py:676:    )
+  backend\app\main.py:677:
+> backend\app\main.py:678:    application.include_router(
+  backend\app\main.py:679:        create_project_control_router(
+  backend\app\main.py:680:            project_control=project_control_service,
+  backend\app\main.py:681:        ),
+  backend\app\main.py:682:    )
+  backend\app\main.py:683:
+> backend\app\main.py:684:    application.include_router(
+  backend\app\main.py:685:        create_email_workflows_router(),
+  backend\app\main.py:686:    )
+  backend\app\main.py:687:
+> backend\app\main.py:688:    application.include_router(
+  backend\app\main.py:689:        privacy_governance_router,
+  backend\app\main.py:690:    )
+  backend\app\main.py:691:
+  backend\app\main.py:692:    processing_registry = (
+  backend\app\main.py:693:        create_beta1_processing_registry()
+  backend\app\main.py:702:    )
+  backend\app\main.py:703:
+> backend\app\main.py:704:    application.include_router(
+  backend\app\main.py:705:        create_privacy_screening_router(
+  backend\app\main.py:706:            processing_registry=processing_registry,
+  backend\app\main.py:707:            screening_adapter=screening_adapter,
+  backend\app\main.py:708:        ),
+  backend\app\main.py:709:    )
+  backend\app\main.py:710:
+> backend\app\main.py:711:    application.include_router(
+  backend\app\main.py:712:        provider_management_controls_router,
+  backend\app\main.py:713:    )
+  backend\app\main.py:714:
+> backend\app\main.py:715:    application.include_router(
+  backend\app\main.py:716:        governance_audit_router,
+  backend\app\main.py:717:    )
+  backend\app\main.py:718:
+> backend\app\main.py:719:    application.include_router(
+  backend\app\main.py:720:        governance_operations_router,
+  backend\app\main.py:721:    )
+  backend\app\main.py:722:
+> backend\app\main.py:723:    application.include_router(
+  backend\app\main.py:724:        governance_evidence_router,
+  backend\app\main.py:725:    )
+  backend\app\main.py:726:
+> backend\app\main.py:727:    application.include_router(
+  backend\app\main.py:728:        governance_change_lifecycle_router,
+  backend\app\main.py:729:    )
+  backend\app\main.py:730:
+> backend\app\main.py:731:    application.include_router(
+  backend\app\main.py:732:        cybersecurity_intelligence_router,
+  backend\app\main.py:733:    )
+  backend\app\main.py:734:
+> backend\app\main.py:735:    application.include_router(
+  backend\app\main.py:736:        cybersecurity_decision_support_router,
+  backend\app\main.py:737:    )
+  backend\app\main.py:738:
+> backend\app\main.py:739:    application.include_router(
+  backend\app\main.py:740:        cybersecurity_reports_router,
+  backend\app\main.py:741:    )
+  backend\app\main.py:742:
+> backend\app\main.py:743:    application.include_router(
+  backend\app\main.py:744:        cybersecurity_live_reports_router,
+  backend\app\main.py:745:    )
+  backend\app\main.py:746:
+  backend\app\main.py:747:    # Academy World - Static Questionnaires
+  backend\app\main.py:748:    #
+  backend\app\main.py:753:    # Recommendation metadata is handled separately.
+  backend\app\main.py:754:
+> backend\app\main.py:755:    application.include_router(
+  backend\app\main.py:756:        academy_questionnaires_router,
+  backend\app\main.py:757:    )
+  backend\app\main.py:758:
+  backend\app\main.py:759:    return application
+  backend\app\main.py:760:
+
+
+
+
+===== 5. PRIVATE CHAT IMPORT =====
+
+  backend\app\main.py:12:)
+  backend\app\main.py:13:from app.application.composition.conversation_composition import (
+  backend\app\main.py:14:    create_conversation_runtime,
+  backend\app\main.py:15:)
+  backend\app\main.py:16:from app.application.composition.private_chat_composition import (
+> backend\app\main.py:17:    build_private_chat_service_factory,
+  backend\app\main.py:18:)
+  backend\app\main.py:19:from app.application.identity.authentication_email_service import (
+  backend\app\main.py:20:    AuthenticationEmailService,
+  backend\app\main.py:21:)
+  backend\app\main.py:22:from app.application.identity.authentication_service import (
+  backend\app\main.py:23:    AuthenticationService,
+  backend\app\main.py:24:)
+  backend\app\main.py:25:from app.application.composition.academy_production import (
+  backend\app\main.py:67:)
+  backend\app\main.py:68:
+  backend\app\main.py:69:from app.api.academy_questionnaires import (
+  backend\app\main.py:70:    router as academy_questionnaires_router,
+  backend\app\main.py:71:)
+> backend\app\main.py:72:from app.api.private_chat import router as private_chat_router
+  backend\app\main.py:73:from app.api.authentication import (
+  backend\app\main.py:74:    router as authentication_router,
+  backend\app\main.py:75:)
+  backend\app\main.py:76:from app.api.dependencies.authorization import require_permission
+  backend\app\main.py:77:from app.api.operations_center import (
+  backend\app\main.py:78:    create_operations_center_router,
+  backend\app\main.py:79:)
+  backend\app\main.py:80:from app.api.routes.persistence_operations_routes import (
+  backend\app\main.py:413:            "Do not allow the learner to override World, provider, model, "
+  backend\app\main.py:414:            "or other application-controlled settings."
+  backend\app\main.py:415:        ),
+  backend\app\main.py:416:    ).strip()
+  backend\app\main.py:417:
+> backend\app\main.py:418:    private_chat_service_factory = build_private_chat_service_factory(
+  backend\app\main.py:419:        session_factory=provider_usage_session_factory,
+  backend\app\main.py:420:        conversation_runtime=private_chat_runtime,
+  backend\app\main.py:421:        character_instruction=private_chat_character_instruction,
+  backend\app\main.py:422:    )
+  backend\app\main.py:423:
+  backend\app\main.py:424:    provider_usage_repository = (
+  backend\app\main.py:425:        PostgreSQLProviderUsageRepository(
+  backend\app\main.py:426:            provider_usage_session_factory,
+  backend\app\main.py:581:
+  backend\app\main.py:582:    application.state.functionality_control_service = (
+  backend\app\main.py:583:        functionality_control_service
+  backend\app\main.py:584:    )
+  backend\app\main.py:585:
+> backend\app\main.py:586:    application.state.private_chat_service_factory = (
+> backend\app\main.py:587:        private_chat_service_factory
+  backend\app\main.py:588:    )
+  backend\app\main.py:589:
+  backend\app\main.py:590:    application.state.private_chat_character_instruction = (
+  backend\app\main.py:591:        private_chat_character_instruction
+  backend\app\main.py:592:    )
+  backend\app\main.py:593:
+  backend\app\main.py:594:    application.state.project_control_service = (
+  backend\app\main.py:595:        project_control_service
+  backend\app\main.py:623:    application.include_router(
+  backend\app\main.py:624:        authentication_router,
+  backend\app\main.py:625:    )
+  backend\app\main.py:626:
+  backend\app\main.py:627:    application.include_router(
+> backend\app\main.py:628:        private_chat_router,
+  backend\app\main.py:629:        prefix="/api",
+  backend\app\main.py:630:    )
+  backend\app\main.py:631:
+  backend\app\main.py:632:    application.include_router(
+  backend\app\main.py:633:        developer_admin_router,
+  backend\app\main.py:634:    )
+  backend\app\main.py:635:
+  backend\app\main.py:636:    application.include_router(
+
+
+
+
+===== 6. RUNTIME FUNCTION IDENTITY =====
+MAIN FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py
+FUNCTION: <function create_application at 0x000001FAF6863920>
+FUNCTION MODULE: app.main
+SOURCE FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py
+SOURCE LINES:
+291
+
+===== 7. APPLICATION ROUTE TYPES =====
+TOTAL ROUTES: 27
+Route '/openapi.json' openapi {'HEAD', 'GET'}
+Route '/docs' swagger_ui_html {'HEAD', 'GET'}
+Route '/docs/oauth2-redirect' swagger_ui_redirect {'HEAD', 'GET'}
+Route '/redoc' redoc_html {'HEAD', 'GET'}
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+_IncludedRouter None None None
+
+===== COMPLETE =====

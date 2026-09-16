@@ -1,5 +1,5 @@
-from backend.app.application.announcement.announcement_composer import AnnouncementComposer
-from backend.app.application.announcement.models import AnnouncementType
+﻿from app.application.announcement.announcement_composer import AnnouncementComposer
+from app.application.announcement.models import AnnouncementType
 
 
 def test_composer_creates_branded_message():
@@ -13,4 +13,3 @@ def test_composer_creates_branded_message():
     assert "New pronunciation practice" in result.rendered_text
     assert "EasyWorld" in result.rendered_text
     assert "Growing with You" in result.rendered_text
-

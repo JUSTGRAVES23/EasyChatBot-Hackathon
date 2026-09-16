@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Invitation Composition.
 
 Composition root for voice call invitation
@@ -20,7 +20,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.app.application.uai.voice.voice_call_invitation_service import (
+from app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
 
@@ -83,3 +83,5 @@ __all__ = [
     "create_voice_call_invitation_service",
     "build_voice_call_invitation_service",
 ]
+
+

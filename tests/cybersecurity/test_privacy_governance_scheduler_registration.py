@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
     CybersecurityAPSchedulerAdapter,
 )
 
@@ -72,3 +72,4 @@ def test_existing_cybersecurity_jobs_remain_registered_without_governance():
         "cybersecurity_daily_report",
         "cybersecurity_weekly_report",
     }
+

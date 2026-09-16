@@ -1,17 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.app.application.privacy.privacy_governance_reminder_history import (
+from app.application.privacy.privacy_governance_reminder_history import (
     PrivacyGovernanceReminderHistory,
 )
-from backend.app.application.privacy.privacy_governance_reminder_policy import (
+from app.application.privacy.privacy_governance_reminder_policy import (
     PrivacyGovernanceReminderPolicy,
 )
-from backend.app.application.privacy.privacy_governance_reminder_scheduler import (
+from app.application.privacy.privacy_governance_reminder_scheduler import (
     PrivacyGovernanceReminderScheduler,
 )
 
@@ -132,3 +132,4 @@ async def test_blocked_case_never_sends():
 
     assert result[0].status == "NOT_ELIGIBLE"
     assert email.calls == 0
+

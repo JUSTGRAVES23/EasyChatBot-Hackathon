@@ -1,36 +1,36 @@
 ﻿import asyncio
 import re
 
-from backend.agents.conversation_agent import (
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
 )
 
-from backend.memory.memory_service import (
+from memory.memory_service import (
     MemoryService,
 )
 
-from backend.providers.llm.llm_provider_factory import (
+from providers.llm.llm_provider_factory import (
     LLMProviderFactory,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.services.companion_service import (
+from services.companion_service import (
     CompanionService,
 )
 
@@ -692,3 +692,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

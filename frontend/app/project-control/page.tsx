@@ -1,0 +1,691 @@
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+
+import {
+  getProjectControlSnapshot,
+  ProjectControlApiError,
+  type ProjectControlSnapshot,
+} from "@/app/lib/api/projectControl";
+
+import styles from "./ProjectControlPage.module.css";
+
+const DEFAULT_PROJECT_ID = "easychatbot";
+
+// Deduplicate concurrent reads. This is deliberately limited to in-flight
+// requests: a completed snapshot is never cached, so Refresh always asks the
+// authoritative API for fresh data. It also prevents React StrictMode's
+// development-only effect replay from issuing two HTTP GETs.
+const inFlightSnapshots = new Map<
+  string,
+  Promise<ProjectControlSnapshot>
+>();
+
+function getSnapshotOnce(projectId: string): Promise<ProjectControlSnapshot> {
+  const existing = inFlightSnapshots.get(projectId);
+  if (existing) return existing;
+
+  const request = getProjectControlSnapshot(projectId);
+  inFlightSnapshots.set(projectId, request);
+
+  const clearInFlight = () => {
+    if (inFlightSnapshots.get(projectId) === request) {
+      inFlightSnapshots.delete(projectId);
+    }
+  };
+
+  // Handle both outcomes without creating an unhandled rejected promise.
+  void request.then(clearInFlight, clearInFlight);
+
+  return request;
+}
+
+function statusLabel(
+  status: ProjectControlSnapshot["project_status"],
+): string {
+  switch (status) {
+    case "on_track":
+      return "ON TRACK";
+    case "at_risk":
+      return "AT RISK";
+    case "blocked":
+      return "BLOCKED";
+    case "complete":
+      return "COMPLETE";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+function statusTone(status: string): string {
+  if (status === "on_track" || status === "available" || status === "complete" || status === "resolved" || status === "done") {
+    return "success";
+  }
+  if (status === "at_risk" || status === "stale" || status === "in_progress") {
+    return "warning";
+  }
+  if (status === "blocked" || status === "unavailable" || status === "open" || status === "cancelled") {
+    return "danger";
+  }
+  return "neutral";
+}
+
+function severityTone(severity: string): string {
+  const value = severity.toLowerCase();
+  if (value === "critical" || value === "high") return "danger";
+  if (value === "medium") return "warning";
+  return "neutral";
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return "Not available";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function formatPercent(value: number): string {
+  return `${Math.max(0, Math.min(100, value)).toFixed(1)}%`;
+}
+
+function formatWholePercent(value: number): string {
+  return `${Math.max(0, Math.min(100, value)).toFixed(0)}%`;
+}
+
+function formatReadiness(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "Not available";
+
+  const numeric = Number(trimmed.replace(/%$/, ""));
+  if (Number.isFinite(numeric)) {
+    return `${Math.max(0, Math.min(100, numeric)).toFixed(1)}%`;
+  }
+
+  return trimmed;
+}
+
+function MetricValue({
+  value,
+  unit,
+}: {
+  value: string | number | boolean | null;
+  unit: string | null;
+}) {
+  if (value === null || value === undefined) return <>â€”</>;
+
+  return (
+    <>
+      {String(value)}
+      {unit ? <span className={styles.metricUnit}> {unit}</span> : null}
+    </>
+  );
+}
+
+export default function ProjectControlPage() {
+  const [snapshot, setSnapshot] = useState<ProjectControlSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // React StrictMode intentionally replays effects in development.
+  // The initial authoritative GET must remain idempotent per mounted
+  // component instance, while explicit Retry/Refresh actions remain
+  // allowed to issue a fresh request.
+  const initialLoadStartedRef = useRef(false);
+
+  const loadSnapshot = useCallback(async (isRefresh = false) => {
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
+    setError(null);
+
+    try {
+      const result = await getSnapshotOnce(DEFAULT_PROJECT_ID);
+      setSnapshot(result);
+    } catch (cause) {
+      if (cause instanceof ProjectControlApiError) {
+        setError(cause.message);
+      } else {
+        setError("Unable to load Project Control data.");
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialLoadStartedRef.current) {
+      return;
+    }
+
+    initialLoadStartedRef.current = true;
+    void loadSnapshot();
+  }, [loadSnapshot]);
+
+  const unavailableSources = useMemo(
+    () =>
+      snapshot?.sources.filter((source) => source.status !== "available") ?? [],
+    [snapshot],
+  );
+
+  if (loading) {
+    return (
+      <main className={styles.page} aria-label="Project Control Center">
+        <div className={styles.loadingPanel} role="status">
+          <div className={styles.loaderOrb} aria-hidden="true">
+            âœ¦
+          </div>
+          <p className={styles.eyebrow}>PROJECT CONTROL CENTER</p>
+          <h1>Consulting the Observatory</h1>
+          <p>Loading project control dataâ€¦</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (error) {
+    return (
+      <main className={styles.page} aria-label="Project Control Center">
+        <section className={styles.errorPanel} role="alert" aria-label="Project Control error">
+          <p className={styles.eyebrow}>PROJECT CONTROL CENTER</p>
+          <h1>Project intelligence unavailable</h1>
+          <p>{error}</p>
+          <button
+            type="button"
+            className={styles.primaryButton}
+            onClick={() => void loadSnapshot()}
+          >
+            <span aria-hidden="true">â†»</span>
+            Retry
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  if (!snapshot) {
+    return (
+      <main className={styles.page} aria-label="Project Control Center">
+        <section className={styles.emptyPanel}>
+          <p className={styles.eyebrow}>PROJECT CONTROL CENTER</p>
+          <h1>No project snapshot</h1>
+          <p>No authoritative project-control snapshot is available.</p>
+        </section>
+      </main>
+    );
+  }
+
+  const progress = Math.max(0, Math.min(100, snapshot.overall_progress_percent));
+
+  return (
+    <main className={styles.page} aria-label="Project Control Center">
+      <div className={styles.atmosphere} aria-hidden="true" />
+
+      <div className={styles.content}>
+        <nav className={styles.breadcrumb} aria-label="Breadcrumb">
+          <span>Home</span>
+          <span aria-hidden="true">â€º</span>
+          <span>Operations Center</span>
+          <span aria-hidden="true">â€º</span>
+          <strong>Project Control Center</strong>
+        </nav>
+
+        <section className={styles.hero}>
+          <div className={styles.heroImage} role="img" aria-label="EasyChatBot Academy observatory library" />
+          <div className={styles.heroOverlay} />
+
+          <div className={styles.heroContent}>
+            <p className={styles.eyebrow}>PROJECT CONTROL CENTER</p>
+            <h1>
+              From Plan <span>to Impact</span>
+            </h1>
+            <p className={styles.heroSubtitle}>
+              Real-time project intelligence from authoritative sources.
+            </p>
+
+            <div className={styles.principles} aria-label="Project control principles">
+              <div>
+                <span className={styles.principleIcon}>â—‡</span>
+                <span>Clear<br />Progress</span>
+              </div>
+              <div>
+                <span className={styles.principleIcon}>â–¥</span>
+                <span>Informed<br />Decisions</span>
+              </div>
+              <div>
+                <span className={styles.principleIcon}>â™§</span>
+                <span>Aligned<br />Teams</span>
+              </div>
+              <div>
+                <span className={styles.principleIcon}>âœ¦</span>
+                <span>A Brighter<br />Tomorrow</span>
+              </div>
+            </div>
+          </div>
+
+          <blockquote className={styles.heroQuote}>
+            â€œDisciplined execution today,<br />
+            a brighter tomorrow.â€
+          </blockquote>
+        </section>
+
+        <section className={styles.projectBar} aria-label="Project identity">
+          <div className={styles.projectIdentity}>
+            <div className={styles.projectEmblem} aria-hidden="true">âœ¦</div>
+            <div>
+              <div className={styles.projectNameRow}>
+                <h2>{snapshot.project_name}</h2>
+                <span
+                  className={styles.statusBadge}
+                  data-tone={statusTone(snapshot.project_status)}
+                >
+                  â— {statusLabel(snapshot.project_status)}
+                </span>
+              </div>
+              <p>AI-powered language learning for a brighter tomorrow.</p>
+            </div>
+          </div>
+
+          <div className={styles.projectControls}>
+            <div className={styles.updated}>
+              <span>Last updated</span>
+              <strong>{formatDate(snapshot.generated_at)}</strong>
+            </div>
+            <button
+              type="button"
+              className={styles.refreshButton}
+              onClick={() => void loadSnapshot(true)}
+              disabled={refreshing}
+              aria-label="Refresh project control data"
+            >
+              <span aria-hidden="true">â†»</span>
+              {refreshing ? "Refreshingâ€¦" : "Refresh"}
+            </button>
+          </div>
+        </section>
+
+        <section className={styles.kpiGrid} aria-label="Project status">
+          <article className={styles.kpiCard}>
+            <span className={styles.kpiIcon} data-tone={statusTone(snapshot.project_status)}>â—</span>
+            <div>
+              <span className={styles.kpiLabel}>Project Status</span>
+              <strong data-tone={statusTone(snapshot.project_status)}>
+                {statusLabel(snapshot.project_status)}
+              </strong>
+              <small>Current delivery state</small>
+            </div>
+          </article>
+
+          <article className={styles.kpiCard}>
+            <span className={styles.progressRing} style={{ "--progress": `${progress}%` } as CSSProperties}>
+              <span>{formatWholePercent(progress)}</span>
+            </span>
+            <div>
+              <span className={styles.kpiLabel}>Overall Progress</span>
+              <strong>{formatPercent(progress)}</strong>
+              <small>Across current scope</small>
+            </div>
+          </article>
+
+          <article className={styles.kpiCard}>
+            <span className={styles.kpiIcon} data-tone="success">âœ¦</span>
+            <div>
+              <span className={styles.kpiLabel}>Release Readiness</span>
+              <strong>{formatReadiness(snapshot.release_readiness)}</strong>
+              <small>Current readiness assessment</small>
+            </div>
+          </article>
+
+          <article className={styles.kpiCard}>
+            <span className={styles.kpiIcon} data-tone="danger">!</span>
+            <div>
+              <span className={styles.kpiLabel}>Open Blockers</span>
+              <strong>{snapshot.open_blockers}</strong>
+              <small>Require attention</small>
+            </div>
+          </article>
+
+          <article className={styles.kpiCard}>
+            <span className={styles.kpiIcon} data-tone="warning">â–³</span>
+            <div>
+              <span className={styles.kpiLabel}>Open Risks</span>
+              <strong>{snapshot.open_risks}</strong>
+              <small>Active risk exposure</small>
+            </div>
+          </article>
+        </section>
+
+        <section className={styles.focusProgressGrid}>
+          <article className={styles.panel}>
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>DELIVERY FOCUS</span>
+                <h2>Current Focus</h2>
+              </div>
+              <span className={styles.goldMark}>âœ¦</span>
+            </div>
+
+            <div className={styles.focusCards}>
+              <div className={styles.focusCard}>
+                <span className={styles.focusIcon}>âš‘</span>
+                <div>
+                  <span>Current Milestone</span>
+                  <strong>{snapshot.current_milestone ?? "Not available"}</strong>
+                </div>
+              </div>
+
+              <div className={styles.focusCard}>
+                <span className={styles.focusIcon}>â—ˆ</span>
+                <div>
+                  <span>Current Workstream</span>
+                  <strong>{snapshot.current_workstream ?? "Not available"}</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article className={styles.panel}>
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>DELIVERY SIGNAL</span>
+                <h2>Project Progress</h2>
+              </div>
+              <strong className={styles.progressValue}>{formatWholePercent(progress)}</strong>
+            </div>
+
+            <div className={styles.largeProgress}>
+              <div className={styles.largeProgressTrack}>
+                <span style={{ width: `${progress}%` }} />
+              </div>
+              <div className={styles.progressScale}>
+                <span>0%</span>
+                <span>Current delivery</span>
+                <span>100%</span>
+              </div>
+            </div>
+
+            <p className={styles.panelNote}>
+              Progress is derived from the authoritative Project Control snapshot.
+            </p>
+          </article>
+        </section>
+
+        <section className={styles.panel} aria-label="Workstreams">
+          <div className={styles.panelHeader}>
+            <div>
+              <span className={styles.panelKicker}>DELIVERY PORTFOLIO</span>
+              <h2>Workstreams <small>({snapshot.workstreams.length})</small></h2>
+            </div>
+          </div>
+
+          {snapshot.workstreams.length === 0 ? (
+            <p className={styles.emptyText}>No workstream data available.</p>
+          ) : (
+            <div className={styles.workstreamGrid}>
+              {snapshot.workstreams.map((workstream) => (
+                <article className={styles.workstreamCard} key={workstream.workstream_id}>
+                  <div className={styles.cardTopline}>
+                    <strong>{workstream.name}</strong>
+                    <span
+                      className={styles.miniBadge}
+                      data-tone={statusTone(workstream.status)}
+                    >
+                      â— {workstream.status.replaceAll("_", " ")}
+                    </span>
+                  </div>
+                  <div className={styles.workstreamPercent}>
+                    {formatWholePercent(workstream.completion_percent)}
+                  </div>
+                  <div className={styles.progressTrack}>
+                    <span style={{ width: `${Math.max(0, Math.min(100, workstream.completion_percent))}%` }} />
+                  </div>
+                  <div className={styles.cardMeta}>
+                    <span>{workstream.source}</span>
+                    <span>{formatDate(workstream.updated_at)}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {snapshot.metrics.length > 0 && (
+          <section className={styles.panel} aria-label="Operational metrics">
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>OBSERVED SIGNALS</span>
+                <h2>Operational Metrics <small>({snapshot.metrics.length})</small></h2>
+              </div>
+            </div>
+
+            <div className={styles.metricGrid}>
+              {snapshot.metrics.map((metric) => (
+                <article className={styles.metricCard} key={metric.key}>
+                  <span>{metric.label}</span>
+                  <strong>
+                    <MetricValue value={metric.value} unit={metric.unit} />
+                  </strong>
+                  <small>{metric.source} Â· {formatDate(metric.observed_at)}</small>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className={styles.twoColumnGrid}>
+          <article className={styles.panel} aria-label="Open issues">
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>CONTROL EXCEPTIONS</span>
+                <h2>Open Issues <small>({snapshot.issues.length})</small></h2>
+              </div>
+            </div>
+
+            {snapshot.issues.length === 0 ? (
+              <p className={styles.emptyText}>No open issues reported.</p>
+            ) : (
+              <div className={styles.table}>
+                <div className={styles.tableHeader}>
+                  <span>Issue</span>
+                  <span>Severity</span>
+                  <span>Status</span>
+                </div>
+                {snapshot.issues.map((issue) => (
+                  <div className={styles.tableRow} key={issue.issue_id}>
+                    <div>
+                      <strong>{issue.title}</strong>
+                      <small>{issue.owner ?? "Owner not assigned"}</small>
+                    </div>
+                    <span className={styles.miniBadge} data-tone={severityTone(issue.severity)}>
+                      {issue.severity}
+                    </span>
+                    <span className={styles.miniBadge} data-tone={statusTone(issue.status)}>
+                      {issue.status.replaceAll("_", " ")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+
+          <article className={styles.panel} aria-label="Active risks">
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>RISK REGISTER</span>
+                <h2>Active Risks <small>({snapshot.risks.length})</small></h2>
+              </div>
+            </div>
+
+            {snapshot.risks.length === 0 ? (
+              <p className={styles.emptyText}>No open risks reported.</p>
+            ) : (
+              <div className={styles.table}>
+                <div className={styles.tableHeader}>
+                  <span>Risk</span>
+                  <span>Severity</span>
+                  <span>Status</span>
+                </div>
+                {snapshot.risks.map((risk) => (
+                  <div className={styles.tableRow} key={risk.risk_id}>
+                    <div>
+                      <strong>{risk.title}</strong>
+                      <small>{risk.owner ?? "Owner not assigned"}</small>
+                    </div>
+                    <span className={styles.miniBadge} data-tone={severityTone(risk.severity)}>
+                      {risk.severity}
+                    </span>
+                    <span className={styles.miniBadge} data-tone={statusTone(risk.status)}>
+                      {risk.status.replaceAll("_", " ")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+        </section>
+
+        <section className={styles.twoColumnGrid}>
+          <article className={styles.panel} aria-label="Open actions">
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>EXECUTION REGISTER</span>
+                <h2>Open Actions <small>({snapshot.actions.length})</small></h2>
+              </div>
+            </div>
+
+            {snapshot.actions.length === 0 ? (
+              <p className={styles.emptyText}>No actions reported.</p>
+            ) : (
+              <div className={styles.table}>
+                <div className={styles.tableHeader}>
+                  <span>Action</span>
+                  <span>Priority</span>
+                  <span>Due</span>
+                </div>
+                {snapshot.actions.map((action) => (
+                  <div className={styles.tableRow} key={action.action_id}>
+                    <div>
+                      <strong>{action.title}</strong>
+                      <small>{action.status.replaceAll("_", " ")}</small>
+                    </div>
+                    <span className={styles.miniBadge} data-tone={severityTone(action.priority)}>
+                      {action.priority}
+                    </span>
+                    <span className={styles.tableDate}>{formatDate(action.due_at)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+
+          <article className={styles.panel} aria-label="Upcoming milestones">
+            <div className={styles.panelHeader}>
+              <div>
+                <span className={styles.panelKicker}>ROADMAP</span>
+                <h2>Upcoming Milestones <small>({snapshot.milestones.length})</small></h2>
+              </div>
+            </div>
+
+            {snapshot.milestones.length === 0 ? (
+              <p className={styles.emptyText}>No milestone data available.</p>
+            ) : (
+              <div className={styles.milestoneList}>
+                {snapshot.milestones.map((milestone) => (
+                  <div className={styles.milestoneRow} key={milestone.milestone_id}>
+                    <div>
+                      <strong>{milestone.name}</strong>
+                      <small>{milestone.source}</small>
+                    </div>
+                    <span className={styles.miniBadge} data-tone={statusTone(milestone.status)}>
+                      {milestone.status.replaceAll("_", " ")}
+                    </span>
+                    <time>{formatDate(milestone.target_date)}</time>
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+        </section>
+
+        <section className={styles.panel} aria-label="Data sources">
+          <div className={styles.panelHeader}>
+            <div>
+              <span className={styles.panelKicker}>EVIDENCE LAYER</span>
+              <h2>Authoritative Data Sources <small>({snapshot.sources.length})</small></h2>
+            </div>
+            {unavailableSources.length > 0 && (
+              <span className={styles.sourceWarning}>
+                {unavailableSources.length} source{unavailableSources.length === 1 ? "" : "s"} need attention
+              </span>
+            )}
+          </div>
+
+          {snapshot.sources.length === 0 ? (
+            <p className={styles.emptyText}>No source information available.</p>
+          ) : (
+            <ul className={styles.sourceList}>
+              {snapshot.sources.map((source) => (
+                <li className={styles.sourceListItem} key={source.source_id}>
+                  <article className={styles.sourceCard}>
+                    <div className={styles.sourceIcon}>âœ¦</div>
+                    <div className={styles.sourceBody}>
+                      <strong>{source.name}</strong>
+                      <span
+                        className={styles.miniBadge}
+                        data-tone={statusTone(source.status)}
+                      >
+                        â— {source.status === "unavailable"
+                          ? "Unavailable"
+                          : source.status === "stale"
+                            ? "Stale"
+                            : source.status === "available"
+                              ? "Available"
+                              : source.status}
+                      </span>
+                      <small>
+                        {source.status === "available"
+                          ? `Updated ${formatDate(source.updated_at)}`
+                          : source.status === "stale"
+                            ? "Data may require refresh"
+                            : source.error ?? "Source unavailable"}
+                      </small>
+                    </div>
+                  </article>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {unavailableSources.length > 0 && (
+            <aside className={styles.sourceNotice} role="status" aria-label="Source warning">
+              <span aria-hidden="true">â–³</span>
+              <div>
+                <strong>Some project-control sources are unavailable or stale.</strong>
+                <p>The dashboard continues to show the latest safe snapshot available from authoritative sources.</p>
+              </div>
+            </aside>
+          )}
+        </section>
+
+        <footer className={styles.footer}>
+          <div>
+            <strong>EasyChatBot Academy</strong>
+            <span>Learn Â· Practice Â· Grow Â· Belong</span>
+          </div>
+          <p>â€œBetter learning. Better people. A brighter tomorrow.â€</p>
+          <small>Snapshot generated {formatDate(snapshot.generated_at)}</small>
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+

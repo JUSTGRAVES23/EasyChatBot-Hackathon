@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for ConversationAgent LLM provider integration.
 
 These tests verify the architecture:
@@ -19,19 +19,19 @@ No real provider API is called.
 
 import pytest
 
-from backend.agents.conversation_agent import (
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
@@ -247,7 +247,7 @@ def test_conversation_agent_rejects_both_service_and_provider():
         )
     )
 
-    from backend.services.llm_service import (
+    from services.llm_service import (
         LLMService,
     )
 

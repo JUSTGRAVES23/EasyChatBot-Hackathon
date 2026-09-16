@@ -1,4 +1,4 @@
-"""
+﻿"""
 Build YETI governance context for cybersecurity email notifications.
 
 This module does not send email and does not modify governance state.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.cybersecurity.governance.yeti_governance_service import (
+from cybersecurity.governance.yeti_governance_service import (
     YetiGovernanceService,
 )
 
@@ -66,3 +66,4 @@ def build_yeti_email_context(
         "authority": explanation.authority,
         "action_required": explanation.action_required,
     }
+

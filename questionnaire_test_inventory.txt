@@ -1,0 +1,913 @@
+﻿
+
+FullName : C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\front
+           end\functionality-health.spec.tsx
+
+FullName : C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\front
+           end\project-control.spec.tsx
+
+FullName : C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\front
+           end\risk-intelligence.spec.tsx
+
+FullName : C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\front
+           end\setup.ts
+
+
+
+
+============================================================
+TEST CONTENT
+============================================================
+
+
+############################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx
+############################################################
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+
+import FunctionalityHealthDashboard from "../../app/components/operations-center/functionality-health/FunctionalityHealthDashboard";
+import {
+  resumeFunctionality,
+  stopFunctionality,
+} from "../../app/lib/api/functionalityHealthControls";
+
+const healthPayload = {
+  generated_at: "2026-09-05T08:00:00Z",
+  environment: "adults" as const,
+  platform_health: "healthy" as const,
+  platform_health_score: 96,
+  user_impact: "LOW" as const,
+  counts: {
+    healthy: 11,
+    degraded: 2,
+    incident: 1,
+    maintenance: 0,
+    disabled: 0,
+    unknown: 0,
+  },
+  functionalities: [
+    {
+      functionality_id: "conversation",
+      name: "AI Conversation",
+      category: "AI",
+      description: "Core AI conversation capability.",
+      status: "healthy" as const,
+      health_score: 98,
+      latency_ms: 240,
+      provider: "openai",
+      model: "gpt-5-mini",
+      capability: "conversation",
+      checked_at: "2026-09-05T08:00:00Z",
+      controllable: true,
+      risk_level: "low",
+      reason: "Operating normally.",
+    },
+    {
+      functionality_id: "voice_tts",
+      name: "Voice / TTS",
+      category: "AI",
+      description: "Text-to-speech capability.",
+      status: "degraded" as const,
+      health_score: 72,
+      latency_ms: 1800,
+      provider: "openai",
+      model: "tts",
+      capability: "voice_tts",
+      checked_at: "2026-09-05T08:00:00Z",
+      controllable: true,
+      risk_level: "medium",
+      reason: "Provider latency above threshold.",
+    },
+  ],
+  attention: [],
+};
+
+describe("Functionality Health", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(healthPayload), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  });
+
+  it("renders the professional Functionality Health dashboard", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Functionality Health",
+      }),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText(
+        "Real-time operational health across all EasyChatBot capabilities.",
+      ),
+    ).toBeInTheDocument();
+
+    expect(screen.getByText("Platform Health")).toBeInTheDocument();
+    expect(screen.getByText("Functionality Status")).toBeInTheDocument();
+    expect(screen.getByText("Status by Category")).toBeInTheDocument();
+    expect(screen.getByText("Functionality Overview")).toBeInTheDocument();
+  });
+
+  it("renders live health data from the API", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    expect(screen.getByText("96%")).toBeInTheDocument();
+
+    const table = screen.getByRole("table");
+
+    expect(
+      within(table).getByText("AI Conversation"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(table).getByText("Voice / TTS"),
+    ).toBeInTheDocument();
+
+    expect(within(table).getByText("98%")).toBeInTheDocument();
+    expect(within(table).getByText("72%")).toBeInTheDocument();
+    expect(within(table).getByText("240 ms")).toBeInTheDocument();
+    expect(within(table).getByText("1800 ms")).toBeInTheDocument();
+
+    const conversationRow = within(table).getByRole("row", {
+      name: /AI Conversation.*AI.*Healthy.*98%.*240 ms/i,
+    });
+
+    const voiceRow = within(table).getByRole("row", {
+      name: /Voice \/ TTS.*AI.*Degraded.*72%.*1800 ms/i,
+    });
+
+    expect(
+      within(conversationRow).getByText("openai"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(voiceRow).getByText("openai"),
+    ).toBeInTheDocument();
+  });
+
+  it("allows an operator to inspect a functionality by selecting its row", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    const table = screen.getByRole("table");
+
+    const voiceRow = within(table).getByRole("row", {
+      name: /Voice \/ TTS.*AI.*Degraded.*72%.*1800 ms/i,
+    });
+
+    fireEvent.click(voiceRow);
+
+    const detailsPanel = await screen.findByRole("complementary");
+
+    expect(
+      within(detailsPanel).getByRole("heading", {
+        name: "Voice / TTS",
+      }),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText("Text-to-speech capability."),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText("voice_tts"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText("tts"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText(
+        "Provider latency above threshold.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("refreshes the health data when Refresh is clicked", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(healthPayload), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    const initialCallCount = fetchSpy.mock.calls.length;
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Refresh",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(
+        initialCallCount,
+      );
+    });
+
+    expect(fetchSpy).toHaveBeenLastCalledWith(
+      "/api/operations-center/functionality-health?environment=adults",
+      {
+        headers: {
+          Accept: "application/json",
+        },
+      },
+    );
+  });
+
+  it("shows an accessible error when the health API fails", async () => {
+    vi.restoreAllMocks();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Service unavailable", {
+        status: 503,
+      }),
+    );
+
+    render(<FunctionalityHealthDashboard />);
+
+    expect(
+      await screen.findByRole("alert"),
+    ).toHaveTextContent(
+      "Functionality health API failed: 503",
+    );
+  });
+
+  it("shows the backend-authorised stop control and requires a reason", async () => {
+    const stopSpy = vi
+      .spyOn(
+        await import("../../app/lib/api/functionalityHealthControls"),
+        "stopFunctionality",
+      )
+      .mockResolvedValue({
+        functionality_id: "conversation",
+        environment: "adults",
+        availability: "disabled",
+        action: "stop",
+        reason: "Operational incident",
+        changed_at: "2026-09-05T08:05:00Z",
+        changed_by: "operator",
+      });
+
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    fireEvent.click(
+      screen.getByRole("row", {
+        name: /AI Conversation.*AI.*Healthy.*98%.*240 ms/i,
+      }),
+    );
+
+    const detailsPanel = await screen.findByRole("complementary");
+
+    fireEvent.click(
+      within(detailsPanel).getByRole("button", {
+        name: "Stop functionality",
+      }),
+    );
+
+    expect(
+      within(detailsPanel).getByRole("textbox", {
+        name: /Reason/i,
+      }),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByRole("button", {
+        name: "Confirm Stop",
+      }),
+    ).toBeDisabled();
+
+    fireEvent.change(
+      within(detailsPanel).getByRole("textbox", {
+        name: /Reason/i,
+      }),
+      {
+        target: {
+          value: "Operational incident",
+        },
+      },
+    );
+
+    expect(
+      within(detailsPanel).getByRole("button", {
+        name: "Confirm Stop",
+      }),
+    ).toBeEnabled();
+
+    fireEvent.click(
+      within(detailsPanel).getByRole("button", {
+        name: "Confirm Stop",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(stopSpy).toHaveBeenCalledWith(
+        "conversation",
+        "adults",
+        "Operational incident",
+      );
+    });
+  });
+
+  it("does not allow an empty stop reason", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    fireEvent.click(
+      screen.getByRole("row", {
+        name: /AI Conversation.*AI.*Healthy.*98%.*240 ms/i,
+      }),
+    );
+
+    const detailsPanel = await screen.findByRole("complementary");
+
+    fireEvent.click(
+      within(detailsPanel).getByRole("button", {
+        name: "Stop functionality",
+      }),
+    );
+
+    expect(
+      within(detailsPanel).getByRole("button", {
+        name: "Confirm Stop",
+      }),
+    ).toBeDisabled();
+  });
+
+  it("shows a safe error when a stop is rejected", async () => {
+    vi.spyOn(
+      await import("../../app/lib/api/functionalityHealthControls"),
+      "stopFunctionality",
+    ).mockRejectedValue(new Error("Permission denied"));
+
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    fireEvent.click(
+      screen.getByRole("row", {
+        name: /AI Conversation.*AI.*Healthy.*98%.*240 ms/i,
+      }),
+    );
+
+    const detailsPanel = await screen.findByRole("complementary");
+
+    fireEvent.click(
+      within(detailsPanel).getByRole("button", {
+        name: "Stop functionality",
+      }),
+    );
+
+    fireEvent.change(
+      within(detailsPanel).getByRole("textbox", {
+        name: /Reason/i,
+      }),
+      {
+        target: {
+          value: "Operational incident",
+        },
+      },
+    );
+
+    fireEvent.click(
+      within(detailsPanel).getByRole("button", {
+        name: "Confirm Stop",
+      }),
+    );
+
+    expect(
+      await within(detailsPanel).findByRole("alert"),
+    ).toHaveTextContent("Permission denied");
+  });
+
+  it("uses the resume control when the backend reports the functionality disabled", async () => {
+    const disabledPayload = {
+      ...healthPayload,
+      functionalities: healthPayload.functionalities.map((item) =>
+        item.functionality_id === "conversation"
+          ? {
+              ...item,
+              availability: "disabled" as const,
+            }
+          : item,
+      ),
+    };
+
+    vi.restoreAllMocks();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(disabledPayload), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+
+    const resumeSpy = vi
+      .spyOn(
+        await import("../../app/lib/api/functionalityHealthControls"),
+        "resumeFunctionality",
+      )
+      .mockResolvedValue({
+        functionality_id: "conversation",
+        environment: "adults",
+        availability: "enabled",
+        action: "resume",
+        reason: null,
+        changed_at: "2026-09-05T08:05:00Z",
+        changed_by: "operator",
+      });
+
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    fireEvent.click(
+      screen.getByRole("row", {
+        name: /AI Conversation.*AI.*Healthy.*98%.*240 ms/i,
+      }),
+    );
+
+    const detailsPanel = await screen.findByRole("complementary");
+
+    fireEvent.click(
+      within(detailsPanel).getByRole("button", {
+        name: "Resume functionality",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(resumeSpy).toHaveBeenCalledWith(
+        "conversation",
+        "adults",
+      );
+    });
+  });
+
+  it("uses backend-authorised operational controls instead of the M1 read-only notice", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    expect(
+      screen.queryByText(
+        "M1 is read-only. Operational actions will be introduced through backend-authorised controls with confirmation and audit logging.",
+      ),
+    ).not.toBeInTheDocument();
+
+    expect(
+      screen.getByText("Backend-authorised operational controls"),
+    ).toBeInTheDocument();
+  });
+});
+
+
+
+############################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\project-control.spec.tsx
+############################################################
+import "@testing-library/jest-dom/vitest";
+
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import ProjectControlPage from "../../app/project-control/page";
+
+const snapshot = {
+  project_id: "easychatbot",
+  project_name: "EasyChatBot",
+  project_status: "on_track",
+  overall_progress_percent: 85,
+  current_milestone: "Beta 1",
+  current_workstream: "Project Control Center",
+  release_readiness: "BETA READY",
+  open_blockers: 0,
+  open_risks: 0,
+  workstreams: [
+    {
+      workstream_id: "pcd",
+      name: "Project Control Center",
+      completion_percent: 85,
+      status: "healthy",
+      source: "api-test",
+      updated_at: null,
+    },
+  ],
+  metrics: [],
+  issues: [],
+  risks: [],
+  actions: [],
+  milestones: [],
+  sources: [
+    {
+      source_id: "api-test",
+      name: "API Test Source",
+      status: "available",
+      updated_at: null,
+      error: null,
+    },
+  ],
+  generated_at:
+    "2026-09-08T15:00:00+00:00",
+};
+
+describe(
+  "Project Control Center",
+  () => {
+    it(
+      "renders the authoritative project snapshot",
+      async () => {
+        const fetchMock =
+          vi
+            .spyOn(globalThis, "fetch")
+            .mockResolvedValue(
+              new Response(
+                JSON.stringify(snapshot),
+                {
+                  status: 200,
+                  headers: {
+                    "Content-Type":
+                      "application/json",
+                  },
+                },
+              ),
+            );
+
+        render(
+          <ProjectControlPage />,
+        );
+
+        expect(
+          screen.getByRole(
+            "status",
+          ),
+        ).toHaveTextContent(
+          "Loading project control data",
+        );
+
+        await waitFor(() => {
+          expect(
+            screen.getByText(
+              "EasyChatBot",
+            ),
+          ).toBeInTheDocument();
+        });
+
+        expect(
+          screen.getByText(
+            "ON TRACK",
+          ),
+        ).toBeInTheDocument();
+
+        expect(
+          screen.getByText(
+            "85.0%",
+          ),
+        ).toBeInTheDocument();
+
+        expect(
+          screen.getByText(
+            "BETA READY",
+          ),
+        ).toBeInTheDocument();
+
+        expect(
+          fetchMock,
+        ).toHaveBeenCalledWith(
+          "/project-control/projects/easychatbot",
+          expect.objectContaining({
+            method: "GET",
+            credentials: "include",
+          }),
+        );
+
+        fetchMock.mockRestore();
+      },
+    );
+
+    it(
+      "shows an API failure and provides retry",
+      async () => {
+        const fetchMock =
+          vi
+            .spyOn(globalThis, "fetch")
+            .mockRejectedValue(
+              new Error(
+                "Network failure",
+              ),
+            );
+
+        render(
+          <ProjectControlPage />,
+        );
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole(
+              "alert",
+            ),
+          ).toBeInTheDocument();
+        });
+
+        expect(
+          screen.getByText(
+            "Unable to load Project Control data.",
+          ),
+        ).toBeInTheDocument();
+
+        const retryButton =
+          screen.getByRole(
+            "button",
+            {
+              name: "Retry",
+            },
+          );
+
+        fireEvent.click(
+          retryButton,
+        );
+
+        await waitFor(() => {
+          expect(
+            fetchMock,
+          ).toHaveBeenCalledTimes(2);
+
+          expect(
+            screen.getByRole(
+              "alert",
+            ),
+          ).toHaveTextContent(
+            "Unable to load Project Control data.",
+          );
+        });
+
+        fetchMock.mockRestore();
+      },
+    );
+
+    it(
+      "shows unavailable source information",
+      async () => {
+        const degradedSnapshot = {
+          ...snapshot,
+          sources: [
+            {
+              ...snapshot.sources[0],
+              status: "unavailable",
+              error:
+                "Source unavailable",
+            },
+          ],
+        };
+
+        const fetchMock =
+          vi
+            .spyOn(globalThis, "fetch")
+            .mockResolvedValue(
+              new Response(
+                JSON.stringify(
+                  degradedSnapshot,
+                ),
+                {
+                  status: 200,
+                  headers: {
+                    "Content-Type":
+                      "application/json",
+                  },
+                },
+              ),
+            );
+
+        render(
+          <ProjectControlPage />,
+        );
+
+        const warning =
+          await screen.findByRole(
+            "status",
+            {
+              name: "Source warning",
+            },
+          );
+
+        expect(
+          warning,
+        ).toHaveTextContent(
+          "Some project-control sources are unavailable or stale.",
+        );
+
+        const sourceName =
+          screen.getByText(
+            "API Test Source",
+          );
+
+        const sourceRow =
+          sourceName.closest("li");
+
+        if (!sourceRow) {
+          throw new Error(
+            "Expected API Test Source to be rendered inside a list item.",
+          );
+        }
+
+        expect(
+          sourceRow,
+        ).toHaveTextContent(
+          "Unavailable",
+        );
+
+        expect(
+          sourceRow,
+        ).toHaveTextContent(
+          "Source unavailable",
+        );
+
+        fetchMock.mockRestore();
+      },
+    );
+  },
+);
+
+
+############################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\risk-intelligence.spec.tsx
+############################################################
+import { render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import RiskIntelligenceDashboard from "../../app/operations-center/risk-intelligence/RiskIntelligenceDashboard";
+import { getRiskIntelligence } from "../../app/lib/api/riskIntelligence";
+
+vi.mock("../../app/lib/api/riskIntelligence", () => ({
+  getRiskIntelligence: vi.fn(),
+}));
+
+const mockedGetRiskIntelligence = vi.mocked(getRiskIntelligence);
+
+describe("RiskIntelligenceDashboard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders authoritative available metrics", async () => {
+    mockedGetRiskIntelligence.mockResolvedValue({
+      lifecycle_id: "CMP-2026-2028",
+      as_of: "2026-09-06T12:00:00Z",
+      population_status: "AVAILABLE",
+      total_item_years: {
+        value: 44,
+        availability: "AVAILABLE",
+      },
+      distinct_controls: {
+        value: 17,
+        availability: "AVAILABLE",
+      },
+      distinct_domains: {
+        value: 16,
+        availability: "AVAILABLE",
+      },
+      yearly_population: {
+        2026: 10,
+        2027: 17,
+        2028: 17,
+      },
+      risk_distribution: {
+        HIGH: 41,
+        MEDIUM: 2,
+        LOW: 1,
+      },
+      domain_distribution: {
+        "AI Governance": 6,
+        "Access Control": 3,
+      },
+      source: "CMPMonitoringPlanItemModel + CMPControlModel",
+    });
+
+    render(<RiskIntelligenceDashboard />);
+
+    expect(
+      screen.getByText("Loading Risk Intelligence…"),
+    ).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("44")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("17")).toBeInTheDocument();
+    expect(screen.getByText("16")).toBeInTheDocument();
+    expect(screen.getByText("2026: 10")).toBeInTheDocument();
+    expect(screen.getByText("HIGH: 41")).toBeInTheDocument();
+    expect(screen.getByText("AI Governance: 6")).toBeInTheDocument();
+  });
+
+  it("does not convert unavailable metrics into zero", async () => {
+    mockedGetRiskIntelligence.mockResolvedValue({
+      lifecycle_id: "CMP-2026-2028",
+      as_of: "2026-09-06T12:00:00Z",
+      population_status: "NOT_AVAILABLE",
+      total_item_years: {
+        value: null,
+        availability: "NOT_AVAILABLE",
+      },
+      distinct_controls: {
+        value: null,
+        availability: "NOT_AVAILABLE",
+      },
+      distinct_domains: {
+        value: null,
+        availability: "NOT_AVAILABLE",
+      },
+      yearly_population: {},
+      risk_distribution: {},
+      domain_distribution: {},
+      source: "CMPMonitoringPlanItemModel + CMPControlModel",
+    });
+
+    render(<RiskIntelligenceDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Not available").length).toBeGreaterThan(0);
+    });
+
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
+
+  it("shows a retry action when the API fails", async () => {
+    mockedGetRiskIntelligence.mockRejectedValue(
+      new Error("Risk Intelligence is temporarily unavailable."),
+    );
+
+    render(<RiskIntelligenceDashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("alert"),
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("Risk Intelligence is temporarily unavailable."),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByRole("button", { name: "Retry" }),
+    ).toBeInTheDocument();
+  });
+});
+
+
+############################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\setup.ts
+############################################################
+import "@testing-library/jest-dom/vitest";

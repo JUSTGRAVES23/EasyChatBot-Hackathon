@@ -1,21 +1,21 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionRequest,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
-from backend.app.application.announcements.execution.legacy_publisher_bridge import (
+from app.application.announcements.execution.legacy_publisher_bridge import (
     LegacyAnnouncementPublisherBridge,
 )
-from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+from app.infrastructure.telegram.telegram_announcement_publisher import (
     TelegramAnnouncementPublisher,
 )
 
@@ -67,7 +67,7 @@ class InMemoryExecutionRepository:
     ):
         from datetime import datetime, timezone
 
-        from backend.app.application.announcements.execution.durable_contracts import (
+        from app.application.announcements.execution.durable_contracts import (
             DurableExecutionStatus,
             PublicationExecutionRecord,
         )
@@ -103,7 +103,7 @@ class InMemoryExecutionRepository:
         from dataclasses import replace
         from datetime import datetime, timezone
 
-        from backend.app.application.announcements.execution.durable_contracts import (
+        from app.application.announcements.execution.durable_contracts import (
             DurableExecutionStatus,
         )
 
@@ -129,7 +129,7 @@ class InMemoryExecutionRepository:
         from dataclasses import replace
         from datetime import datetime, timezone
 
-        from backend.app.application.announcements.execution.durable_contracts import (
+        from app.application.announcements.execution.durable_contracts import (
             DurableExecutionStatus,
         )
 

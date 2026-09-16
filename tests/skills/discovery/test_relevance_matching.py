@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Discovery Relevance Matching Skill.
 """
 
@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import pytest
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     DiscoveryCandidate,
 )
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     DiscoveryProfile,
 )
-from backend.skills.discovery.relevance_matching import (
+from skills.discovery.relevance_matching import (
     RelevanceMatch,
     RelevanceMatchingSkill,
 )
-from backend.skills.skill import SkillInput
+from skills.skill import SkillInput
 
 
 @pytest.mark.asyncio

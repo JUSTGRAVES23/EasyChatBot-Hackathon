@@ -1,21 +1,21 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionRequest,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_contracts import (
+from app.application.announcements.execution.durable_contracts import (
     DurableExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
-from backend.app.domain.announcements.publication_status import PublicationStatus
+from app.domain.announcements.publication_status import PublicationStatus
 
 
 @dataclass
@@ -191,3 +191,4 @@ async def test_failed_attempt_is_durably_recorded_without_sensitive_error_text()
     assert record.status is DurableExecutionStatus.FAILED
     assert record.error_code == "RUNTIMEERROR"
     assert "APIKEY" not in str(record)
+

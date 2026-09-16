@@ -12,7 +12,7 @@ class BetaUserRecord(Base):
     __tablename__ = "beta_users"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     active_world_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)

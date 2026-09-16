@@ -1,4 +1,4 @@
-"""
+﻿"""
 OpenAI LLM Provider.
 
 Concrete LLM provider implementation for the EasyChatBot
@@ -47,15 +47,15 @@ import os
 
 from openai import AsyncOpenAI
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.llm.llm_provider import (
+from providers.llm.llm_provider import (
     LLMProvider,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 

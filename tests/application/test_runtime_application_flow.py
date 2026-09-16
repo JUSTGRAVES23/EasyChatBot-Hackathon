@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime Application Service tests.
 
 Validates the application boundary:
@@ -28,11 +28,11 @@ from __future__ import annotations
 import pytest
 
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
-from backend.services.runtime.runtime_application_service import (
+from services.runtime.runtime_application_service import (
     RuntimeApplicationService,
 )
 

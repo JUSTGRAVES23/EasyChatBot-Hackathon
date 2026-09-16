@@ -1,16 +1,16 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.application.health.operational_event import (
+from app.application.health.operational_event import (
     OperationalEvent,
     OperationalEventType,
     OperationalSurface,
 )
-from backend.app.application.operations_center.dashboard_composition import (
+from app.application.operations_center.dashboard_composition import (
     OperationsCenterComposition,
 )
-from backend.app.application.operations_center.dashboard_facade import (
+from app.application.operations_center.dashboard_facade import (
     OperationsCenterDashboardFacade,
 )
 
@@ -85,3 +85,4 @@ async def test_ws21_14_dashboard_contract_contains_no_learner_content():
     assert "api_key" not in text
     assert "bot_token" not in text
     assert "database_url" not in text
+

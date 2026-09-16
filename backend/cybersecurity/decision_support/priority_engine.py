@@ -14,7 +14,7 @@ It only supports human review.
 
 from __future__ import annotations
 
-from backend.cybersecurity.decision_support.models import (
+from cybersecurity.decision_support.models import (
     DecisionPriority,
     SecurityDecisionItem,
 )
@@ -162,3 +162,4 @@ class CybersecurityPriorityEngine:
             ),
 
         )
+

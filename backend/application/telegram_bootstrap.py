@@ -1,19 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 
-from backend.app.application.composition.beta_telegram_production import (
+from app.application.composition.beta_telegram_production import (
     BetaTelegramProductionComposition,
     create_production_beta_telegram_composition,
 )
-from backend.app.application.composition.conversation_composition import (
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.composition.conversation_composition import (
     create_conversation_runtime,
 )
-from backend.app.infrastructure.persistence.database import (
+from app.application.uai.language.language_detector import (
+    LanguageDetector,
+)
+from app.infrastructure.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
-from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+from app.infrastructure.telegram.telegram_bot_runtime import (
     TelegramBotRuntime,
 )
 
@@ -26,17 +32,31 @@ _telegram_production: (
 ) = None
 
 
-def create_telegram_runtime() -> TelegramBotRuntime:
+def create_telegram_runtime(
+    *,
+    functionality_control_service: FunctionalityOperationalControlService,
+    language_detector: LanguageDetector,
+) -> TelegramBotRuntime:
     """
     Create the production Beta Telegram runtime.
 
-    Existing dependency seams remain exposed at this module level
-    intentionally. This preserves deterministic test composition
-    and allows controlled dependency injection without changing
-    production behavior.
+    The functionality-control service and language detector are supplied
+    explicitly by the application composition. Telegram bootstrap does not
+    create a second control repository or control service, and it does not
+    create a default language detector.
     """
 
     global _telegram_production
+
+    if functionality_control_service is None:
+        raise ValueError(
+            "functionality_control_service is required."
+        )
+
+    if language_detector is None:
+        raise ValueError(
+            "language_detector is required."
+        )
 
     if _telegram_production is None:
         _telegram_production = (
@@ -50,6 +70,10 @@ def create_telegram_runtime() -> TelegramBotRuntime:
                 conversation_runtime_factory=(
                     create_conversation_runtime
                 ),
+                functionality_control_service=(
+                    functionality_control_service
+                ),
+                language_detector=language_detector,
             )
         )
 
@@ -60,12 +84,21 @@ def create_telegram_runtime() -> TelegramBotRuntime:
     return _telegram_production.beta_telegram.runtime
 
 
-async def start_telegram_runtime() -> None:
+async def start_telegram_runtime(
+    *,
+    functionality_control_service: FunctionalityOperationalControlService,
+    language_detector: LanguageDetector,
+) -> None:
     """
     Start the production Telegram runtime.
     """
 
-    runtime = create_telegram_runtime()
+    runtime = create_telegram_runtime(
+        functionality_control_service=(
+            functionality_control_service
+        ),
+        language_detector=language_detector,
+    )
 
     await runtime.start()
 

@@ -1,0 +1,266 @@
+﻿import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { useParams } from "react-router-dom";
+
+import {
+  getWorldBySlug,
+  type WorldCatalogueEntry,
+} from "./worldCatalogue";
+
+import {
+  createPrivateChatConversation,
+  sendPrivateChatMessage,
+} from "./worldPrivateChatApi";
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
+export default function WorldPrivateChatPage() {
+  const { worldSlug } = useParams<{
+    worldSlug: string;
+  }>();
+
+  const world = useMemo<WorldCatalogueEntry | undefined>(
+    () => getWorldBySlug(worldSlug ?? ""),
+    [worldSlug],
+  );
+
+  const [conversationId, setConversationId] =
+    useState<string | null>(null);
+
+  const [messages, setMessages] = useState<ChatMessage[]>(
+    [],
+  );
+
+  const [draft, setDraft] = useState("");
+  const [loadingConversation, setLoadingConversation] =
+    useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function initialiseConversation() {
+      if (!world) {
+        setLoadingConversation(false);
+        return;
+      }
+
+      setLoadingConversation(true);
+      setError(null);
+      setConversationId(null);
+      setMessages([]);
+
+      try {
+        const conversation =
+          await createPrivateChatConversation(
+            world.worldId,
+          );
+
+        if (!active) {
+          return;
+        }
+
+        setConversationId(
+          conversation.conversation_id,
+        );
+      } catch (cause) {
+        if (!active) {
+          return;
+        }
+
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Unable to create the private conversation.",
+        );
+      } finally {
+        if (active) {
+          setLoadingConversation(false);
+        }
+      }
+    }
+
+    void initialiseConversation();
+
+    return () => {
+      active = false;
+    };
+  }, [world]);
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    const message = draft.trim();
+
+    if (!message || !conversationId || sending) {
+      return;
+    }
+
+    setSending(true);
+    setError(null);
+
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: message,
+    };
+
+    setMessages((current) => [
+      ...current,
+      userMessage,
+    ]);
+
+    setDraft("");
+
+    try {
+      const result =
+        await sendPrivateChatMessage(
+          conversationId,
+          message,
+        );
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: result.response,
+        },
+      ]);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to send the message.",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (!world) {
+    return (
+      <main>
+        <h1>World not found</h1>
+        <p>
+          The requested Learning World is not available.
+        </p>
+      </main>
+    );
+  }
+
+  return (
+    <main
+      aria-label={`${world.name} private chat`}
+      style={{
+        maxWidth: 900,
+        margin: "0 auto",
+        padding: "2rem",
+      }}
+    >
+      <header>
+        <h1>{world.name}</h1>
+        <p>
+          Private conversation for this Learning World.
+        </p>
+      </header>
+
+      {loadingConversation && (
+        <p role="status">
+          Creating your private conversation…
+        </p>
+      )}
+
+      {error && (
+        <p role="alert">
+          {error}
+        </p>
+      )}
+
+      <section
+        aria-label="Conversation"
+        style={{
+          minHeight: 320,
+          marginTop: "1.5rem",
+          marginBottom: "1rem",
+        }}
+      >
+        {messages.length === 0 &&
+          !loadingConversation && (
+            <p>
+              Start a private conversation in{" "}
+              {world.name}.
+            </p>
+          )}
+
+        {messages.map((message) => (
+          <article
+            key={message.id}
+            aria-label={message.role}
+            style={{
+              marginBottom: "1rem",
+            }}
+          >
+            <strong>
+              {message.role === "user"
+                ? "You"
+                : world.name}
+            </strong>
+            <p>{message.content}</p>
+          </article>
+        ))}
+      </section>
+
+      <form onSubmit={handleSubmit}>
+        <label htmlFor="private-chat-message">
+          Message
+        </label>
+
+        <textarea
+          id="private-chat-message"
+          value={draft}
+          onChange={(event) =>
+            setDraft(event.target.value)
+          }
+          disabled={
+            loadingConversation ||
+            !conversationId ||
+            sending
+          }
+          rows={4}
+          maxLength={10000}
+          placeholder={`Write a message in ${world.name}…`}
+          style={{
+            display: "block",
+            width: "100%",
+            marginTop: "0.5rem",
+            marginBottom: "0.75rem",
+          }}
+        />
+
+        <button
+          type="submit"
+          disabled={
+            loadingConversation ||
+            !conversationId ||
+            sending ||
+            !draft.trim()
+          }
+        >
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </form>
+    </main>
+  );
+}

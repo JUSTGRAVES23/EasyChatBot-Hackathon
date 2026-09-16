@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionRequest,
     PublicationExecutionResult,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
-from backend.app.domain.announcements.publication import Publication
+from app.domain.announcements.publication import Publication
 
 
 @dataclass(frozen=True, slots=True)

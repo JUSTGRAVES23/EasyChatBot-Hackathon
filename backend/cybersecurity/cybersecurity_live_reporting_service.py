@@ -18,7 +18,7 @@ from __future__ import annotations
 
 
 
-from backend.cybersecurity.cybersecurity_notification_event import (
+from cybersecurity.cybersecurity_notification_event import (
     CybersecurityNotificationEvent,
 )
 
@@ -90,3 +90,4 @@ class CybersecurityLiveReportingService:
             "status":
                 "no_notification_required"
         }
+

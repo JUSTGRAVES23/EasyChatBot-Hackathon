@@ -1,0 +1,215 @@
+﻿        provider_usage_engine = getattr(
+            application.state,
+            "provider_usage_engine",
+            None,
+        )
+
+        if provider_usage_engine is not None:
+            try:
+                provider_usage_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL provider-usage engine shutdown failed:",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    academy_config = (
+        AcademyActivationConfig.from_environment()
+    )
+
+    auth_engine = create_async_database_engine()
+
+    auth_session_factory = (
+        create_async_session_factory(
+            auth_engine,
+        )
+    )
+
+    auth_repository = (
+        PostgreSQLAuthenticationRepository(
+            auth_session_factory,
+        )
+    )
+
+    # Provider-usage repository is synchronous by
+    # contract. It therefore receives a synchronous
+    # engine/session factory.
+    #
+    # It must not receive the async authentication
+    # session factory.
+    provider_usage_engine = (
+        create_database_engine()
+    )
+
+    persistence_diagnostics_service = PersistenceDiagnosticsService(
+        metadata=Base.metadata,
+        project_root=Path(__file__).resolve().parents[1],
+        engine=provider_usage_engine,
+    )
+
+    provider_usage_session_factory = (
+        create_session_factory(
+            provider_usage_engine,
+        )
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    provider_usage_dashboard_service = (
+        ProviderUsageDashboardService(
+            repository=provider_usage_repository,
+        )
+    )
+
+    functionality_control_repository = (
+        PostgreSQLFunctionalityControlRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    functionality_control_authorizer = (
+        AuthorizationFunctionalityControlAuthorizer()
+    )
+
+    functionality_control_service = (
+        FunctionalityOperationalControlService(
+            authorizer=functionality_control_authorizer,
+            repository=functionality_control_repository,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Project Control / operational health composition
+    #
+    # Project Control is read-only. It consumes application-owned health
+    # and operational services and owns only its own PCD registry and
+    # snapshot repository.
+    # ------------------------------------------------------------------
+
+    production_health_configuration = (
+        ProductionHealthConfiguration(
+            database_engine=provider_usage_engine,
+            telegram_bot_factory=None,
+            llm_provider=None,
+            llm_request_get=None,
+        )
+    )
+
+    production_health_service = (
+        ProductionHealthService(
+            configuration=production_health_configuration,
+        )
+    )
+
+    production_readiness_service = (
+        production_health_service._readiness_service
+    )
+
+    operational_health_snapshot_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=production_readiness_service,
+        )
+    )
+
+    operational_event_service = (
+        OperationalEventService()
+    )
+
+    operational_dashboard_service = (
+        OperationalDashboardService(
+            health_snapshot_service=operational_health_snapshot_service,
+            event_service=operational_event_service,
+        )
+    )
+
+    privacy_governance_composition = (
+        get_privacy_governance_composition()
+    )
+
+    project_registry = (
+        InMemoryProjectRegistry()
+    )
+
+    project_snapshot_repository = (
+        InMemorySnapshotRepository()
+    )
+
+    project_control_service = (
+        create_project_control_service(
+            registry=project_registry,
+            snapshots=project_snapshot_repository,
+            health_service=production_health_service,
+            dashboard_service=operational_dashboard_service,
+            case_registry=(
+                privacy_governance_composition.case_registry
+            ),
+        )
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = (
+            auth_session_factory
+        )
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = (
+            create_academy_one_week_workflow(
+                session_factory=academy_session_factory,
+                telegram_bot=announcement_telegram_client,
+            )
+        )
+
+    scheduler_runtime = (
+        create_cybersecurity_scheduler_runtime(
+            academy_one_week_workflow=academy_one_week_workflow,
+        )
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = (
+        scheduler_runtime
+    )
+
+    application.state.auth_repository = (
+        auth_repository
+    )
+
+    application.state.auth_engine = (
+        auth_engine
+    )
+
+    application.state.provider_usage_engine = (
+        provider_usage_engine
+    )
+
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+
+    application.state.project_control_service = (
+        project_control_service
+    )
+

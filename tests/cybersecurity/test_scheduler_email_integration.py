@@ -5,7 +5,7 @@ Tests for Scheduler Email Integration workflow.
 import pytest
 
 
-from backend.cybersecurity.cybersecurity_reporting_integration_service import (
+from cybersecurity.cybersecurity_reporting_integration_service import (
     CybersecurityReportingIntegrationService,
 )
 
@@ -127,3 +127,4 @@ async def test_reporting_email_integration():
         ==
         "critical_email"
     )
+

@@ -1,20 +1,20 @@
-"""
+﻿"""
 Tests for Voice Call Acceptance Composition.
 
 Validates:
 
 Composition
       |
-      ↓
+      â†“
 VoiceCallAcceptanceService
       |
       +----------------+
       |                |
-      ↓                ↓
+      â†“                â†“
 VoiceCall        Notification
 Management       Service
       |
-      ↓
+      â†“
 Session Service
 """
 
@@ -136,3 +136,4 @@ def test_composition_has_independent_workflow_dependencies():
         service.voice_call_session_service
         is not None
     )
+

@@ -13,7 +13,7 @@ from src.providers.search_provider.parallel_adapter import (
     ParallelSearchProvider,
 )
 
-from backend.providers.llm.llm_provider_factory import (
+from providers.llm.llm_provider_factory import (
     LLMProviderFactory,
 )
 
@@ -158,3 +158,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

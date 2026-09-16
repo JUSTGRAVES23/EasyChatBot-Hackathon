@@ -1,4 +1,4 @@
-from backend.governance.audit_event import AuditEvent
+﻿from governance.audit_event import AuditEvent
 
 
 def test_audit_event_creation():
@@ -12,3 +12,4 @@ def test_audit_event_creation():
     assert event.event == "PROVIDER_PAUSED"
     assert event.actor == "admin"
     assert event.timestamp is not None
+

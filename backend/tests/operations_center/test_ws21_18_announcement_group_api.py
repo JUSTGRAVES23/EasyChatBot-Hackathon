@@ -1,30 +1,30 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.application.health.dependency_checks import (
+from app.application.health.dependency_checks import (
     AsyncDependencyCheck,
     ConfigurationCheck,
 )
-from backend.app.application.health.operational_event import (
+from app.application.health.operational_event import (
     OperationalEvent,
     OperationalEventType,
     OperationalSeverity,
     OperationalSurface,
 )
-from backend.app.application.health.operational_event_service import (
+from app.application.health.operational_event_service import (
     OperationalEventService,
 )
-from backend.app.application.health.operational_health_snapshot import (
+from app.application.health.operational_health_snapshot import (
     OperationalHealthSnapshotService,
 )
-from backend.app.application.health.operational_dashboard_service import (
+from app.application.health.operational_dashboard_service import (
     OperationalDashboardService,
 )
-from backend.app.application.health.production_readiness_service import (
+from app.application.health.production_readiness_service import (
     ProductionReadinessService,
 )
-from backend.app.application.operations_center.announcement_group_operations_api import (
+from app.application.operations_center.announcement_group_operations_api import (
     AnnouncementGroupOperationsAPI,
 )
 

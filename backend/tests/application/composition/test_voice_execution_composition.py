@@ -1,14 +1,14 @@
-"""
+﻿"""
 Tests for Voice Execution Composition.
 
 Validates:
 
 Composition Root
         |
-        ↓
+        â†“
 VoiceCallExecutionService
         |
-        ↓
+        â†“
 VoiceCallExecutionRuntime
 """
 
@@ -61,3 +61,4 @@ def test_build_voice_execution_service():
         service,
         VoiceCallExecutionService,
     )
+

@@ -7,7 +7,7 @@ It deliberately does not create a new persistence architecture. The
 canonical PostgreSQL engine and async session factory are supplied by the
 platform persistence boundary in:
 
-    backend.app.infrastructure.persistence.database
+    app.infrastructure.persistence.database
 
 The resulting object graph is:
 
@@ -35,19 +35,19 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from backend.app.application.announcements.execution.audit_adapter import (
+from app.application.announcements.execution.audit_adapter import (
     DurablePublicationExecutionAudit,
 )
-from backend.app.application.announcements.execution.durable_execution_service import (
+from app.application.announcements.execution.durable_execution_service import (
     DurablePublicationExecutionService,
 )
-from backend.app.infrastructure.announcements.publication_audit_repository import (
+from app.infrastructure.announcements.publication_audit_repository import (
     SqlAlchemyPublicationAuditRepository,
 )
-from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+from app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
     SqlAlchemyPublicationExecutionRepository,
 )
-from backend.app.infrastructure.persistence.database import (
+from app.infrastructure.persistence.database import (
     create_async_database_engine,
     create_async_session_factory,
 )

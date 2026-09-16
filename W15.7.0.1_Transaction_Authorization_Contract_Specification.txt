@@ -1,0 +1,547 @@
+﻿W15.7.0.1 — TRANSACTION AUTHORIZATION CONTRACT SPECIFICATION
+============================================================
+
+STATUS
+------
+W15.6 Authentication Assurance: COMPLETE
+W15.6 Final Verification: PASS
+W15.7 Contract phase: STARTING
+Production implementation: NOT STARTED
+
+OBJECTIVE
+---------
+Define the central EasyChatBot Transaction Authorization boundary
+before implementing high-risk business-service transaction gates.
+
+Transaction Authorization answers:
+
+    "Is this exact transaction what the authenticated user approved?"
+
+It is distinct from:
+
+    Authentication:
+        Who are you?
+
+    Authentication Assurance:
+        How strongly/recently did you authenticate?
+
+    Authorization:
+        Are you permitted to perform this operation?
+
+    Transaction Authorization:
+        Did you approve this exact transaction?
+
+ARCHITECTURAL BOUNDARY
+----------------------
+Authentication
+    ->
+Authentication Assurance
+    ->
+Authorization Policy
+    ->
+Transaction Authorization
+    ->
+Business Operation
+
+W15.7 MUST NOT move authentication, MFA, or business authorization
+logic into the Transaction Authorization component.
+
+TRANSACTION BINDING
+-------------------
+A transaction authorization MUST bind to all applicable transaction
+attributes required by policy.
+
+Required binding fields:
+
+    transaction_id
+    principal_id
+    amount
+    currency
+    merchant_or_service
+    operation
+    timestamp
+    nonce
+    risk_context
+
+A change to any security-relevant bound transaction attribute MUST
+invalidate the existing transaction authorization.
+
+Examples:
+
+    €100
+        !=
+    €10,000
+
+    merchant-A
+        !=
+    merchant-B
+
+    purchase
+        !=
+    refund
+
+    principal-A
+        !=
+    principal-B
+
+PRINCIPAL BINDING
+-----------------
+Transaction authorization MUST be bound to the authenticated
+principal.
+
+An authorization created for principal A MUST NOT be usable by
+principal B.
+
+Principal substitution MUST fail closed.
+
+TRANSACTION ID BINDING
+----------------------
+Every transaction authorization MUST reference a unique transaction_id.
+
+The authorization MUST NOT be transferable to another transaction.
+
+OPERATION BINDING
+-----------------
+Authorization MUST be bound to the intended business operation.
+
+Examples:
+
+    PURCHASE
+    SUBSCRIPTION_CHANGE
+    PAYMENT_METHOD_CHANGE
+    REFUND
+    MONEY_TRANSFER
+    ACCOUNT_SECURITY_CHANGE
+
+Changing the operation MUST invalidate the authorization.
+
+AMOUNT BINDING
+--------------
+For monetary transactions, authorization MUST bind to the exact
+approved amount.
+
+Changing the amount MUST invalidate authorization.
+
+Currency MUST also be bound.
+
+Example:
+
+    EUR 100
+        !=
+    EUR 1,000
+
+    EUR 100
+        !=
+    USD 100
+
+MERCHANT / SERVICE BINDING
+--------------------------
+Where applicable, authorization MUST bind to the intended merchant,
+recipient, provider, or service.
+
+Changing the intended destination MUST invalidate authorization.
+
+TIMESTAMP
+---------
+Transaction authorization MUST contain trusted server/application
+timing information.
+
+Caller-controlled current time MUST NOT determine authorization
+freshness.
+
+Authorization expiry MUST be evaluated using trusted application time.
+
+NONCE
+-----
+Each transaction authorization MUST contain a unique nonce or
+equivalent anti-replay value.
+
+The nonce MUST NOT be reusable.
+
+REPLAY PROTECTION
+-----------------
+Transaction authorization MUST be single-use.
+
+After successful consumption:
+
+    authorization = CONSUMED
+
+A consumed authorization MUST NOT authorize another operation.
+
+Replay attempts MUST fail closed.
+
+Concurrent attempts against the same authorization MUST NOT permit
+multiple successful consumptions.
+
+EXPIRY
+------
+Transaction authorization MUST have a short, centrally controlled
+validity period.
+
+Expiry policy MUST be centrally supplied.
+
+Business services MUST NOT independently define authorization
+freshness/expiry rules.
+
+An expired authorization MUST fail closed.
+
+AUTHORIZATION LIFECYCLE
+-----------------------
+The contract SHOULD distinguish explicit authorization states.
+
+Minimum conceptual states:
+
+    CREATED
+    PENDING_USER_APPROVAL
+    APPROVED
+    CONSUMED
+    EXPIRED
+    REJECTED
+    REVOKED
+
+Only an APPROVED, unexpired, unused authorization may be consumed
+for the exact bound transaction.
+
+CONCURRENCY
+-----------
+Consumption MUST be atomic with respect to replay protection.
+
+Two concurrent requests MUST NOT both successfully consume the same
+transaction authorization.
+
+The implementation MUST define an idempotency/concurrency strategy.
+
+TAMPER RESISTANCE
+-----------------
+The system MUST detect modification of transaction authorization
+data.
+
+At minimum, authorization validation MUST ensure that the currently
+presented transaction matches the originally authorized transaction.
+
+Where cryptographic transaction authorization is introduced, any
+modification to security-relevant transaction data MUST invalidate
+the authorization.
+
+The implementation MUST NOT claim cryptographic integrity until
+actual cryptographic protection is implemented and tested.
+
+AUTHENTICATION ASSURANCE DEPENDENCY
+-----------------------------------
+W15.7 MAY require an AuthenticationAssuranceContext produced by W15.6.
+
+Transaction policy determines the minimum required assurance level.
+
+Examples:
+
+    low-risk transaction
+        -> policy-defined assurance
+
+    high-risk transaction
+        -> A2 or stronger
+
+    critical/high-value transaction
+        -> A3 / phishing-resistant assurance where policy requires it
+
+W15.7 MUST consume the W15.6 assurance result.
+
+W15.7 MUST NOT recreate MFA or authentication-assurance logic.
+
+AUTHORIZATION SEPARATION
+------------------------
+Authentication assurance does NOT grant business authorization.
+
+Transaction authorization does NOT grant general application
+permissions.
+
+The following are separate decisions:
+
+    Authentication Assurance
+    Authorization
+    Transaction Authorization
+
+A transaction authorization MUST NOT bypass AuthorizationService or
+application authorization policy.
+
+USER APPROVAL
+-------------
+The transaction authorization represents approval of the exact
+transaction presented to the user.
+
+The implementation MUST NOT allow approval of one transaction to be
+reinterpreted as approval of another transaction.
+
+For high-risk operations, the approval evidence MUST be correlated
+with the exact transaction representation.
+
+RISK CONTEXT
+------------
+Where risk evaluation is used, risk context MUST be bound to the
+authorization decision according to centrally supplied policy.
+
+Risk context MUST NOT silently change after approval without
+re-evaluation where policy requires re-evaluation.
+
+A material risk change MUST be capable of invalidating or requiring
+renewal of authorization.
+
+AUDIT EVIDENCE
+--------------
+Transaction authorization MUST produce auditable evidence sufficient
+to establish:
+
+    principal
+    transaction_id
+    operation
+    transaction attributes
+    authorization decision
+    assurance level used
+    authorization time
+    expiry
+    nonce / authorization identifier
+    policy version
+    consumption result
+    failure/rejection reason where applicable
+
+Raw credentials, passwords, OTP secrets, private keys, access tokens,
+refresh tokens, or equivalent sensitive secrets MUST NOT be stored
+in transaction authorization audit records.
+
+FAILURE SEMANTICS
+-----------------
+Failures MUST be deterministic and fail closed.
+
+The contract SHOULD distinguish at least:
+
+    INVALID_TRANSACTION
+    INVALID_PRINCIPAL_BINDING
+    INVALID_TRANSACTION_BINDING
+    INVALID_OPERATION
+    INVALID_AMOUNT
+    INVALID_CURRENCY
+    INVALID_MERCHANT_OR_SERVICE
+    INVALID_NONCE
+    INVALID_AUTHORIZATION
+    TRANSACTION_AUTHORIZATION_REQUIRED
+    TRANSACTION_AUTHORIZATION_DENIED
+    TRANSACTION_AUTHORIZATION_EXPIRED
+    TRANSACTION_AUTHORIZATION_REPLAYED
+    TRANSACTION_AUTHORIZATION_ALREADY_CONSUMED
+    INSUFFICIENT_AUTHENTICATION_ASSURANCE
+
+No failure may silently downgrade to an authorized state.
+
+NO SILENT DOWNGRADE
+-------------------
+If policy requires transaction authorization, absence or failure of
+transaction authorization MUST NOT result in normal execution.
+
+If policy requires A3 and only A2 is available:
+
+    DENY
+
+If transaction authorization is required but missing:
+
+    DENY
+
+If transaction authorization has expired:
+
+    DENY
+
+If authorization has already been consumed:
+
+    DENY
+
+If transaction attributes differ:
+
+    DENY
+
+CENTRAL POLICY
+--------------
+Transaction authorization policy MUST be centrally supplied.
+
+Business services MUST NOT contain their own:
+
+    transaction expiry rules
+    replay rules
+    assurance thresholds
+    transaction authorization policy
+
+Business services request a policy decision through the approved
+application boundary.
+
+HIGH-RISK OPERATIONS
+--------------------
+The design MUST support policy enforcement for operations including:
+
+    purchases
+    subscriptions
+    payment-method changes
+    refunds
+    money movement
+    high-value financial operations
+    critical account/security operations
+
+Exact monetary thresholds MUST be policy/configuration decisions and
+MUST NOT be hard-coded independently into individual business
+services.
+
+RESPONSIBILITY BOUNDARIES
+-------------------------
+W15.6 Authentication Assurance owns:
+
+    authentication assurance
+    assurance level
+    authentication freshness
+    authentication evidence
+
+W15.7 Transaction Authorization owns:
+
+    transaction binding
+    user approval binding
+    authorization lifecycle
+    replay protection
+    expiry
+    consumption
+    transaction integrity validation
+    transaction authorization evidence
+
+AuthorizationService owns:
+
+    application/business permission decisions
+
+Business services own:
+
+    execution of already-authorized business operations
+
+Business services MUST NOT implement their own transaction
+authorization or MFA mechanisms.
+
+ZITADEL / KEYCLOAK
+------------------
+External IAM remains outside the W15.7 transaction authorization
+implementation boundary.
+
+ZITADEL/Keycloak may provide identity and authentication-assurance
+building blocks.
+
+EasyChatBot MUST retain ownership of transaction authorization.
+
+Transaction authorization MUST NOT be delegated blindly to the IAM
+provider.
+
+IMPLEMENTATION SEPARATION
+-------------------------
+W15.7 implementation MUST NOT modify the following unless a reviewed
+architectural necessity is demonstrated:
+
+    AuthenticationService
+    Principal
+    IdentityProvider
+    SessionIdentityProvider
+    AuthorizationService
+
+The implementation must introduce a dedicated transaction
+authorization boundary.
+
+PROPOSED IMPLEMENTATION BOUNDARY
+--------------------------------
+The exact filenames will be finalized during implementation review,
+but the intended boundary is:
+
+    app/domain/identity/
+        transaction_authorization.py
+
+    app/application/
+        identity/
+            transaction_authorization.py
+
+    tests/security/
+        test_transaction_authorization.py
+
+No implementation begins until this contract passes 4-eyes review
+and is frozen.
+
+SECURITY TEST STRATEGY
+----------------------
+Required tests MUST include:
+
+    transaction binding
+    principal binding
+    transaction_id binding
+    operation binding
+    amount binding
+    currency binding
+    merchant/service binding
+    nonce uniqueness
+    replay protection
+    consumed authorization rejection
+    expiry
+    trusted-clock evaluation
+    concurrent/double-consumption protection
+    tampering detection
+    insufficient authentication assurance
+    missing transaction authorization
+    deterministic DENY
+    successful authorization
+    authorization separation
+    authentication-assurance separation
+    transaction-authorization lifecycle
+    audit evidence safety
+    no raw secret storage
+    no silent downgrade
+
+TEST GATE
+---------
+No advancement while relevant tests fail.
+
+Failure procedure:
+
+    STOP
+    ->
+    DIAGNOSE
+    ->
+    FIX
+    ->
+    TEST
+    ->
+    REVIEW
+    ->
+    VERIFY
+
+Do not commit or advance W15.7 with failing relevant tests.
+
+OUT OF SCOPE FOR THIS CONTRACT PHASE
+-------------------------------------
+    production payment integration
+    production money movement
+    ZITADEL deployment
+    Keycloak deployment
+    WebAuthn implementation
+    actual cryptographic signing implementation
+    business-service transaction gates
+    production monetary thresholds
+    replacing existing authentication
+    replacing AuthorizationService
+
+APPROVAL CRITERIA
+-----------------
+W15.7 contract may be frozen only when:
+
+    transaction binding is explicit
+    principal binding is explicit
+    replay protection is explicit
+    expiry is explicit
+    concurrency is addressed
+    tampering protection is explicit
+    authentication assurance remains separate
+    authorization remains separate
+    business services remain free of transaction policy
+    audit requirements are explicit
+    failure semantics are deterministic
+    security test strategy is complete
+    implementation boundary is explicit
+
+============================================================
+END W15.7.0.1
+============================================================

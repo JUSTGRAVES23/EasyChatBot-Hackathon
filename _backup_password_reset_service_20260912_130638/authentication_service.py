@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
+import hashlib
+import hmac
+import secrets
+
+
+class AuthenticationError(ValueError):
+    """Expected authentication failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResult:
+    session_id: UUID
+    user_id: UUID
+    expires_at: datetime
+
+
+class PasswordHasher:
+    """PBKDF2 password hashing using the Python standard library."""
+
+    algorithm = "pbkdf2_sha256"
+    iterations = 600_000
+    salt_bytes = 32
+
+    def hash(self, password: str) -> str:
+        if len(password) < 12:
+            raise AuthenticationError(
+                "Password must contain at least 12 characters."
+            )
+
+        salt = secrets.token_bytes(self.salt_bytes)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            self.iterations,
+        )
+        return (
+            f"{self.algorithm}${self.iterations}$"
+            f"{salt.hex()}${digest.hex()}"
+        )
+
+    def verify(self, password: str, encoded: str) -> bool:
+        try:
+            algorithm, iterations, salt_hex, digest_hex = encoded.split("$")
+
+            if algorithm != self.algorithm:
+                return False
+
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt_hex),
+                int(iterations),
+            )
+
+            return hmac.compare_digest(
+                candidate.hex(),
+                digest_hex,
+            )
+        except (ValueError, TypeError):
+            return False
+
+
+class AuthenticationService:
+    """Application service for registration/login/session lifecycle.
+
+    Persistence is supplied through a repository protocol so the service does
+    not depend on a particular ORM implementation.
+
+    Authentication email delivery is supplied through the application email
+    service boundary. Provider selection and provider credentials remain
+    outside this service.
+    """
+
+    def __init__(
+        self,
+        repository,
+        *,
+        email_service=None,
+        password_hasher: PasswordHasher | None = None,
+        session_ttl: timedelta = timedelta(hours=12),
+    ) -> None:
+        self._repository = repository
+        self._email_service = email_service
+        self._password_hasher = password_hasher or PasswordHasher()
+        self._session_ttl = session_ttl
+
+    async def register(
+        self,
+        *,
+        email: str,
+        username: str,
+        password: str,
+    ):
+        normalized_email = email.strip().lower()
+        normalized_username = username.strip()
+
+        if not normalized_email or "@" not in normalized_email:
+            raise AuthenticationError("A valid email is required.")
+
+        if not normalized_username:
+            raise AuthenticationError("Username is required.")
+
+        if await self._repository.email_exists(normalized_email):
+            raise AuthenticationError(
+                "An account with this email already exists."
+            )
+
+        if await self._repository.username_exists(normalized_username):
+            raise AuthenticationError(
+                "That username is already in use."
+            )
+
+        user_id = uuid4()
+        password_hash = self._password_hasher.hash(password)
+
+        await self._repository.create_user(
+            user_id=user_id,
+            email=normalized_email,
+            username=normalized_username,
+        )
+
+        await self._repository.create_password_credential(
+            user_id=user_id,
+            password_hash=password_hash,
+        )
+
+        verification_token = (
+            await self._repository.create_email_verification(
+                user_id=user_id,
+                email=normalized_email,
+            )
+        )
+
+        if self._email_service is None:
+            raise AuthenticationError(
+                "Registration email delivery is not configured."
+            )
+
+        try:
+            await self._email_service.send_verification_email(
+                email=normalized_email,
+                username=normalized_username,
+                verification_token=verification_token,
+            )
+        except Exception:
+            raise AuthenticationError(
+                "Registration email could not be sent. "
+                "Please try again later."
+            ) from None
+
+        return user_id
+
+    async def authenticate(
+        self,
+        *,
+        email: str,
+        password: str,
+        device_name: str | None = None,
+        ip_address: str | None = None,
+    ) -> SessionResult:
+        user = await self._repository.get_user_by_email(
+            email.strip().lower()
+        )
+
+        if user is None:
+            raise AuthenticationError(
+                "Invalid email or password."
+            )
+
+        if user.status != "active":
+            raise AuthenticationError(
+                "Account is not active."
+            )
+
+        if not user.email_verified:
+            raise AuthenticationError(
+                "Email verification is required."
+            )
+
+        credential = await self._repository.get_password_credential(
+            user.id
+        )
+
+        if credential is None or not self._password_hasher.verify(
+            password,
+            credential.password_hash,
+        ):
+            raise AuthenticationError(
+                "Invalid email or password."
+            )
+
+        now = datetime.now(timezone.utc)
+        expires_at = now + self._session_ttl
+        session_id = uuid4()
+
+        await self._repository.create_session(
+            session_id=session_id,
+            user_id=user.id,
+            created_at=now,
+            expires_at=expires_at,
+            device_name=device_name,
+            ip_address=ip_address,
+        )
+
+        return SessionResult(
+            session_id=session_id,
+            user_id=user.id,
+            expires_at=expires_at,
+        )
+
+    async def verify_email(
+        self,
+        token: str,
+    ) -> None:
+        """Verify an email address using a repository-managed token.
+
+        Token generation, hashing, expiration, single-use enforcement,
+        and persistence remain the responsibility of the repository.
+        The application service exposes the business operation without
+        depending on the persistence implementation.
+        """
+
+        normalized_token = token.strip()
+
+        if not normalized_token:
+            raise AuthenticationError(
+                "Email verification token is required."
+            )
+
+        verified = await self._repository.verify_email(
+            normalized_token,
+        )
+
+        if not verified:
+            raise AuthenticationError(
+                "Invalid or expired email verification token."
+            )
+
+    async def revoke_session(
+        self,
+        session_id: UUID,
+    ) -> None:
+        await self._repository.revoke_session(session_id)

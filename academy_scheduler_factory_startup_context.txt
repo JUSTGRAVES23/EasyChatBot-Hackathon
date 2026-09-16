@@ -1,0 +1,345 @@
+﻿====================================================================================================
+EASYCHATBOT ACADEMY
+SCHEDULER FACTORY STARTUP CONTEXT
+====================================================================================================
+
+READ-ONLY
+NO SOURCE MODIFICATION
+NO DATABASE WRITE
+NO MIGRATION
+NO EMAIL
+NO TELEGRAM
+NO SCHEDULER START
+
+====================================================================================================
+1. SCHEDULER FACTORY
+====================================================================================================
+
+"""
+Cybersecurity Scheduler Factory.
+
+Creates the single shared scheduler runtime.
+
+Academy is composed as an optional application workflow and
+registered on the existing scheduler. No second scheduler is created.
+"""
+
+from __future__ import annotations
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    CybersecuritySchedulerRuntime,
+)
+
+from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+from backend.cybersecurity.scheduler.scheduler_configuration import (
+    SCHEDULER_TIMEZONE,
+)
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+    CybersecuritySchedulerWorkflow,
+)
+
+from backend.cybersecurity.email.cybersecurity_email_service import (
+    CybersecurityEmailService,
+)
+
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+def create_cybersecurity_scheduler_runtime(
+    workflow_service=None,
+    *,
+    academy_one_week_workflow=None,
+) -> CybersecuritySchedulerRuntime:
+    """Create the single shared scheduler runtime."""
+
+    if workflow_service is None:
+        email_service = CybersecurityEmailService(
+            recipient="davdbarbero1999@gmail.com",
+        )
+
+        workflow_service = CybersecuritySchedulerWorkflow(
+            email_service=email_service,
+        )
+
+    scheduler = AsyncIOScheduler(
+        timezone=SCHEDULER_TIMEZONE,
+    )
+
+    # Academy production composition is explicit and injectable.
+    #
+    # It is deliberately NOT created here automatically because the
+    # application import path must remain safe when PostgreSQL is not
+    # configured in a development/test environment.
+    #
+    # Production composition may inject the completed Academy workflow.
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    return CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+
+__all__ = [
+    "create_cybersecurity_scheduler_runtime",
+]
+
+====================================================================================================
+2. APPLICATION SCHEDULER CREATION
+====================================================================================================
+
+# Cybersecurity Reports API
+#
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+#
+# Cybersecurity Live Reports API
+#
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Scheduler runtime instance
+#
+
+scheduler_runtime = create_cybersecurity_scheduler_runtime()
+
+
+#
+# Announcement configuration
+#
+
+def _announcement_publishing_enabled() -> bool:
+    """
+    Resolve the explicit Beta 1 announcement publication switch.
+
+    Publication is disabled by default.
+
+    Accepted truthy values:
+
+====================================================================================================
+3. ACADEMY PRODUCTION COMPOSITION
+====================================================================================================
+
+from __future__ import annotations
+
+import os
+
+from backend.app.application.academy_notification_formatters import (
+    AcademyEmailFormatter,
+    AcademyTelegramFormatter,
+)
+
+from backend.app.application.academy_notification_ports import (
+    TelegramNotificationSender,
+)
+
+from backend.app.application.academy_notification_service import (
+    OneWeekNotificationOrchestrator,
+)
+from backend.app.application.academy.academy_one_week_workflow import (
+    AcademyOneWeekWorkflow,
+)
+from backend.app.infrastructure.academy.postgresql_academy_notification_repository import (
+    PostgreSQLAcademyDeliveryRepository,
+    PostgreSQLAcademyUserQuery,
+)
+from backend.app.infrastructure.email.academy_email_notification_sender import (
+    AcademyEmailNotificationSender,
+)
+from backend.app.infrastructure.telegram.academy_notification_telegram import (
+    ExistingBotTelegramNotificationSender,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+class DisabledAcademyTelegramSender:
+    """Safe default when no existing Telegram Bot is supplied.
+
+    Academy email delivery remains independently testable.
+    No second Telegram Bot is created.
+    """
+
+    async def send(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        portal_url: str,
+    ) -> dict:
+        return {
+            "provider": "telegram",
+            "status": "not_configured",
+            "message_id": None,
+        }
+
+
+def _required_config(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for Academy production composition."
+        )
+
+    return value
+
+
+def create_academy_one_week_workflow(
+    *,
+    session_factory=None,
+    email_provider_manager: EmailProviderManager | None = None,
+    telegram_bot=None,
+    portal_url: str | None = None,
+    registration_email: str | None = None,
+) -> AcademyOneWeekWorkflow:
+    """Compose the production Academy one-week workflow.
+
+    Composition:
+
+        PostgreSQL
+            ↓
+        AcademyOneWeekWorkflow
+            ↓
+        OneWeekNotificationOrchestrator
+            ↓
+        EmailProviderManager
+            ↓
+        Existing Telegram Bot adapter
+
+    The scheduler itself is intentionally not created here.
+    """
+
+    if session_factory is None:
+        engine = create_async_database_engine()
+        session_factory = create_async_session_factory(engine)
+
+    resolved_portal_url = (
+        portal_url.strip()
+        if portal_url is not None
+        else _required_config("EASYCHATBOT_PORTAL_URL")
+    )
+
+    resolved_registration_email = (
+        registration_email.strip()
+        if registration_email is not None
+        else _required_config("EASYCHATBOT_REGISTRATION_EMAIL")
+    )
+
+    email_sender = AcademyEmailNotificationSender(
+        provider_manager=email_provider_manager
+        or EmailProviderManager()
+    )
+
+    if telegram_bot is not None:
+        telegram_sender: TelegramNotificationSender = (
+            ExistingBotTelegramNotificationSender(
+                telegram_bot,
+            )
+        )
+    else:
+        telegram_sender = DisabledAcademyTelegramSender()
+
+    notifications = OneWeekNotificationOrchestrator(
+        email_sender=email_sender,
+        telegram_sender=telegram_sender,
+        email_formatter=AcademyEmailFormatter(),
+        telegram_formatter=AcademyTelegramFormatter(),
+        registration_email=resolved_registration_email,
+        portal_url=resolved_portal_url,
+    )
+
+    users = PostgreSQLAcademyUserQuery(
+        session_factory,
+    )
+
+    deliveries = PostgreSQLAcademyDeliveryRepository(
+        session_factory,
+    )
+
+    return AcademyOneWeekWorkflow(
+        users=users,
+        deliveries=deliveries,
+        notifications=notifications,
+    )
+
+
+__all__ = [
+    "create_academy_one_week_workflow",
+]
+
+
+====================================================================================================
+4. EXISTING FACTORY TEST
+====================================================================================================
+
+from unittest.mock import MagicMock
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+def test_scheduler_factory_accepts_existing_academy_workflow():
+    academy_workflow = MagicMock()
+
+    runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(),
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.academy_one_week_workflow is academy_workflow
+
+
+def test_scheduler_factory_creates_one_shared_scheduler():
+    academy_workflow = MagicMock()
+
+    runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(),
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.scheduler is not None
+    assert adapter.academy_one_week_workflow is academy_workflow
+    assert adapter.scheduler.running is False
+
+====================================================================================================
+INSPECTION COMPLETE
+====================================================================================================
+
+NEXT GATE:
+Determine the minimum safe startup composition point.
+Do NOT modify scheduler internals.
+Do NOT create another scheduler.
+Do NOT start scheduler.
+Do NOT send email.
+Do NOT send Telegram.

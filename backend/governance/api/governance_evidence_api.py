@@ -1,4 +1,4 @@
-"""
+﻿"""
 Governance Evidence API.
 
 Read-only audit evidence projection.
@@ -11,11 +11,11 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi import Depends
 
-from backend.governance.operations_center.governance_evidence_service import (
+from governance.operations_center.governance_evidence_service import (
     GovernanceEvidenceService,
 )
 
-from backend.governance.operations_center.governance_runtime import (
+from governance.operations_center.governance_runtime import (
     governance_evidence_service,
 )
 

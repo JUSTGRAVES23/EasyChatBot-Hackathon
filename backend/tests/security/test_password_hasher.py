@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from backend.app.application.identity.authentication_service import (
+from app.application.identity.authentication_service import (
     AuthenticationError,
     PasswordHasher,
 )
@@ -31,3 +31,4 @@ def test_short_password_rejected() -> None:
         pass
     else:
         raise AssertionError("Short password was accepted.")
+

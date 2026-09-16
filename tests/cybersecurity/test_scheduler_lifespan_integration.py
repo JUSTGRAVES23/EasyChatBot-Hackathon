@@ -18,7 +18,7 @@ Does NOT test:
 import pytest
 
 
-from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
     create_cybersecurity_scheduler_runtime,
 )
 
@@ -66,3 +66,4 @@ async def test_scheduler_factory_creates_runtime():
         status["started"]
         is False
     )
+

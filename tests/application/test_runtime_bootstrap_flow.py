@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime bootstrap flow tests.
 
 Validates:
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.application.bootstrap import (
+from application.bootstrap import (
     bootstrap_application,
     get_external_runtime_service,
 )

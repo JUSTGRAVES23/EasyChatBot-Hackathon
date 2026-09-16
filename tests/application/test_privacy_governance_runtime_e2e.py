@@ -1,20 +1,20 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.api.privacy_governance import router as privacy_governance_router
-from backend.app.application.privacy.privacy_approval_record import (
+from app.api.privacy_governance import router as privacy_governance_router
+from app.application.privacy.privacy_approval_record import (
     ApprovalDecision,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
     reset_privacy_governance_composition_for_tests,
 )

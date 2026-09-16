@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from unittest.mock import patch
 
 import pytest
 
-from backend.app.application.privacy.privacy_approval_email_service import (
+from app.application.privacy.privacy_approval_email_service import (
     ApprovalEmailRequest,
 )
-from backend.app.infrastructure.email.resend_approval_email_sender import (
+from app.infrastructure.email.resend_approval_email_sender import (
     ResendApprovalEmailSender,
 )
 

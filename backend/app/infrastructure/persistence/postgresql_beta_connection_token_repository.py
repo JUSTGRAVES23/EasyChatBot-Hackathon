@@ -40,3 +40,4 @@ class PostgreSQLBetaConnectionTokenRepository(BetaConnectionTokenRepository):
             .values(used_at=used_at)
         )
         self._session.flush()
+

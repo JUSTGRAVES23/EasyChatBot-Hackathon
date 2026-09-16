@@ -14,39 +14,39 @@ from __future__ import annotations
 
 import pytest
 
-from backend.agents.discovery.discovery_agent import DiscoveryAgent
-from backend.runtime.context.execution_context import ExecutionContext
+from agents.discovery.discovery_agent import DiscoveryAgent
+from runtime.context.execution_context import ExecutionContext
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     ContentProductDiscoverySkill,
     DiscoveryCandidate,
 )
-from backend.skills.discovery.discovery_quality_verification import (
+from skills.discovery.discovery_quality_verification import (
     DiscoveryQualityVerificationSkill,
 )
-from backend.skills.discovery.hackathon_preference_source import (
+from skills.discovery.hackathon_preference_source import (
     HackathonPreferenceSource,
 )
-from backend.skills.discovery.personalised_content_adaptation import (
+from skills.discovery.personalised_content_adaptation import (
     PersonalisedContentAdaptationSkill,
 )
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     PreferenceUnderstandingSkill,
 )
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQuery,
     DiscoveryQueryGenerationSkill,
 )
-from backend.skills.discovery.recommendation_explanation import (
+from skills.discovery.recommendation_explanation import (
     RecommendationExplanationSkill,
 )
-from backend.skills.discovery.recommendation_ranking import (
+from skills.discovery.recommendation_ranking import (
     RecommendationRankingSkill,
 )
-from backend.skills.discovery.relevance_matching import (
+from skills.discovery.relevance_matching import (
     RelevanceMatchingSkill,
 )
-from backend.skills.discovery.user_choice_handoff import (
+from skills.discovery.user_choice_handoff import (
     UserChoiceControlledHandoffSkill,
 )
 
@@ -246,3 +246,4 @@ async def test_discovery_pipeline_does_not_bypass_gateway():
         isinstance(query, DiscoveryQuery)
         for query in gateway.queries
     )
+

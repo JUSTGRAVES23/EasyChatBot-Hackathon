@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Notification Composition.
 
 Validates:
@@ -85,13 +85,13 @@ def test_composed_service_creates_notification():
 
         Composition
              |
-             ↓
+             â†“
         Application Service
              |
-             ↓
+             â†“
         Repository
              |
-             ↓
+             â†“
         Stored Notification
     """
 
@@ -137,3 +137,4 @@ def test_composed_service_creates_notification():
     assert stored.voice_call_id == (
         "vc-001"
     )
+

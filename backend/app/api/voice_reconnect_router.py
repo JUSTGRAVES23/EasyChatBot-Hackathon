@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Reconnect API.
 
 HTTP boundary for reconnecting
@@ -18,22 +18,18 @@ Does NOT:
 
 from __future__ import annotations
 
-
 from fastapi import (
     APIRouter,
     HTTPException,
 )
 
-
-from backend.app.application.composition.voice_lifecycle_composition import (
+from app.application.composition.voice_lifecycle_composition import (
     build_voice_call_lifecycle_service,
 )
-
 
 from app.api.schemas.voice_call import (
     VoiceReconnectResponseSchema,
 )
-
 
 
 router = APIRouter(
@@ -42,7 +38,6 @@ router = APIRouter(
         "voice-reconnect",
     ],
 )
-
 
 
 @router.post(
@@ -60,27 +55,21 @@ def reconnect_voice_call(
     and lifecycle event handling.
     """
 
-
     service = (
         build_voice_call_lifecycle_service()
     )
 
-
     if service.voice_call_management_service is None:
-
         raise RuntimeError(
             "Voice call management service "
             "not configured."
         )
 
-
     if service.voice_call_session_service is None:
-
         raise RuntimeError(
             "Voice call session service "
             "not configured."
         )
-
 
     voice_call = (
         service.voice_call_management_service
@@ -89,9 +78,7 @@ def reconnect_voice_call(
         )
     )
 
-
     if voice_call is None:
-
         raise HTTPException(
             status_code=404,
             detail=(
@@ -99,47 +86,36 @@ def reconnect_voice_call(
             ),
         )
 
-
     try:
-
         session = (
             service.reconnect_call(
                 voice_call=voice_call,
             )
         )
 
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
         ) from exc
 
-
     return VoiceReconnectResponseSchema(
-
         voice_call_id=(
             voice_call.id
         ),
-
         character_id=(
             voice_call.character_id
         ),
-
         language_code=(
             voice_call.language_code
         ),
-
         session_id=(
             session.session_id
         ),
-
         state=(
             session.state.value
         ),
     )
-
 
 
 __all__ = [

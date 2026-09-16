@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Character Resolver.
 """
 
@@ -80,3 +80,4 @@ def test_unknown_character_returns_error():
         assert str(error) == (
             "Character not found: unknown_character"
         )
+

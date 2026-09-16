@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for API runtime boundaries.
 
 Verifies:
@@ -16,7 +16,7 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-from backend.api.main import app
+from api.main import app
 
 
 client = TestClient(app)
@@ -51,7 +51,7 @@ def test_api_does_not_expose_runtime_gateway_directly():
     CapabilityGateway should not become a route dependency.
     """
 
-    from backend.api import routes
+    from api import routes
 
     assert hasattr(
         routes,
@@ -66,7 +66,7 @@ async def test_external_runtime_service_factory_creates_service():
     ExternalRuntimeService boundary.
     """
 
-    from backend.api.routes import (
+    from api.routes import (
         create_external_runtime_service,
     )
 

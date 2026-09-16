@@ -1,11 +1,11 @@
 ﻿import asyncio
 import re
 
-from backend.agents.conversation_agent import ConversationAgent
-from backend.characters.character_profile import CharacterProfile
-from backend.intelligence.research_service import ResearchService
-from backend.providers.llm.llm_provider_factory import LLMProviderFactory
-from backend.runtime.context.execution_context import ExecutionContext
+from agents.conversation_agent import ConversationAgent
+from characters.character_profile import CharacterProfile
+from intelligence.research_service import ResearchService
+from providers.llm.llm_provider_factory import LLMProviderFactory
+from runtime.context.execution_context import ExecutionContext
 
 
 def word_count(text: str) -> int:
@@ -111,3 +111,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

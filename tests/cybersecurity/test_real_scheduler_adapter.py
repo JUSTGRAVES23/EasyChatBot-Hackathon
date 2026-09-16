@@ -15,7 +15,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
     CybersecurityAPSchedulerAdapter,
 )
 
@@ -134,3 +134,4 @@ def test_apscheduler_adapter_lifecycle():
         scheduler.running
         is False
     )
+

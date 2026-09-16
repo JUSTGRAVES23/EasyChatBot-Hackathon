@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Dependency Composition.
 
 Application composition root
@@ -22,37 +22,37 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from backend.app.application.uai.voice.voice_call_service import (
+from app.application.uai.voice.voice_call_service import (
     VoiceCallService,
 )
 
 
-from backend.app.application.uai.voice.voice_call_orchestrator import (
+from app.application.uai.voice.voice_call_orchestrator import (
     VoiceCallOrchestrator,
 )
 
 
-from backend.app.application.uai.voice.voice_character_session_service import (
+from app.application.uai.voice.voice_character_session_service import (
     VoiceCharacterSessionService,
 )
 
 
-from backend.app.application.uai.voice.voice_interaction_context_service import (
+from app.application.uai.voice.voice_interaction_context_service import (
     VoiceInteractionContextService,
 )
 
 
-from backend.app.application.uai.context.interaction_context_builder import (
+from app.application.uai.context.interaction_context_builder import (
     InteractionContextBuilder,
 )
 
 
-from backend.app.application.uai.world.world_resolver import (
+from app.application.uai.world.world_resolver import (
     WorldResolver,
 )
 
 
-from backend.app.application.uai.character.character_resolver import (
+from app.application.uai.character.character_resolver import (
     CharacterResolver,
 )
 
@@ -271,3 +271,6 @@ __all__ = [
     "build_voice_call_service",
     "build_voice_interaction_context_service",
 ]
+
+
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 LLM Service.
 
 Application-level service responsible for executing
@@ -44,15 +44,15 @@ from __future__ import annotations
 
 import logging
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.llm.llm_provider import (
+from providers.llm.llm_provider import (
     LLMProvider,
 )
 
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
 

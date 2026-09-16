@@ -1,4 +1,4 @@
-"""
+﻿"""
 Cybersecurity Delivery Control.
 
 Manual governance kill switch for cybersecurity delivery.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from backend.governance.governance_audit_service import (
+from governance.governance_audit_service import (
     GovernanceAuditService,
 )
 

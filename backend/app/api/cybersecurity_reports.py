@@ -9,7 +9,7 @@ No automated remediation.
 from fastapi import APIRouter
 
 
-from backend.cybersecurity.intelligence_report_service import (
+from cybersecurity.intelligence_report_service import (
     CybersecurityIntelligenceReportService,
 )
 
@@ -86,3 +86,4 @@ async def create_critical_alert(
     )
 
     return result
+

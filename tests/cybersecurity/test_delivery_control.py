@@ -15,7 +15,7 @@ Tests:
 from __future__ import annotations
 
 
-from backend.cybersecurity.control.cybersecurity_delivery_control import (
+from cybersecurity.control.cybersecurity_delivery_control import (
     CybersecurityDeliveryControl,
 )
 
@@ -92,3 +92,4 @@ def test_delivery_control_can_be_paused_and_resumed_multiple_times() -> None:
     status = control.status()
 
     assert status["reason"] == "Second emergency stop"
+

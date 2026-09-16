@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from uuid import uuid4
@@ -7,12 +7,15 @@ import pytest
 from dotenv import load_dotenv
 from sqlalchemy import inspect, text
 
-from backend.app.ai_runtime.conversation.conversation_runtime import (
+from app.ai_runtime.conversation.conversation_runtime import (
     ConversationRuntime,
 )
-from backend.app.application.composition.beta_telegram_production import (
+from app.application.composition.beta_telegram_production import (
     BetaTelegramProductionComposition,
     create_production_beta_telegram_composition,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
 )
 
 
@@ -57,9 +60,86 @@ class FakeProductionLLMProvider:
         )
 
         return (
-            "Bonjour ! Réponse produite par le "
+            "Bonjour ! RÃ©ponse produite par le "
             "Conversation Runtime."
         )
+
+
+# ============================================================================
+# Deterministic language detector
+# ============================================================================
+
+
+class DeterministicLanguageDetector:
+    """
+    Deterministic test double for the production language-detector contract.
+
+    The production composition still requires an explicit LanguageDetector.
+    This test seam avoids an external language-detection dependency while
+    preserving the real production composition and language-policy wiring.
+    """
+
+    def __init__(self, language: str = "fr") -> None:
+        self._language = language
+
+    def detect(self, text: str) -> str:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string.")
+
+        if not text.strip():
+            raise ValueError("text cannot be empty.")
+
+        return self._language
+
+
+# ============================================================================
+# Functionality-control test seam
+# ============================================================================
+
+
+class FakeFunctionalityControlAuthorizer:
+    """Allow the deterministic test control service to be constructed."""
+
+    def can_control_functionality(
+        self,
+        *,
+        actor,
+        environment,
+        functionality_id,
+    ):
+        return True
+
+
+class FakeFunctionalityControlRepository:
+    """Keep WS19 control state deterministic and enabled."""
+
+    def get_availability(
+        self,
+        *,
+        environment,
+        functionality_id,
+    ):
+        return "enabled"
+
+    def get_last_action(
+        self,
+        *,
+        environment,
+        functionality_id,
+    ):
+        return None
+
+    def record_transition(self, **kwargs):
+        raise AssertionError(
+            "WS19 composition tests must not perform a control transition."
+        )
+
+
+def make_functionality_control_service():
+    return FunctionalityOperationalControlService(
+        authorizer=FakeFunctionalityControlAuthorizer(),
+        repository=FakeFunctionalityControlRepository(),
+    )
 
 
 # ============================================================================
@@ -74,7 +154,9 @@ def _build_composition(
     """
     Build the real production Telegram composition.
 
-    Only the LLM provider is replaced by a deterministic test double.
+    The LLM provider and language detector are deterministic test seams.
+    PostgreSQL, Beta access, conversation service, boundary, policies,
+    adapter and Telegram runtime remain real.
     """
 
     if provider is None:
@@ -84,8 +166,13 @@ def _build_composition(
         llm_provider=provider,
     )
 
+    functionality_control_service = make_functionality_control_service()
+    language_detector = DeterministicLanguageDetector("fr")
+
     return create_production_beta_telegram_composition(
         conversation_runtime=runtime,
+        functionality_control_service=functionality_control_service,
+        language_detector=language_detector,
     )
 
 
@@ -256,7 +343,7 @@ def _find_recent_event(
 
 
 # ============================================================================
-# WS-19.1 — Production composition
+# WS-19.1 â€” Production composition
 # ============================================================================
 
 
@@ -295,7 +382,7 @@ def test_ws19_production_composition_creates():
 
 
 # ============================================================================
-# WS-19.2 — Production policy wiring
+# WS-19.2 â€” Production policy wiring
 # ============================================================================
 
 
@@ -335,7 +422,7 @@ def test_ws19_production_policies_are_injected():
 
 
 # ============================================================================
-# WS-19.3 — PostgreSQL integration
+# WS-19.3 â€” PostgreSQL integration
 # ============================================================================
 
 
@@ -371,7 +458,7 @@ def test_ws19_postgresql_contains_telegram_identity():
 
 
 # ============================================================================
-# WS-19.4 — Active World
+# WS-19.4 â€” Active World
 # ============================================================================
 
 
@@ -401,7 +488,7 @@ async def test_ws19_active_world_is_resolved():
 
 
 # ============================================================================
-# WS-19.5 — Conversation Runtime
+# WS-19.5 â€” Conversation Runtime
 # ============================================================================
 
 
@@ -451,7 +538,7 @@ async def test_ws19_message_reaches_real_conversation_runtime():
 
 
 # ============================================================================
-# WS-19.6 — Persistence
+# WS-19.6 â€” Persistence
 # ============================================================================
 
 
@@ -507,7 +594,7 @@ def test_ws19_conversation_events_are_persisted():
 
 
 # ============================================================================
-# WS-19.7 — User and assistant conversation
+# WS-19.7 â€” User and assistant conversation
 # ============================================================================
 
 
@@ -576,7 +663,7 @@ def test_ws19_user_and_assistant_share_conversation():
 
 
 # ============================================================================
-# WS-19.8 — Conversation continuity
+# WS-19.8 â€” Conversation continuity
 # ============================================================================
 
 
@@ -637,7 +724,7 @@ def test_ws19_persisted_history_is_available():
 
 
 # ============================================================================
-# WS-19.9 — Cross-user isolation
+# WS-19.9 â€” Cross-user isolation
 # ============================================================================
 
 
@@ -746,7 +833,7 @@ def test_ws19_different_users_remain_isolated():
 
 
 # ============================================================================
-# WS-19.10 — Rate limiting
+# WS-19.10 â€” Rate limiting
 # ============================================================================
 
 
@@ -804,7 +891,7 @@ async def test_ws19_rate_limiter_is_identity_scoped(
 
 
 # ============================================================================
-# WS-19.11 — Abuse protection
+# WS-19.11 â€” Abuse protection
 # ============================================================================
 
 
@@ -862,7 +949,7 @@ async def test_ws19_abuse_protection_is_identity_scoped(
 
 
 # ============================================================================
-# WS-19.12 — World-language policy
+# WS-19.12 â€” World-language policy
 # ============================================================================
 
 
@@ -872,7 +959,7 @@ def test_ws19_policy_messages_use_world_language():
         Policy messages use the active World language.
     """
 
-    from backend.app.application.beta_access.policies.telegram_policy_messages import (
+    from app.application.beta_access.policies.telegram_policy_messages import (
         TelegramPolicyMessageService,
     )
 
@@ -905,7 +992,7 @@ def test_ws19_policy_messages_use_world_language():
 
 
 # ============================================================================
-# WS-19.13 — Observability
+# WS-19.13 â€” Observability
 # ============================================================================
 
 
@@ -970,7 +1057,7 @@ async def test_ws19_observability_does_not_log_raw_identity_or_content(
 
 
 # ============================================================================
-# WS-19.14 — Safe runtime failure
+# WS-19.14 â€” Safe runtime failure
 # ============================================================================
 
 
@@ -1068,7 +1155,7 @@ async def test_ws19_runtime_failure_returns_safe_response():
 
 
 # ============================================================================
-# WS-19.15 — Real Telegram adapter
+# WS-19.15 â€” Real Telegram adapter
 # ============================================================================
 
 
@@ -1092,7 +1179,7 @@ def test_ws19_real_telegram_adapter_is_composed():
 
 
 # ============================================================================
-# WS-19.16 — Real Telegram runtime
+# WS-19.16 â€” Real Telegram runtime
 # ============================================================================
 
 
@@ -1116,7 +1203,7 @@ def test_ws19_real_telegram_runtime_is_composed():
 
 
 # ============================================================================
-# WS-19.17 — Dependency graph
+# WS-19.17 â€” Dependency graph
 # ============================================================================
 
 
@@ -1169,7 +1256,7 @@ def test_ws19_dependency_graph_is_integrated():
 
 
 # ============================================================================
-# WS-19.18 — PostgreSQL schema integrity
+# WS-19.18 â€” PostgreSQL schema integrity
 # ============================================================================
 
 

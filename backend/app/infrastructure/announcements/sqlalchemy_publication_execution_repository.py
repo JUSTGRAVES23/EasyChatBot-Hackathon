@@ -13,12 +13,12 @@ from sqlalchemy import DateTime, Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.app.application.announcements.execution.durable_contracts import (
+from app.application.announcements.execution.durable_contracts import (
     DurableExecutionStatus,
     PublicationExecutionRecord,
     PublicationExecutionRepository,
 )
-from backend.app.infrastructure.persistence.database import Base
+from app.infrastructure.persistence.database import Base
 
 
 class PublicationExecutionRecordModel(Base):

@@ -18,35 +18,35 @@ Does NOT:
 
 from __future__ import annotations
 
-from backend.agents.agent_result import (
+from agents.agent_result import (
     AgentResult,
 )
 
-from backend.agents.base_agent import (
+from agents.base_agent import (
     BaseAgent,
 )
 
-from backend.cybersecurity.intelligence_models import (
+from cybersecurity.intelligence_models import (
     CybersecuritySignal,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.skills.skill import (
+from skills.skill import (
     SkillInput,
 )
 
-from backend.skills.cybersecurity.executive_security_summary import (
+from skills.cybersecurity.executive_security_summary import (
     ExecutiveSecuritySummarySkill,
 )
 
-from backend.skills.cybersecurity.security_signal_analysis import (
+from skills.cybersecurity.security_signal_analysis import (
     SecuritySignalAnalysisSkill,
 )
 
-from backend.skills.cybersecurity.threat_prioritisation import (
+from skills.cybersecurity.threat_prioritisation import (
     ThreatPrioritisationSkill,
 )
 

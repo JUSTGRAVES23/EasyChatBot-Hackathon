@@ -1,22 +1,22 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 
 import pytest
 
-from backend.app.application.announcements.approval.approval_service import (
+from app.application.announcements.approval.approval_service import (
     AnnouncementPublicationApprovalService,
 )
-from backend.app.application.announcements.publication_service import (
+from app.application.announcements.publication_service import (
     AnnouncementPublicationService,
 )
-from backend.app.application.announcements.template_registry import (
+from app.application.announcements.template_registry import (
     AnnouncementTemplateRegistry,
 )
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import (
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import (
     PublicationStatus,
     PublicationType,
 )
-from backend.app.infrastructure.announcements.in_memory_repositories import (
+from app.infrastructure.announcements.in_memory_repositories import (
     InMemoryAnnouncementTemplateRepository,
     InMemoryPublicationRepository,
 )

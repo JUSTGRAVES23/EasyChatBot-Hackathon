@@ -1,0 +1,4039 @@
+PROJECT CONTROL � FINAL REVIEW
+============================================================
+Generated: 2026-09-11 08:19:55
+Branch: safety/pre-agentic-cinema-frontend-2026-09-09
+============================================================
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\__init__.py =====
+
+from .application.service import ProjectControlService
+from .domain.models import ProjectControlSnapshot, ProjectDefinition
+
+__all__ = ["ProjectControlService", "ProjectControlSnapshot", "ProjectDefinition"]
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\api\project_control_router.py =====
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
+
+from app.api.dependencies.authorization import require_permission
+from app.domain.authorization.permissions import Permission
+
+from ..application.service import ProjectControlService
+
+
+def create_project_control_router(
+    project_control: ProjectControlService,
+) -> APIRouter:
+    """Create the read-only Project Control Center API router.
+
+    Authorization is enforced at the HTTP boundary before the
+    ProjectControlService is executed.
+
+    The router:
+    - requires FUNCTIONALITY_CONTROL permission;
+    - exposes read-only project-control snapshots;
+    - does not execute the Project Manager Agent;
+    - does not call LLM/provider infrastructure;
+    - does not mutate project state.
+    """
+    if project_control is None:
+        raise ValueError(
+            "project_control cannot be None."
+        )
+
+    router = APIRouter(
+        prefix="/project-control",
+        tags=["Project Control Center"],
+    )
+
+    permission_dependency = require_permission(
+        Permission.FUNCTIONALITY_CONTROL,
+    )
+
+    @router.get(
+        "/projects/{project_id}",
+        summary="Get project control snapshot",
+        description=(
+            "Return the unified read-only Project Control "
+            "Center snapshot for a project."
+        ),
+        dependencies=[
+            Depends(permission_dependency),
+        ],
+    )
+    async def get_project_control_snapshot(
+        project_id: str,
+    ) -> dict[str, object]:
+        try:
+            snapshot = (
+                await project_control.get_snapshot_async(
+                    project_id,
+                    persist=False,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=str(exc),
+            ) from exc
+
+        return jsonable_encoder(snapshot)
+
+    return router
+
+
+__all__ = [
+    "create_project_control_router",
+]
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\application\event_service.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from ..domain.models import ProjectEvent, ProjectEventType
+from ..domain.ports import ProjectEventRepository
+
+
+class ProjectEventService:
+    """Records project-control events; it does not mutate source systems."""
+
+    def __init__(self, repository: ProjectEventRepository) -> None:
+        self._repository = repository
+
+    def record(
+        self,
+        *,
+        project_id: str,
+        event_type: ProjectEventType,
+        summary: str,
+        source: str,
+        metadata: dict[str, str] | None = None,
+    ) -> ProjectEvent:
+        event = ProjectEvent(
+            event_id=f"pev-{uuid4()}",
+            project_id=project_id,
+            event_type=event_type,
+            occurred_at=datetime.now(timezone.utc),
+            summary=summary,
+            source=source,
+            metadata=tuple(sorted((metadata or {}).items())),
+        )
+        return self._repository.save(event)
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\application\history_service.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..domain.models import ProjectControlSnapshot
+from ..domain.ports import SnapshotRepository
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectTrend:
+    project_id: str
+    snapshots: tuple[ProjectControlSnapshot, ...]
+    progress_delta: float | None
+    blocker_delta: int | None
+    risk_delta: int | None
+
+
+class ProjectHistoryService:
+    def __init__(self, repository: SnapshotRepository) -> None:
+        self._repository = repository
+
+    def trend(self, project_id: str, limit: int = 30) -> ProjectTrend:
+        snapshots = tuple(self._repository.list_for_project(project_id, limit))
+        if len(snapshots) < 2:
+            return ProjectTrend(project_id, snapshots, None, None, None)
+
+        latest, previous = snapshots[0], snapshots[1]
+
+        progress_delta = None
+        if (
+            latest.overall_progress_percent is not None
+            and previous.overall_progress_percent is not None
+        ):
+            progress_delta = round(
+                latest.overall_progress_percent
+                - previous.overall_progress_percent,
+                1,
+            )
+
+        return ProjectTrend(
+            project_id=project_id,
+            snapshots=snapshots,
+            progress_delta=progress_delta,
+            blocker_delta=latest.open_blockers - previous.open_blockers,
+            risk_delta=latest.open_risks - previous.open_risks,
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\application\portfolio_service.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..domain.models import ProjectControlSnapshot
+from .service import ProjectControlService
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioSnapshot:
+    projects: tuple[ProjectControlSnapshot, ...]
+    generated_at: str
+
+
+class PortfolioControlService:
+    """Phase 2/3 portfolio read model built from project snapshots."""
+
+    def __init__(self, project_control: ProjectControlService) -> None:
+        self._project_control = project_control
+
+    def get_portfolio(self) -> PortfolioSnapshot:
+        snapshots = tuple(
+            self._project_control.get_snapshot(project.project_id)
+            for project in self._project_control.list_projects()
+        )
+        generated_at = (
+            max((s.generated_at for s in snapshots), default=None)
+        )
+        return PortfolioSnapshot(
+            projects=snapshots,
+            generated_at=generated_at.isoformat() if generated_at else "",
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\application\service.py =====
+
+"""
+Project Control Center application service.
+
+Composes read-only project status sources into a unified
+ProjectControlSnapshot.
+
+The service does not own authoritative project state.
+Authoritative state remains in the source systems exposed
+through ProjectStatusSource adapters.
+
+Both synchronous and asynchronous composition paths are
+supported:
+
+- get_snapshot() for synchronous sources;
+- get_snapshot_async() for sources that expose asynchronous
+  application services.
+
+No event-loop bridging is performed.
+"""
+
+from __future__ import annotations
+
+import inspect
+from dataclasses import dataclass
+from typing import Any
+
+from ..domain.models import (
+    ProjectControlSnapshot,
+    ProjectDefinition,
+    ProjectStatus,
+    WorkstreamStatus,
+)
+from ..domain.ports import (
+    ProjectRegistry,
+    ProjectStatusSource,
+    SnapshotRepository,
+)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """
+    Resolve an awaitable value while preserving synchronous values.
+
+    This helper allows the asynchronous composition path to work
+    with both synchronous and asynchronous source implementations.
+
+    It deliberately does not create or manage an event loop.
+    """
+
+    if inspect.isawaitable(value):
+        return await value
+
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectControlService:
+    """
+    Application service responsible for project-control composition.
+
+    The service is read-oriented. It retrieves project data from
+    registered ProjectStatusSource adapters and builds a unified
+    ProjectControlSnapshot.
+
+    It does not modify authoritative source systems.
+    """
+
+    registry: ProjectRegistry
+    sources: tuple[ProjectStatusSource, ...]
+    snapshots: SnapshotRepository
+
+    def get_snapshot(
+        self,
+        project_id: str,
+        *,
+        persist: bool = True,
+    ) -> ProjectControlSnapshot:
+        """
+        Build a project-control snapshot from synchronous sources.
+
+        This method preserves the original synchronous PCD contract.
+
+        Asynchronous sources must be consumed through
+        get_snapshot_async().
+        """
+
+        project = self.registry.get(project_id)
+
+        if project is None:
+            raise ValueError(
+                f"Unknown project: {project_id}"
+            )
+
+        workstreams = []
+        metrics = []
+        issues = []
+        risks = []
+        actions = []
+        milestones = []
+        source_health = []
+
+        for source in self.sources:
+            source_health.append(source.health())
+
+            workstreams.extend(
+                source.fetch_workstreams(project_id)
+            )
+            metrics.extend(
+                source.fetch_metrics(project_id)
+            )
+            issues.extend(
+                source.fetch_issues(project_id)
+            )
+            risks.extend(
+                source.fetch_risks(project_id)
+            )
+            actions.extend(
+                source.fetch_actions(project_id)
+            )
+            milestones.extend(
+                source.fetch_milestones(project_id)
+            )
+
+        snapshot = self._build_snapshot(
+            project=project,
+            workstreams=workstreams,
+            metrics=metrics,
+            issues=issues,
+            risks=risks,
+            actions=actions,
+            milestones=milestones,
+            source_health=source_health,
+        )
+
+        if persist:
+            self.snapshots.save(snapshot)
+
+        return snapshot
+
+    async def get_snapshot_async(
+        self,
+        project_id: str,
+        *,
+        persist: bool = True,
+    ) -> ProjectControlSnapshot:
+        """
+        Build a project-control snapshot from sync/async sources.
+
+        This is the production composition path for PCD adapters
+        backed by asynchronous application services.
+
+        The method awaits asynchronous source operations directly.
+        It does not call asyncio.run(), create a nested event loop,
+        or otherwise bridge asynchronous execution into synchronous
+        code.
+        """
+
+        project = self.registry.get(project_id)
+
+        if project is None:
+            raise ValueError(
+                f"Unknown project: {project_id}"
+            )
+
+        workstreams = []
+        metrics = []
+        issues = []
+        risks = []
+        actions = []
+        milestones = []
+        source_health = []
+
+        for source in self.sources:
+            source_health.append(source.health())
+
+            workstreams.extend(
+                await _maybe_await(
+                    source.fetch_workstreams(project_id)
+                )
+            )
+            metrics.extend(
+                await _maybe_await(
+                    source.fetch_metrics(project_id)
+                )
+            )
+            issues.extend(
+                await _maybe_await(
+                    source.fetch_issues(project_id)
+                )
+            )
+            risks.extend(
+                await _maybe_await(
+                    source.fetch_risks(project_id)
+                )
+            )
+            actions.extend(
+                await _maybe_await(
+                    source.fetch_actions(project_id)
+                )
+            )
+            milestones.extend(
+                await _maybe_await(
+                    source.fetch_milestones(project_id)
+                )
+            )
+
+        snapshot = self._build_snapshot(
+            project=project,
+            workstreams=workstreams,
+            metrics=metrics,
+            issues=issues,
+            risks=risks,
+            actions=actions,
+            milestones=milestones,
+            source_health=source_health,
+        )
+
+        if persist:
+            self.snapshots.save(snapshot)
+
+        return snapshot
+
+    @staticmethod
+    def _build_snapshot(
+        *,
+        project: ProjectDefinition,
+        workstreams: list,
+        metrics: list,
+        issues: list,
+        risks: list,
+        actions: list,
+        milestones: list,
+        source_health: list,
+    ) -> ProjectControlSnapshot:
+        """
+        Deterministically compose the unified project snapshot.
+
+        No source is mutated and no new authoritative state is
+        created here.
+        """
+
+        progress_values = [
+            workstream.completion_percent
+            for workstream in workstreams
+            if workstream.completion_percent is not None
+        ]
+
+        progress = (
+            round(
+                sum(progress_values) / len(progress_values),
+                1,
+            )
+            if progress_values
+            else None
+        )
+
+        blockers = (
+            sum(
+                1
+                for workstream in workstreams
+                if workstream.status is WorkstreamStatus.BLOCKED
+            )
+            + sum(
+                1
+                for issue in issues
+                if issue.status.value in {
+                    "open",
+                    "in_progress",
+                }
+                and issue.severity.value in {
+                    "high",
+                    "critical",
+                }
+            )
+        )
+
+        open_risks = sum(
+            1
+            for risk in risks
+            if risk.status.lower()
+            not in {
+                "closed",
+                "resolved",
+            }
+        )
+
+        warnings = sum(
+            1
+            for workstream in workstreams
+            if workstream.status is WorkstreamStatus.WARNING
+        )
+
+        if blockers:
+            status = ProjectStatus.BLOCKED
+        elif progress is not None and progress >= 100:
+            status = ProjectStatus.COMPLETE
+        elif warnings or open_risks:
+            status = ProjectStatus.AT_RISK
+        elif workstreams:
+            status = ProjectStatus.ON_TRACK
+        else:
+            status = ProjectStatus.UNKNOWN
+
+        if blockers:
+            readiness = "NOT READY"
+        elif progress is not None and progress >= 80:
+            readiness = "BETA READY"
+        elif progress is not None:
+            readiness = "IN PROGRESS"
+        else:
+            readiness = "UNKNOWN"
+
+        current_milestone = next(
+            (
+                milestone.name
+                for milestone in milestones
+                if milestone.status.lower()
+                in {
+                    "active",
+                    "in_progress",
+                }
+            ),
+            None,
+        )
+
+        current_workstream = next(
+            (
+                workstream.name
+                for workstream in workstreams
+                if workstream.status
+                in {
+                    WorkstreamStatus.WARNING,
+                    WorkstreamStatus.BLOCKED,
+                }
+            ),
+            None,
+        )
+
+        return ProjectControlSnapshot(
+            project_id=project.project_id,
+            project_name=project.name,
+            project_status=status,
+            overall_progress_percent=progress,
+            current_milestone=current_milestone,
+            current_workstream=current_workstream,
+            release_readiness=readiness,
+            open_blockers=blockers,
+            open_risks=open_risks,
+            workstreams=tuple(workstreams),
+            metrics=tuple(metrics),
+            issues=tuple(issues),
+            risks=tuple(risks),
+            actions=tuple(actions),
+            milestones=tuple(milestones),
+            sources=tuple(source_health),
+        )
+
+    def list_projects(self) -> list[ProjectDefinition]:
+        """Return active projects from the authoritative registry."""
+
+        return self.registry.list_active()
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\domain\models.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+
+
+class ProjectStatus(str, Enum):
+    ON_TRACK = "on_track"
+    AT_RISK = "at_risk"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    UNKNOWN = "unknown"
+
+
+class WorkstreamStatus(str, Enum):
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    UNKNOWN = "unknown"
+
+
+class SourceStatus(str, Enum):
+    AVAILABLE = "available"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
+class Severity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class IssueStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+class ActionStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+
+class ProjectEventType(str, Enum):
+    PROJECT_CREATED = "project_created"
+    WORKSTREAM_UPDATED = "workstream_updated"
+    ISSUE_OPENED = "issue_opened"
+    ISSUE_RESOLVED = "issue_resolved"
+    RISK_OPENED = "risk_opened"
+    RISK_RESOLVED = "risk_resolved"
+    MILESTONE_COMPLETED = "milestone_completed"
+    ACTION_CREATED = "action_created"
+    ACTION_COMPLETED = "action_completed"
+    APPROVAL_GRANTED = "approval_granted"
+    READINESS_CHANGED = "readiness_changed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkstreamSnapshot:
+    workstream_id: str
+    name: str
+    completion_percent: float | None
+    status: WorkstreamStatus
+    source: str
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSnapshot:
+    key: str
+    label: str
+    value: float | int | str
+    unit: str | None = None
+    source: str = ""
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssueSnapshot:
+    issue_id: str
+    project_id: str
+    title: str
+    severity: Severity
+    status: IssueStatus
+    workstream_id: str | None = None
+    owner: str | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RiskSnapshot:
+    risk_id: str
+    project_id: str
+    title: str
+    severity: Severity
+    status: str
+    workstream_id: str | None = None
+    owner: str | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ActionSnapshot:
+    action_id: str
+    project_id: str
+    title: str
+    priority: Severity
+    status: ActionStatus
+    owner: str | None = None
+    workstream_id: str | None = None
+    due_at: datetime | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MilestoneSnapshot:
+    milestone_id: str
+    project_id: str
+    name: str
+    status: str
+    target_date: datetime | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSnapshot:
+    source_id: str
+    name: str
+    status: SourceStatus
+    updated_at: datetime | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectControlSnapshot:
+    project_id: str
+    project_name: str
+    project_status: ProjectStatus
+    overall_progress_percent: float | None
+    current_milestone: str | None
+    current_workstream: str | None
+    release_readiness: str
+    open_blockers: int
+    open_risks: int
+    workstreams: tuple[WorkstreamSnapshot, ...] = ()
+    metrics: tuple[MetricSnapshot, ...] = ()
+    issues: tuple[IssueSnapshot, ...] = ()
+    risks: tuple[RiskSnapshot, ...] = ()
+    actions: tuple[ActionSnapshot, ...] = ()
+    milestones: tuple[MilestoneSnapshot, ...] = ()
+    sources: tuple[SourceSnapshot, ...] = ()
+    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectDefinition:
+    project_id: str
+    name: str
+    description: str = ""
+    owner: str | None = None
+    active: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectEvent:
+    event_id: str
+    project_id: str
+    event_type: ProjectEventType
+    occurred_at: datetime
+    summary: str
+    source: str
+    metadata: tuple[tuple[str, str], ...] = ()
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\domain\ports.py =====
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from .models import (
+    ActionSnapshot,
+    IssueSnapshot,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    ProjectDefinition,
+    ProjectEvent,
+    ProjectControlSnapshot,
+    RiskSnapshot,
+    SourceSnapshot,
+    WorkstreamSnapshot,
+)
+
+
+class ProjectRegistry(ABC):
+    @abstractmethod
+    def get(self, project_id: str) -> ProjectDefinition | None: ...
+
+    @abstractmethod
+    def list_active(self) -> list[ProjectDefinition]: ...
+
+    @abstractmethod
+    def save(self, project: ProjectDefinition) -> ProjectDefinition: ...
+
+
+class ProjectStatusSource(ABC):
+    """Read-only adapter over an existing authoritative EasyChatBot source."""
+
+    @property
+    @abstractmethod
+    def source_id(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def source_name(self) -> str: ...
+
+    @abstractmethod
+    def fetch_workstreams(self, project_id: str) -> list[WorkstreamSnapshot]: ...
+
+    @abstractmethod
+    def fetch_metrics(self, project_id: str) -> list[MetricSnapshot]: ...
+
+    @abstractmethod
+    def fetch_issues(self, project_id: str) -> list[IssueSnapshot]: ...
+
+    @abstractmethod
+    def fetch_risks(self, project_id: str) -> list[RiskSnapshot]: ...
+
+    @abstractmethod
+    def fetch_actions(self, project_id: str) -> list[ActionSnapshot]: ...
+
+    @abstractmethod
+    def fetch_milestones(self, project_id: str) -> list[MilestoneSnapshot]: ...
+
+    @abstractmethod
+    def health(self) -> SourceSnapshot: ...
+
+
+class SnapshotRepository(ABC):
+    @abstractmethod
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot: ...
+
+    @abstractmethod
+    def list_for_project(self, project_id: str, limit: int = 30) -> list[ProjectControlSnapshot]: ...
+
+
+class ProjectEventRepository(ABC):
+    @abstractmethod
+    def save(self, event: ProjectEvent) -> ProjectEvent: ...
+
+    @abstractmethod
+    def list_for_project(self, project_id: str, limit: int = 100) -> list[ProjectEvent]: ...
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\composition.py =====
+
+"""
+Project Control Center production composition.
+
+This module assembles the Project Control Center application service
+from authoritative application-layer dependencies.
+
+Responsibilities:
+
+- construct the approved PCD source adapters;
+- inject authoritative application services/registries;
+- construct ProjectControlService.
+
+This module does NOT:
+
+- own authoritative project state;
+- duplicate Health state;
+- duplicate Operations state;
+- duplicate Privacy Governance state;
+- call providers directly;
+- mutate production systems;
+- execute project-management decisions.
+
+Architecture:
+
+    Authoritative Application Services / Registries
+                         |
+                         v
+                 PCD Source Adapters
+                         |
+                         v
+                ProjectControlService
+                         |
+                         v
+                ProjectControlSnapshot
+"""
+
+from __future__ import annotations
+
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+from app.application.privacy.privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+
+from ..application.service import ProjectControlService
+from ..domain.ports import ProjectRegistry, SnapshotRepository
+from .governance_risk_source import (
+    GovernanceRiskProjectStatusSource,
+)
+from .health_source import (
+    ProductionHealthProjectStatusSource,
+)
+from .operations_source import (
+    OperationsProjectStatusSource,
+)
+
+
+def create_project_control_service(
+    *,
+    registry: ProjectRegistry,
+    snapshots: SnapshotRepository,
+    health_service: ProductionHealthService,
+    dashboard_service: OperationalDashboardService,
+    case_registry: PrivacyGovernanceCaseRegistry,
+) -> ProjectControlService:
+    """
+    Create the production ProjectControlService.
+
+    All dependencies are supplied explicitly.
+
+    The function constructs only the PCD read-only adapters. The
+    authoritative application services and registries remain owned
+    by their respective bounded contexts.
+
+    Args:
+        registry:
+            Authoritative PCD project registry.
+
+        snapshots:
+            PCD snapshot repository.
+
+        health_service:
+            Existing ProductionHealthService.
+
+        dashboard_service:
+            Existing OperationalDashboardService.
+
+        case_registry:
+            Existing PrivacyGovernanceCaseRegistry.
+
+    Returns:
+        Fully composed ProjectControlService.
+
+    Raises:
+        ValueError:
+            If a required dependency is None.
+    """
+
+    if registry is None:
+        raise ValueError(
+            "registry cannot be None."
+        )
+
+    if snapshots is None:
+        raise ValueError(
+            "snapshots cannot be None."
+        )
+
+    if health_service is None:
+        raise ValueError(
+            "health_service cannot be None."
+        )
+
+    if dashboard_service is None:
+        raise ValueError(
+            "dashboard_service cannot be None."
+        )
+
+    if case_registry is None:
+        raise ValueError(
+            "case_registry cannot be None."
+        )
+
+    health_source = ProductionHealthProjectStatusSource(
+        health_service=health_service,
+    )
+
+    operations_source = OperationsProjectStatusSource(
+        dashboard_service=dashboard_service,
+    )
+
+    governance_source = GovernanceRiskProjectStatusSource(
+        case_registry=case_registry,
+    )
+
+    return ProjectControlService(
+        registry=registry,
+        sources=(
+            health_source,
+            operations_source,
+            governance_source,
+        ),
+        snapshots=snapshots,
+    )
+
+
+__all__ = [
+    "create_project_control_service",
+]
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\demo_source.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from ..domain.models import (
+    ActionSnapshot,
+    ActionStatus,
+    IssueSnapshot,
+    IssueStatus,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    RiskSnapshot,
+    Severity,
+    SourceSnapshot,
+    SourceStatus,
+    WorkstreamSnapshot,
+    WorkstreamStatus,
+)
+from ..domain.ports import ProjectStatusSource
+
+
+class DemoProjectStatusSource(ProjectStatusSource):
+    """TEST/DEMO ONLY. Never use these values as production project truth."""
+
+    @property
+    def source_id(self) -> str:
+        return "demo"
+
+    @property
+    def source_name(self) -> str:
+        return "Demo Source"
+
+    def health(self) -> SourceSnapshot:
+        return SourceSnapshot(
+            "demo", self.source_name, SourceStatus.AVAILABLE,
+            datetime.now(timezone.utc)
+        )
+
+    def fetch_workstreams(self, project_id: str) -> list[WorkstreamSnapshot]:
+        return [
+            WorkstreamSnapshot("engineering", "Development / Engineering", 90, WorkstreamStatus.HEALTHY, "demo"),
+            WorkstreamSnapshot("agents", "AI Agents", 85, WorkstreamStatus.HEALTHY, "demo"),
+            WorkstreamSnapshot("quality", "Quality & Testing", 78, WorkstreamStatus.WARNING, "demo"),
+            WorkstreamSnapshot("governance", "Security & Governance", 88, WorkstreamStatus.HEALTHY, "demo"),
+            WorkstreamSnapshot("operations", "Provider / AI Operations", 82, WorkstreamStatus.HEALTHY, "demo"),
+            WorkstreamSnapshot("beta", "Beta", 65, WorkstreamStatus.WARNING, "demo"),
+        ]
+
+    def fetch_metrics(self, project_id: str) -> list[MetricSnapshot]:
+        return [
+            MetricSnapshot("tests", "Tests", 955, source="demo"),
+            MetricSnapshot("coverage", "Coverage", 87, "%", "demo"),
+            MetricSnapshot("open_issues", "Open Issues", 12, source="demo"),
+        ]
+
+    def fetch_issues(self, project_id: str) -> list[IssueSnapshot]:
+        return [
+            IssueSnapshot("ISS-001", project_id, "Example quality issue", Severity.MEDIUM, IssueStatus.OPEN, "quality", "QA", "demo")
+        ]
+
+    def fetch_risks(self, project_id: str) -> list[RiskSnapshot]:
+        return [
+            RiskSnapshot("R-001", project_id, "Provider API rate limits", Severity.MEDIUM, "Open", "operations", "Operations", "demo"),
+            RiskSnapshot("R-002", project_id, "Beta feedback volume", Severity.MEDIUM, "Monitoring", "beta", "Beta", "demo"),
+        ]
+
+    def fetch_actions(self, project_id: str) -> list[ActionSnapshot]:
+        return [
+            ActionSnapshot("A-001", project_id, "Refine beta test scenarios", Severity.HIGH, ActionStatus.OPEN, "Beta", "beta", source="demo"),
+            ActionSnapshot("A-002", project_id, "Update M2.4 documentation", Severity.MEDIUM, ActionStatus.OPEN, "Documentation", source="demo"),
+        ]
+
+    def fetch_milestones(self, project_id: str) -> list[MilestoneSnapshot]:
+        return [
+            MilestoneSnapshot("M2.4", project_id, "Voice", "active", source="demo"),
+            MilestoneSnapshot("M3.0", project_id, "Beta Release", "not_started", source="demo"),
+        ]
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\governance_risk_source.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from app.application.privacy.privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+
+from ..domain.models import (
+    ActionSnapshot,
+    IssueSnapshot,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    RiskSnapshot,
+    Severity,
+    SourceSnapshot,
+    SourceStatus,
+    WorkstreamSnapshot,
+)
+from ..domain.ports import ProjectStatusSource
+
+
+class GovernanceRiskProjectStatusSource(ProjectStatusSource):
+    """Read-only PCD adapter over Privacy Governance risk state.
+
+    The PrivacyGovernanceCaseRegistry remains authoritative.
+
+    This adapter projects governance-case risk into the PCD RiskSnapshot
+    contract without creating a second risk store or changing governance
+    state.
+
+    Risk severity and governance decision status remain separate concepts:
+
+        case.risk              -> RiskSnapshot.severity
+        case.governance_status -> RiskSnapshot.status
+    """
+
+    _SOURCE_ID = "privacy-governance"
+    _SOURCE_NAME = "Privacy Governance"
+
+    def __init__(
+        self,
+        *,
+        case_registry: PrivacyGovernanceCaseRegistry,
+    ) -> None:
+        if case_registry is None:
+            raise ValueError(
+                "case_registry cannot be None."
+            )
+
+        self._case_registry = case_registry
+
+    @property
+    def source_id(self) -> str:
+        return self._SOURCE_ID
+
+    @property
+    def source_name(self) -> str:
+        return self._SOURCE_NAME
+
+    def health(self) -> SourceSnapshot:
+        """Report adapter availability without modifying governance state."""
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ) -> list[WorkstreamSnapshot]:
+        """Privacy Governance does not own PCD project workstreams."""
+        return []
+
+    def fetch_metrics(
+        self,
+        project_id: str,
+    ) -> list[MetricSnapshot]:
+        """Privacy Governance risk cases are projected as risks, not metrics."""
+        return []
+
+    def fetch_issues(
+        self,
+        project_id: str,
+    ) -> list[IssueSnapshot]:
+        """Privacy Governance cases are represented through RiskSnapshot."""
+        return []
+
+    def fetch_risks(
+        self,
+        project_id: str,
+    ) -> list[RiskSnapshot]:
+        """Project authoritative governance cases into PCD risks."""
+        risks: list[RiskSnapshot] = []
+
+        for case in self._case_registry.all():
+            risks.append(
+                RiskSnapshot(
+                    risk_id=case.case_id,
+                    project_id=project_id,
+                    title=case.title,
+                    severity=self._map_severity(case.risk),
+                    status=case.governance_status,
+                    workstream_id=None,
+                    owner=None,
+                    source=self.source_id,
+                )
+            )
+
+        return risks
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ) -> list[ActionSnapshot]:
+        """Privacy Governance does not own PCD project actions."""
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ) -> list[MilestoneSnapshot]:
+        """Privacy Governance does not own PCD milestones."""
+        return []
+
+    @staticmethod
+    def _map_severity(
+        risk: str,
+    ) -> Severity:
+        """Normalize authoritative privacy risk into PCD severity.
+
+        Privacy governance currently uses LOW/MEDIUM/HIGH semantics.
+        Unknown values fail closed to MEDIUM rather than inventing a new
+        severity or silently treating the case as LOW.
+        """
+        normalized = str(risk).strip().lower()
+
+        mapping = {
+            "low": Severity.LOW,
+            "medium": Severity.MEDIUM,
+            "high": Severity.HIGH,
+        }
+
+        return mapping.get(
+            normalized,
+            Severity.MEDIUM,
+        )
+
+
+__all__ = [
+    "GovernanceRiskProjectStatusSource",
+]
+
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\health_source.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from app.application.health.health_result import HealthStatus
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+
+from ..domain.models import (
+    ActionSnapshot,
+    IssueSnapshot,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    RiskSnapshot,
+    SourceSnapshot,
+    SourceStatus,
+    WorkstreamSnapshot,
+)
+from ..domain.ports import ProjectStatusSource
+
+
+class ProductionHealthProjectStatusSource(ProjectStatusSource):
+    """Read-only PCD adapter over ProductionHealthService.
+
+    This adapter does not access databases, Telegram, LLM providers,
+    or infrastructure health checks directly.
+
+    ProductionHealthService remains the authoritative application-level
+    entry point for production health.
+
+    PCD-2A integrates health only. It deliberately does not invent or
+    duplicate project workstream, issue, risk, action, or milestone data.
+    """
+
+    _SOURCE_ID = "production-health"
+    _SOURCE_NAME = "Production Health"
+
+    def __init__(
+        self,
+        *,
+        health_service: ProductionHealthService,
+    ) -> None:
+        if health_service is None:
+            raise ValueError(
+                "health_service cannot be None."
+            )
+
+        self._health_service = health_service
+
+    @property
+    def source_id(self) -> str:
+        return self._SOURCE_ID
+
+    @property
+    def source_name(self) -> str:
+        return self._SOURCE_NAME
+
+    def health(self) -> SourceSnapshot:
+        """Report adapter availability without probing dependencies.
+
+        ProjectStatusSource.health() is synchronous, while the real
+        production health check is asynchronous. Therefore this method
+        intentionally performs no external health probe.
+
+        The actual production health result is obtained through
+        fetch_health().
+        """
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    async def fetch_health(self) -> SourceSnapshot:
+        """Execute ProductionHealthService and translate its result."""
+        try:
+            result = (
+                await self._health_service
+                .check_production_health()
+            )
+        except Exception:
+            return SourceSnapshot(
+                source_id=self.source_id,
+                name=self.source_name,
+                status=SourceStatus.UNAVAILABLE,
+                updated_at=datetime.now(timezone.utc),
+                error="production_health_check_failed",
+            )
+
+        if result.status is HealthStatus.HEALTHY:
+            return SourceSnapshot(
+                source_id=self.source_id,
+                name=self.source_name,
+                status=SourceStatus.AVAILABLE,
+                updated_at=datetime.now(timezone.utc),
+            )
+
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.UNAVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+            error="production_health_not_ready",
+        )
+
+    async def fetch_metrics(
+        self,
+        project_id: str,
+    ) -> list[MetricSnapshot]:
+        """PCD-2A does not create project metrics."""
+        return []
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ) -> list[WorkstreamSnapshot]:
+        """PCD-2A does not create project workstream data."""
+        return []
+
+    def fetch_issues(
+        self,
+        project_id: str,
+    ) -> list[IssueSnapshot]:
+        """PCD-2A does not create project issue data."""
+        return []
+
+    def fetch_risks(
+        self,
+        project_id: str,
+    ) -> list[RiskSnapshot]:
+        """PCD-2A does not create project risk data."""
+        return []
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ) -> list[ActionSnapshot]:
+        """PCD-2A does not create project action data."""
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ) -> list[MilestoneSnapshot]:
+        """PCD-2A does not create project milestone data."""
+        return []
+
+
+__all__ = [
+    "ProductionHealthProjectStatusSource",
+]
+
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\in_memory.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..domain.models import ProjectControlSnapshot, ProjectDefinition, ProjectEvent
+from ..domain.ports import (
+    ProjectEventRepository,
+    ProjectRegistry,
+    SnapshotRepository,
+)
+
+
+@dataclass
+class InMemoryProjectRegistry(ProjectRegistry):
+    projects: dict[str, ProjectDefinition] = field(default_factory=dict)
+
+    def get(self, project_id: str) -> ProjectDefinition | None:
+        return self.projects.get(project_id)
+
+    def list_active(self) -> list[ProjectDefinition]:
+        return [p for p in self.projects.values() if p.active]
+
+    def save(self, project: ProjectDefinition) -> ProjectDefinition:
+        self.projects[project.project_id] = project
+        return project
+
+
+@dataclass
+class InMemorySnapshotRepository(SnapshotRepository):
+    data: dict[str, list[ProjectControlSnapshot]] = field(default_factory=dict)
+
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot:
+        self.data.setdefault(snapshot.project_id, []).insert(0, snapshot)
+        return snapshot
+
+    def list_for_project(
+        self, project_id: str, limit: int = 30
+    ) -> list[ProjectControlSnapshot]:
+        return self.data.get(project_id, [])[:limit]
+
+
+@dataclass
+class InMemoryProjectEventRepository(ProjectEventRepository):
+    data: dict[str, list[ProjectEvent]] = field(default_factory=dict)
+
+    def save(self, event: ProjectEvent) -> ProjectEvent:
+        self.data.setdefault(event.project_id, []).insert(0, event)
+        return event
+
+    def list_for_project(
+        self, project_id: str, limit: int = 100
+    ) -> list[ProjectEvent]:
+        return self.data.get(project_id, [])[:limit]
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\infrastructure\operations_source.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.operational_incident import (
+    IncidentStatus,
+)
+
+from ..domain.models import (
+    ActionSnapshot,
+    IssueSnapshot,
+    IssueStatus,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    RiskSnapshot,
+    Severity,
+    SourceSnapshot,
+    SourceStatus,
+    WorkstreamSnapshot,
+)
+from ..domain.ports import ProjectStatusSource
+
+
+class OperationsProjectStatusSource(ProjectStatusSource):
+    """Read-only PCD adapter over the existing Operations Center state.
+
+    OperationalDashboardService remains the application-owned Operations
+    boundary. This adapter does not create another incident store and does
+    not access infrastructure directly.
+
+    PCD-2B integrates operational incidents as dashboard issues because
+    incidents represent actionable operational problems. It deliberately
+    does not invent project workstreams, risks, actions, or milestones
+    where the Operations Center has no authoritative contract for them.
+    """
+
+    _SOURCE_ID = "operations-center"
+    _SOURCE_NAME = "Operations Center"
+
+    def __init__(
+        self,
+        *,
+        dashboard_service: OperationalDashboardService,
+    ) -> None:
+        if dashboard_service is None:
+            raise ValueError(
+                "dashboard_service cannot be None."
+            )
+
+        self._dashboard_service = dashboard_service
+
+    @property
+    def source_id(self) -> str:
+        return self._SOURCE_ID
+
+    @property
+    def source_name(self) -> str:
+        return self._SOURCE_NAME
+
+    def health(self) -> SourceSnapshot:
+        """Report adapter availability without performing a new probe.
+
+        The Operations dashboard itself owns fresh health evaluation.
+        ProjectStatusSource.health() is synchronous, so this method does
+        not attempt to bridge into the asynchronous dashboard service.
+        """
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    async def fetch_dashboard(
+        self,
+    ):
+        """Return the authoritative Operations dashboard snapshot."""
+        return await (
+            self._dashboard_service
+            .create_dashboard_snapshot()
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ) -> list[WorkstreamSnapshot]:
+        """Operations Center does not own project workstreams."""
+        return []
+
+    async def fetch_metrics(
+        self,
+        project_id: str,
+    ) -> list[MetricSnapshot]:
+        """Translate authoritative operational metrics into PCD metrics."""
+        dashboard = await self.fetch_dashboard()
+
+        return [
+            MetricSnapshot(
+                key="operations.open_incidents",
+                label="Open Operational Incidents",
+                value=dashboard.private_classroom.incidents.open
+                + dashboard.announcement_group.incidents.open,
+                source=self.source_id,
+                observed_at=dashboard.generated_at,
+            ),
+            MetricSnapshot(
+                key="operations.critical_incidents",
+                label="Critical Operational Incidents",
+                value=dashboard.private_classroom.incidents.critical
+                + dashboard.announcement_group.incidents.critical,
+                source=self.source_id,
+                observed_at=dashboard.generated_at,
+            ),
+            MetricSnapshot(
+                key="operations.message_failures",
+                label="Operational Message Failures",
+                value=(
+                    dashboard.private_classroom.metrics.message_failures
+                    + dashboard.announcement_group.metrics.message_failures
+                ),
+                source=self.source_id,
+                observed_at=dashboard.generated_at,
+            ),
+            MetricSnapshot(
+                key="operations.rate_limit_events",
+                label="Rate Limit Events",
+                value=(
+                    dashboard.private_classroom.metrics.rate_limit_events
+                    + dashboard.announcement_group.metrics.rate_limit_events
+                ),
+                source=self.source_id,
+                observed_at=dashboard.generated_at,
+            ),
+            MetricSnapshot(
+                key="operations.abuse_events",
+                label="Abuse Events",
+                value=(
+                    dashboard.private_classroom.metrics.abuse_events
+                    + dashboard.announcement_group.metrics.abuse_events
+                ),
+                source=self.source_id,
+                observed_at=dashboard.generated_at,
+            ),
+        ]
+
+    async def fetch_issues(
+        self,
+        project_id: str,
+    ) -> list[IssueSnapshot]:
+        """Translate current operational incidents into PCD issues.
+
+        Incident content/events are intentionally not copied into the PCD
+        issue model. Only dashboard-safe operational identifiers and state
+        are exposed.
+        """
+        dashboard = await self.fetch_dashboard()
+
+        issues: list[IssueSnapshot] = []
+
+        for incident in dashboard.incidents:
+            issues.append(
+                IssueSnapshot(
+                    issue_id=incident.incident_id,
+                    project_id=project_id,
+                    title=(
+                        f"Operational incident "
+                        f"{incident.incident_id}"
+                    ),
+                    severity=self._map_severity(
+                        incident.severity
+                    ),
+                    status=self._map_issue_status(
+                        incident.status
+                    ),
+                    owner=None,
+                    source=self.source_id,
+                )
+            )
+
+        return issues
+
+    def fetch_risks(
+        self,
+        project_id: str,
+    ) -> list[RiskSnapshot]:
+        """Operations Center does not own project risks."""
+        return []
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ) -> list[ActionSnapshot]:
+        """Operations Center does not own project actions."""
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ) -> list[MilestoneSnapshot]:
+        """Operations Center does not own project milestones."""
+        return []
+
+    @staticmethod
+    def _map_severity(
+        severity: str,
+    ) -> Severity:
+        try:
+            return Severity(severity.lower())
+        except ValueError:
+            return Severity.MEDIUM
+
+    @staticmethod
+    def _map_issue_status(
+        status: str,
+    ) -> IssueStatus:
+        normalized = status.lower()
+
+        if normalized in {
+            IncidentStatus.RESOLVED.value,
+            IncidentStatus.CLOSED.value,
+        }:
+            return IssueStatus.RESOLVED
+
+        if normalized in {
+            IncidentStatus.INVESTIGATING.value,
+            IncidentStatus.ACKNOWLEDGED.value,
+            IncidentStatus.OPEN.value,
+            IncidentStatus.DETECTED.value,
+        }:
+            return IssueStatus.IN_PROGRESS
+
+        return IssueStatus.OPEN
+
+
+__all__ = [
+    "OperationsProjectStatusSource",
+]
+
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\integration\project_manager_agent.py =====
+
+from __future__ import annotations
+
+from ..domain.models import ProjectControlSnapshot
+
+
+class ProjectManagerAgentContextBuilder:
+    """
+    Boundary for the EXISTING Project Manager Agent.
+
+    This class does not execute an agent and does not call an LLM.
+    It converts trusted, read-only project facts into an agent context.
+    """
+
+    @staticmethod
+    def build(snapshot: ProjectControlSnapshot) -> dict[str, object]:
+        return {
+            "project": {
+                "id": snapshot.project_id,
+                "name": snapshot.project_name,
+                "status": snapshot.project_status.value,
+                "progress_percent": snapshot.overall_progress_percent,
+                "release_readiness": snapshot.release_readiness,
+            },
+            "delivery": {
+                "current_milestone": snapshot.current_milestone,
+                "current_workstream": snapshot.current_workstream,
+                "open_blockers": snapshot.open_blockers,
+                "open_risks": snapshot.open_risks,
+            },
+            "workstreams": [
+                {
+                    "id": w.workstream_id,
+                    "name": w.name,
+                    "progress_percent": w.completion_percent,
+                    "status": w.status.value,
+                    "source": w.source,
+                }
+                for w in snapshot.workstreams
+            ],
+            "issues": [
+                {
+                    "id": i.issue_id,
+                    "title": i.title,
+                    "severity": i.severity.value,
+                    "status": i.status.value,
+                    "workstream_id": i.workstream_id,
+                }
+                for i in snapshot.issues
+            ],
+            "risks": [
+                {
+                    "id": r.risk_id,
+                    "title": r.title,
+                    "severity": r.severity.value,
+                    "status": r.status,
+                    "workstream_id": r.workstream_id,
+                }
+                for r in snapshot.risks
+            ],
+            "actions": [
+                {
+                    "id": a.action_id,
+                    "title": a.title,
+                    "priority": a.priority.value,
+                    "status": a.status.value,
+                    "owner": a.owner,
+                }
+                for a in snapshot.actions
+            ],
+            "rules": [
+                "Use only supplied facts.",
+                "Do not invent missing project data.",
+                "Separate facts from interpretation.",
+                "Do not change project state.",
+                "Recommendations are advisory unless separately authorised.",
+            ],
+        }
+
+    @staticmethod
+    def build_summary_instruction(snapshot: ProjectControlSnapshot) -> str:
+        context = ProjectManagerAgentContextBuilder.build(snapshot)
+        return (
+            "Prepare a concise project-management briefing from the supplied "
+            f"structured context for project {snapshot.project_name}. "
+            "Report current status, progress, blockers, material risks, "
+            "recent/active actions and the recommended next management focus. "
+            "Explicitly identify unavailable or stale sources. "
+            "Do not invent facts or perform actions."
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\integration\project_manager_service.py =====
+
+"""
+Project Manager Agent integration service.
+
+This module provides the governed application boundary between the
+Project Control Center and the Project Manager Agent.
+
+Responsibilities:
+
+- obtain a ProjectControlSnapshot;
+- convert it through ProjectManagerAgentContextBuilder;
+- return structured agent context;
+- build the management briefing instruction.
+
+This service does NOT:
+
+- execute an LLM;
+- select an LLM provider;
+- query Health directly;
+- query Operations directly;
+- query Privacy Governance directly;
+- access Git directly;
+- access databases directly;
+- modify project state;
+- execute production actions.
+
+The Project Control Center remains the single composition boundary.
+The Project Manager Agent receives only the resulting read-only snapshot
+context.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..application.service import ProjectControlService
+from .project_manager_agent import (
+    ProjectManagerAgentContextBuilder,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectManagerAgentService:
+    """
+    Governed integration boundary for the Project Manager Agent.
+
+    The service deliberately depends only on ProjectControlService.
+    It therefore cannot directly reach the authoritative Health,
+    Operations, Privacy Governance, provider, or persistence systems.
+    """
+
+    project_control: ProjectControlService
+
+    def __post_init__(self) -> None:
+        if self.project_control is None:
+            raise ValueError(
+                "project_control cannot be None."
+            )
+
+    def build_context(
+        self,
+        project_id: str,
+        *,
+        persist: bool = False,
+    ) -> dict[str, object]:
+        """
+        Build read-only Project Manager Agent context.
+
+        The context is derived from the ProjectControlSnapshot and
+        contains only data exposed by the existing context builder.
+        """
+
+        snapshot = self.project_control.get_snapshot(
+            project_id,
+            persist=persist,
+        )
+
+        return ProjectManagerAgentContextBuilder.build(
+            snapshot
+        )
+
+    async def build_context_async(
+        self,
+        project_id: str,
+        *,
+        persist: bool = False,
+    ) -> dict[str, object]:
+        """
+        Build read-only Project Manager Agent context asynchronously.
+
+        This uses the asynchronous Project Control composition path
+        required by production-backed PCD adapters.
+        """
+
+        snapshot = await self.project_control.get_snapshot_async(
+            project_id,
+            persist=persist,
+        )
+
+        return ProjectManagerAgentContextBuilder.build(
+            snapshot
+        )
+
+    def build_summary_instruction(
+        self,
+        project_id: str,
+        *,
+        persist: bool = False,
+    ) -> str:
+        """
+        Build the management briefing instruction.
+
+        No model/provider is invoked here.
+        """
+
+        snapshot = self.project_control.get_snapshot(
+            project_id,
+            persist=persist,
+        )
+
+        return (
+            ProjectManagerAgentContextBuilder
+            .build_summary_instruction(snapshot)
+        )
+
+    async def build_summary_instruction_async(
+        self,
+        project_id: str,
+        *,
+        persist: bool = False,
+    ) -> str:
+        """
+        Build the management briefing instruction asynchronously.
+
+        No model/provider is invoked here.
+        """
+
+        snapshot = await self.project_control.get_snapshot_async(
+            project_id,
+            persist=persist,
+        )
+
+        return (
+            ProjectManagerAgentContextBuilder
+            .build_summary_instruction(snapshot)
+        )
+
+
+__all__ = [
+    "ProjectManagerAgentService",
+]
+============================================================
+PROJECT CONTROL TEST FILES
+============================================================
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+from fastapi import FastAPI, HTTPException, status
+from fastapi.testclient import TestClient
+
+from app.api.dependencies.identity import get_current_principal
+from app.domain.identity.principal import (
+    AccountStatus,
+    Principal,
+)
+from app.project_control_center.api.project_control_router import (
+    create_project_control_router,
+)
+from app.project_control_center.application.service import (
+    ProjectControlService,
+)
+from app.project_control_center.domain.models import (
+    ProjectDefinition,
+    SourceSnapshot,
+    SourceStatus,
+    WorkstreamSnapshot,
+    WorkstreamStatus,
+)
+from app.project_control_center.domain.ports import ProjectStatusSource
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+
+
+@dataclass
+class ApiTestSource(ProjectStatusSource):
+    """
+    Minimal authoritative-style source for API component tests.
+
+    The source contains deterministic project-control data and has
+    no external side effects.
+    """
+
+    @property
+    def source_id(self) -> str:
+        return "api-test"
+
+    @property
+    def source_name(self) -> str:
+        return "API Test Source"
+
+    def health(self) -> SourceSnapshot:
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ) -> list[WorkstreamSnapshot]:
+        return [
+            WorkstreamSnapshot(
+                workstream_id="pcd",
+                name="Project Control Center",
+                completion_percent=85,
+                status=WorkstreamStatus.HEALTHY,
+                source=self.source_id,
+            )
+        ]
+
+    def fetch_metrics(self, project_id: str):
+        return []
+
+    def fetch_issues(self, project_id: str):
+        return []
+
+    def fetch_risks(self, project_id: str):
+        return []
+
+    def fetch_actions(self, project_id: str):
+        return []
+
+    def fetch_milestones(self, project_id: str):
+        return []
+
+
+def make_project_control() -> ProjectControlService:
+    """
+    Build an isolated ProjectControlService for API tests.
+    """
+
+    registry = InMemoryProjectRegistry()
+
+    registry.save(
+        ProjectDefinition(
+            project_id="easychatbot",
+            name="EasyChatBot",
+        )
+    )
+
+    return ProjectControlService(
+        registry=registry,
+        sources=(ApiTestSource(),),
+        snapshots=InMemorySnapshotRepository(),
+    )
+
+
+def make_principal(
+    role: str = "operator",
+) -> Principal:
+    """
+    Build an active, verified test principal.
+
+    Authorization remains handled by the production
+    AuthorizationService.
+    """
+
+    return Principal(
+        user_id="test-user",
+        email="test@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset({role}),
+    )
+
+
+def make_identity_override(
+    principal: Principal | None,
+):
+    """
+    Override only the external identity/session resolution.
+
+    This deliberately does NOT override authorization.
+
+    Consequently:
+
+        test Principal
+            ↓
+        real authorization dependency
+            ↓
+        real AuthorizationService
+            ↓
+        FUNCTIONALITY_CONTROL
+    """
+
+    async def override_get_current_principal() -> Principal:
+        if principal is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required.",
+            )
+
+        return principal
+
+    return override_get_current_principal
+
+
+def make_app(
+    project_control: ProjectControlService,
+    *,
+    principal: Principal | None = None,
+) -> FastAPI:
+    """
+    Build an isolated FastAPI application for API component tests.
+
+    Only the identity lookup is overridden. The PCD authorization
+    boundary remains production code.
+    """
+
+    application = FastAPI()
+
+    application.include_router(
+        create_project_control_router(
+            project_control,
+        )
+    )
+
+    application.dependency_overrides[
+        get_current_principal
+    ] = make_identity_override(principal)
+
+    return application
+
+
+def test_router_rejects_missing_project_control():
+    with pytest.raises(
+        ValueError,
+        match="project_control cannot be None",
+    ):
+        create_project_control_router(
+            None,  # type: ignore[arg-type]
+        )
+
+
+def test_unauthenticated_request_returns_401():
+    application = make_app(
+        make_project_control(),
+        principal=None,
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 401
+
+    assert response.json() == {
+        "detail": "Authentication required.",
+    }
+
+
+def test_beta_user_request_returns_403():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("beta_user"),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 403
+
+    assert response.json() == {
+        "detail": "Insufficient permission.",
+    }
+
+
+def test_operator_request_returns_200():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("operator"),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 200
+
+
+def test_admin_request_returns_200():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("admin"),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 200
+
+
+def test_get_project_control_snapshot_returns_expected_contract():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("operator"),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["project_id"] == "easychatbot"
+    assert body["project_name"] == "EasyChatBot"
+    assert body["project_status"] == "on_track"
+    assert body["overall_progress_percent"] == 85.0
+    assert body["release_readiness"] == "BETA READY"
+    assert body["open_blockers"] == 0
+    assert body["open_risks"] == 0
+
+    assert body["workstreams"][0]["workstream_id"] == "pcd"
+    assert body["workstreams"][0]["name"] == "Project Control Center"
+    assert body["workstreams"][0]["status"] == "healthy"
+
+    assert body["sources"][0]["source_id"] == "api-test"
+    assert body["sources"][0]["status"] == "available"
+
+
+def test_get_project_control_snapshot_does_not_persist():
+    project_control = make_project_control()
+
+    application = make_app(
+        project_control,
+        principal=make_principal("operator"),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 200
+
+    assert (
+        project_control.snapshots.list_for_project(
+            "easychatbot",
+        )
+        == []
+    )
+
+
+def test_unknown_project_returns_404():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("operator"),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/project-control/projects/missing",
+        )
+
+    assert response.status_code == 404
+
+    assert response.json() == {
+        "detail": "Unknown project: missing",
+    }
+
+
+def test_endpoint_is_get_only():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("operator"),
+    )
+
+    with TestClient(application) as client:
+        response = client.post(
+            "/project-control/projects/easychatbot",
+        )
+
+    assert response.status_code == 405
+
+
+def test_endpoint_does_not_expose_agent_execution():
+    application = make_app(
+        make_project_control(),
+        principal=make_principal("operator"),
+    )
+
+    openapi = application.openapi()
+    paths = openapi["paths"]
+
+    project_control_path = (
+        "/project-control/projects/{project_id}"
+    )
+
+    assert project_control_path in paths
+
+    assert "get" in paths[project_control_path]
+
+    assert "post" not in paths[project_control_path]
+    assert "put" not in paths[project_control_path]
+    assert "patch" not in paths[project_control_path]
+    assert "delete" not in paths[project_control_path]
+
+    assert not any(
+        "execute" in path.lower()
+        for path in paths
+        if "project-control" in path
+    )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from fastapi import Depends, FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.dependencies.authorization import (
+    require_permission,
+)
+from app.api.dependencies.identity import (
+    get_current_principal,
+)
+from app.domain.authorization.permissions import (
+    Permission,
+)
+from app.domain.identity.principal import (
+    AccountStatus,
+    Principal,
+)
+from app.project_control_center.api.project_control_router import (
+    create_project_control_router,
+)
+from app.project_control_center.application.service import (
+    ProjectControlService,
+)
+from app.project_control_center.domain.models import (
+    ProjectDefinition,
+    SourceSnapshot,
+    SourceStatus,
+)
+from app.project_control_center.domain.ports import (
+    ProjectStatusSource,
+)
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+
+
+@dataclass
+class AuthorizationTestSource(
+    ProjectStatusSource,
+):
+    @property
+    def source_id(self) -> str:
+        return "authorization-test"
+
+    @property
+    def source_name(self) -> str:
+        return "Authorization Test"
+
+    def health(self) -> SourceSnapshot:
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_metrics(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_issues(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_risks(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ):
+        return []
+
+
+def make_project_control() -> ProjectControlService:
+    registry = InMemoryProjectRegistry()
+
+    registry.save(
+        ProjectDefinition(
+            project_id="easychatbot",
+            name="EasyChatBot",
+        )
+    )
+
+    return ProjectControlService(
+        registry=registry,
+        sources=(AuthorizationTestSource(),),
+        snapshots=InMemorySnapshotRepository(),
+    )
+
+
+def make_router():
+    return create_project_control_router(
+        make_project_control(),
+    )
+
+
+def make_app() -> FastAPI:
+    application = FastAPI()
+
+    application.include_router(
+        make_router(),
+    )
+
+    return application
+
+
+def make_principal(
+    *,
+    roles: frozenset[str],
+) -> Principal:
+    return Principal(
+        user_id="authorization-test-user",
+        email="operator@example.test",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=roles,
+    )
+
+
+def test_beta_user_does_not_have_functionality_control_permission():
+    principal = make_principal(
+        roles=frozenset({"beta_user"}),
+    )
+
+    dependency = require_permission(
+        Permission.FUNCTIONALITY_CONTROL,
+    )
+
+    application = FastAPI()
+
+    @application.get("/test")
+    async def protected(
+        _: Principal = Depends(dependency),
+    ):
+        return {"ok": True}
+
+    # Override the identity dependency, not the permission dependency.
+    #
+    # This preserves the real authorization path:
+    #
+    # get_current_principal
+    #       -> require_permission(...)
+    #       -> AuthorizationService
+    #       -> PermissionDeniedError
+    #       -> HTTP 403
+    application.dependency_overrides[
+        get_current_principal
+    ] = lambda: principal
+
+    with TestClient(application) as client:
+        response = client.get("/test")
+
+    assert response.status_code == 403
+
+
+def test_operator_has_functionality_control_permission():
+    principal = make_principal(
+        roles=frozenset({"operator"}),
+    )
+
+    dependency = require_permission(
+        Permission.FUNCTIONALITY_CONTROL,
+    )
+
+    application = FastAPI()
+
+    @application.get("/test")
+    async def protected(
+        _: Principal = Depends(dependency),
+    ):
+        return {"ok": True}
+
+    # Override only identity so that the real authorization
+    # service evaluates the operator's permission.
+    application.dependency_overrides[
+        get_current_principal
+    ] = lambda: principal
+
+    with TestClient(application) as client:
+        response = client.get("/test")
+
+    assert response.status_code == 200
+
+
+def test_project_control_router_uses_functionality_control_permission():
+    router = make_router()
+
+    routes = [
+        route
+        for route in router.routes
+        if hasattr(route, "path")
+        and route.path
+        == "/project-control/projects/{project_id}"
+    ]
+
+    assert len(routes) == 1
+
+    route = routes[0]
+
+    assert route.methods == {"GET"}
+
+    dependency_calls = {
+        dependency.call
+        for dependency in route.dependant.dependencies
+    }
+
+    assert len(dependency_calls) == 1
+
+    permission_dependency = next(
+        iter(dependency_calls)
+    )
+
+    assert permission_dependency is not None
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+
+from app.project_control_center.application.service import (
+    ProjectControlService,
+)
+from app.project_control_center.domain.models import (
+    ActionSnapshot,
+    ActionStatus,
+    IssueSnapshot,
+    IssueStatus,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    ProjectDefinition,
+    RiskSnapshot,
+    Severity,
+    SourceSnapshot,
+    SourceStatus,
+    WorkstreamSnapshot,
+    WorkstreamStatus,
+)
+from app.project_control_center.domain.ports import ProjectStatusSource
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+
+
+@dataclass
+class MixedSource(ProjectStatusSource):
+    """
+    Test source supporting both synchronous and asynchronous
+    source methods.
+
+    This represents the compatibility requirement of the
+    asynchronous composition path.
+    """
+
+    @property
+    def source_id(self) -> str:
+        return "mixed"
+
+    @property
+    def source_name(self) -> str:
+        return "Mixed Source"
+
+    def health(self) -> SourceSnapshot:
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ) -> list[WorkstreamSnapshot]:
+        return [
+            WorkstreamSnapshot(
+                workstream_id="engineering",
+                name="Engineering",
+                completion_percent=90,
+                status=WorkstreamStatus.HEALTHY,
+                source=self.source_id,
+            )
+        ]
+
+    async def fetch_metrics(
+        self,
+        project_id: str,
+    ) -> list[MetricSnapshot]:
+        return [
+            MetricSnapshot(
+                key="tests",
+                label="Tests",
+                value=955,
+                source=self.source_id,
+            )
+        ]
+
+    async def fetch_issues(
+        self,
+        project_id: str,
+    ) -> list[IssueSnapshot]:
+        return [
+            IssueSnapshot(
+                issue_id="ISS-1",
+                project_id=project_id,
+                title="High severity issue",
+                severity=Severity.HIGH,
+                status=IssueStatus.OPEN,
+                source=self.source_id,
+            )
+        ]
+
+    async def fetch_risks(
+        self,
+        project_id: str,
+    ) -> list[RiskSnapshot]:
+        return [
+            RiskSnapshot(
+                risk_id="RISK-1",
+                project_id=project_id,
+                title="Governance risk",
+                severity=Severity.HIGH,
+                status="PENDING_DPO_GRC",
+                source=self.source_id,
+            )
+        ]
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ) -> list[ActionSnapshot]:
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ) -> list[MilestoneSnapshot]:
+        return []
+
+
+class SyncSource(ProjectStatusSource):
+    """
+    Fully synchronous source used to verify that the existing
+    synchronous composition path remains intact.
+    """
+
+    @property
+    def source_id(self) -> str:
+        return "sync-test"
+
+    @property
+    def source_name(self) -> str:
+        return "Synchronous Test Source"
+
+    def health(self) -> SourceSnapshot:
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ) -> list[WorkstreamSnapshot]:
+        return [
+            WorkstreamSnapshot(
+                workstream_id="engineering",
+                name="Engineering",
+                completion_percent=90,
+                status=WorkstreamStatus.HEALTHY,
+                source=self.source_id,
+            )
+        ]
+
+    def fetch_metrics(
+        self,
+        project_id: str,
+    ) -> list[MetricSnapshot]:
+        return [
+            MetricSnapshot(
+                key="tests",
+                label="Tests",
+                value=955,
+                source=self.source_id,
+            )
+        ]
+
+    def fetch_issues(
+        self,
+        project_id: str,
+    ) -> list[IssueSnapshot]:
+        return []
+
+    def fetch_risks(
+        self,
+        project_id: str,
+    ) -> list[RiskSnapshot]:
+        return []
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ) -> list[ActionSnapshot]:
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ) -> list[MilestoneSnapshot]:
+        return []
+
+
+def make_service(
+    source: ProjectStatusSource,
+) -> ProjectControlService:
+    registry = InMemoryProjectRegistry()
+    snapshots = InMemorySnapshotRepository()
+
+    registry.save(
+        ProjectDefinition(
+            project_id="easychatbot",
+            name="EasyChatBot",
+        )
+    )
+
+    return ProjectControlService(
+        registry=registry,
+        sources=(source,),
+        snapshots=snapshots,
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_composition_builds_snapshot():
+    service = make_service(MixedSource())
+
+    snapshot = await service.get_snapshot_async(
+        "easychatbot",
+        persist=False,
+    )
+
+    assert snapshot.project_id == "easychatbot"
+    assert snapshot.project_name == "EasyChatBot"
+
+
+@pytest.mark.asyncio
+async def test_async_composition_aggregates_all_source_data():
+    service = make_service(MixedSource())
+
+    snapshot = await service.get_snapshot_async(
+        "easychatbot",
+        persist=False,
+    )
+
+    assert len(snapshot.workstreams) == 1
+    assert len(snapshot.metrics) == 1
+    assert len(snapshot.issues) == 1
+    assert len(snapshot.risks) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_composition_preserves_existing_status_rules():
+    service = make_service(MixedSource())
+
+    snapshot = await service.get_snapshot_async(
+        "easychatbot",
+        persist=False,
+    )
+
+    assert snapshot.project_status.value == "blocked"
+    assert snapshot.open_blockers == 1
+    assert snapshot.open_risks == 1
+    assert snapshot.release_readiness == "NOT READY"
+
+
+@pytest.mark.asyncio
+async def test_async_composition_persists_snapshot():
+    service = make_service(MixedSource())
+
+    snapshot = await service.get_snapshot_async(
+        "easychatbot",
+    )
+
+    stored = service.snapshots.list_for_project(
+        "easychatbot"
+    )
+
+    assert stored
+    assert stored[-1] == snapshot
+
+
+@pytest.mark.asyncio
+async def test_unknown_project_is_rejected():
+    service = make_service(MixedSource())
+
+    with pytest.raises(
+        ValueError,
+        match="Unknown project: missing",
+    ):
+        await service.get_snapshot_async(
+            "missing",
+            persist=False,
+        )
+
+
+def test_existing_sync_composition_remains_unchanged():
+    service = make_service(SyncSource())
+
+    snapshot = service.get_snapshot(
+        "easychatbot",
+        persist=False,
+    )
+
+    assert snapshot.project_id == "easychatbot"
+    assert snapshot.project_name == "EasyChatBot"
+    assert snapshot.overall_progress_percent == 90
+    assert snapshot.project_status.value == "on_track"
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+from app.application.privacy.privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+from app.project_control_center.application.service import (
+    ProjectControlService,
+)
+from app.project_control_center.domain.models import (
+    ProjectDefinition,
+)
+from app.project_control_center.domain.ports import (
+    ProjectRegistry,
+    SnapshotRepository,
+)
+from app.project_control_center.infrastructure.composition import (
+    create_project_control_service,
+)
+from app.project_control_center.infrastructure.governance_risk_source import (
+    GovernanceRiskProjectStatusSource,
+)
+from app.project_control_center.infrastructure.health_source import (
+    ProductionHealthProjectStatusSource,
+)
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+from app.project_control_center.infrastructure.operations_source import (
+    OperationsProjectStatusSource,
+)
+
+
+@dataclass
+class FakeProductionHealthService:
+    """Minimal dependency for composition testing."""
+
+
+@dataclass
+class FakeDashboardService:
+    """Minimal dependency for composition testing."""
+
+
+def make_dependencies():
+    registry = InMemoryProjectRegistry()
+
+    registry.save(
+        ProjectDefinition(
+            project_id="easychatbot",
+            name="EasyChatBot",
+        )
+    )
+
+    snapshots = InMemorySnapshotRepository()
+    health_service = FakeProductionHealthService()
+    dashboard_service = FakeDashboardService()
+    case_registry = PrivacyGovernanceCaseRegistry()
+
+    return (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    )
+
+
+def test_factory_returns_project_control_service():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert isinstance(
+        service,
+        ProjectControlService,
+    )
+
+
+def test_factory_registers_expected_source_adapters():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert len(service.sources) == 3
+
+    assert isinstance(
+        service.sources[0],
+        ProductionHealthProjectStatusSource,
+    )
+
+    assert isinstance(
+        service.sources[1],
+        OperationsProjectStatusSource,
+    )
+
+    assert isinstance(
+        service.sources[2],
+        GovernanceRiskProjectStatusSource,
+    )
+
+
+def test_factory_preserves_source_order():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert [
+        source.source_id
+        for source in service.sources
+    ] == [
+        "production-health",
+        "operations-center",
+        "privacy-governance",
+    ]
+
+
+def test_factory_injects_existing_authoritative_dependencies():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert service.sources[0]._health_service is health_service
+    assert service.sources[1]._dashboard_service is dashboard_service
+    assert service.sources[2]._case_registry is case_registry
+
+
+def test_factory_preserves_project_registry():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert service.registry is registry
+
+
+def test_factory_preserves_snapshot_repository():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert service.snapshots is snapshots
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "registry",
+        "snapshots",
+        "health_service",
+        "dashboard_service",
+        "case_registry",
+    ],
+)
+def test_factory_rejects_missing_required_dependency(argument):
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    dependencies = {
+        "registry": registry,
+        "snapshots": snapshots,
+        "health_service": health_service,
+        "dashboard_service": dashboard_service,
+        "case_registry": case_registry,
+    }
+
+    dependencies[argument] = None
+
+    with pytest.raises(
+        ValueError,
+        match=f"{argument} cannot be None",
+    ):
+        create_project_control_service(
+            **dependencies,
+        )
+
+
+def test_factory_does_not_create_duplicate_authoritative_stores():
+    (
+        registry,
+        snapshots,
+        health_service,
+        dashboard_service,
+        case_registry,
+    ) = make_dependencies()
+
+    service = create_project_control_service(
+        registry=registry,
+        snapshots=snapshots,
+        health_service=health_service,
+        dashboard_service=dashboard_service,
+        case_registry=case_registry,
+    )
+
+    assert service.sources[0]._health_service is health_service
+    assert service.sources[1]._dashboard_service is dashboard_service
+    assert service.sources[2]._case_registry is case_registry
+
+    assert not hasattr(
+        service,
+        "health_state",
+    )
+
+    assert not hasattr(
+        service,
+        "operations_state",
+    )
+
+    assert not hasattr(
+        service,
+        "privacy_state",
+    )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_governance_risk_source.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.privacy.privacy_governance_case import (
+    PrivacyGovernanceCase,
+    PrivacyTriggerType,
+)
+from app.application.privacy.privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+from app.project_control_center.domain.models import (
+    Severity,
+    SourceStatus,
+)
+from app.project_control_center.infrastructure.governance_risk_source import (
+    GovernanceRiskProjectStatusSource,
+)
+
+
+def make_case(
+    *,
+    case_id: str,
+    risk: str,
+    governance_status: str = "PENDING_DPO_GRC",
+) -> PrivacyGovernanceCase:
+    return PrivacyGovernanceCase(
+        case_id=case_id,
+        title=f"Privacy case {case_id}",
+        summary="Test privacy governance case",
+        trigger_type=PrivacyTriggerType.NEW_PROCESSING,
+        triggered_at=datetime.now(timezone.utc),
+        trigger_source="test",
+        change_id=f"CHANGE-{case_id}",
+        risk=risk,
+        governance_status=governance_status,
+    )
+
+
+def test_source_identity() -> None:
+    registry = PrivacyGovernanceCaseRegistry()
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    assert source.source_id == "privacy-governance"
+    assert source.source_name == "Privacy Governance"
+
+
+def test_health_reports_available() -> None:
+    registry = PrivacyGovernanceCaseRegistry()
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    result = source.health()
+
+    assert result.source_id == "privacy-governance"
+    assert result.name == "Privacy Governance"
+    assert result.status is SourceStatus.AVAILABLE
+
+
+def test_fetch_risks_maps_privacy_case_risk() -> None:
+    registry = PrivacyGovernanceCaseRegistry(
+        [
+            make_case(
+                case_id="CASE-LOW",
+                risk="low",
+            ),
+            make_case(
+                case_id="CASE-MEDIUM",
+                risk="medium",
+            ),
+            make_case(
+                case_id="CASE-HIGH",
+                risk="high",
+            ),
+        ]
+    )
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    risks = source.fetch_risks("easychatbot")
+
+    assert len(risks) == 3
+
+    by_id = {
+        risk.risk_id: risk
+        for risk in risks
+    }
+
+    assert by_id["CASE-LOW"].severity is Severity.LOW
+    assert by_id["CASE-MEDIUM"].severity is Severity.MEDIUM
+    assert by_id["CASE-HIGH"].severity is Severity.HIGH
+
+
+def test_fetch_risks_preserves_governance_status_separately() -> None:
+    registry = PrivacyGovernanceCaseRegistry(
+        [
+            make_case(
+                case_id="CASE-1",
+                risk="high",
+                governance_status="PENDING_DPO_GRC",
+            ),
+            make_case(
+                case_id="CASE-2",
+                risk="high",
+                governance_status="APPROVED",
+            ),
+            make_case(
+                case_id="CASE-3",
+                risk="high",
+                governance_status="BLOCKED",
+            ),
+        ]
+    )
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    risks = source.fetch_risks("easychatbot")
+
+    by_id = {
+        risk.risk_id: risk
+        for risk in risks
+    }
+
+    assert by_id["CASE-1"].severity is Severity.HIGH
+    assert by_id["CASE-1"].status == "PENDING_DPO_GRC"
+
+    assert by_id["CASE-2"].severity is Severity.HIGH
+    assert by_id["CASE-2"].status == "APPROVED"
+
+    assert by_id["CASE-3"].severity is Severity.HIGH
+    assert by_id["CASE-3"].status == "BLOCKED"
+
+
+def test_fetch_risks_preserves_project_and_source_identity() -> None:
+    registry = PrivacyGovernanceCaseRegistry(
+        [
+            make_case(
+                case_id="CASE-TRACE",
+                risk="medium",
+            )
+        ]
+    )
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    risks = source.fetch_risks("project-123")
+
+    assert len(risks) == 1
+    risk = risks[0]
+
+    assert risk.project_id == "project-123"
+    assert risk.risk_id == "CASE-TRACE"
+    assert risk.title == "Privacy case CASE-TRACE"
+    assert risk.source == "privacy-governance"
+    assert risk.workstream_id is None
+    assert risk.owner is None
+
+
+def test_fetch_risks_is_read_only() -> None:
+    case = make_case(
+        case_id="CASE-READONLY",
+        risk="high",
+    )
+
+    registry = PrivacyGovernanceCaseRegistry([case])
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    before = registry.all()
+
+    source.fetch_risks("easychatbot")
+
+    after = registry.all()
+
+    assert after == before
+    assert after[0] == case
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "fetch_workstreams",
+        "fetch_metrics",
+        "fetch_issues",
+        "fetch_actions",
+        "fetch_milestones",
+    ],
+)
+def test_non_risk_project_contracts_remain_empty(
+    method_name: str,
+) -> None:
+    registry = PrivacyGovernanceCaseRegistry()
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    method = getattr(source, method_name)
+
+    assert method("easychatbot") == []
+
+
+def test_unknown_risk_fails_closed_to_medium() -> None:
+    registry = PrivacyGovernanceCaseRegistry(
+        [
+            make_case(
+                case_id="CASE-UNKNOWN",
+                risk="unexpected-risk",
+            )
+        ]
+    )
+
+    source = GovernanceRiskProjectStatusSource(
+        case_registry=registry,
+    )
+
+    risks = source.fetch_risks("easychatbot")
+
+    assert len(risks) == 1
+    assert risks[0].severity is Severity.MEDIUM
+
+
+def test_none_registry_is_rejected() -> None:
+    with pytest.raises(ValueError, match="case_registry cannot be None"):
+        GovernanceRiskProjectStatusSource(
+            case_registry=None,  # type: ignore[arg-type]
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_health_source.py =====
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import pytest
+
+from app.application.health.health_result import (
+    HealthCheckResult,
+    HealthStatus,
+    ProductionReadinessResult,
+)
+from app.project_control_center.domain.models import SourceStatus
+from app.project_control_center.infrastructure.health_source import (
+    ProductionHealthProjectStatusSource,
+)
+
+
+class FakeProductionHealthService:
+    def __init__(
+        self,
+        *,
+        result: ProductionReadinessResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.calls = 0
+
+    async def check_production_health(
+        self,
+    ) -> ProductionReadinessResult:
+        self.calls += 1
+
+        if self.error is not None:
+            raise self.error
+
+        assert self.result is not None
+        return self.result
+
+
+def make_result(
+    status: HealthStatus,
+) -> ProductionReadinessResult:
+    return ProductionReadinessResult(
+        status=status,
+        checks=(
+            HealthCheckResult(
+                name="postgresql",
+                status=status,
+                details=(
+                    {"connectivity": "ok"}
+                    if status is HealthStatus.HEALTHY
+                    else {"reason": "database_unavailable"}
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_healthy_production_health_is_available():
+    service = FakeProductionHealthService(
+        result=make_result(HealthStatus.HEALTHY),
+    )
+
+    source = ProductionHealthProjectStatusSource(
+        health_service=service,
+    )
+
+    snapshot = await source.fetch_health()
+
+    assert service.calls == 1
+    assert snapshot.source_id == "production-health"
+    assert snapshot.name == "Production Health"
+    assert snapshot.status is SourceStatus.AVAILABLE
+    assert snapshot.error is None
+    assert isinstance(snapshot.updated_at, datetime)
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_production_health_is_unavailable():
+    service = FakeProductionHealthService(
+        result=make_result(HealthStatus.UNHEALTHY),
+    )
+
+    source = ProductionHealthProjectStatusSource(
+        health_service=service,
+    )
+
+    snapshot = await source.fetch_health()
+
+    assert snapshot.status is SourceStatus.UNAVAILABLE
+    assert snapshot.error == "production_health_not_ready"
+
+
+@pytest.mark.asyncio
+async def test_not_configured_production_health_is_unavailable():
+    service = FakeProductionHealthService(
+        result=make_result(HealthStatus.NOT_CONFIGURED),
+    )
+
+    source = ProductionHealthProjectStatusSource(
+        health_service=service,
+    )
+
+    snapshot = await source.fetch_health()
+
+    assert snapshot.status is SourceStatus.UNAVAILABLE
+    assert snapshot.error == "production_health_not_ready"
+
+
+@pytest.mark.asyncio
+async def test_health_service_failure_is_safe_and_generic():
+    service = FakeProductionHealthService(
+        error=RuntimeError(
+            "DATABASE_URL=postgresql://user:password@host/db"
+        ),
+    )
+
+    source = ProductionHealthProjectStatusSource(
+        health_service=service,
+    )
+
+    snapshot = await source.fetch_health()
+
+    assert snapshot.status is SourceStatus.UNAVAILABLE
+    assert snapshot.error == "production_health_check_failed"
+
+    serialized = str(snapshot)
+
+    assert "password" not in serialized
+    assert "postgresql://" not in serialized
+
+
+def test_health_does_not_probe_external_dependencies():
+    service = FakeProductionHealthService()
+
+    source = ProductionHealthProjectStatusSource(
+        health_service=service,
+    )
+
+    snapshot = source.health()
+
+    assert snapshot.source_id == "production-health"
+    assert snapshot.name == "Production Health"
+    assert snapshot.status is SourceStatus.AVAILABLE
+    assert service.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_does_not_duplicate_project_status_data():
+    service = FakeProductionHealthService(
+        result=make_result(HealthStatus.HEALTHY),
+    )
+
+    source = ProductionHealthProjectStatusSource(
+        health_service=service,
+    )
+
+    assert await source.fetch_metrics(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_workstreams(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_issues(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_risks(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_actions(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_milestones(
+        "easychatbot"
+    ) == []
+
+
+def test_none_health_service_is_rejected():
+    with pytest.raises(
+        ValueError,
+        match="health_service cannot be None",
+    ):
+        ProductionHealthProjectStatusSource(
+            health_service=None,
+        )
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_long_term.py =====
+
+from app.project_control_center.application.history_service import ProjectHistoryService
+from app.project_control_center.application.service import ProjectControlService
+from app.project_control_center.domain.models import ProjectDefinition, ProjectEventType
+from app.project_control_center.infrastructure.demo_source import DemoProjectStatusSource
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectEventRepository,
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+from app.project_control_center.integration.project_manager_agent import (
+    ProjectManagerAgentContextBuilder,
+)
+
+
+def make_services():
+    registry = InMemoryProjectRegistry()
+    snapshots = InMemorySnapshotRepository()
+    registry.save(ProjectDefinition("easychatbot", "EasyChatBot"))
+    control = ProjectControlService(
+        registry=registry,
+        sources=(DemoProjectStatusSource(),),
+        snapshots=snapshots,
+    )
+    return registry, snapshots, control
+
+
+def test_phase_1_builds_project_snapshot():
+    _, snapshots, control = make_services()
+    snapshot = control.get_snapshot("easychatbot")
+    assert snapshot.project_id == "easychatbot"
+    assert snapshot.project_name == "EasyChatBot"
+    assert snapshot.overall_progress_percent == 81.3
+    assert snapshot.open_risks == 2
+    assert snapshots.list_for_project("easychatbot")
+
+
+def test_new_project_is_data_not_code():
+    registry, _, control = make_services()
+    registry.save(ProjectDefinition("risk-intelligence", "Risk Intelligence"))
+    snapshot = control.get_snapshot("risk-intelligence")
+    assert snapshot.project_id == "risk-intelligence"
+    assert snapshot.project_name == "Risk Intelligence"
+
+
+def test_project_manager_context_is_read_only():
+    _, _, control = make_services()
+    snapshot = control.get_snapshot("easychatbot", persist=False)
+    context = ProjectManagerAgentContextBuilder.build(snapshot)
+    assert context["project"]["status"] in {"on_track", "at_risk", "blocked", "complete", "unknown"}
+    assert context["rules"]
+    assert "Do not invent missing project data." in context["rules"]
+
+
+def test_history_service_reports_delta():
+    _, snapshots, control = make_services()
+    first = control.get_snapshot("easychatbot")
+    second = control.get_snapshot("easychatbot")
+    trend = ProjectHistoryService(snapshots).trend("easychatbot")
+    assert len(trend.snapshots) == 2
+    assert trend.progress_delta == 0
+
+
+def test_event_repository_boundary():
+    repository = InMemoryProjectEventRepository()
+    from app.project_control_center.application.event_service import ProjectEventService
+    event = ProjectEventService(repository).record(
+        project_id="easychatbot",
+        event_type=ProjectEventType.PROJECT_CREATED,
+        summary="Project registered",
+        source="project-control",
+    )
+    assert repository.list_for_project("easychatbot")[0] == event
+
+===== C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_operations_source.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.health.health_result import HealthStatus
+from app.application.health.operational_dashboard_models import (
+    DashboardIncident,
+    DashboardIncidentSummary,
+    DashboardOperationalMetrics,
+    DashboardSurfaceStatus,
+    OperationalDashboardSnapshot,
+)
+from app.application.health.operational_event import (
+    OperationalSurface,
+)
+from app.project_control_center.domain.models import (
+    IssueStatus,
+    Severity,
+    SourceStatus,
+)
+from app.project_control_center.infrastructure.operations_source import (
+    OperationsProjectStatusSource,
+)
+
+
+@dataclass
+class FakeDashboardService:
+    snapshot: OperationalDashboardSnapshot
+    calls: int = 0
+
+    async def create_dashboard_snapshot(
+        self,
+    ) -> OperationalDashboardSnapshot:
+        self.calls += 1
+        return self.snapshot
+
+
+def make_dashboard(
+    *,
+    incidents: tuple[DashboardIncident, ...] = (),
+) -> OperationalDashboardSnapshot:
+    generated_at = datetime.now(timezone.utc)
+
+    empty_surface = DashboardSurfaceStatus(
+        surface=OperationalSurface.PRIVATE_CLASSROOM,
+        status=HealthStatus.HEALTHY,
+        incidents=DashboardIncidentSummary(),
+        metrics=DashboardOperationalMetrics(),
+    )
+
+    empty_announcement = DashboardSurfaceStatus(
+        surface=OperationalSurface.ANNOUNCEMENT_GROUP,
+        status=HealthStatus.HEALTHY,
+        incidents=DashboardIncidentSummary(),
+        metrics=DashboardOperationalMetrics(),
+    )
+
+    return OperationalDashboardSnapshot(
+        generated_at=generated_at,
+        overall_status=HealthStatus.HEALTHY,
+        health_score=100,
+        private_classroom=empty_surface,
+        announcement_group=empty_announcement,
+        incidents=incidents,
+    )
+
+
+def make_incident(
+    *,
+    incident_id: str = "incident-001",
+    severity: str = "high",
+    status: str = "open",
+) -> DashboardIncident:
+    now = datetime.now(timezone.utc)
+
+    return DashboardIncident(
+        incident_id=incident_id,
+        correlation_id=f"corr-{incident_id}",
+        surface=OperationalSurface.PRIVATE_CLASSROOM,
+        severity=severity,
+        status=status,
+        first_seen=now,
+        last_seen=now,
+        occurrence_count=1,
+    )
+
+
+def test_none_dashboard_service_is_rejected():
+    with pytest.raises(
+        ValueError,
+        match="dashboard_service cannot be None",
+    ):
+        OperationsProjectStatusSource(
+            dashboard_service=None,
+        )
+
+
+def test_health_does_not_probe_operations_service():
+    service = FakeDashboardService(
+        snapshot=make_dashboard(),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    result = source.health()
+
+    assert result.source_id == "operations-center"
+    assert result.name == "Operations Center"
+    assert result.status is SourceStatus.AVAILABLE
+    assert service.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_dashboard_uses_authoritative_dashboard_service():
+    service = FakeDashboardService(
+        snapshot=make_dashboard(),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    result = await source.fetch_dashboard()
+
+    assert result.overall_status is HealthStatus.HEALTHY
+    assert service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_operational_incident_becomes_pcd_issue():
+    incident = make_incident(
+        incident_id="incident-high",
+        severity="high",
+        status="open",
+    )
+
+    service = FakeDashboardService(
+        snapshot=make_dashboard(
+            incidents=(incident,),
+        ),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    issues = await source.fetch_issues(
+        "easychatbot",
+    )
+
+    assert len(issues) == 1
+
+    issue = issues[0]
+
+    assert issue.issue_id == "incident-high"
+    assert issue.project_id == "easychatbot"
+    assert issue.severity is Severity.HIGH
+    assert issue.status is IssueStatus.IN_PROGRESS
+    assert issue.source == "operations-center"
+    assert issue.owner is None
+
+
+@pytest.mark.asyncio
+async def test_resolved_incident_becomes_resolved_issue():
+    incident = make_incident(
+        incident_id="incident-resolved",
+        severity="medium",
+        status="resolved",
+    )
+
+    service = FakeDashboardService(
+        snapshot=make_dashboard(
+            incidents=(incident,),
+        ),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    issues = await source.fetch_issues(
+        "easychatbot",
+    )
+
+    assert issues[0].status is IssueStatus.RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_unknown_incident_severity_is_safe():
+    incident = make_incident(
+        incident_id="incident-unknown",
+        severity="unexpected",
+        status="open",
+    )
+
+    service = FakeDashboardService(
+        snapshot=make_dashboard(
+            incidents=(incident,),
+        ),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    issues = await source.fetch_issues(
+        "easychatbot",
+    )
+
+    assert issues[0].severity is Severity.MEDIUM
+
+
+@pytest.mark.asyncio
+async def test_operations_does_not_invent_project_entities():
+    service = FakeDashboardService(
+        snapshot=make_dashboard(),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    assert source.fetch_workstreams(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_risks(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_actions(
+        "easychatbot"
+    ) == []
+
+    assert source.fetch_milestones(
+        "easychatbot"
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_operational_metrics_are_translated_without_event_content():
+    generated_at = datetime.now(timezone.utc)
+
+    private = DashboardSurfaceStatus(
+        surface=OperationalSurface.PRIVATE_CLASSROOM,
+        status=HealthStatus.HEALTHY,
+        incidents=DashboardIncidentSummary(
+            open=2,
+            critical=1,
+        ),
+        metrics=DashboardOperationalMetrics(
+            message_failures=3,
+            rate_limit_events=4,
+            abuse_events=5,
+        ),
+    )
+
+    announcement = DashboardSurfaceStatus(
+        surface=OperationalSurface.ANNOUNCEMENT_GROUP,
+        status=HealthStatus.HEALTHY,
+        incidents=DashboardIncidentSummary(
+            open=1,
+            critical=1,
+        ),
+        metrics=DashboardOperationalMetrics(
+            message_failures=6,
+            rate_limit_events=7,
+            abuse_events=8,
+        ),
+    )
+
+    dashboard = OperationalDashboardSnapshot(
+        generated_at=generated_at,
+        overall_status=HealthStatus.HEALTHY,
+        health_score=100,
+        private_classroom=private,
+        announcement_group=announcement,
+    )
+
+    service = FakeDashboardService(
+        snapshot=dashboard,
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    metrics = await source.fetch_metrics(
+        "easychatbot",
+    )
+
+    values = {
+        metric.key: metric.value
+        for metric in metrics
+    }
+
+    assert values["operations.open_incidents"] == 3
+    assert values["operations.critical_incidents"] == 2
+    assert values["operations.message_failures"] == 9
+    assert values["operations.rate_limit_events"] == 11
+    assert values["operations.abuse_events"] == 13
+
+    serialized = str(metrics).lower()
+
+    assert "message content" not in serialized
+    assert "password" not in serialized
+    assert "api_key" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_multiple_incidents_are_preserved_as_separate_issues():
+    incidents = (
+        make_incident(
+            incident_id="incident-001",
+            severity="critical",
+            status="open",
+        ),
+        make_incident(
+            incident_id="incident-002",
+            severity="low",
+            status="acknowledged",
+        ),
+    )
+
+    service = FakeDashboardService(
+        snapshot=make_dashboard(
+            incidents=incidents,
+        ),
+    )
+
+    source = OperationsProjectStatusSource(
+        dashboard_service=service,
+    )
+
+    issues = await source.fetch_issues(
+        "easychatbot",
+    )
+
+    assert [issue.issue_id for issue in issues] == [
+        "incident-001",
+        "incident-002",
+    ]
+
+    assert issues[0].severity is Severity.CRITICAL
+    assert issues[1].severity is Severity.LOW
+    assert all(
+        issue.project_id == "easychatbot"
+        for issue in issues
+    )
+============================================================
+END
+============================================================

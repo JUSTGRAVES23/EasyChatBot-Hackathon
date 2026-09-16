@@ -1,4 +1,4 @@
-"""
+﻿"""
 API chat flow integration tests.
 
 Verifies the complete API boundary for the /chat endpoint
@@ -33,8 +33,8 @@ from httpx import (
     AsyncClient,
 )
 
-from backend.api import routes
-from backend.api.main import app
+from api import routes
+from api.main import app
 
 
 class FakeCompanionService:

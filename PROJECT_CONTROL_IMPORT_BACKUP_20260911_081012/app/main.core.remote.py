@@ -1,0 +1,450 @@
+﻿"""
+EasyChatBot FastAPI Application.
+
+Application entry point.
+
+Responsibilities:
+- Create FastAPI application.
+- Register active API routers.
+- Configure application metadata.
+- Manage application lifecycle.
+
+Does NOT:
+- Execute AI agents.
+- Handle business logic.
+- Manage voice sessions.
+- Call external providers.
+- Implement individual application services.
+- Execute cybersecurity workflows.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+
+#
+# Scheduler lifecycle boundary
+#
+# FastAPI only controls lifecycle.
+# Business logic remains outside.
+#
+
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+#
+# Governance Audit API
+#
+# Read-only governance evidence boundary.
+#
+# Does NOT:
+# - modify controls;
+# - execute actions;
+# - change audit history.
+#
+
+from governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+
+
+#
+# Operations Center Governance API
+#
+# Read-only governance visibility.
+#
+# Provides:
+# - control status;
+# - audit visibility;
+# - YETI governance messages.
+#
+
+from governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+
+#
+# Governance Evidence Timeline API
+#
+# Read-only evidence explorer.
+#
+# Provides:
+# - governance events;
+# - operational history;
+# - audit evidence visibility.
+#
+
+from governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+
+
+#
+# Governance Change Lifecycle API
+#
+# Provides:
+# - approval lifecycle;
+# - change management visibility;
+# - audit lifecycle integration.
+#
+# Flow:
+#
+# Approval
+#    |
+#    v
+# Change Record
+#    |
+#    v
+# Governance Audit
+#
+
+from governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+
+
+#
+# Provider Management Controls
+#
+# Human-controlled provider delivery governance.
+#
+# Provider Management owns the control.
+# Governance Center observes and explains the state.
+#
+
+from app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+
+
+#
+# Privacy Governance Operations Center API
+#
+# Privacy governance API boundary.
+#
+# Provides:
+# - governance summary;
+# - governance status chart;
+# - governance case list;
+# - governance case detail;
+# - explicit human governance decisions;
+# - controlled Beta/demo case creation.
+#
+# Decision logic remains inside the application service layer.
+#
+
+from app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+
+
+#
+# Voice APIs
+#
+
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+
+
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+
+
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+
+
+#
+# AI Operations Center
+#
+
+from app.api.operations_center import (
+    router as operations_center_router,
+)
+
+
+#
+# Cybersecurity Intelligence API
+#
+
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+
+#
+# Cybersecurity Decision Support API
+#
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+
+
+#
+# Cybersecurity Reports API
+#
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+#
+# Cybersecurity Live Reports API
+#
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Scheduler runtime instance
+#
+
+scheduler_runtime = create_cybersecurity_scheduler_runtime()
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    Starts:
+    - cybersecurity scheduler runtime.
+
+    Stops:
+    - cybersecurity scheduler runtime.
+
+    No business logic belongs here.
+    """
+
+    try:
+        await scheduler_runtime.start()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+    """
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    #
+    # CORS
+    #
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=[
+            "*",
+        ],
+        allow_headers=[
+            "*",
+        ],
+    )
+
+    #
+    # Voice APIs
+    #
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    #
+    # AI Operations Center
+    #
+
+    application.include_router(
+        operations_center_router,
+    )
+
+    #
+    # Privacy Governance Operations Center
+    #
+    # Existing privacy governance API contract.
+    #
+    # Read endpoints:
+    #
+    # GET /api/privacy/governance/summary
+    # GET /api/privacy/governance/status-chart
+    # GET /api/privacy/governance/cases
+    # GET /api/privacy/governance/cases/{case_id}
+    #
+    # Decision endpoints:
+    #
+    # POST /api/privacy/governance/cases/{case_id}/approve
+    # POST /api/privacy/governance/cases/{case_id}/reject
+    # POST /api/privacy/governance/cases/{case_id}/request-changes
+    #
+    # Development/demo:
+    #
+    # POST /api/privacy/governance/demo/create-case
+    #
+    # All remain behind the established privacy governance router.
+    #
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    #
+    # Provider Management Controls
+    #
+    # Human-controlled provider delivery controls.
+    #
+    # POST /controls/providers/pause
+    # POST /controls/providers/resume
+    # GET  /controls/providers/status
+    #
+    # Provider Management remains the authority
+    # for changing provider execution state.
+    #
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    #
+    # Governance Audit API
+    #
+    # Provides immutable evidence visibility.
+    #
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    #
+    # Operations Center Governance API
+    #
+    # Provides governance dashboard state.
+    #
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    #
+    # Governance Evidence Timeline API
+    #
+    # Provides evidence explorer data.
+    #
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    #
+    # Governance Change Lifecycle API
+    #
+    # Approval -> Change -> Audit lifecycle.
+    #
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    #
+    # Cybersecurity Intelligence
+    #
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    #
+    # Cybersecurity Decision Support
+    #
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    #
+    # Cybersecurity Reports
+    #
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    #
+    # Cybersecurity Live Reports
+    #
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]
+

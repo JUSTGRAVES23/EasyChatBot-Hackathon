@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Trigger Service.
 
 Application workflow service responsible
@@ -27,22 +27,22 @@ from dataclasses import dataclass
 
 
 
-from backend.app.application.uai.voice.voice_call_management_service import (
+from app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from backend.app.application.uai.voice.voice_call_invitation_service import (
+from app.application.uai.voice.voice_call_invitation_service import (
     VoiceCallInvitationService,
 )
 
 
-from backend.app.application.uai.notifications.voice_call_notification_service import (
+from app.application.uai.notifications.voice_call_notification_service import (
     VoiceCallNotificationService,
 )
 
 
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
 
@@ -206,3 +206,5 @@ class VoiceCallTriggerService:
 __all__ = [
     "VoiceCallTriggerService",
 ]
+
+

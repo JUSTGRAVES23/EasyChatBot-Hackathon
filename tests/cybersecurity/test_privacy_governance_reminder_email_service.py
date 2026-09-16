@@ -1,14 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from backend.app.application.privacy.email.privacy_governance_reminder_email_service import (
+from app.application.privacy.email.privacy_governance_reminder_email_service import (
     PrivacyGovernanceReminderEmailService,
 )
-from backend.app.application.privacy.privacy_governance_case_url import (
+from app.application.privacy.privacy_governance_case_url import (
     PrivacyGovernanceCaseURLBuilder,
 )
 
@@ -58,7 +58,7 @@ async def test_reminder_is_concise_and_contains_case_link_and_logo(tmp_path: Pat
     call = sender.calls[0]
     assert call["subject"] == (
         "[EasyChatBot Privacy Governance] "
-        "Reminder — Decision Required for CASE-E2E-001"
+        "Reminder â€” Decision Required for CASE-E2E-001"
     )
     assert "REVIEW THIS CASE" in call["html_body"]
     assert (
@@ -74,3 +74,4 @@ async def test_reminder_is_concise_and_contains_case_link_and_logo(tmp_path: Pat
     # Reminder must remain shorter in scope than the initial approval email:
     assert "Possible decisions:" not in call["html_body"]
     assert "ACTION REQUIRED" not in call["html_body"]
+

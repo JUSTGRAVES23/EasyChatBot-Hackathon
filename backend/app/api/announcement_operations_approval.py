@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from backend.app.application.announcements.approval.async_approval_service import (
+from app.api.dependencies.authorization import require_permission
+from app.application.announcements.approval.async_approval_service import (
     AsyncAnnouncementPublicationApprovalService,
+)
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.principal import Principal
+
+
+announcement_publish_permission = require_permission(
+    Permission.ANNOUNCEMENT_PUBLISH
 )
 
 
-AdminAuthorizer = Callable[[], Awaitable[bool]]
-
-
 class PublicationApprovalRequest(BaseModel):
-    actor: str = Field(min_length=1, max_length=255)
+    pass
 
 
 class PublicationApprovalResponse(BaseModel):
@@ -23,54 +26,32 @@ class PublicationApprovalResponse(BaseModel):
     approved_at: str | None
 
 
-async def _default_admin_authorizer() -> bool:
-    return False
-
-
 def create_announcement_operations_approval_router(
     *,
     approval_service: AsyncAnnouncementPublicationApprovalService,
-    admin_authorizer: AdminAuthorizer = _default_admin_authorizer,
 ) -> APIRouter:
     if approval_service is None:
         raise ValueError("approval_service cannot be None.")
-    if admin_authorizer is None:
-        raise ValueError("admin_authorizer cannot be None.")
 
     router = APIRouter(
         prefix="/api/announcement-operations",
         tags=["announcement-operations"],
     )
 
-    async def require_admin() -> None:
-        try:
-            authorized = await admin_authorizer()
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Administrator authorization required.",
-            ) from None
-
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Administrator authorization required.",
-            )
-
     @router.post(
         "/publications/{publication_id}/approve",
         response_model=PublicationApprovalResponse,
         status_code=status.HTTP_200_OK,
-        dependencies=[Depends(require_admin)],
     )
     async def approve_publication(
         publication_id: str,
-        request: PublicationApprovalRequest,
+        _request: PublicationApprovalRequest,
+        principal: Principal = Depends(announcement_publish_permission),
     ) -> PublicationApprovalResponse:
         try:
             result = await approval_service.approve(
                 publication_id=publication_id,
-                actor=request.actor,
+                actor=principal.user_id,
             )
         except LookupError as exc:
             raise HTTPException(
@@ -84,6 +65,7 @@ def create_announcement_operations_approval_router(
             ) from exc
 
         publication = result.publication
+
         return PublicationApprovalResponse(
             publication_id=publication.publication_id,
             status=publication.status.value,
@@ -98,8 +80,8 @@ def create_announcement_operations_approval_router(
 
 
 __all__ = [
-    "AdminAuthorizer",
     "PublicationApprovalRequest",
     "PublicationApprovalResponse",
+    "announcement_publish_permission",
     "create_announcement_operations_approval_router",
 ]

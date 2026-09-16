@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 
 import pytest
 
-from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+from app.infrastructure.telegram.telegram_bot_runtime import (
     TelegramBotRuntime,
 )
 

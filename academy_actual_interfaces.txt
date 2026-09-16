@@ -1,0 +1,2244 @@
+====================================================================================================
+EASYCHATBOT ACADEMY
+ACTUAL ACADEMY IMPLEMENTATION INTERFACE REVIEW
+====================================================================================================
+
+READ-ONLY
+NO SOURCE MODIFICATION
+NO DATABASE WRITE
+NO MIGRATION
+NO EMAIL
+NO TELEGRAM
+NO SCHEDULER
+
+
+====================================================================================================
+1. ACTUAL IMPLEMENTATION FILES
+====================================================================================================
+
+====================================================================================================
+FILE: backend/app/application/academy_notification_service.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from .academy_notification_formatters import AcademyEmailFormatter, AcademyTelegramFormatter
+from .academy_notification_ports import EmailNotificationSender, TelegramNotificationSender
+from ..domain.academy_notification import (
+    AcademyNotification,
+    AcademyNotificationType,
+)
+
+
+class OneWeekNotificationOrchestrator:
+    """Coordinates the 1-week milestone across Email and Telegram."""
+
+    def __init__(
+        self,
+        *,
+        email_sender: EmailNotificationSender,
+        telegram_sender: TelegramNotificationSender,
+        email_formatter: AcademyEmailFormatter,
+        telegram_formatter: AcademyTelegramFormatter,
+        registration_email: str,
+        portal_url: str,
+    ) -> None:
+        if not registration_email.strip():
+            raise ValueError("registration_email cannot be empty.")
+        if not portal_url.strip():
+            raise ValueError("portal_url cannot be empty.")
+
+        self._email_sender = email_sender
+        self._telegram_sender = telegram_sender
+        self._email_formatter = email_formatter
+        self._telegram_formatter = telegram_formatter
+        self._registration_email = registration_email
+        self._portal_url = portal_url
+
+    @staticmethod
+    def is_one_week_eligible(
+        *,
+        registered_at: datetime,
+        now: datetime,
+    ) -> bool:
+        if registered_at.tzinfo is None or now.tzinfo is None:
+            raise ValueError("timestamps must be timezone-aware.")
+        age = now - registered_at
+        return timedelta(days=7) <= age < timedelta(days=8)
+
+    async def send_one_week(
+        self,
+        *,
+        email: str,
+        username: str,
+        telegram_chat_id: str | None,
+    ) -> dict:
+        notification = AcademyNotification(
+            notification_type=AcademyNotificationType.ONE_WEEK_MILESTONE,
+            username=username,
+            portal_url=self._portal_url,
+        )
+
+        rendered_email = self._email_formatter.render(notification)
+
+        email_result = await self._email_sender.send(
+            "🎓 One Week at EasyChatBot, "
+            f"@{username.strip()}!",
+            {
+                "recipient": email,
+                "email_type": "academy_notification",
+                "notification_type": notification.notification_type.value,
+                "from": self._registration_email,
+                "body": rendered_email["body"],
+                "html": rendered_email["html"],
+                "attachments": rendered_email.get(
+                    "attachments",
+                    [],
+                ),
+            },
+        )
+
+        telegram_result = None
+        if telegram_chat_id:
+            telegram_result = await self._telegram_sender.send(
+                chat_id=telegram_chat_id,
+                text=self._telegram_formatter.render(notification),
+                portal_url=self._portal_url,
+            )
+
+        return {
+            "notification_type": notification.notification_type.value,
+            "email": email_result,
+            "telegram": telegram_result,
+        }
+
+====================================================================================================
+FILE: backend/app/application/academy_notification_formatters.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+import os
+from html import escape
+from pathlib import Path
+from typing import Any
+
+from ..domain.academy_notification import AcademyNotification
+
+
+class AcademyEmailFormatter:
+    """Render branded Academy email content.
+
+    The logo is referenced by CID and delivered as an inline MIME asset,
+    not as a normal user-visible attachment. Both logo instances are
+    navigation links to the configured Academy portal.
+
+    Social destinations are configuration-driven. Until EasyChatBot's own
+    accounts exist, the defaults point to the corresponding platform home.
+    """
+
+    LOGO_CONTENT_ID = "easychatbot-logo"
+
+    def __init__(
+        self,
+        *,
+        logo_path: str | Path | None = None,
+        x_url: str | None = None,
+        instagram_url: str | None = None,
+        linkedin_url: str | None = None,
+        youtube_url: str | None = None,
+    ) -> None:
+        if logo_path is None:
+            logo_path = (
+                Path(__file__).resolve().parents[2]
+                / "assets"
+                / "email"
+                / "easychatbot-logo.png"
+            )
+
+        self.logo_path = Path(logo_path)
+
+        if not self.logo_path.is_file():
+            raise FileNotFoundError(
+                f"EasyChatBot Academy email logo not found: {self.logo_path}"
+            )
+
+        self.social_urls = {
+            "x": self._resolve_url(x_url, "EASYCHATBOT_X_URL", "https://x.com/"),
+            "instagram": self._resolve_url(
+                instagram_url,
+                "EASYCHATBOT_INSTAGRAM_URL",
+                "https://www.instagram.com/",
+            ),
+            "linkedin": self._resolve_url(
+                linkedin_url,
+                "EASYCHATBOT_LINKEDIN_URL",
+                "https://www.linkedin.com/",
+            ),
+            "youtube": self._resolve_url(
+                youtube_url,
+                "EASYCHATBOT_YOUTUBE_URL",
+                "https://www.youtube.com/",
+            ),
+        }
+
+    @staticmethod
+    def _resolve_url(
+        explicit: str | None,
+        environment_name: str,
+        default: str,
+    ) -> str:
+        value = explicit or os.getenv(environment_name) or default
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{environment_name} cannot be empty.")
+        return value
+
+    def render(self, notification: AcademyNotification) -> dict[str, Any]:
+        username = escape(notification.username, quote=True)
+        portal_url = escape(notification.portal_url, quote=True)
+        social = {
+            key: escape(value, quote=True)
+            for key, value in self.social_urls.items()
+        }
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>One Week at EasyChatBot</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f7fb;font-family:Arial,Helvetica,sans-serif;color:#18243a;">
+<div style="width:100%;padding:28px 12px;box-sizing:border-box;">
+<div style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:18px;overflow:hidden;">
+
+<div style="text-align:center;padding:28px 24px 16px;">
+<a href="{portal_url}" style="text-decoration:none;display:inline-block;">
+<img src="cid:{self.LOGO_CONTENT_ID}" alt="EasyChatBot" width="220"
+     style="display:block;width:220px;max-width:100%;height:auto;border:0;margin:0 auto;">
+</a>
+</div>
+
+<div style="padding:10px 36px 36px;">
+<h1 style="margin:0 0 18px;font-size:30px;line-height:1.15;color:#18243a;text-align:center;">
+&#127891; Congratulations, @{username}!
+</h1>
+
+<p style="font-size:16px;line-height:1.65;margin:0 0 16px;">
+It has been one week since you joined the EasyChatBot Academy.
+</p>
+
+<p style="font-size:16px;line-height:1.65;margin:0 0 16px;">
+What a great start! Every lesson you complete, every question you ask,
+and every conversation you have is another step forward in your journey.
+</p>
+
+<p style="font-size:16px;line-height:1.65;margin:0 0 24px;">
+Keep exploring, keep practising, and keep building your confidence.
+Your Academy journey is only just beginning. &#128640;
+</p>
+
+<div style="text-align:center;margin:28px 0 30px;">
+<a href="{portal_url}"
+   style="display:inline-block;background:#123b78;color:#ffffff;padding:14px 26px;border-radius:10px;text-decoration:none;font-weight:bold;font-size:16px;">
+&#128640; Continue Learning
+</a>
+</div>
+
+<p style="font-size:16px;line-height:1.65;margin:0;">
+Keep going, @{username}. We are growing with you.
+</p>
+</div>
+
+<div style="background:#0f2345;padding:28px 24px;text-align:center;">
+<a href="{portal_url}" style="display:inline-block;text-decoration:none;">
+<img src="cid:{self.LOGO_CONTENT_ID}" alt="EasyChatBot" width="135"
+     style="display:block;width:135px;max-width:100%;height:auto;border:0;margin:0 auto 16px;">
+</a>
+
+<div style="margin:8px 0 18px;font-size:0;">
+<a href="{social['x']}" aria-label="X" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:16px;font-weight:bold;">X</a>
+<a href="{social['instagram']}" aria-label="Instagram" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:18px;font-weight:bold;">◎</a>
+<a href="{social['linkedin']}" aria-label="LinkedIn" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;">in</a>
+<a href="{social['youtube']}" aria-label="YouTube" style="display:inline-block;margin:0 7px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:bold;">&#9654;</a>
+</div>
+
+<p style="margin:0 0 8px;color:#ffffff;font-size:14px;font-weight:bold;">
+EasyChatBot — Growing With You.
+</p>
+<p style="margin:0;color:#c8d3e3;font-size:12px;line-height:1.5;">
+This is an automated message from EasyChatBot.
+</p>
+</div>
+
+</div>
+</div>
+</body>
+</html>
+"""
+
+        text = (
+            "🎓 Congratulations, @"
+            f"{notification.username}!\n\n"
+            "It has been one week since you joined the EasyChatBot Academy.\n\n"
+            "What a great start! Every lesson you complete, every question you ask, "
+            "and every conversation you have is another step forward in your journey.\n\n"
+            "Keep exploring, keep practising, and keep building your confidence. "
+            "Your Academy journey is only just beginning. 🚀\n\n"
+            "Continue Learning:\n"
+            f"{notification.portal_url}\n\n"
+            f"Keep going, @{notification.username}. We are growing with you.\n\n"
+            "EasyChatBot — Growing With You.\n"
+        )
+
+        return {
+            "html": html,
+            "body": text,
+            "attachments": [
+                {
+                    "path": str(self.logo_path),
+                    "filename": "easychatbot-logo.png",
+                    "inline": True,
+                    "content_id": self.LOGO_CONTENT_ID,
+                }
+            ],
+        }
+
+
+class AcademyTelegramFormatter:
+    """Render the same notification as Telegram-friendly text."""
+
+    def render(self, notification: AcademyNotification) -> str:
+        return (
+            "🎓 *Congratulations, @"
+            f"{notification.username}!*\n\n"
+            "It has been one week since you joined the EasyChatBot Academy.\n\n"
+            "What a great start! Every lesson you complete, every question "
+            "you ask, and every conversation you have is another step forward "
+            "in your journey.\n\n"
+            "Keep exploring, keep practising, and keep building your confidence. "
+            "Your Academy journey is only just beginning. 🚀\n\n"
+            f"Keep going, @{notification.username}. We are growing with you."
+        )
+
+====================================================================================================
+FILE: backend/app/application/academy_notification_ports.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, Protocol
+
+
+class EmailNotificationSender(Protocol):
+    async def send(
+        self,
+        subject: str,
+        content: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        ...
+
+
+class TelegramNotificationSender(Protocol):
+    async def send(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        portal_url: str,
+    ) -> Mapping[str, Any]:
+        ...
+
+====================================================================================================
+FILE: backend/app/infrastructure/email/academy_email_notification_sender.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+﻿from __future__ import annotations
+
+from typing import Any
+
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+class AcademyEmailNotificationSender:
+    """Academy email adapter over the existing provider boundary.
+
+    Application code depends on the Academy email port.
+    Provider selection remains owned by EmailProviderManager.
+
+    Does NOT:
+    - create a second email provider;
+    - access provider credentials;
+    - send email directly through Resend;
+    - make Academy eligibility decisions.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_manager: EmailProviderManager | None = None,
+    ) -> None:
+        self._provider_manager = (
+            provider_manager
+            if provider_manager is not None
+            else EmailProviderManager()
+        )
+
+    async def send(
+        self,
+        subject: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(subject, str) or not subject.strip():
+            raise ValueError("Email subject cannot be empty.")
+
+        if not isinstance(content, dict):
+            raise TypeError("Email content must be a dictionary.")
+
+        recipient = content.get("recipient")
+
+        if not isinstance(recipient, str) or not recipient.strip():
+            raise ValueError("Email recipient is required.")
+
+        result = await self._provider_manager.send(
+            subject.strip(),
+            content,
+        )
+
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Email provider returned an invalid result."
+            )
+
+        return result
+
+
+__all__ = [
+    "AcademyEmailNotificationSender",
+]
+
+====================================================================================================
+FILE: backend/app/application/academy/academy_notification_delivery.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Protocol
+from uuid import UUID
+
+
+class AcademyDeliveryStatus(StrEnum):
+    PENDING = "PENDING"
+    SENDING = "SENDING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class AcademyEligibleUser:
+    user_id: UUID
+    email: str
+    username: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AcademyDeliveryRecord:
+    user_id: UUID
+    notification_type: str
+    status: AcademyDeliveryStatus
+    attempt_count: int
+    provider_message_id: str | None = None
+    last_error: str | None = None
+
+
+class AcademyUserQuery(Protocol):
+    async def list_one_week_candidates(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[AcademyEligibleUser]:
+        ...
+
+
+class AcademyDeliveryRepository(Protocol):
+    async def claim(
+        self,
+        *,
+        user_id: UUID,
+        notification_type: str,
+        now: datetime,
+    ) -> AcademyDeliveryRecord | None:
+        ...
+
+    async def mark_succeeded(
+        self,
+        *,
+        user_id: UUID,
+        notification_type: str,
+        provider_message_id: str | None,
+        now: datetime,
+    ) -> None:
+        ...
+
+    async def mark_failed(
+        self,
+        *,
+        user_id: UUID,
+        notification_type: str,
+        error: str,
+        now: datetime,
+    ) -> None:
+        ...
+
+====================================================================================================
+FILE: backend/app/application/academy/academy_one_week_workflow.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from backend.app.application.academy_notification_service import (
+    OneWeekNotificationOrchestrator,
+)
+from backend.app.application.academy.academy_notification_delivery import (
+    AcademyDeliveryRepository,
+    AcademyUserQuery,
+)
+
+
+class AcademyOneWeekWorkflow:
+    """Execute the Academy 1-week workflow without owning scheduler state."""
+
+    NOTIFICATION_TYPE = "1_WEEK_MILESTONE"
+
+    def __init__(
+        self,
+        *,
+        users: AcademyUserQuery,
+        deliveries: AcademyDeliveryRepository,
+        notifications: OneWeekNotificationOrchestrator,
+        clock=None,
+    ) -> None:
+        self._users = users
+        self._deliveries = deliveries
+        self._notifications = notifications
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    async def run(self) -> dict[str, int]:
+        now = self._clock()
+        if now.tzinfo is None:
+            raise ValueError("Workflow clock must return a timezone-aware datetime.")
+
+        window_start = now - timedelta(days=8)
+        window_end = now - timedelta(days=7)
+
+        candidates = await self._users.list_one_week_candidates(
+            window_start=window_start,
+            window_end=window_end,
+        )
+
+        attempted = 0
+        succeeded = 0
+        skipped = 0
+        failed = 0
+
+        for user in candidates:
+            # The query is deliberately bounded by the same eligibility window,
+            # while the domain rule remains the final guard.
+            if not self._notifications.is_one_week_eligible(
+                registered_at=user.created_at,
+                now=now,
+            ):
+                skipped += 1
+                continue
+
+            claim = await self._deliveries.claim(
+                user_id=user.user_id,
+                notification_type=self.NOTIFICATION_TYPE,
+                now=now,
+            )
+
+            if claim is None:
+                skipped += 1
+                continue
+
+            attempted += 1
+
+            try:
+                result = await self._notifications.send_one_week(
+                    email=user.email,
+                    username=user.username,
+                    telegram_chat_id=None,
+                )
+                email_result = result.get("email") or {}
+                provider_message_id = email_result.get("message_id")
+
+                await self._deliveries.mark_succeeded(
+                    user_id=user.user_id,
+                    notification_type=self.NOTIFICATION_TYPE,
+                    provider_message_id=(
+                        str(provider_message_id)
+                        if provider_message_id is not None
+                        else None
+                    ),
+                    now=now,
+                )
+                succeeded += 1
+            except Exception as exc:
+                await self._deliveries.mark_failed(
+                    user_id=user.user_id,
+                    notification_type=self.NOTIFICATION_TYPE,
+                    error=str(exc)[:2000],
+                    now=now,
+                )
+                failed += 1
+
+        return {
+            "candidates": len(candidates),
+            "attempted": attempted,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+        }
+
+====================================================================================================
+FILE: backend/app/infrastructure/telegram/academy_notification_telegram.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+from typing import Any
+
+
+class ExistingBotTelegramNotificationSender:
+    """Outbound adapter around the existing Telegram Bot instance.
+
+    No Bot is created here. The composition root injects the existing
+    `TelegramBotRuntime.bot`.
+    """
+
+    def __init__(self, bot: Any) -> None:
+        if bot is None:
+            raise ValueError("bot cannot be None.")
+        self._bot = bot
+
+    async def send(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        portal_url: str,
+    ) -> dict:
+        if not chat_id.strip():
+            raise ValueError("chat_id cannot be empty.")
+        if not portal_url.strip():
+            raise ValueError("portal_url cannot be empty.")
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🚀 Continue Learning", url=portal_url)]]
+        )
+
+        message = await self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+
+        return {
+            "provider": "telegram",
+            "status": "accepted",
+            "message_id": getattr(message, "message_id", None),
+        }
+
+====================================================================================================
+FILE: backend/app/infrastructure/telegram/telegram_bot_runtime.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from backend.app.interfaces.telegram.beta_telegram_adapter import (
+    BetaTelegramAdapter,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramBotRuntime:
+    """
+    Infrastructure adapter for python-telegram-bot.
+
+    Responsibilities:
+    - Telegram application lifecycle;
+    - Telegram handler registration;
+    - delegation to BetaTelegramAdapter;
+    - exposing the already-created Telegram bot client to
+      controlled infrastructure adapters.
+
+    The runtime MUST NOT:
+    - perform Beta authorization;
+    - execute conversation logic;
+    - deliver classroom responses returned by the adapter;
+    - create a second Telegram client;
+    - bypass the controlled publication boundary.
+
+    IMPORTANT RESPONSE OWNERSHIP:
+
+        Telegram update
+              |
+              v
+        TelegramBotRuntime
+              |
+              v
+        BetaTelegramAdapter
+              |
+              +----> reply_text()
+              |
+              v
+          response
+
+    The adapter owns Telegram classroom response delivery.
+
+    Therefore the runtime MUST NOT call reply_text() with the
+    response returned by the adapter.
+
+    This prevents duplicate Telegram messages.
+
+    PUBLICATION CLIENT OWNERSHIP:
+
+        TelegramBotRuntime
+              |
+              +----> existing Application
+                           |
+                           +----> existing Bot client
+                                      |
+                                      v
+                         Controlled publication adapters
+
+    The runtime remains the owner of Telegram client creation
+    and lifecycle. Consumers receive a reference to the existing
+    client through the read-only ``bot`` property.
+    """
+
+    def __init__(
+        self,
+        *,
+        adapter: BetaTelegramAdapter,
+        conversation_boundary: Any = None,
+    ) -> None:
+        if adapter is None:
+            raise ValueError(
+                "adapter cannot be None."
+            )
+
+        self._adapter = adapter
+
+        # Retained for constructor compatibility with existing
+        # composition. Runtime does not execute the boundary.
+        self._conversation_boundary = conversation_boundary
+
+        self._application: Application | None = None
+        self._running = False
+
+    # =========================================================
+    # Application construction
+    # =========================================================
+
+    def build(self) -> Application:
+        token = os.getenv(
+            "TELEGRAM_BOT_TOKEN"
+        )
+
+        if not token:
+            raise RuntimeError(
+                "TELEGRAM_BOT_TOKEN is missing."
+            )
+
+        application = (
+            Application
+            .builder()
+            .token(token)
+            .build()
+        )
+
+        application.add_handler(
+            CommandHandler(
+                "start",
+                self._handle_start,
+            )
+        )
+
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.PRIVATE
+                & filters.TEXT
+                & ~filters.COMMAND,
+                self._handle_private_message,
+            )
+        )
+
+        self._application = application
+
+        logger.info(
+            "Telegram bot runtime created."
+        )
+
+        return application
+
+    # =========================================================
+    # Existing Telegram bot client
+    # =========================================================
+
+    @property
+    def bot(self) -> Any:
+        """
+        Return the existing Telegram bot client.
+
+        The TelegramBotRuntime remains responsible for creating
+        and owning the Telegram Application and its Bot client.
+
+        This property does not create another client and does not
+        expose credentials.
+
+        Consumers may use this reference for controlled outbound
+        operations such as the announcement publication adapter.
+
+        Raises:
+            RuntimeError: If the Telegram application has not yet
+                been built.
+        """
+
+        if self._application is None:
+            raise RuntimeError(
+                "Telegram bot runtime has not been built."
+            )
+
+        return self._application.bot
+
+    # =========================================================
+    # Lifecycle
+    # =========================================================
+
+    async def start(self) -> None:
+        if self._running:
+            logger.warning(
+                "Telegram runtime already running."
+            )
+            return
+
+        if self._application is None:
+            self.build()
+
+        assert self._application is not None
+
+        await self._application.initialize()
+        await self._application.start()
+
+        if self._application.updater is not None:
+            await self._application.updater.start_polling(
+                drop_pending_updates=False,
+            )
+
+        self._running = True
+
+        logger.info(
+            "Telegram bot polling started."
+        )
+
+    async def stop(self) -> None:
+        if self._application is None:
+            return
+
+        if (
+            self._application.updater is not None
+            and self._running
+        ):
+            await self._application.updater.stop()
+
+        await self._application.stop()
+        await self._application.shutdown()
+
+        self._running = False
+
+        logger.info(
+            "Telegram bot runtime stopped."
+        )
+
+    # =========================================================
+    # Telegram handlers
+    # =========================================================
+
+    async def _handle_start(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await self._adapter.handle_start(
+            update,
+            context,
+        )
+
+    async def _handle_private_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if (
+            update.effective_user is None
+            or update.effective_chat is None
+            or update.effective_message is None
+        ):
+            return
+
+        try:
+            # =================================================
+            # SINGLE DELEGATION POINT
+            # =================================================
+            #
+            # BetaTelegramAdapter:
+            #
+            #   1. validates transport
+            #   2. authorizes access
+            #   3. invokes conversation boundary
+            #   4. sends Telegram response
+            #   5. returns response for observation/testing
+            #
+            # The returned value MUST NOT be sent again.
+            #
+
+            await self._adapter.handle_message(
+                update,
+                context,
+            )
+
+        except Exception:
+            logger.exception(
+                "Unexpected Telegram adapter failure."
+            )
+
+            # This is ONLY an infrastructure-level fallback for
+            # failures escaping the adapter itself.
+            #
+            # Normal conversation failures are already contained
+            # by BetaTelegramAdapter.
+            await update.effective_message.reply_text(
+                "EasyChatBot is temporarily unavailable. "
+                "Please try again."
+            )
+
+
+__all__ = [
+    "TelegramBotRuntime",
+]
+====================================================================================================
+FILE: backend/app/application/composition/academy_production.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+﻿from __future__ import annotations
+
+import os
+
+from backend.app.application.academy.academy_notification_formatters import (
+    AcademyEmailFormatter,
+    AcademyTelegramFormatter,
+)
+from backend.app.application.academy.academy_notification_ports import (
+    TelegramNotificationSender,
+)
+from backend.app.application.academy.academy_notification_service import (
+    OneWeekNotificationOrchestrator,
+)
+from backend.app.application.academy.academy_one_week_workflow import (
+    AcademyOneWeekWorkflow,
+)
+from backend.app.infrastructure.academy.postgresql_academy_notification_repository import (
+    PostgreSQLAcademyDeliveryRepository,
+    PostgreSQLAcademyUserQuery,
+)
+from backend.app.infrastructure.email.academy_email_notification_sender import (
+    AcademyEmailNotificationSender,
+)
+from backend.app.infrastructure.telegram.academy_notification_telegram import (
+    ExistingBotTelegramNotificationSender,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+class DisabledAcademyTelegramSender:
+    """Safe default when no existing Telegram Bot is supplied.
+
+    Academy email delivery remains independently testable.
+    No second Telegram Bot is created.
+    """
+
+    async def send(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        portal_url: str,
+    ) -> dict:
+        return {
+            "provider": "telegram",
+            "status": "not_configured",
+            "message_id": None,
+        }
+
+
+def _required_config(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for Academy production composition."
+        )
+
+    return value
+
+
+def create_academy_one_week_workflow(
+    *,
+    session_factory=None,
+    email_provider_manager: EmailProviderManager | None = None,
+    telegram_bot=None,
+    portal_url: str | None = None,
+    registration_email: str | None = None,
+) -> AcademyOneWeekWorkflow:
+    """Compose the production Academy one-week workflow.
+
+    Composition:
+
+        PostgreSQL
+            ↓
+        AcademyOneWeekWorkflow
+            ↓
+        OneWeekNotificationOrchestrator
+            ↓
+        EmailProviderManager
+            ↓
+        Existing Telegram Bot adapter
+
+    The scheduler itself is intentionally not created here.
+    """
+
+    if session_factory is None:
+        engine = create_async_database_engine()
+        session_factory = create_async_session_factory(engine)
+
+    resolved_portal_url = (
+        portal_url.strip()
+        if portal_url is not None
+        else _required_config("EASYCHATBOT_PORTAL_URL")
+    )
+
+    resolved_registration_email = (
+        registration_email.strip()
+        if registration_email is not None
+        else _required_config("EASYCHATBOT_REGISTRATION_EMAIL")
+    )
+
+    email_sender = AcademyEmailNotificationSender(
+        provider_manager=email_provider_manager
+        or EmailProviderManager()
+    )
+
+    if telegram_bot is not None:
+        telegram_sender: TelegramNotificationSender = (
+            ExistingBotTelegramNotificationSender(
+                telegram_bot,
+            )
+        )
+    else:
+        telegram_sender = DisabledAcademyTelegramSender()
+
+    notifications = OneWeekNotificationOrchestrator(
+        email_sender=email_sender,
+        telegram_sender=telegram_sender,
+        email_formatter=AcademyEmailFormatter(),
+        telegram_formatter=AcademyTelegramFormatter(),
+        registration_email=resolved_registration_email,
+        portal_url=resolved_portal_url,
+    )
+
+    users = PostgreSQLAcademyUserQuery(
+        session_factory,
+    )
+
+    deliveries = PostgreSQLAcademyDeliveryRepository(
+        session_factory,
+    )
+
+    return AcademyOneWeekWorkflow(
+        users=users,
+        deliveries=deliveries,
+        notifications=notifications,
+    )
+
+
+__all__ = [
+    "create_academy_one_week_workflow",
+]
+
+====================================================================================================
+FILE: backend/cybersecurity/email/email_provider_manager.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+"""
+Email Provider Manager.
+
+Controls provider selection, configuration, availability,
+and controlled email delivery.
+
+The manager is deliberately provider-independent.
+Concrete providers such as Resend are injected into this
+boundary rather than called directly by application services.
+
+Does NOT:
+- generate cybersecurity reports;
+- schedule emails;
+- analyse security;
+- execute remediation;
+- expose provider credentials.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backend.cybersecurity.email.resend_email_provider import (
+    ResendEmailProvider,
+)
+
+
+class EmailProviderManager:
+    """
+    Provider abstraction for controlled email delivery.
+    """
+
+    def __init__(
+        self,
+        provider: Any | None = None,
+    ) -> None:
+
+        self.provider = (
+            provider
+            if provider is not None
+            else self._build_default_provider()
+        )
+
+    @staticmethod
+    def _build_default_provider() -> Any | None:
+        """
+        Build the configured default email provider.
+
+        Resend is currently the approved hackathon provider.
+
+        If Resend is not configured, return None so the
+        application can report provider_not_configured
+        rather than failing during application import.
+        """
+
+        try:
+            return ResendEmailProvider()
+
+        except ValueError:
+            return None
+
+    def status(self) -> dict[str, Any]:
+        """
+        Return non-sensitive provider status.
+
+        This method never exposes:
+        - API keys;
+        - secrets;
+        - credentials.
+
+        Status is determined from the provider already
+        configured in the manager. No external provider
+        request is made.
+        """
+
+        if self.provider is None:
+
+            return {
+                "provider": None,
+                "configured": False,
+                "available": False,
+                "status": "not_configured",
+            }
+
+        provider_id = getattr(
+            self.provider,
+            "provider_id",
+            self.provider.__class__.__name__,
+        )
+
+        return {
+            "provider": provider_id,
+            "configured": True,
+            "available": True,
+            "status": "ready",
+        }
+
+    async def send(
+        self,
+        subject: str,
+        content: dict,
+    ) -> dict:
+
+        if self.provider is None:
+
+            return {
+                "status": "provider_not_configured",
+            }
+
+        return await self.provider.send(
+            subject,
+            content,
+        )
+====================================================================================================
+FILE: backend/cybersecurity/scheduler/cybersecurity_apscheduler_adapter.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+"""
+Cybersecurity APScheduler Adapter.
+
+Infrastructure boundary for scheduled workflows.
+
+Responsibilities:
+- register existing cybersecurity jobs;
+- optionally register privacy governance reminders;
+- optionally register Academy notification workflows;
+- start and stop the single APScheduler instance.
+
+Does NOT:
+- own Academy eligibility;
+- own Academy delivery state;
+- send emails directly;
+- send Telegram messages directly;
+- make governance decisions;
+- create a second scheduler.
+"""
+
+from __future__ import annotations
+
+from backend.cybersecurity.scheduler.scheduler_configuration import (
+    DAILY_REPORT_HOUR,
+    DAILY_REPORT_MINUTE,
+    WEEKLY_REPORT_DAY,
+    WEEKLY_REPORT_HOUR,
+    WEEKLY_REPORT_MINUTE,
+)
+
+
+class CybersecurityAPSchedulerAdapter:
+    """APScheduler implementation boundary.
+
+    All scheduled application workflows share this single scheduler.
+
+    Optional workflows remain dependency-injected so existing
+    cybersecurity-only tests and deployments remain backwards compatible.
+    """
+
+    def __init__(
+        self,
+        scheduler,
+        workflow_service,
+        governance_reminder_workflow=None,
+        governance_reminder_interval_minutes: int = 60,
+        academy_one_week_workflow=None,
+        academy_one_week_hour: int = 8,
+        academy_one_week_minute: int = 15,
+    ) -> None:
+        if scheduler is None:
+            raise ValueError("scheduler cannot be None.")
+
+        if workflow_service is None:
+            raise ValueError("workflow_service cannot be None.")
+
+        if governance_reminder_interval_minutes <= 0:
+            raise ValueError(
+                "governance_reminder_interval_minutes must be > 0."
+            )
+
+        if not 0 <= academy_one_week_hour <= 23:
+            raise ValueError(
+                "academy_one_week_hour must be between 0 and 23."
+            )
+
+        if not 0 <= academy_one_week_minute <= 59:
+            raise ValueError(
+                "academy_one_week_minute must be between 0 and 59."
+            )
+
+        self.scheduler = scheduler
+        self.workflow_service = workflow_service
+
+        self.governance_reminder_workflow = (
+            governance_reminder_workflow
+        )
+        self.governance_reminder_interval_minutes = (
+            governance_reminder_interval_minutes
+        )
+
+        self.academy_one_week_workflow = (
+            academy_one_week_workflow
+        )
+        self.academy_one_week_hour = academy_one_week_hour
+        self.academy_one_week_minute = academy_one_week_minute
+
+    def register_jobs(self) -> None:
+        """Register all enabled workflows on the single scheduler."""
+
+        self.scheduler.add_job(
+            self.workflow_service.create_daily_report,
+            trigger="cron",
+            hour=DAILY_REPORT_HOUR,
+            minute=DAILY_REPORT_MINUTE,
+            id="cybersecurity_daily_report",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self.workflow_service.create_weekly_report,
+            trigger="cron",
+            day_of_week=WEEKLY_REPORT_DAY,
+            hour=WEEKLY_REPORT_HOUR,
+            minute=WEEKLY_REPORT_MINUTE,
+            id="cybersecurity_weekly_report",
+            replace_existing=True,
+        )
+
+        if self.governance_reminder_workflow is not None:
+            self.scheduler.add_job(
+                self.governance_reminder_workflow.run,
+                trigger="interval",
+                minutes=self.governance_reminder_interval_minutes,
+                id="privacy_governance_reminder",
+                replace_existing=True,
+            )
+
+        if self.academy_one_week_workflow is not None:
+            self.scheduler.add_job(
+                self.academy_one_week_workflow.run,
+                trigger="cron",
+                hour=self.academy_one_week_hour,
+                minute=self.academy_one_week_minute,
+                id="academy_one_week_milestone",
+                replace_existing=True,
+            )
+
+    def register_critical_handler(self, handler) -> None:
+        self.critical_handler = handler
+
+    async def trigger_critical_event(self, event: dict):
+        if not hasattr(self, "critical_handler"):
+            return None
+
+        return await self.critical_handler(event)
+
+    def start(self) -> None:
+        if not self.scheduler.running:
+            self.scheduler.start()
+
+    def shutdown(self) -> None:
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+
+
+__all__ = [
+    "CybersecurityAPSchedulerAdapter",
+]
+====================================================================================================
+FILE: backend/cybersecurity/scheduler/cybersecurity_scheduler_factory.py
+EXISTS: True
+----------------------------------------------------------------------------------------------------
+﻿"""
+Cybersecurity Scheduler Factory.
+
+Creates the single shared scheduler runtime.
+
+Academy is composed as an optional application workflow and
+registered on the existing scheduler. No second scheduler is created.
+"""
+
+from __future__ import annotations
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    CybersecuritySchedulerRuntime,
+)
+
+from backend.cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+from backend.cybersecurity.scheduler.scheduler_configuration import (
+    SCHEDULER_TIMEZONE,
+)
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+    CybersecuritySchedulerWorkflow,
+)
+
+from backend.cybersecurity.email.cybersecurity_email_service import (
+    CybersecurityEmailService,
+)
+
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+def create_cybersecurity_scheduler_runtime(
+    workflow_service=None,
+    *,
+    academy_one_week_workflow=None,
+) -> CybersecuritySchedulerRuntime:
+    """Create the single shared scheduler runtime."""
+
+    if workflow_service is None:
+        email_service = CybersecurityEmailService(
+            recipient="davdbarbero1999@gmail.com",
+        )
+
+        workflow_service = CybersecuritySchedulerWorkflow(
+            email_service=email_service,
+        )
+
+    scheduler = AsyncIOScheduler(
+        timezone=SCHEDULER_TIMEZONE,
+    )
+
+    # Academy production composition is explicit and injectable.
+    #
+    # It is deliberately NOT created here automatically because the
+    # application import path must remain safe when PostgreSQL is not
+    # configured in a development/test environment.
+    #
+    # Production composition may inject the completed Academy workflow.
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    return CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+
+__all__ = [
+    "create_cybersecurity_scheduler_runtime",
+]
+
+
+====================================================================================================
+2. ACTUAL SYMBOL LOCATIONS
+====================================================================================================
+
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class OneWeekNotificationOrchestrator
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy_notification_service.py:13: class OneWeekNotificationOrchestrator:
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class AcademyEmailFormatter
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy_notification_formatters.py:11: class AcademyEmailFormatter:
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class AcademyTelegramFormatter
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy_notification_formatters.py:191: class AcademyTelegramFormatter:
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class AcademyEmailNotificationSender
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\academy_email_notification_sender.py:10: class AcademyEmailNotificationSender:
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class EmailNotificationSender
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy_notification_ports.py:7: class EmailNotificationSender(Protocol):
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class TelegramNotificationSender
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy_notification_ports.py:16: class TelegramNotificationSender(Protocol):
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class AcademyUserQuery
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy\academy_notification_delivery.py:35: class AcademyUserQuery(Protocol):
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class AcademyDeliveryRepository
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy\academy_notification_delivery.py:45: class AcademyDeliveryRepository(Protocol):
+
+----------------------------------------------------------------------------------------------------
+SEARCH: class TelegramBotRuntime
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\telegram\telegram_bot_runtime.py:24: class TelegramBotRuntime:
+
+----------------------------------------------------------------------------------------------------
+SEARCH: def create_cybersecurity_scheduler_runtime
+----------------------------------------------------------------------------------------------------
+C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py:39: def create_cybersecurity_scheduler_runtime(
+
+====================================================================================================
+3. CURRENT ACADEMY APPLICATION DIRECTORY
+====================================================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy\academy_notification_delivery.py
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\academy\academy_one_week_workflow.py
+
+====================================================================================================
+4. CURRENT ACADEMY PRODUCTION COMPOSITION
+====================================================================================================
+
+﻿from __future__ import annotations
+
+import os
+
+from backend.app.application.academy.academy_notification_formatters import (
+    AcademyEmailFormatter,
+    AcademyTelegramFormatter,
+)
+from backend.app.application.academy.academy_notification_ports import (
+    TelegramNotificationSender,
+)
+from backend.app.application.academy.academy_notification_service import (
+    OneWeekNotificationOrchestrator,
+)
+from backend.app.application.academy.academy_one_week_workflow import (
+    AcademyOneWeekWorkflow,
+)
+from backend.app.infrastructure.academy.postgresql_academy_notification_repository import (
+    PostgreSQLAcademyDeliveryRepository,
+    PostgreSQLAcademyUserQuery,
+)
+from backend.app.infrastructure.email.academy_email_notification_sender import (
+    AcademyEmailNotificationSender,
+)
+from backend.app.infrastructure.telegram.academy_notification_telegram import (
+    ExistingBotTelegramNotificationSender,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+from backend.cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+
+
+class DisabledAcademyTelegramSender:
+    """Safe default when no existing Telegram Bot is supplied.
+
+    Academy email delivery remains independently testable.
+    No second Telegram Bot is created.
+    """
+
+    async def send(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        portal_url: str,
+    ) -> dict:
+        return {
+            "provider": "telegram",
+            "status": "not_configured",
+            "message_id": None,
+        }
+
+
+def _required_config(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for Academy production composition."
+        )
+
+    return value
+
+
+def create_academy_one_week_workflow(
+    *,
+    session_factory=None,
+    email_provider_manager: EmailProviderManager | None = None,
+    telegram_bot=None,
+    portal_url: str | None = None,
+    registration_email: str | None = None,
+) -> AcademyOneWeekWorkflow:
+    """Compose the production Academy one-week workflow.
+
+    Composition:
+
+        PostgreSQL
+            ↓
+        AcademyOneWeekWorkflow
+            ↓
+        OneWeekNotificationOrchestrator
+            ↓
+        EmailProviderManager
+            ↓
+        Existing Telegram Bot adapter
+
+    The scheduler itself is intentionally not created here.
+    """
+
+    if session_factory is None:
+        engine = create_async_database_engine()
+        session_factory = create_async_session_factory(engine)
+
+    resolved_portal_url = (
+        portal_url.strip()
+        if portal_url is not None
+        else _required_config("EASYCHATBOT_PORTAL_URL")
+    )
+
+    resolved_registration_email = (
+        registration_email.strip()
+        if registration_email is not None
+        else _required_config("EASYCHATBOT_REGISTRATION_EMAIL")
+    )
+
+    email_sender = AcademyEmailNotificationSender(
+        provider_manager=email_provider_manager
+        or EmailProviderManager()
+    )
+
+    if telegram_bot is not None:
+        telegram_sender: TelegramNotificationSender = (
+            ExistingBotTelegramNotificationSender(
+                telegram_bot,
+            )
+        )
+    else:
+        telegram_sender = DisabledAcademyTelegramSender()
+
+    notifications = OneWeekNotificationOrchestrator(
+        email_sender=email_sender,
+        telegram_sender=telegram_sender,
+        email_formatter=AcademyEmailFormatter(),
+        telegram_formatter=AcademyTelegramFormatter(),
+        registration_email=resolved_registration_email,
+        portal_url=resolved_portal_url,
+    )
+
+    users = PostgreSQLAcademyUserQuery(
+        session_factory,
+    )
+
+    deliveries = PostgreSQLAcademyDeliveryRepository(
+        session_factory,
+    )
+
+    return AcademyOneWeekWorkflow(
+        users=users,
+        deliveries=deliveries,
+        notifications=notifications,
+    )
+
+
+__all__ = [
+    "create_academy_one_week_workflow",
+]
+
+
+====================================================================================================
+5. ACADEMY ONE-WEEK WORKFLOW IMPORTS
+====================================================================================================
+
+0001: from __future__ import annotations
+0002: 
+0003: from datetime import datetime, timedelta, timezone
+0004: 
+0005: from backend.app.application.academy_notification_service import (
+0006:     OneWeekNotificationOrchestrator,
+0007: )
+0008: from backend.app.application.academy.academy_notification_delivery import (
+0009:     AcademyDeliveryRepository,
+0010:     AcademyUserQuery,
+0011: )
+0012: 
+0013: 
+0014: class AcademyOneWeekWorkflow:
+0015:     """Execute the Academy 1-week workflow without owning scheduler state."""
+0016: 
+0017:     NOTIFICATION_TYPE = "1_WEEK_MILESTONE"
+0018: 
+0019:     def __init__(
+0020:         self,
+0021:         *,
+0022:         users: AcademyUserQuery,
+0023:         deliveries: AcademyDeliveryRepository,
+0024:         notifications: OneWeekNotificationOrchestrator,
+0025:         clock=None,
+0026:     ) -> None:
+0027:         self._users = users
+0028:         self._deliveries = deliveries
+0029:         self._notifications = notifications
+0030:         self._clock = clock or (lambda: datetime.now(timezone.utc))
+0031: 
+0032:     async def run(self) -> dict[str, int]:
+0033:         now = self._clock()
+0034:         if now.tzinfo is None:
+0035:             raise ValueError("Workflow clock must return a timezone-aware datetime.")
+0036: 
+0037:         window_start = now - timedelta(days=8)
+0038:         window_end = now - timedelta(days=7)
+0039: 
+0040:         candidates = await self._users.list_one_week_candidates(
+0041:             window_start=window_start,
+0042:             window_end=window_end,
+0043:         )
+0044: 
+0045:         attempted = 0
+0046:         succeeded = 0
+0047:         skipped = 0
+0048:         failed = 0
+0049: 
+0050:         for user in candidates:
+0051:             # The query is deliberately bounded by the same eligibility window,
+0052:             # while the domain rule remains the final guard.
+0053:             if not self._notifications.is_one_week_eligible(
+0054:                 registered_at=user.created_at,
+0055:                 now=now,
+0056:             ):
+0057:                 skipped += 1
+0058:                 continue
+0059: 
+0060:             claim = await self._deliveries.claim(
+0061:                 user_id=user.user_id,
+0062:                 notification_type=self.NOTIFICATION_TYPE,
+0063:                 now=now,
+0064:             )
+0065: 
+0066:             if claim is None:
+0067:                 skipped += 1
+0068:                 continue
+0069: 
+0070:             attempted += 1
+0071: 
+0072:             try:
+0073:                 result = await self._notifications.send_one_week(
+0074:                     email=user.email,
+0075:                     username=user.username,
+0076:                     telegram_chat_id=None,
+0077:                 )
+0078:                 email_result = result.get("email") or {}
+0079:                 provider_message_id = email_result.get("message_id")
+0080: 
+0081:                 await self._deliveries.mark_succeeded(
+0082:                     user_id=user.user_id,
+0083:                     notification_type=self.NOTIFICATION_TYPE,
+0084:                     provider_message_id=(
+0085:                         str(provider_message_id)
+0086:                         if provider_message_id is not None
+0087:                         else None
+0088:                     ),
+0089:                     now=now,
+0090:                 )
+0091:                 succeeded += 1
+0092:             except Exception as exc:
+0093:                 await self._deliveries.mark_failed(
+0094:                     user_id=user.user_id,
+0095:                     notification_type=self.NOTIFICATION_TYPE,
+0096:                     error=str(exc)[:2000],
+0097:                     now=now,
+0098:                 )
+0099:                 failed += 1
+0100: 
+0101:         return {
+0102:             "candidates": len(candidates),
+0103:             "attempted": attempted,
+0104:             "succeeded": succeeded,
+0105:             "failed": failed,
+0106:             "skipped": skipped,
+0107:         }
+
+====================================================================================================
+6. EXISTING DATABASE FACTORY
+====================================================================================================
+
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+
+class Base(DeclarativeBase):
+    """Canonical SQLAlchemy metadata registry for the platform."""
+
+    pass
+
+
+def database_url() -> str:
+    """Return the canonical PostgreSQL connection URL."""
+
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for PostgreSQL persistence."
+        )
+
+    return value
+
+
+def create_database_engine():
+    """Create the existing synchronous PostgreSQL engine.
+
+    This API is preserved for the existing Beta 1 persistence layer.
+    """
+
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(
+    engine,
+) -> sessionmaker[Session]:
+    """Create the existing synchronous session factory.
+
+    Preserved for existing Beta 1 repositories.
+    """
+
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
+def async_database_url() -> str:
+    """Return DATABASE_URL adapted for SQLAlchemy async PostgreSQL.
+
+    The environment remains the single source of truth. We only adapt the
+    driver at the infrastructure boundary when the configured URL uses the
+    standard PostgreSQL SQLAlchemy scheme.
+    """
+
+    value = database_url()
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    raise RuntimeError(
+        "DATABASE_URL must use a PostgreSQL URL compatible with "
+        "the synchronous or async PostgreSQL persistence boundary."
+    )
+
+
+def create_async_database_engine() -> AsyncEngine:
+    """Create the canonical asynchronous PostgreSQL engine.
+
+    This is used by durable WS-22 persistence while sharing the same
+    DATABASE_URL and canonical Base as the existing persistence layer.
+    """
+
+    return create_async_engine(
+        async_database_url(),
+        pool_pre_ping=True,
+    )
+
+
+def create_async_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    """Create the canonical asynchronous PostgreSQL session factory."""
+
+    return async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+====================================================================================================
+7. EXISTING TELEGRAM RUNTIME
+====================================================================================================
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from backend.app.interfaces.telegram.beta_telegram_adapter import (
+    BetaTelegramAdapter,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramBotRuntime:
+    """
+    Infrastructure adapter for python-telegram-bot.
+
+    Responsibilities:
+    - Telegram application lifecycle;
+    - Telegram handler registration;
+    - delegation to BetaTelegramAdapter;
+    - exposing the already-created Telegram bot client to
+      controlled infrastructure adapters.
+
+    The runtime MUST NOT:
+    - perform Beta authorization;
+    - execute conversation logic;
+    - deliver classroom responses returned by the adapter;
+    - create a second Telegram client;
+    - bypass the controlled publication boundary.
+
+    IMPORTANT RESPONSE OWNERSHIP:
+
+        Telegram update
+              |
+              v
+        TelegramBotRuntime
+              |
+              v
+        BetaTelegramAdapter
+              |
+              +----> reply_text()
+              |
+              v
+          response
+
+    The adapter owns Telegram classroom response delivery.
+
+    Therefore the runtime MUST NOT call reply_text() with the
+    response returned by the adapter.
+
+    This prevents duplicate Telegram messages.
+
+    PUBLICATION CLIENT OWNERSHIP:
+
+        TelegramBotRuntime
+              |
+              +----> existing Application
+                           |
+                           +----> existing Bot client
+                                      |
+                                      v
+                         Controlled publication adapters
+
+    The runtime remains the owner of Telegram client creation
+    and lifecycle. Consumers receive a reference to the existing
+    client through the read-only ``bot`` property.
+    """
+
+    def __init__(
+        self,
+        *,
+        adapter: BetaTelegramAdapter,
+        conversation_boundary: Any = None,
+    ) -> None:
+        if adapter is None:
+            raise ValueError(
+                "adapter cannot be None."
+            )
+
+        self._adapter = adapter
+
+        # Retained for constructor compatibility with existing
+        # composition. Runtime does not execute the boundary.
+        self._conversation_boundary = conversation_boundary
+
+        self._application: Application | None = None
+        self._running = False
+
+    # =========================================================
+    # Application construction
+    # =========================================================
+
+    def build(self) -> Application:
+        token = os.getenv(
+            "TELEGRAM_BOT_TOKEN"
+        )
+
+        if not token:
+            raise RuntimeError(
+                "TELEGRAM_BOT_TOKEN is missing."
+            )
+
+        application = (
+            Application
+            .builder()
+            .token(token)
+            .build()
+        )
+
+        application.add_handler(
+            CommandHandler(
+                "start",
+                self._handle_start,
+            )
+        )
+
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.PRIVATE
+                & filters.TEXT
+                & ~filters.COMMAND,
+                self._handle_private_message,
+            )
+        )
+
+        self._application = application
+
+        logger.info(
+            "Telegram bot runtime created."
+        )
+
+        return application
+
+    # =========================================================
+    # Existing Telegram bot client
+    # =========================================================
+
+    @property
+    def bot(self) -> Any:
+        """
+        Return the existing Telegram bot client.
+
+        The TelegramBotRuntime remains responsible for creating
+        and owning the Telegram Application and its Bot client.
+
+        This property does not create another client and does not
+        expose credentials.
+
+        Consumers may use this reference for controlled outbound
+        operations such as the announcement publication adapter.
+
+        Raises:
+            RuntimeError: If the Telegram application has not yet
+                been built.
+        """
+
+        if self._application is None:
+            raise RuntimeError(
+                "Telegram bot runtime has not been built."
+            )
+
+        return self._application.bot
+
+    # =========================================================
+    # Lifecycle
+    # =========================================================
+
+    async def start(self) -> None:
+        if self._running:
+            logger.warning(
+                "Telegram runtime already running."
+            )
+            return
+
+        if self._application is None:
+            self.build()
+
+        assert self._application is not None
+
+        await self._application.initialize()
+        await self._application.start()
+
+        if self._application.updater is not None:
+            await self._application.updater.start_polling(
+                drop_pending_updates=False,
+            )
+
+        self._running = True
+
+        logger.info(
+            "Telegram bot polling started."
+        )
+
+    async def stop(self) -> None:
+        if self._application is None:
+            return
+
+        if (
+            self._application.updater is not None
+            and self._running
+        ):
+            await self._application.updater.stop()
+
+        await self._application.stop()
+        await self._application.shutdown()
+
+        self._running = False
+
+        logger.info(
+            "Telegram bot runtime stopped."
+        )
+
+    # =========================================================
+    # Telegram handlers
+    # =========================================================
+
+    async def _handle_start(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        await self._adapter.handle_start(
+            update,
+            context,
+        )
+
+    async def _handle_private_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if (
+            update.effective_user is None
+            or update.effective_chat is None
+            or update.effective_message is None
+        ):
+            return
+
+        try:
+            # =================================================
+            # SINGLE DELEGATION POINT
+            # =================================================
+            #
+            # BetaTelegramAdapter:
+            #
+            #   1. validates transport
+            #   2. authorizes access
+            #   3. invokes conversation boundary
+            #   4. sends Telegram response
+            #   5. returns response for observation/testing
+            #
+            # The returned value MUST NOT be sent again.
+            #
+
+            await self._adapter.handle_message(
+                update,
+                context,
+            )
+
+        except Exception:
+            logger.exception(
+                "Unexpected Telegram adapter failure."
+            )
+
+            # This is ONLY an infrastructure-level fallback for
+            # failures escaping the adapter itself.
+            #
+            # Normal conversation failures are already contained
+            # by BetaTelegramAdapter.
+            await update.effective_message.reply_text(
+                "EasyChatBot is temporarily unavailable. "
+                "Please try again."
+            )
+
+
+__all__ = [
+    "TelegramBotRuntime",
+]
+
+====================================================================================================
+8. ENGINEERING GATE
+====================================================================================================
+
+Purpose:
+Map the actual repository interfaces before correcting Academy production composition.
+
+Rules:
+KEEP existing PostgreSQL persistence framework.
+KEEP existing Academy domain/application services.
+KEEP existing EmailProviderManager.
+KEEP existing Telegram Bot runtime.
+KEEP single scheduler.
+DO NOT create duplicate formatter modules.
+DO NOT create duplicate notification service.
+DO NOT create duplicate provider infrastructure.
+DO NOT modify database schema.
+DO NOT execute migration.
+DO NOT send email.
+DO NOT send Telegram.
+DO NOT start scheduler.
+
+NEXT GATE:
+Repair Academy production composition against the actual interfaces discovered above.
+
+====================================================================================================
+9. INSPECTION COMPLETE
+====================================================================================================
+
+NO SOURCE MODIFIED
+NO DATABASE
+NO MIGRATION
+NO EMAIL
+NO TELEGRAM
+NO SCHEDULER

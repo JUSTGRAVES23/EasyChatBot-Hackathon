@@ -8,13 +8,13 @@ from sqlalchemy import DateTime, Integer, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.app.application.announcements.repositories import PublicationRepository
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import (
+from app.application.announcements.repositories import PublicationRepository
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import (
     PublicationStatus,
     PublicationType,
 )
-from backend.app.infrastructure.persistence.database import Base
+from app.infrastructure.persistence.database import Base
 
 
 class PublicationModel(Base):
@@ -128,3 +128,4 @@ class SqlAlchemyPublicationRepository(PublicationRepository):
             "SqlAlchemyPublicationRepository requires its async boundary; "
             "use list_all_async()."
         )
+

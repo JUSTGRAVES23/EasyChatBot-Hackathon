@@ -1,4 +1,4 @@
-"""
+﻿"""
 Companion Service.
 
 Application orchestration layer for EasyChatBot.
@@ -75,27 +75,27 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from backend.agents.conversation_agent import (
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.agents.research_agent import (
+from agents.research_agent import (
     ResearchAgent,
 )
 
-from backend.agents.quality_agent import (
+from agents.quality_agent import (
     QualityAgent,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.memory.memory_service import (
+from memory.memory_service import (
     MemoryService,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
@@ -176,19 +176,19 @@ class CompanionService:
         Flow:
 
         MemoryService
-            ↓
+            â†“
         MemoryContextBuilder
-            ↓
+            â†“
         optional memory-enriched ExecutionContext
-            ↓
+            â†“
         optional ResearchAgent
-            ↓
+            â†“
         optional intelligence-enriched ExecutionContext
-            ↓
+            â†“
         ConversationAgent
-            ↓
+            â†“
         QualityAgent
-            ↓
+            â†“
         MemoryService.remember()
 
         The original ExecutionContext is never mutated.
@@ -217,13 +217,13 @@ class CompanionService:
             raise ValueError("Execution context cannot be None.")
 
         # -----------------------------------------------------
-        # Step 1 — Retrieve existing learner memory
+        # Step 1 â€” Retrieve existing learner memory
         # -----------------------------------------------------
 
         memories = self.memory_service.recall(context.user_id)
 
         # -----------------------------------------------------
-        # Step 2 — Build bounded learner memory context
+        # Step 2 â€” Build bounded learner memory context
         # -----------------------------------------------------
 
         memory_context = self.memory_context_builder.build(
@@ -233,7 +233,7 @@ class CompanionService:
         )
 
         # -----------------------------------------------------
-        # Step 3 — Attach memory only when relevant memory
+        # Step 3 â€” Attach memory only when relevant memory
         # exists.
         #
         # If there is no relevant memory, preserve the
@@ -249,7 +249,7 @@ class CompanionService:
             )
 
         # -----------------------------------------------------
-        # Step 4 — Optional Live Intelligence
+        # Step 4 â€” Optional Live Intelligence
         #
         # Research receives the current runtime context but
         # does not receive or manage memory itself.
@@ -270,7 +270,7 @@ class CompanionService:
                 )
 
         # -----------------------------------------------------
-        # Step 5 — Conversation Agent
+        # Step 5 â€” Conversation Agent
         #
         # ConversationAgent can now receive:
         #
@@ -285,13 +285,13 @@ class CompanionService:
         )
 
         # -----------------------------------------------------
-        # Step 6 — Quality Agent
+        # Step 6 â€” Quality Agent
         # -----------------------------------------------------
 
         quality_result = await self.quality_agent.execute(conversation_context)
 
         # -----------------------------------------------------
-        # Step 7 — Persist interaction
+        # Step 7 â€” Persist interaction
         #
         # Memory persistence remains owned by MemoryService.
         # -----------------------------------------------------
@@ -303,7 +303,7 @@ class CompanionService:
         )
 
         # -----------------------------------------------------
-        # Step 8 — Return combined result
+        # Step 8 â€” Return combined result
         # -----------------------------------------------------
 
         return {
@@ -318,3 +318,4 @@ class CompanionService:
             "memory_count": len(memories),
             "memory_context_count": (memory_context.memory_count),
         }
+

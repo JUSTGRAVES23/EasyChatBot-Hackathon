@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 
-from backend.app.application.privacy.privacy_governance_case import (
+from app.application.privacy.privacy_governance_case import (
     PrivacyGovernanceCase,
     PrivacyTriggerType,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
 
@@ -22,3 +22,4 @@ def test_case_registry_supports_clickable_case_lookup():
 
     assert registry.get("PCR-001").summary == "New memory processing introduced."
     assert registry.pending()[0].case_id == "PCR-001"
+

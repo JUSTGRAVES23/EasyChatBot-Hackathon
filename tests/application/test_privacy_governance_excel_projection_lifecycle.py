@@ -1,25 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
 
 from openpyxl import load_workbook
 
-from backend.app.application.privacy.privacy_approval_record import (
+from app.application.privacy.privacy_approval_record import (
     ApprovalDecision,
     PrivacyApprovalRecord,
 )
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case import (
+from app.application.privacy.privacy_governance_case import (
     PrivacyGovernanceCase,
     PrivacyTriggerType,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
-from backend.app.application.privacy.privacy_governance_excel_sync import (
+from app.application.privacy.privacy_governance_excel_sync import (
     PrivacyGovernanceExcelSync,
 )
 
@@ -145,3 +145,4 @@ def test_request_changes_projects_blocked_state(tmp_path: Path):
     assert dashboard["Approved"] == 0
     assert dashboard["Blocked"] == 1
     assert dashboard["Approval Records"] == 1
+

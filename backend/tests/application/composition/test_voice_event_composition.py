@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Event Composition.
 
 Validates:
@@ -100,3 +100,4 @@ def test_composed_service_can_retrieve_event():
     assert events[-1].event_type == (
         VoiceCallEventType.ACCEPTED
     )
+

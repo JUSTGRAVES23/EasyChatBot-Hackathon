@@ -1,32 +1,32 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_change_registry import (
+from app.application.privacy.privacy_change_registry import (
     PrivacyChangeRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case import (
+from app.application.privacy.privacy_governance_case import (
     PrivacyGovernanceCase,
     PrivacyTriggerType,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case_service import (
+from app.application.privacy.privacy_governance_case_service import (
     PrivacyGovernanceCaseService,
 )
-from backend.app.application.privacy.privacy_governance_decision_service import (
+from app.application.privacy.privacy_governance_decision_service import (
     PrivacyGovernanceDecisionService,
 )
-from backend.app.application.privacy.privacy_governance_runtime_sync import (
+from app.application.privacy.privacy_governance_runtime_sync import (
     PrivacyGovernanceRuntimeSync,
 )
 

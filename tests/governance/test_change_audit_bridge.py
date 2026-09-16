@@ -1,4 +1,4 @@
-from backend.governance.change_management.change_audit_bridge import (
+﻿from governance.change_management.change_audit_bridge import (
     ChangeAuditBridge,
 )
 
@@ -40,3 +40,4 @@ def test_change_audit_bridge():
 
     assert result["event"] == "CHANGE_APPROVED"
     assert len(audit.events) == 1
+

@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
 from openpyxl import load_workbook
 
-from backend.app.application.privacy.privacy_governance_excel_sync import (
+from app.application.privacy.privacy_governance_excel_sync import (
     PrivacyGovernanceExcelSync,
 )
 
@@ -45,3 +45,4 @@ def test_excel_projection_contains_authoritative_case_and_approval_evidence(
     assert "Privacy Governance Cases" in workbook.sheetnames
     assert "Approval Evidence" in workbook.sheetnames
     assert "Governance Dashboard" in workbook.sheetnames
+

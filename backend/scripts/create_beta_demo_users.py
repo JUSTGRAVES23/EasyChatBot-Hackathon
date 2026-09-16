@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import os
@@ -43,7 +43,7 @@ load_dotenv(
 #
 # Existing backend modules use:
 #
-#     from backend.app....
+#     from app....
 #
 # Therefore backend/ must be a Python root.
 #
@@ -56,23 +56,31 @@ if str(BACKEND_ROOT) not in sys.path:
     )
 
 
-from backend.app.application.beta_access.beta_access_service import (
+from app.application.beta_access.beta_access_service import (
     BetaAccessService,
 )
 
-from backend.app.application.beta_access.models import (
+from app.application.beta_access.models import (
     BetaUserState,
 )
 
-from backend.app.infrastructure.persistence.database import (
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+from app.infrastructure.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
 
-from backend.app.infrastructure.persistence.postgresql_beta_access_repository import (
+from app.infrastructure.persistence.postgresql_beta_access_repository import (
     PostgreSQLBetaTokenRepository,
     PostgreSQLBetaUserRepository,
     PostgreSQLTelegramBindingRepository,
+)
+
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
 )
 
 
@@ -96,13 +104,24 @@ DEMO_USERS = [
 
 def create_beta_access_service() -> BetaAccessService:
     """
-    Create BetaAccessService using PostgreSQL persistence.
+    Create BetaAccessService using PostgreSQL persistence
+    and the application WorldResolver.
     """
 
     engine = create_database_engine()
 
     session_factory = create_session_factory(
         engine,
+    )
+
+    app_root = BACKEND_ROOT / "app"
+
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds",
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
     )
 
     return BetaAccessService(
@@ -115,6 +134,7 @@ def create_beta_access_service() -> BetaAccessService:
         binding_repository=PostgreSQLTelegramBindingRepository(
             session_factory,
         ),
+        world_resolver=world_resolver,
     )
 
 
@@ -179,7 +199,7 @@ async def provision_beta_users() -> None:
 
         await service.assign_world(
             user_id=user.user_id,
-            world_id="world-fr",
+            world_id="french_world",
         )
 
         token_result = await service.create_connection_token(
@@ -201,7 +221,7 @@ async def provision_beta_users() -> None:
             f"Email: {user.email}"
         )
         print(
-            "World: world-fr"
+            "World: french_world"
         )
         print(
             "Telegram invitation:"

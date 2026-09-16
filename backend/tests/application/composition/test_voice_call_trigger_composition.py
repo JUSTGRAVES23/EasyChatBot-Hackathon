@@ -1,20 +1,20 @@
-"""
+﻿"""
 Tests for Voice Call Trigger Composition.
 
 Validates:
 
 Composition
       |
-      ↓
+      â†“
 VoiceCallTriggerService
       |
-      ↓
+      â†“
 VoiceCallManagementService
       |
-      ↓
+      â†“
 InvitationService
       |
-      ↓
+      â†“
 NotificationService
 """
 
@@ -127,3 +127,4 @@ def test_composed_trigger_flow():
     assert result["notification"].voice_call_id == (
         result["voice_call"].id
     )
+

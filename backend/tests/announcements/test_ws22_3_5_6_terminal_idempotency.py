@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -8,17 +8,17 @@ import pytest
 from dotenv import load_dotenv
 from sqlalchemy import delete, select
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionRequest,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcements.execution.durable_execution_composition import (
+from app.application.announcements.execution.durable_execution_composition import (
     create_durable_publication_execution_composition,
 )
-from backend.app.infrastructure.announcements.publication_audit_repository import (
+from app.infrastructure.announcements.publication_audit_repository import (
     PublicationAuditEventModel,
 )
-from backend.app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
+from app.infrastructure.announcements.sqlalchemy_publication_execution_repository import (
     PublicationExecutionRecordModel,
 )
 

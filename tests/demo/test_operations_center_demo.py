@@ -1,4 +1,4 @@
-from backend.demo.operations_center_demo_service import (
+﻿from demo.operations_center_demo_service import (
     OperationsCenterDemoService,
 )
 
@@ -25,3 +25,4 @@ def test_operations_center_demo_view():
     assert result["evidence"]["available"] is True
     assert result["email_preview"]["status"] == "prepared"
     assert result["yeti"] == "Evidence available"
+

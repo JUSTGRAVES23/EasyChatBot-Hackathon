@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the Resend email provider.
 
 The provider supports two controlled email contracts:
@@ -20,7 +20,7 @@ import base64
 import pytest
 import resend
 
-from backend.cybersecurity.email.resend_email_provider import (
+from cybersecurity.email.resend_email_provider import (
     ResendEmailProvider,
 )
 

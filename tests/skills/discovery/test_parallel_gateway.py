@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the Parallel Discovery Gateway.
 """
 
@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from backend.providers.provider_result import ProviderResult
-from backend.runtime.context.execution_context import ExecutionContext
-from backend.skills.discovery.parallel_gateway import (
+from providers.provider_result import ProviderResult
+from runtime.context.execution_context import ExecutionContext
+from skills.discovery.parallel_gateway import (
     ParallelDiscoveryGateway,
 )
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQuery,
 )
 

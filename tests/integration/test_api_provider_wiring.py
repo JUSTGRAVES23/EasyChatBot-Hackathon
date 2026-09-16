@@ -1,4 +1,4 @@
-"""
+﻿"""
 API provider wiring integration tests.
 
 Verifies that the API composition layer creates an
@@ -10,14 +10,14 @@ The real OpenAI API is never called.
 
 import pytest
 
-from backend.api import routes
-from backend.characters.character_profile import (
+from api import routes
+from characters.character_profile import (
     CharacterProfile,
 )
-from backend.providers.provider_result import (
+from providers.provider_result import (
     ProviderResult,
 )
-from backend.services.llm_service import (
+from services.llm_service import (
     LLMService,
 )
 

@@ -1,34 +1,34 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 
 import pytest
 
-from backend.app.application.privacy.privacy_approval_record import (
+from app.application.privacy.privacy_approval_record import (
     ApprovalDecision,
 )
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_change_registry import (
+from app.application.privacy.privacy_change_registry import (
     PrivacyChangeRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case import (
+from app.application.privacy.privacy_governance_case import (
     PrivacyGovernanceCase,
     PrivacyTriggerType,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case_service import (
+from app.application.privacy.privacy_governance_case_service import (
     PrivacyGovernanceCaseService,
 )
-from backend.app.application.privacy.privacy_governance_decision_service import (
+from app.application.privacy.privacy_governance_decision_service import (
     PrivacyGovernanceDecisionService,
 )
 
@@ -54,7 +54,7 @@ def make_case() -> PrivacyGovernanceCase:
         triggered_at=datetime.now(timezone.utc),
         trigger_source="Processing Registry",
 
-        # Authoritative case → privacy change relationship.
+        # Authoritative case â†’ privacy change relationship.
         # This is required by PrivacyGovernanceDecisionService
         # before any DPO/GRC decision can be recorded.
         change_id="PCR-CASE-001",

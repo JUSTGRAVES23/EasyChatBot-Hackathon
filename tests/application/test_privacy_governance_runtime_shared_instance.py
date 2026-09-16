@@ -1,15 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
     reset_privacy_governance_composition_for_tests,
 )
-from backend.app.application.privacy.privacy_governance_runtime import (
+from app.application.privacy.privacy_governance_runtime import (
     process_new_processing_governance,
 )
 
@@ -49,3 +49,4 @@ def test_runtime_bridge_writes_to_the_same_composition_seen_by_dashboard():
         }
     finally:
         reset_privacy_governance_composition_for_tests()
+

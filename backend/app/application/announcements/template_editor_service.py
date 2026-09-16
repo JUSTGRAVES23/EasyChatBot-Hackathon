@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from backend.app.application.announcements.publication_service import (
+from app.application.announcements.publication_service import (
     AnnouncementPublicationService,
 )
-from backend.app.application.announcements.template_editor_models import (
+from app.application.announcements.template_editor_models import (
     TemplateEditorOption,
     TemplateEditorPreview,
     build_editor_fields,
 )
-from backend.app.application.announcements.template_registry import (
+from app.application.announcements.template_registry import (
     AnnouncementTemplateRegistry,
 )
 
@@ -93,3 +93,4 @@ class AnnouncementTemplateEditorService:
             values=values,
             version=version,
         )
+

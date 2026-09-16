@@ -1,69 +1,21 @@
-﻿"""
-Voice Call Management Service.
-
-Application service responsible for
-managing persistent voice call identity.
-
-Responsibilities:
-- Create new voice calls.
-- Retrieve existing voice calls.
-- Support reconnect workflows.
-- Coordinate voice call repository.
-
-Does NOT:
-- Handle HTTP.
-- Connect LiveKit.
-- Generate tokens.
-- Execute AI runtime.
-- Send notifications.
-- Persist directly.
-"""
-
 from __future__ import annotations
 
-
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
-
-from datetime import (
-    datetime,
-    timedelta,
-    timezone,
-)
-
-
-import uuid
-
-
-from backend.app.application.uai.voice.voice_call_repository import (
+from app.application.uai.voice.voice_call_repository import (
     VoiceCallRepository,
 )
+from app.domain.uai.voice.voice_call import VoiceCall
+from app.domain.uai.voice.voice_call_state import VoiceCallState
 
 
-from app.domain.uai.voice.voice_call import (
-    VoiceCall,
-)
-
-
-from app.domain.uai.voice.voice_call_state import (
-    VoiceCallState,
-)
-
-
-
-@dataclass(
-    frozen=True,
-    slots=True,
-)
+@dataclass(frozen=True, slots=True)
 class VoiceCallManagementService:
-    """
-    Application service for persistent
-    voice call lifecycle management.
-    """
+    """Application service for voice-call lifecycle management."""
 
     repository: VoiceCallRepository
-
-
 
     def create_call(
         self,
@@ -72,183 +24,120 @@ class VoiceCallManagementService:
         character_id: str,
         world_id: str,
         language_code: str,
-        reconnect_minutes: int = 30,
     ) -> VoiceCall:
         """
-        Create a new persistent voice call.
+        Create and persist a new active voice call.
+
+        VoiceCall owns the lifecycle state and invariants.
+        The application service is responsible for creation,
+        persistence and orchestration only.
         """
 
-
-        if reconnect_minutes <= 0:
-
-            raise ValueError(
-                "reconnect_minutes must be positive."
-            )
-
-
-        now = datetime.now(
-            timezone.utc
-        )
-
+        now = datetime.now(timezone.utc)
 
         voice_call = VoiceCall(
-            id=(
-                f"vc-{uuid.uuid4()}"
-            ),
+            id=f"vc-{uuid4()}",
             learner_id=learner_id,
             character_id=character_id,
             world_id=world_id,
             language_code=language_code,
             state=VoiceCallState.CREATED,
             created_at=now,
-            expires_at=(
-                now
-                + timedelta(
-                    minutes=reconnect_minutes,
-                )
-            ),
+            expires_at=now + timedelta(minutes=30),
         )
 
-
-        return (
-            self.repository
-            .save(
-                voice_call=voice_call,
-            )
+        return self.repository.save(
+            voice_call=voice_call,
         )
-
-
 
     def get_call(
         self,
         *,
         voice_call_id: str,
     ) -> VoiceCall | None:
-        """
-        Retrieve an existing voice call.
-        """
+        """Retrieve a voice call by persistent identity."""
 
-
-        return (
-            self.repository
-            .get_by_id(
-                voice_call_id=voice_call_id,
-            )
+        return self.repository.get_by_id(
+            voice_call_id=voice_call_id,
         )
-
-
 
     def can_reconnect(
         self,
         *,
         voice_call_id: str,
-        now: datetime,
+        now: datetime | None = None,
     ) -> bool:
-        """
-        Check whether a learner can reconnect
-        to an existing voice call.
-        """
+        """Determine whether an existing call can reconnect."""
 
-
-        voice_call = (
-            self.get_call(
-                voice_call_id=voice_call_id,
-            )
+        voice_call = self.get_call(
+            voice_call_id=voice_call_id,
         )
-
 
         if voice_call is None:
-
             return False
 
-
-        return (
-            voice_call
-            .can_reconnect(
-                now=now,
-            )
+        current_time = (
+            now
+            if now is not None
+            else datetime.now(timezone.utc)
         )
 
-
+        return voice_call.can_reconnect(
+            now=current_time,
+        )
 
     def mark_disconnected(
         self,
         *,
         voice_call_id: str,
     ) -> VoiceCall:
-        """
-        Mark existing call as disconnected.
-        """
+        """Mark an existing voice call as disconnected."""
 
-
-        voice_call = (
-            self.get_call(
-                voice_call_id=voice_call_id,
-            )
+        voice_call = self.get_call(
+            voice_call_id=voice_call_id,
         )
-
 
         if voice_call is None:
-
             raise ValueError(
-                "Voice call not found."
+                f"Unknown voice call: {voice_call_id}"
             )
 
-
-        updated = (
-            voice_call
-            .mark_disconnected()
+        disconnected_call = (
+            voice_call.mark_disconnected()
         )
 
-
-        return (
-            self.repository
-            .save(
-                voice_call=updated,
-            )
+        return self.repository.save(
+            voice_call=disconnected_call,
         )
-
-
 
     def complete_call(
         self,
         *,
         voice_call_id: str,
     ) -> VoiceCall:
-        """
-        Complete existing voice call.
-        """
+        """Complete an existing voice call."""
 
-
-        voice_call = (
-            self.get_call(
-                voice_call_id=voice_call_id,
-            )
+        voice_call = self.get_call(
+            voice_call_id=voice_call_id,
         )
-
 
         if voice_call is None:
-
             raise ValueError(
-                "Voice call not found."
+                f"Unknown voice call: {voice_call_id}"
             )
 
-
-        updated = (
-            voice_call
-            .mark_completed()
+        completed_call = (
+            voice_call.mark_completed()
         )
 
-
-        return (
-            self.repository
-            .save(
-                voice_call=updated,
-            )
+        return self.repository.save(
+            voice_call=completed_call,
         )
-
 
 
 __all__ = [
     "VoiceCallManagementService",
 ]
+
+
+

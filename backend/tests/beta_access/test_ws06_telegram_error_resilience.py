@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -300,3 +300,4 @@ async def test_ws06_different_users_remain_isolated_after_failure():
             "message": "Bonjour",
         },
     ]
+

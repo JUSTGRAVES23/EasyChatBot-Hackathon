@@ -1,6 +1,6 @@
 ﻿import pytest
 
-from backend.cybersecurity.dashboard_data_source import (
+from cybersecurity.dashboard_data_source import (
     DashboardCybersecurityDataSource,
 )
 

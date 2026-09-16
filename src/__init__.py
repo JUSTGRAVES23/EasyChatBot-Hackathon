@@ -1,0 +1,1 @@
+﻿# EasyChatBot source architecture package.

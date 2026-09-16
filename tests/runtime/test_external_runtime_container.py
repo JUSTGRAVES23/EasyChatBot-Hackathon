@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests External Runtime Container.
 
 Validates:
@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import pytest
 
-from backend.runtime.external_runtime_container import (
+from runtime.external_runtime_container import (
     configure_external_runtime_service,
     get_external_runtime_service,
 )
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 

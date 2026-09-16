@@ -1,4 +1,4 @@
-"""
+﻿"""
 Provider Management Control API.
 
 Human-controlled provider delivery controls.
@@ -14,7 +14,7 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from backend.governance.operations_center.governance_runtime import (
+from governance.operations_center.governance_runtime import (
     provider_delivery_control,
 )
 

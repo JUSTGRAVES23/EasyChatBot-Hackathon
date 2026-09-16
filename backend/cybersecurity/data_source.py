@@ -1,4 +1,4 @@
-"""
+﻿"""
 Cybersecurity data-source contract.
 
 The Cybersecurity Intelligence Agent consumes normalized
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from backend.cybersecurity.intelligence_models import (
+from cybersecurity.intelligence_models import (
     CybersecuritySignal,
 )
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Parallel Discovery Gateway.
 
 Adapts the existing ParallelSearchProvider to the
@@ -29,20 +29,20 @@ Parallel API
 from __future__ import annotations
 
 
-from backend.providers.parallel.parallel_provider import (
+from providers.parallel.parallel_provider import (
     ParallelSearchProvider,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     DiscoveryCandidate,
     DiscoveryGateway,
 )
 
-from backend.skills.discovery.query_generation import (
+from skills.discovery.query_generation import (
     DiscoveryQuery,
 )
 

@@ -1,0 +1,1245 @@
+﻿
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\identity\authentication_service.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
+import hashlib
+import hmac
+import secrets
+
+
+class AuthenticationError(ValueError):
+    """Expected authentication failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResult:
+    session_id: UUID
+    user_id: UUID
+    expires_at: datetime
+
+
+class PasswordHasher:
+    """PBKDF2 password hashing using the Python standard library."""
+
+    algorithm = "pbkdf2_sha256"
+    iterations = 600_000
+    salt_bytes = 32
+
+    def hash(self, password: str) -> str:
+        if len(password) < 12:
+            raise AuthenticationError(
+                "Password must contain at least 12 characters."
+            )
+
+        salt = secrets.token_bytes(self.salt_bytes)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            self.iterations,
+        )
+        return (
+            f"{self.algorithm}${self.iterations}$"
+            f"{salt.hex()}${digest.hex()}"
+        )
+
+    def verify(self, password: str, encoded: str) -> bool:
+        try:
+            algorithm, iterations, salt_hex, digest_hex = encoded.split("$")
+            if algorithm != self.algorithm:
+                return False
+
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt_hex),
+                int(iterations),
+            )
+            return hmac.compare_digest(candidate.hex(), digest_hex)
+        except (ValueError, TypeError):
+            return False
+
+
+class AuthenticationService:
+    """Application service for registration/login/session lifecycle.
+
+    Persistence is supplied through a repository protocol so the service does
+    not depend on a particular ORM implementation.
+    """
+
+    def __init__(
+        self,
+        repository,
+        *,
+        password_hasher: PasswordHasher | None = None,
+        session_ttl: timedelta = timedelta(hours=12),
+    ) -> None:
+        self._repository = repository
+        self._password_hasher = password_hasher or PasswordHasher()
+        self._session_ttl = session_ttl
+
+    async def register(
+        self,
+        *,
+        email: str,
+        username: str,
+        password: str,
+    ):
+        normalized_email = email.strip().lower()
+        normalized_username = username.strip()
+
+        if not normalized_email or "@" not in normalized_email:
+            raise AuthenticationError("A valid email is required.")
+
+        if not normalized_username:
+            raise AuthenticationError("Username is required.")
+
+        if await self._repository.email_exists(normalized_email):
+            raise AuthenticationError("An account with this email already exists.")
+
+        if await self._repository.username_exists(normalized_username):
+            raise AuthenticationError("That username is already in use.")
+
+        user_id = uuid4()
+        password_hash = self._password_hasher.hash(password)
+
+        await self._repository.create_user(
+            user_id=user_id,
+            email=normalized_email,
+            username=normalized_username,
+        )
+        await self._repository.create_password_credential(
+            user_id=user_id,
+            password_hash=password_hash,
+        )
+        await self._repository.create_email_verification(
+            user_id=user_id,
+            email=normalized_email,
+        )
+
+        return user_id
+
+    async def authenticate(
+        self,
+        *,
+        email: str,
+        password: str,
+        device_name: str | None = None,
+        ip_address: str | None = None,
+    ) -> SessionResult:
+        user = await self._repository.get_user_by_email(
+            email.strip().lower()
+        )
+
+        if user is None:
+            raise AuthenticationError("Invalid email or password.")
+
+        if user.status != "active":
+            raise AuthenticationError("Account is not active.")
+
+        if not user.email_verified:
+            raise AuthenticationError("Email verification is required.")
+
+        credential = await self._repository.get_password_credential(
+            user.id
+        )
+
+        if credential is None or not self._password_hasher.verify(
+            password,
+            credential.password_hash,
+        ):
+            raise AuthenticationError("Invalid email or password.")
+
+        now = datetime.now(timezone.utc)
+        expires_at = now + self._session_ttl
+        session_id = uuid4()
+
+        await self._repository.create_session(
+            session_id=session_id,
+            user_id=user.id,
+            created_at=now,
+            expires_at=expires_at,
+            device_name=device_name,
+            ip_address=ip_address,
+        )
+
+        return SessionResult(
+            session_id=session_id,
+            user_id=user.id,
+            expires_at=expires_at,
+        )
+
+    async def verify_email(
+        self,
+        token: str,
+    ) -> None:
+        """Verify an email address using a repository-managed token.
+
+        Token generation, hashing, expiration, single-use enforcement,
+        and persistence remain the responsibility of the repository.
+        The application service exposes the business operation without
+        depending on the persistence implementation.
+        """
+
+        normalized_token = token.strip()
+
+        if not normalized_token:
+            raise AuthenticationError(
+                "Email verification token is required."
+            )
+
+        verified = await self._repository.verify_email(
+            normalized_token,
+        )
+
+        if not verified:
+            raise AuthenticationError(
+                "Invalid or expired email verification token."
+            )
+
+    async def revoke_session(self, session_id: UUID) -> None:
+        await self._repository.revoke_session(session_id)
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, EmailStr, Field
+
+from app.api.dependencies.identity import get_current_principal
+from app.application.identity.authentication_service import (
+    AuthenticationError,
+    AuthenticationService,
+)
+from app.domain.identity.principal import Principal
+
+
+# NOTE:
+# The authentication service/repository must be composed into app.state
+# by the application's existing bootstrap/composition root.
+
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["authentication"],
+)
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    username: str = Field(
+        min_length=2,
+        max_length=100,
+    )
+    password: str = Field(
+        min_length=12,
+        max_length=256,
+    )
+
+
+class RegisterResponse(BaseModel):
+    user_id: UUID
+    detail: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(
+        min_length=1,
+        max_length=256,
+    )
+
+
+class LoginResponse(BaseModel):
+    detail: str
+    expires_at: str
+
+
+class SessionResponse(BaseModel):
+    authenticated: bool
+
+
+@router.get(
+    "/session",
+    response_model=SessionResponse,
+    summary="Check the current authentication session",
+    description=(
+        "Return whether the current request has a valid authenticated "
+        "application session. The session identifier and other sensitive "
+        "authentication data are never returned."
+    ),
+)
+async def get_session(
+    principal: Principal = Depends(get_current_principal),
+) -> SessionResponse:
+    """
+    Return the current authentication state.
+
+    Authentication is resolved exclusively through the existing
+    get_current_principal() dependency and SessionIdentityProvider.
+
+    This endpoint intentionally exposes only authentication state.
+    It does not expose the session identifier, credentials, or other
+    sensitive authentication material.
+    """
+    return SessionResponse(
+        authenticated=principal.is_active,
+    )
+
+
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register(
+    request: RegisterRequest,
+    http_request: Request,
+) -> RegisterResponse:
+    service = AuthenticationService(
+        http_request.app.state.auth_repository
+    )
+
+    try:
+        user_id = await service.register(
+            email=str(request.email),
+            username=request.username,
+            password=request.password,
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from None
+
+    return RegisterResponse(
+        user_id=user_id,
+        detail=(
+            "Registration successful. "
+            "Email verification is required."
+        ),
+    )
+
+
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+)
+async def login(
+    request: LoginRequest,
+    http_request: Request,
+    response: Response,
+) -> LoginResponse:
+    service = AuthenticationService(
+        http_request.app.state.auth_repository
+    )
+
+    try:
+        result = await service.authenticate(
+            email=str(request.email),
+            password=request.password,
+            device_name=http_request.headers.get("user-agent"),
+            ip_address=(
+                http_request.client.host
+                if http_request.client
+                else None
+            ),
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+            headers={
+                "WWW-Authenticate": "Session",
+            },
+        ) from None
+
+    expires_in_seconds = max(
+        0,
+        int(
+            (
+                result.expires_at
+                - datetime.now(timezone.utc)
+            ).total_seconds()
+        ),
+    )
+
+    response.set_cookie(
+        key="easychatbot_session",
+        value=str(result.session_id),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=expires_in_seconds,
+        path="/",
+    )
+
+    return LoginResponse(
+        detail="Login successful.",
+        expires_at=result.expires_at.isoformat(),
+    )
+
+
+@router.post("/verify-email")
+async def verify_email(
+    token: str,
+    http_request: Request,
+) -> dict[str, str]:
+    """Verify an application email address.
+
+    Token validation and single-use enforcement remain inside the
+    authentication repository.
+    """
+    service = AuthenticationService(
+        http_request.app.state.auth_repository
+    )
+
+    try:
+        await service.verify_email(token)
+    except AuthenticationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from None
+
+    return {
+        "detail": "Email verification successful.",
+    }
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def logout(
+    http_request: Request,
+    response: Response,
+) -> None:
+    session_id = http_request.cookies.get(
+        "easychatbot_session"
+    )
+
+    if session_id:
+        service = AuthenticationService(
+            http_request.app.state.auth_repository
+        )
+        await service.revoke_session(
+            UUID(session_id)
+        )
+
+    response.delete_cookie(
+        key="easychatbot_session",
+        path="/",
+    )
+
+
+__all__ = [
+    "router",
+    "RegisterRequest",
+    "RegisterResponse",
+    "LoginRequest",
+    "LoginResponse",
+    "SessionResponse",
+]
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\identity\authentication_email_service.py =====
+
+from __future__ import annotations
+
+from html import escape
+from pathlib import Path
+from dotenv import dotenv_values
+from typing import Protocol
+
+
+def _registration_email_sender() -> str:
+    """Return the dedicated EasyChatBot registration sender."""
+    repository_root = Path(__file__).resolve().parents[4]
+    env_file = repository_root / ".env"
+
+    configuration = dotenv_values(env_file)
+
+    sender = configuration.get(
+        "EASYCHATBOT_REGISTRATION_EMAIL"
+    )
+
+    if not isinstance(sender, str) or not sender.strip():
+        raise RuntimeError(
+            "EASYCHATBOT_REGISTRATION_EMAIL is not configured."
+        )
+
+    return sender.strip()
+
+
+class AuthenticationEmailSender(Protocol):
+    """Application boundary for authentication email delivery."""
+
+    async def send(
+        self,
+        subject: str,
+        content: dict,
+    ) -> dict:
+        ...
+
+
+class AuthenticationEmailService:
+    """Build and deliver branded EasyChatBot verification emails."""
+
+    LOGO_CONTENT_ID = "easychatbot-logo"
+
+    def __init__(
+        self,
+        email_sender: AuthenticationEmailSender,
+        *,
+        frontend_base_url: str,
+        privacy_url: str | None = None,
+        logo_path: str | Path | None = None,
+    ) -> None:
+        self._registration_sender = _registration_email_sender()
+
+        self._email_sender = email_sender
+        self._frontend_base_url = frontend_base_url.rstrip("/")
+
+        # Privacy policy destination is intentionally optional until
+        # EasyChatBot has an authoritative user-facing privacy page.
+        self._privacy_url = (
+            privacy_url.strip()
+            if isinstance(privacy_url, str) and privacy_url.strip()
+            else None
+        )
+
+        if logo_path is None:
+            logo_path = (
+                Path(__file__).resolve().parents[2]
+                / "assets"
+                / "email"
+                / "easychatbot-logo.png"
+            )
+
+        self._logo_path = Path(logo_path)
+
+        if not self._logo_path.is_file():
+            raise FileNotFoundError(
+                f"EasyChatBot email logo not found: {self._logo_path}"
+            )
+
+    async def send_verification_email(
+        self,
+        *,
+        email: str,
+        username: str,
+        verification_token: str,
+    ) -> dict:
+        """Build and send the account verification email.
+
+        The raw verification token is used only to construct the verification
+        URL and is never logged or returned separately by this service.
+        """
+        recipient = email.strip()
+        display_name = username.strip()
+
+        verification_url = (
+            f"{self._frontend_base_url}"
+            f"/verify-email?token={verification_token}"
+        )
+
+        html = self._build_html(
+            username=display_name,
+            verification_url=verification_url,
+        )
+
+        text = self._build_text(
+            username=display_name,
+            verification_url=verification_url,
+        )
+
+        if not self._registration_sender:
+            raise RuntimeError(
+                "EASYCHATBOT_REGISTRATION_EMAIL is not configured."
+            )
+
+        return await self._email_sender.send(
+            "🎓 Welcome to EasyChatBot, "
+            f"@{display_name} — your journey starts here!",
+            {
+                "recipient": recipient,
+                "email_type": "authentication_verification",
+                "from": self._registration_sender,
+                "username": display_name,
+                "body": text,
+                "html": html,
+                "attachments": [
+                    {
+                        "path": str(self._logo_path),
+                        "filename": "easychatbot-logo.png",
+                        "inline": True,
+                        "content_id": self.LOGO_CONTENT_ID,
+                    }
+                ],
+            },
+        )
+
+    def _build_html(
+        self,
+        *,
+        username: str,
+        verification_url: str,
+    ) -> str:
+        safe_username = escape(username)
+        safe_verification_url = escape(
+            verification_url,
+            quote=True,
+        )
+
+        privacy_section = ""
+
+        if self._privacy_url:
+            safe_privacy_url = escape(
+                self._privacy_url,
+                quote=True,
+            )
+
+            privacy_section = f"""
+                            <strong>Your privacy matters.</strong>
+                            Learn how EasyChatBot handles and protects
+                            your personal data:
+                            <a
+                                href="{safe_privacy_url}"
+                                style="
+                                    color:#374151;
+                                    font-weight:700;
+                                "
+                            >
+                                Data Protection &amp; Privacy
+                            </a>
+                            <br><br>
+"""
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+    <title>Welcome to EasyChatBot</title>
+</head>
+<body
+    style="
+        margin:0;
+        padding:0;
+        background:#f6f7fb;
+        font-family:Arial,Helvetica,sans-serif;
+        color:#1f2937;
+    "
+>
+    <table
+        role="presentation"
+        width="100%"
+        cellspacing="0"
+        cellpadding="0"
+        border="0"
+        style="background:#f6f7fb;"
+    >
+        <tr>
+            <td align="center" style="padding:32px 16px;">
+                <table
+                    role="presentation"
+                    width="100%"
+                    cellspacing="0"
+                    cellpadding="0"
+                    border="0"
+                    style="
+                        max-width:620px;
+                        background:#ffffff;
+                        border-radius:18px;
+                        overflow:hidden;
+                    "
+                >
+                    <tr>
+                        <td
+                            align="center"
+                            style="padding:32px 28px 18px;"
+                        >
+                            <img
+                                src="cid:{self.LOGO_CONTENT_ID}"
+                                alt="EasyChatBot — Growing With You."
+                                style="
+                                    display:block;
+                                    max-width:260px;
+                                    width:100%;
+                                    height:auto;
+                                    border:0;
+                                "
+                            />
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            align="center"
+                            style="padding:16px 36px 8px;"
+                        >
+                            <div
+                                style="
+                                    font-size:28px;
+                                    font-weight:700;
+                                "
+                            >
+                                🎓 Welcome to EasyChatBot
+                            </div>
+
+                            <div
+                                style="
+                                    margin-top:10px;
+                                    font-size:17px;
+                                    color:#6b7280;
+                                "
+                            >
+                                Your journey starts here.
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            style="
+                                padding:28px 40px 10px;
+                                font-size:16px;
+                                line-height:1.7;
+                            "
+                        >
+                            Hey {safe_username} 👋
+                            <br><br>
+                            Welcome to <strong>EasyChatBot!</strong>
+                            <br><br>
+                            You've just taken your first step into
+                            your learning journey — and we're excited
+                            to have you here.
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td style="padding:12px 40px 22px;">
+                            <table
+                                role="presentation"
+                                width="100%"
+                                cellspacing="0"
+                                cellpadding="0"
+                                border="0"
+                                style="
+                                    background:#f4f7ff;
+                                    border-radius:14px;
+                                "
+                            >
+                                <tr>
+                                    <td
+                                        align="center"
+                                        style="padding:24px 20px;"
+                                    >
+                                        <div
+                                            style="
+                                                font-size:13px;
+                                                font-weight:700;
+                                                text-transform:uppercase;
+                                                letter-spacing:1px;
+                                                color:#6b7280;
+                                            "
+                                        >
+                                            Your EasyChatBot identity
+                                        </div>
+
+                                        <div
+                                            style="
+                                                margin-top:10px;
+                                                font-size:25px;
+                                                font-weight:700;
+                                            "
+                                        >
+                                            @{safe_username}
+                                        </div>
+
+                                        <div
+                                            style="
+                                                margin-top:8px;
+                                                font-size:14px;
+                                                color:#6b7280;
+                                            "
+                                        >
+                                            Your unique identity
+                                            inside EasyChatBot.
+                                        </div>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            style="
+                                padding:4px 40px 10px;
+                                font-size:16px;
+                                line-height:1.7;
+                            "
+                        >
+                            You can use your EasyChatBot alias to
+                            connect with other learners, participate
+                            in activities and identify yourself across
+                            the platform.
+                            <br><br>
+                            Think of it as your name inside the
+                            EasyChatBot community.
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            align="center"
+                            style="padding:24px 40px 10px;"
+                        >
+                            <div
+                                style="
+                                    font-size:21px;
+                                    font-weight:700;
+                                "
+                            >
+                                🔐 One last step
+                            </div>
+
+                            <div
+                                style="
+                                    margin-top:10px;
+                                    font-size:15px;
+                                    line-height:1.6;
+                                    color:#6b7280;
+                                "
+                            >
+                                Before you enter the Academy,
+                                let's make sure this email address
+                                really belongs to you.
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            align="center"
+                            style="padding:22px 40px 28px;"
+                        >
+                            <a
+                                href="{safe_verification_url}"
+                                style="
+                                    display:inline-block;
+                                    padding:15px 28px;
+                                    border-radius:10px;
+                                    background:#111827;
+                                    color:#ffffff;
+                                    text-decoration:none;
+                                    font-size:16px;
+                                    font-weight:700;
+                                "
+                            >
+                                VERIFY MY EMAIL ✨
+                            </a>
+
+                            <div
+                                style="
+                                    margin-top:16px;
+                                    font-size:13px;
+                                    line-height:1.5;
+                                    color:#6b7280;
+                                "
+                            >
+                                This link is valid for 24 hours
+                                and can only be used once.
+                            </div>
+
+                            <div
+                                style="
+                                    margin-top:18px;
+                                    padding:14px;
+                                    background:#f9fafb;
+                                    border-radius:8px;
+                                    text-align:left;
+                                    word-break:break-all;
+                                    font-size:12px;
+                                    line-height:1.5;
+                                    color:#4b5563;
+                                "
+                            >
+                                <strong>
+                                    If the button does not work:
+                                </strong>
+                                <br>
+                                Copy and paste this address into
+                                your browser:
+                                <br><br>
+                                {safe_verification_url}
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            align="center"
+                            style="
+                                padding:0 40px 30px;
+                                font-size:15px;
+                                line-height:1.6;
+                            "
+                        >
+                            Once you're verified,
+                            you're ready to start learning.
+                            <br><br>
+                            <strong>Learn. Practice. Grow.</strong>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            style="
+                                padding:24px 40px;
+                                background:#f9fafb;
+                                font-size:12px;
+                                line-height:1.6;
+                                color:#6b7280;
+                            "
+                        >
+                            If you didn't create this account,
+                            you can safely ignore this email.
+                            <br><br>
+
+                            This is an automated message from EasyChatBot.
+                            <br><br>
+
+                            {privacy_section}
+
+                            <strong>EasyChatBot</strong><br>
+                            Growing With You.
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+    def _build_text(
+        self,
+        *,
+        username: str,
+        verification_url: str,
+    ) -> str:
+        privacy_section = ""
+
+        if self._privacy_url:
+            privacy_section = f"""
+Your privacy matters.
+Learn how EasyChatBot handles and protects your personal data:
+{self._privacy_url}
+"""
+
+        return f"""🎓 Welcome to EasyChatBot
+
+Your journey starts here.
+
+Hey {username} 👋
+
+Welcome to EasyChatBot!
+
+You've just taken your first step into your learning journey —
+and we're excited to have you here.
+
+YOUR EASYCHATBOT IDENTITY
+
+@{username}
+
+Your unique identity inside EasyChatBot.
+
+You can use your EasyChatBot alias to connect with other learners,
+participate in activities and identify yourself across the platform.
+
+ONE LAST STEP
+
+Before you enter the Academy, let's make sure this email address
+really belongs to you.
+
+Verify your email:
+{verification_url}
+
+If the verification button does not work, copy and paste the
+verification address above directly into your browser.
+
+This link is valid for 24 hours and can only be used once.
+
+Once you're verified, you're ready to start learning.
+
+Learn. Practice. Grow.
+
+If you didn't create this account, you can safely ignore this email.
+
+This is an automated message from EasyChatBot.
+
+{privacy_section}
+
+EasyChatBot
+Growing With You.
+"""
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\authentication_email_sender.py =====
+
+from __future__ import annotations
+
+from typing import Any
+
+from cybersecurity.email.email_provider_manager import EmailProviderManager
+
+
+class AuthenticationEmailSenderAdapter:
+    """Authentication email adapter over the shared provider boundary.
+
+    Authentication application services depend on the authentication email
+    sender contract. Provider selection and credentials remain owned by the
+    shared EmailProviderManager.
+
+    This adapter does not:
+    - access provider credentials;
+    - call Resend directly;
+    - select providers;
+    - make authentication or verification decisions.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_manager: EmailProviderManager | None = None,
+    ) -> None:
+        self._provider_manager = (
+            provider_manager
+            if provider_manager is not None
+            else EmailProviderManager()
+        )
+
+    async def send(
+        self,
+        subject: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send an authentication email through the shared provider boundary."""
+        if not isinstance(subject, str) or not subject.strip():
+            raise ValueError("Email subject cannot be empty.")
+
+        if not isinstance(content, dict):
+            raise TypeError("Email content must be a dictionary.")
+
+        recipient = content.get("recipient")
+        if not isinstance(recipient, str) or not recipient.strip():
+            raise ValueError("Email recipient is required.")
+
+        result = await self._provider_manager.send(
+            subject.strip(),
+            content,
+        )
+
+        if not isinstance(result, dict):
+            raise TypeError("Email provider returned an invalid result.")
+
+        return result
+
+
+__all__ = ["AuthenticationEmailSenderAdapter"]
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_email_service.py =====
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from app.application.identity.authentication_email_service import (
+    AuthenticationEmailService,
+)
+
+
+class StubAuthenticationEmailSender:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def send(
+        self,
+        subject: str,
+        content: dict,
+    ) -> dict:
+        self.calls.append((subject, content))
+        return {
+            "provider": "stub",
+            "status": "accepted",
+        }
+
+
+def build_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    privacy_url: str | None = None,
+) -> tuple[AuthenticationEmailService, StubAuthenticationEmailSender]:
+    monkeypatch.setattr(
+        "app.application.identity.authentication_email_service."
+        "_registration_email_sender",
+        lambda: "EasyChatBot <noreply@example.com>",
+    )
+
+    logo_path = tmp_path / "easychatbot-logo.png"
+    logo_path.write_bytes(b"fake-logo")
+
+    sender = StubAuthenticationEmailSender()
+
+    service = AuthenticationEmailService(
+        sender,
+        frontend_base_url="https://academy.example.com/",
+        privacy_url=privacy_url,
+        logo_path=logo_path,
+    )
+
+    return service, sender
+
+
+@pytest.mark.asyncio
+async def test_send_verification_email_includes_privacy_url_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service, sender = build_service(
+        monkeypatch,
+        tmp_path,
+        privacy_url="https://academy.example.com/privacy",
+    )
+
+    result = await service.send_verification_email(
+        email="user@example.com",
+        username="David",
+        verification_token="test-token",
+    )
+
+    assert result == {
+        "provider": "stub",
+        "status": "accepted",
+    }
+
+    assert len(sender.calls) == 1
+
+    _, content = sender.calls[0]
+
+    assert content["recipient"] == "user@example.com"
+    assert "https://academy.example.com/privacy" in content["html"]
+    assert "https://academy.example.com/privacy" in content["body"]
+    assert "Data Protection" in content["html"]
+
+
+@pytest.mark.asyncio
+async def test_send_verification_email_omits_privacy_section_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service, sender = build_service(
+        monkeypatch,
+        tmp_path,
+        privacy_url=None,
+    )
+
+    result = await service.send_verification_email(
+        email="user@example.com",
+        username="David",
+        verification_token="test-token",
+    )
+
+    assert result["status"] == "accepted"
+
+    _, content = sender.calls[0]
+
+    assert (
+        "https://academy.example.com/verify-email?token=test-token"
+        in content["html"]
+    )
+    assert (
+        "https://academy.example.com/verify-email?token=test-token"
+        in content["body"]
+    )
+
+    assert "Data Protection &amp; Privacy" not in content["html"]
+    assert "Data Protection & Privacy" not in content["body"]
+
+
+@pytest.mark.asyncio
+async def test_blank_privacy_url_is_treated_as_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service, sender = build_service(
+        monkeypatch,
+        tmp_path,
+        privacy_url="   ",
+    )
+
+    await service.send_verification_email(
+        email="user@example.com",
+        username="David",
+        verification_token="test-token",
+    )
+
+    _, content = sender.calls[0]
+
+    assert "Data Protection &amp; Privacy" not in content["html"]
+    assert "Data Protection & Privacy" not in content["body"]
+
+
+@pytest.mark.asyncio
+async def test_privacy_url_is_optional_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "app.application.identity.authentication_email_service."
+        "_registration_email_sender",
+        lambda: "EasyChatBot <noreply@example.com>",
+    )
+
+    logo_path = tmp_path / "easychatbot-logo.png"
+    logo_path.write_bytes(b"fake-logo")
+
+    sender = StubAuthenticationEmailSender()
+
+    service = AuthenticationEmailService(
+        sender,
+        frontend_base_url="https://academy.example.com",
+        logo_path=logo_path,
+    )
+
+    await service.send_verification_email(
+        email="user@example.com",
+        username="David",
+        verification_token="test-token",
+    )
+
+    assert len(sender.calls) == 1
+
+    _, content = sender.calls[0]
+
+    assert "Data Protection &amp; Privacy" not in content["html"]
+    assert "Data Protection & Privacy" not in content["body"]

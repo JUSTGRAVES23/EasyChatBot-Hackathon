@@ -1,4 +1,4 @@
-"""
+﻿"""
 Unit tests for CompanionService.
 
 These tests verify the application orchestration boundary:
@@ -30,19 +30,19 @@ from dataclasses import dataclass
 
 import pytest
 
-from backend.agents.agent_result import (
+from agents.agent_result import (
     AgentResult,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 
-from backend.services.companion_service import (
+from services.companion_service import (
     CompanionService,
 )
 

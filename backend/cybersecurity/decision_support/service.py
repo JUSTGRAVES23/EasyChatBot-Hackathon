@@ -14,7 +14,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.cybersecurity.decision_support.agent.agent import (
+from cybersecurity.decision_support.agent.agent import (
     CybersecurityDecisionSupportAgent,
 )
 
@@ -37,3 +37,4 @@ class CybersecurityDecisionSupportService:
         return await self.agent.analyse(
             intelligence
         )
+

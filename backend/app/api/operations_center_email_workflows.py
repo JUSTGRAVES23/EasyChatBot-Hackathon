@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from backend.app.application.operations_center.email_workflow_status_service import (
+from app.application.operations_center.email_workflow_status_service import (
     EmailWorkflowStatusService,
 )
-from backend.cybersecurity.email.email_provider_manager import EmailProviderManager
+from cybersecurity.email.email_provider_manager import EmailProviderManager
 
 
 def create_email_workflows_router() -> APIRouter:
@@ -26,3 +26,5 @@ def create_email_workflows_router() -> APIRouter:
 
 
 __all__ = ["create_email_workflows_router"]
+
+

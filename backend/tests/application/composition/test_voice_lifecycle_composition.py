@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Lifecycle Composition.
 
 Validates that the composition root
@@ -123,3 +123,4 @@ def test_lifecycle_event_service_is_shared_dependency():
         service.voice_call_event_service
         is not None
     )
+

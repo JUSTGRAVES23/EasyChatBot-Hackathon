@@ -8,11 +8,11 @@ human decision-support information.
 from __future__ import annotations
 
 
-from backend.cybersecurity.decision_support.priority_engine import (
+from cybersecurity.decision_support.priority_engine import (
     CybersecurityPriorityEngine,
 )
 
-from backend.cybersecurity.decision_support.agent.models import (
+from cybersecurity.decision_support.agent.models import (
     CybersecurityDecisionBrief,
     DecisionBriefItem,
 )
@@ -169,3 +169,4 @@ class CybersecurityDecisionSupportAgent:
             ],
 
         )
+

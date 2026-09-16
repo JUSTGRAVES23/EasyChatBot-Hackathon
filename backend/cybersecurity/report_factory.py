@@ -10,17 +10,17 @@ Keeps wiring separate from business logic.
 from __future__ import annotations
 
 
-from backend.cybersecurity.dashboard_data_source import (
+from cybersecurity.dashboard_data_source import (
     DashboardCybersecurityDataSource,
 )
 
 
-from backend.cybersecurity.intelligence_service import (
+from cybersecurity.intelligence_service import (
     CybersecurityIntelligenceService,
 )
 
 
-from backend.cybersecurity.intelligence_report_service import (
+from cybersecurity.intelligence_report_service import (
     CybersecurityIntelligenceReportService,
 )
 
@@ -53,3 +53,4 @@ def create_cybersecurity_report_service(
         intelligence_service,
         report_service,
     )
+

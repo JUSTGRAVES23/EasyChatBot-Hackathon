@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from backend.cybersecurity.control.cybersecurity_delivery_control import CybersecurityDeliveryControl
+from cybersecurity.control.cybersecurity_delivery_control import CybersecurityDeliveryControl
 
 router = APIRouter(prefix="/controls/cybersecurity", tags=["Cybersecurity Controls"])
 _control = CybersecurityDeliveryControl()
@@ -25,4 +25,5 @@ async def pause(request: PauseRequest) -> dict:
 async def resume() -> dict:
     _control.resume()
     return _control.status()
+
 

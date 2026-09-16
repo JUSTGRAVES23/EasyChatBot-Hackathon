@@ -256,3 +256,5 @@ async def test_invalid_input_does_not_consume_policies():
     assert await abuse.allow(
         telegram_user_id=1,
     )
+
+

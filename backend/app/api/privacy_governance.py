@@ -4,17 +4,17 @@ from fastapi import APIRouter, HTTPException
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
 )
-from backend.app.application.privacy.privacy_governance_api_sync import (
+from app.application.privacy.privacy_governance_api_sync import (
     PrivacyGovernanceAPIEvidenceSync,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
 )
-from backend.app.application.privacy.privacy_governance_dashboard_api import (
+from app.application.privacy.privacy_governance_dashboard_api import (
     PrivacyGovernanceDashboardAPI,
 )
 
@@ -41,7 +41,7 @@ from backend.app.application.privacy.privacy_governance_dashboard_api import (
 #
 # Existing tests and application integrations intentionally import:
 #
-#     from backend.app.api.privacy_governance import router
+#     from app.api.privacy_governance import router
 #
 # Therefore all privacy governance endpoints remain attached to this
 # canonical router.

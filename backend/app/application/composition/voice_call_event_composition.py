@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Event Composition.
 
 Composition root for voice lifecycle events.
@@ -17,16 +17,13 @@ Does NOT:
 
 from __future__ import annotations
 
-
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
 
-
-from backend.app.application.composition.voice_call_event_dependencies import (
+from app.application.composition.voice_call_event_dependencies import (
     voice_call_event_repository,
 )
-
 
 
 def create_voice_call_event_service(
@@ -35,13 +32,11 @@ def create_voice_call_event_service(
     Create configured voice call event service.
     """
 
-
     return VoiceCallEventService(
         repository=(
             voice_call_event_repository
         ),
     )
-
 
 
 def build_voice_call_event_service(
@@ -53,11 +48,9 @@ def build_voice_call_event_service(
     and other composition roots.
     """
 
-
     return (
         create_voice_call_event_service()
     )
-
 
 
 __all__ = [

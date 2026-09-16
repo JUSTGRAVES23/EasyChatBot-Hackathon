@@ -1,0 +1,1279 @@
+﻿===== app/main.py =====
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+from backend.app.application.operations_center.dashboard_composition import (
+    create_operations_center_composition,
+)
+from backend.app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from backend.app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from backend.app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+from backend.app.api.authentication import (
+    router as authentication_router,
+)
+from backend.app.api.operations_center import (
+    create_operations_center_router,
+)
+from backend.app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from backend.app.infrastructure.persistence.postgresql_functionality_control_repository import (
+    PostgreSQLFunctionalityControlRepository,
+)
+from backend.app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+
+# Existing imports below remain unchanged.
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+from backend.app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+from backend.app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+from backend.app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+from backend.app.application.privacy.screening.service import (
+    ScreeningService,
+)
+from backend.app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+from app.api.voice_calls import router as voice_calls_router
+from app.api.voice_reconnect_router import router as voice_reconnect_router
+from app.api.voice_call_trigger import router as voice_call_trigger_router
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+# This package intentionally provides the complete file so the change is
+# copy-safe. Only the production usage composition/router wiring differs
+# from the existing file.
+
+
+def _create_announcement_components():
+    telegram_client = TelegramAnnouncementClient()
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+    return telegram_client, announcement_publisher
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+    except Exception as exc:
+        print("Cybersecurity scheduler startup failed:", exc)
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+    except Exception as exc:
+        print("Cybersecurity scheduler shutdown failed:", exc)
+    finally:
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+        if telegram_client is not None:
+            try:
+                await telegram_client.close()
+            except Exception as exc:
+                print(
+                    "Telegram announcement client shutdown failed:",
+                    exc,
+                )
+
+        auth_engine = getattr(application.state, "auth_engine", None)
+        if auth_engine is not None:
+            try:
+                await auth_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL authentication engine shutdown failed:",
+                    exc,
+                )
+
+        provider_usage_engine = getattr(
+            application.state,
+            "provider_usage_engine",
+            None,
+        )
+        if provider_usage_engine is not None:
+            try:
+                provider_usage_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL provider-usage engine shutdown failed:",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    academy_config = AcademyActivationConfig.from_environment()
+
+    auth_engine = create_async_database_engine()
+    auth_session_factory = create_async_session_factory(auth_engine)
+    auth_repository = PostgreSQLAuthenticationRepository(
+        auth_session_factory,
+    )
+
+    # Provider-usage repository is synchronous by contract. It therefore
+    # receives a synchronous engine/session factory. It must not receive
+    # the async authentication session factory.
+    provider_usage_engine = create_database_engine()
+    provider_usage_session_factory = create_session_factory(
+        provider_usage_engine,
+    )
+    provider_usage_repository = PostgreSQLProviderUsageRepository(
+        provider_usage_session_factory,
+    )
+    provider_usage_dashboard_service = ProviderUsageDashboardService(
+        repository=provider_usage_repository,
+    )
+
+    functionality_control_repository = PostgreSQLFunctionalityControlRepository(
+        provider_usage_session_factory,
+    )
+    functionality_control_authorizer = AuthorizationFunctionalityControlAuthorizer()
+    functionality_control_service = FunctionalityOperationalControlService(
+        authorizer=functionality_control_authorizer,
+        repository=functionality_control_repository,
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = auth_session_factory
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = create_academy_one_week_workflow(
+            session_factory=academy_session_factory,
+            telegram_bot=announcement_telegram_client,
+        )
+
+    scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = scheduler_runtime
+    application.state.auth_repository = auth_repository
+    application.state.auth_engine = auth_engine
+    application.state.provider_usage_engine = provider_usage_engine
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.include_router(authentication_router)
+    application.include_router(voice_calls_router)
+    application.include_router(voice_reconnect_router)
+    application.include_router(voice_call_trigger_router)
+    application.include_router(voice_notification_acceptance_router)
+
+    operations_center_composition = create_operations_center_composition(
+        provider_usage_dashboard_service=provider_usage_dashboard_service,
+        functionality_control_service=functionality_control_service,
+    )
+    application.include_router(
+        create_operations_center_router(
+            composition=operations_center_composition,
+        ),
+    )
+
+    application.include_router(create_email_workflows_router())
+    application.include_router(privacy_governance_router)
+
+    processing_registry = create_beta1_processing_registry()
+    screening_service = ScreeningService()
+    screening_adapter = ProcessingActivityScreeningAdapter(screening_service)
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    application.include_router(provider_management_controls_router)
+    application.include_router(governance_audit_router)
+    application.include_router(governance_operations_router)
+    application.include_router(governance_evidence_router)
+    application.include_router(governance_change_lifecycle_router)
+    application.include_router(cybersecurity_intelligence_router)
+    application.include_router(cybersecurity_decision_support_router)
+    application.include_router(cybersecurity_reports_router)
+    application.include_router(cybersecurity_live_reports_router)
+
+    return application
+
+
+app = create_application()
+
+__all__ = ["app", "create_application"]
+===== API operations_center.py =====
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+from backend.app.api.dependencies.authorization import require_permission
+from backend.app.application.operations_center.dashboard_composition import (
+    OperationsCenterComposition,
+    create_operations_center_composition,
+)
+from backend.app.application.provider_management.environment import (
+    OperationsEnvironment,
+)
+from backend.app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from backend.app.domain.authorization.permissions import Permission
+from backend.app.domain.identity.principal import Principal
+
+
+class FunctionalityStopRequest(BaseModel):
+    environment: OperationsEnvironment
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class FunctionalityResumeRequest(BaseModel):
+    environment: OperationsEnvironment
+
+
+def _control_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Functionality operational control is not configured.",
+    )
+
+
+def _result_as_dict(result: Any) -> dict[str, Any]:
+    return {
+        "functionality_id": result.functionality_id,
+        "environment": result.environment,
+        "availability": result.availability,
+        "action": result.action,
+        "reason": result.reason,
+        "changed_at": result.changed_at.isoformat(),
+        "changed_by": result.changed_by,
+    }
+
+
+def create_operations_center_router(
+    *,
+    composition: OperationsCenterComposition | None = None,
+) -> APIRouter:
+    resolved_composition = composition or create_operations_center_composition()
+
+    dashboard_api = resolved_composition.dashboard_api
+    chat_operations_api = resolved_composition.chat_operations_api
+    functionality_health_service = resolved_composition.functionality_health_service
+    functionality_control_service = (
+        resolved_composition.functionality_control_service
+    )
+    event_service = resolved_composition.event_service
+    provider_usage_dashboard_service = (
+        resolved_composition.provider_usage_dashboard_service
+    )
+
+    router = APIRouter(
+        prefix="/api/operations-center",
+        tags=["operations-center"],
+    )
+
+    @router.get("/dashboard")
+    async def get_dashboard() -> dict[str, Any]:
+        return await dashboard_api.get_dashboard()
+
+    @router.get("/chat-operations")
+    async def get_chat_operations_dashboard() -> dict[str, Any]:
+        return await chat_operations_api.get_dashboard()
+
+    @router.get("/chat-operations/private-classroom")
+    async def get_private_classroom_operations() -> dict[str, Any]:
+        return await chat_operations_api.get_private_classroom_details()
+
+    @router.get("/chat-operations/announcement-group")
+    async def get_announcement_group_operations() -> dict[str, Any]:
+        return await chat_operations_api.get_announcement_group_details()
+
+    @router.get("/functionality-health")
+    async def get_functionality_health(
+        environment: OperationsEnvironment | None = None,
+    ) -> dict[str, Any]:
+        return await functionality_health_service.get_health(
+            environment=environment
+        )
+
+    @router.post(
+        "/functionality/{functionality_id}/stop",
+        dependencies=[Depends(require_permission(Permission.FUNCTIONALITY_CONTROL))],
+    )
+    def stop_functionality(
+        functionality_id: str,
+        request: FunctionalityStopRequest,
+        principal: Principal = Depends(
+            require_permission(Permission.FUNCTIONALITY_CONTROL)
+        ),
+    ) -> dict[str, Any]:
+        if functionality_control_service is None:
+            raise _control_unavailable()
+
+        try:
+            result = functionality_control_service.stop(
+                actor=principal,
+                actor_name=principal.user_id,
+                environment=request.environment.value,
+                functionality_id=functionality_id,
+                reason=request.reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permission.",
+            ) from None
+
+        return _result_as_dict(result)
+
+    @router.post(
+        "/functionality/{functionality_id}/resume",
+        dependencies=[Depends(require_permission(Permission.FUNCTIONALITY_CONTROL))],
+    )
+    def resume_functionality(
+        functionality_id: str,
+        request: FunctionalityResumeRequest,
+        principal: Principal = Depends(
+            require_permission(Permission.FUNCTIONALITY_CONTROL)
+        ),
+    ) -> dict[str, Any]:
+        if functionality_control_service is None:
+            raise _control_unavailable()
+
+        try:
+            result = functionality_control_service.resume(
+                actor=principal,
+                actor_name=principal.user_id,
+                environment=request.environment.value,
+                functionality_id=functionality_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permission.",
+            ) from None
+
+        return _result_as_dict(result)
+
+    @router.get("/operational-events")
+    def get_operational_events() -> list[dict[str, Any]]:
+        incidents = event_service.list_incidents()
+        return [
+            event.as_dict()
+            for incident in incidents
+            for event in incident.events
+        ]
+
+    @router.get("/provider-usage")
+    def get_provider_usage() -> dict[str, Any]:
+        if provider_usage_dashboard_service is None:
+            return {
+                "status": "not_configured",
+                "reason": "provider_usage_dashboard_service_not_configured",
+            }
+        return provider_usage_dashboard_service.get_snapshot()
+
+    return router
+
+
+router = create_operations_center_router()
+
+__all__ = ["router", "create_operations_center_router"]
+===== API privacy_governance.py =====
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field
+
+from backend.app.application.privacy.privacy_change import (
+    PrivacyChange,
+    PrivacyChangeRisk,
+)
+from backend.app.application.privacy.privacy_governance_api_sync import (
+    PrivacyGovernanceAPIEvidenceSync,
+)
+from backend.app.application.privacy.privacy_governance_composition import (
+    get_privacy_governance_composition,
+)
+from backend.app.application.privacy.privacy_governance_dashboard_api import (
+    PrivacyGovernanceDashboardAPI,
+)
+
+
+# ============================================================================
+# PRIVACY GOVERNANCE API
+# ============================================================================
+#
+# This is the single canonical privacy governance router.
+#
+# READ:
+#   GET  /api/privacy/governance/summary
+#   GET  /api/privacy/governance/status-chart
+#   GET  /api/privacy/governance/cases
+#   GET  /api/privacy/governance/cases/{case_id}
+#
+# HUMAN GOVERNANCE:
+#   POST /api/privacy/governance/cases/{case_id}/approve
+#   POST /api/privacy/governance/cases/{case_id}/reject
+#   POST /api/privacy/governance/cases/{case_id}/request-changes
+#
+# BETA / DEVELOPMENT:
+#   POST /api/privacy/governance/demo/create-case
+#
+# Existing tests and application integrations intentionally import:
+#
+#     from backend.app.api.privacy_governance import router
+#
+# Therefore all privacy governance endpoints remain attached to this
+# canonical router.
+# ============================================================================
+
+router = APIRouter(
+    prefix="/api/privacy/governance",
+    tags=["privacy-governance"],
+)
+
+
+class PrivacyGovernanceDecisionRequest(BaseModel):
+    """Explicit human governance decision request."""
+
+    change_id: str = Field(
+        min_length=1,
+    )
+
+    approval_id: str = Field(
+        min_length=1,
+    )
+
+    reviewer: str = Field(
+        min_length=1,
+    )
+
+    role: str = Field(
+        min_length=1,
+    )
+
+    comment: str = Field(
+        min_length=1,
+    )
+
+
+class PrivacyGovernanceDemoCaseRequest(BaseModel):
+    """Controlled Beta/demo governance case creation request.
+
+    This endpoint exists only for development and demonstration.
+
+    Production case creation must use the governed application workflow
+    rather than this demo adapter.
+    """
+
+    case_id: str = Field(
+        default="CASE-E2E-001",
+        min_length=1,
+    )
+
+    change_id: str = Field(
+        default="PCR-E2E-001",
+        min_length=1,
+    )
+
+
+def _composition():
+    """Resolve the process-wide governance composition."""
+
+    return get_privacy_governance_composition()
+
+
+def _dashboard_api() -> PrivacyGovernanceDashboardAPI:
+    """Resolve the read-only governance dashboard API."""
+
+    composition = _composition()
+
+    return PrivacyGovernanceDashboardAPI(
+        dashboard_service=composition.dashboard_service,
+    )
+
+
+def _evidence_sync() -> PrivacyGovernanceAPIEvidenceSync:
+    """Resolve the API-to-Excel evidence synchronization adapter."""
+
+    composition = _composition()
+
+    return PrivacyGovernanceAPIEvidenceSync(
+        case_service=composition.case_service,
+    )
+
+
+def _require_decision_role(
+    role: str,
+) -> str:
+    """Validate the explicitly submitted governance role."""
+
+    normalized = role.strip().upper()
+
+    if normalized not in {
+        "DPO",
+        "GRC",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="role must be DPO or GRC.",
+        )
+
+    return normalized
+
+
+def _decision_response(
+    *,
+    case_id: str,
+    record: object,
+) -> dict[str, object]:
+    """Return decision evidence, refreshed case state, and Excel sync status."""
+
+    dashboard = _dashboard_api()
+
+    try:
+        case = dashboard.get_case_detail(
+            case_id,
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    evidence = _evidence_sync().sync_decision(
+        case_id,
+    )
+
+    return {
+        "case": case,
+        "approval_record": jsonable_encoder(
+            record,
+        ),
+        "excel_sync": {
+            "status": evidence.status,
+            "workbook_path": evidence.workbook_path,
+            "error": evidence.error,
+        },
+    }
+
+
+# ============================================================================
+# READ-ONLY GOVERNANCE ENDPOINTS
+# ============================================================================
+
+
+@router.get("/summary")
+def get_summary() -> dict[str, int]:
+    """Return current privacy governance dashboard KPIs."""
+
+    return _dashboard_api().get_summary()
+
+
+@router.get("/status-chart")
+def get_status_chart() -> list[dict[str, object]]:
+    """Return current governance status chart data."""
+
+    return list(
+        _dashboard_api().get_status_chart(),
+    )
+
+
+@router.get("/cases")
+def get_cases() -> list[dict[str, object]]:
+    """Return current governance case rows."""
+
+    return list(
+        _dashboard_api().get_cases(),
+    )
+
+
+@router.get("/cases/{case_id}")
+def get_case_detail(
+    case_id: str,
+) -> dict[str, object]:
+    """Return complete read-only governance case detail."""
+
+    try:
+        return _dashboard_api().get_case_detail(
+            case_id,
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================================
+# EXPLICIT HUMAN GOVERNANCE DECISION ENDPOINTS
+# ============================================================================
+#
+# IMPORTANT:
+#
+# These endpoints intentionally use `router`.
+#
+# Do NOT create a second `decision_router` here.
+#
+# The existing tests directly import and register `router`.
+# ============================================================================
+
+
+@router.post(
+    "/cases/{case_id}/approve",
+)
+def approve_case(
+    case_id: str,
+    request: PrivacyGovernanceDecisionRequest,
+) -> dict[str, object]:
+    """Record one explicit human approval."""
+
+    role = _require_decision_role(
+        request.role,
+    )
+
+    composition = _composition()
+
+    try:
+        record = composition.case_service.approve(
+            case_id=case_id,
+            change_id=request.change_id,
+            approval_id=request.approval_id,
+            reviewer=request.reviewer.strip(),
+            role=role,
+            comment=request.comment.strip(),
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return _decision_response(
+        case_id=case_id,
+        record=record,
+    )
+
+
+@router.post(
+    "/cases/{case_id}/reject",
+)
+def reject_case(
+    case_id: str,
+    request: PrivacyGovernanceDecisionRequest,
+) -> dict[str, object]:
+    """Record an explicit human rejection."""
+
+    role = _require_decision_role(
+        request.role,
+    )
+
+    composition = _composition()
+
+    try:
+        record = composition.case_service.reject(
+            case_id=case_id,
+            change_id=request.change_id,
+            approval_id=request.approval_id,
+            reviewer=request.reviewer.strip(),
+            role=role,
+            comment=request.comment.strip(),
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return _decision_response(
+        case_id=case_id,
+        record=record,
+    )
+
+
+@router.post(
+    "/cases/{case_id}/request-changes",
+)
+def request_case_changes(
+    case_id: str,
+    request: PrivacyGovernanceDecisionRequest,
+) -> dict[str, object]:
+    """Record an explicit human request-for-changes decision."""
+
+    role = _require_decision_role(
+        request.role,
+    )
+
+    composition = _composition()
+
+    try:
+        record = composition.case_service.request_changes(
+            case_id=case_id,
+            change_id=request.change_id,
+            approval_id=request.approval_id,
+            reviewer=request.reviewer.strip(),
+            role=role,
+            comment=request.comment.strip(),
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return _decision_response(
+        case_id=case_id,
+        record=record,
+    )
+
+
+# ============================================================================
+# CONTROLLED BETA / DEVELOPMENT ENDPOINT
+# ============================================================================
+
+
+@router.post(
+    "/demo/create-case",
+)
+def create_demo_case(
+    request: PrivacyGovernanceDemoCaseRequest | None = None,
+) -> dict[str, object]:
+    """Create a controlled Beta demonstration governance case.
+
+    Development/demo only.
+
+    Production case creation must use the governed application workflow.
+    """
+
+    composition = _composition()
+
+    demo_request = (
+        request
+        if request is not None
+        else PrivacyGovernanceDemoCaseRequest()
+    )
+
+    case_id = demo_request.case_id.strip()
+    change_id = demo_request.change_id.strip()
+
+    if not case_id:
+        raise HTTPException(
+            status_code=400,
+            detail="case_id cannot be blank.",
+        )
+
+    if not change_id:
+        raise HTTPException(
+            status_code=400,
+            detail="change_id cannot be blank.",
+        )
+
+    change = PrivacyChange(
+        change_id=change_id,
+        title="New learner data processing",
+        description=(
+            "Beta demonstration of a new privacy-impacting "
+            "learner processing activity."
+        ),
+        risk=PrivacyChangeRisk.MEDIUM,
+        dpo_required=True,
+        grc_required=True,
+    )
+
+    try:
+        result = composition.flow_service.process_new_processing(
+            change,
+            automated_validation_passed=True,
+            case_id=case_id,
+            trigger_source="Processing Registry",
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    evidence = _evidence_sync().sync_case(
+        result.case.case_id,
+    )
+
+    return {
+        "case_id": result.case.case_id,
+        "change_id": result.change.change_id,
+        "validation_status": result.case.validation_status,
+        "governance_status": result.case.governance_status,
+        "excel_sync": {
+            "status": evidence.status,
+            "workbook_path": evidence.workbook_path,
+            "error": evidence.error,
+        },
+    }
+
+
+__all__ = [
+    "PrivacyGovernanceDecisionRequest",
+    "PrivacyGovernanceDemoCaseRequest",
+    "router",
+]
+===== PRIVACY GOVERNANCE RUNTIME =====
+from __future__ import annotations
+
+from .privacy_change import PrivacyChange
+from .privacy_governance_composition import (
+    get_privacy_governance_composition,
+)
+from .privacy_governance_flow_service import PrivacyGovernanceFlowResult
+
+
+def process_new_processing_governance(
+    change: PrivacyChange,
+    *,
+    automated_validation_passed: bool,
+    case_id: str | None = None,
+    trigger_source: str = "Processing Registry",
+    processing_ids: tuple[str, ...] = (),
+    data_map_ids: tuple[str, ...] = (),
+) -> PrivacyGovernanceFlowResult:
+    """Runtime bridge for existing privacy processing integrations.
+
+    Existing privacy processing should call this function after it has a
+    deterministic validation result. The function uses the same composition
+    instance observed by the Operations Center API.
+
+    No HTTP request is required and no approval decision is made here.
+    """
+
+    composition = get_privacy_governance_composition()
+
+    return composition.flow_service.process_new_processing(
+        change,
+        automated_validation_passed=automated_validation_passed,
+        case_id=case_id,
+        trigger_source=trigger_source,
+        processing_ids=processing_ids,
+        data_map_ids=data_map_ids,
+    )
+===== OPERATIONS COMPOSITION REFERENCES IN MAIN =====
+
+  app\main.py:10:)
+  app\main.py:11:from backend.app.application.composition.academy_production import (
+  app\main.py:12:    create_academy_one_week_workflow,
+  app\main.py:13:)
+  app\main.py:14:from backend.app.application.operations_center.dashboard_composition import (
+> app\main.py:15:    create_operations_center_composition,
+  app\main.py:16:)
+  app\main.py:17:from backend.app.application.provider_management.functionality_control_authorizer 
+import (
+  app\main.py:18:    AuthorizationFunctionalityControlAuthorizer,
+  app\main.py:19:)
+  app\main.py:20:from 
+backend.app.application.provider_management.functionality_operational_control_service import (
+  app\main.py:21:    FunctionalityOperationalControlService,
+  app\main.py:22:)
+> app\main.py:23:from backend.app.application.provider_management.provider_usage_dashboard_service 
+import (
+  app\main.py:24:    ProviderUsageDashboardService,
+  app\main.py:25:)
+  app\main.py:26:from backend.app.api.authentication import (
+  app\main.py:27:    router as authentication_router,
+  app\main.py:28:)
+  app\main.py:29:from backend.app.api.operations_center import (
+  app\main.py:30:    create_operations_center_router,
+  app\main.py:31:)
+  app\main.py:192:        provider_usage_engine,
+  app\main.py:193:    )
+  app\main.py:194:    provider_usage_repository = PostgreSQLProviderUsageRepository(
+  app\main.py:195:        provider_usage_session_factory,
+  app\main.py:196:    )
+> app\main.py:197:    provider_usage_dashboard_service = ProviderUsageDashboardService(
+  app\main.py:198:        repository=provider_usage_repository,
+  app\main.py:199:    )
+  app\main.py:200:
+  app\main.py:201:    functionality_control_repository = PostgreSQLFunctionalityControlRepository(
+  app\main.py:202:        provider_usage_session_factory,
+  app\main.py:203:    )
+  app\main.py:204:    functionality_control_authorizer = 
+AuthorizationFunctionalityControlAuthorizer()
+  app\main.py:205:    functionality_control_service = FunctionalityOperationalControlService(
+  app\main.py:235:
+  app\main.py:236:    application.state.scheduler_runtime = scheduler_runtime
+  app\main.py:237:    application.state.auth_repository = auth_repository
+  app\main.py:238:    application.state.auth_engine = auth_engine
+  app\main.py:239:    application.state.provider_usage_engine = provider_usage_engine
+> app\main.py:240:    application.state.provider_usage_dashboard_service = (
+> app\main.py:241:        provider_usage_dashboard_service
+  app\main.py:242:    )
+  app\main.py:243:    application.state.functionality_control_service = (
+  app\main.py:244:        functionality_control_service
+  app\main.py:245:    )
+  app\main.py:246:    application.state.announcement_telegram_client = (
+  app\main.py:247:        announcement_telegram_client
+  app\main.py:248:    )
+  app\main.py:249:
+  app\main.py:264:    application.include_router(voice_calls_router)
+  app\main.py:265:    application.include_router(voice_reconnect_router)
+  app\main.py:266:    application.include_router(voice_call_trigger_router)
+  app\main.py:267:    application.include_router(voice_notification_acceptance_router)
+  app\main.py:268:
+> app\main.py:269:    operations_center_composition = create_operations_center_composition(
+> app\main.py:270:        provider_usage_dashboard_service=provider_usage_dashboard_service,
+  app\main.py:271:        functionality_control_service=functionality_control_service,
+  app\main.py:272:    )
+  app\main.py:273:    application.include_router(
+  app\main.py:274:        create_operations_center_router(
+  app\main.py:275:            composition=operations_center_composition,
+  app\main.py:276:        ),
+  app\main.py:277:    )
+  app\main.py:278:
+===== PRIVACY RUNTIME REFERENCES IN MAIN =====
+  app\main.py:68:    router as governance_change_lifecycle_router,
+  app\main.py:69:)
+  app\main.py:70:from backend.app.api.provider_management_controls import (
+  app\main.py:71:    router as provider_management_controls_router,
+  app\main.py:72:)
+> app\main.py:73:from backend.app.api.privacy_governance import (
+> app\main.py:74:    router as privacy_governance_router,
+  app\main.py:75:)
+> app\main.py:76:from backend.app.api.privacy_screening import (
+> app\main.py:77:    create_privacy_screening_router,
+  app\main.py:78:)
+> app\main.py:79:from backend.app.application.privacy.beta1_processing_catalog import (
+  app\main.py:80:    create_beta1_processing_registry,
+  app\main.py:81:)
+> app\main.py:82:from backend.app.application.privacy.screening.adapter import (
+  app\main.py:83:    ProcessingActivityScreeningAdapter,
+  app\main.py:84:)
+> app\main.py:85:from backend.app.application.privacy.screening.service import (
+  app\main.py:86:    ScreeningService,
+  app\main.py:87:)
+  app\main.py:88:from backend.app.api.operations_center_email_workflows import (
+  app\main.py:89:    create_email_workflows_router,
+  app\main.py:90:)
+  app\main.py:91:from app.api.voice_calls import router as voice_calls_router
+  app\main.py:92:from app.api.voice_reconnect_router import router as voice_reconnect_router
+  app\main.py:93:from app.api.voice_call_trigger import router as voice_call_trigger_router
+  app\main.py:275:            composition=operations_center_composition,
+  app\main.py:276:        ),
+  app\main.py:277:    )
+  app\main.py:278:
+  app\main.py:279:    application.include_router(create_email_workflows_router())
+> app\main.py:280:    application.include_router(privacy_governance_router)
+  app\main.py:281:
+  app\main.py:282:    processing_registry = create_beta1_processing_registry()
+  app\main.py:283:    screening_service = ScreeningService()
+  app\main.py:284:    screening_adapter = ProcessingActivityScreeningAdapter(screening_service)
+  app\main.py:285:    application.include_router(
+> app\main.py:286:        create_privacy_screening_router(
+  app\main.py:287:            processing_registry=processing_registry,
+  app\main.py:288:            screening_adapter=screening_adapter,
+  app\main.py:289:        ),
+  app\main.py:290:    )
+  app\main.py:291:
+  app\main.py:292:    application.include_router(provider_management_controls_router)
+  app\main.py:293:    application.include_router(governance_audit_router)
+  app\main.py:294:    application.include_router(governance_operations_router)
+===== PCD COMPOSITION =====
+"""
+Project Control Center production composition.
+
+This module assembles the Project Control Center application service
+from authoritative application-layer dependencies.
+
+Responsibilities:
+
+- construct the approved PCD source adapters;
+- inject authoritative application services/registries;
+- construct ProjectControlService.
+
+This module does NOT:
+
+- own authoritative project state;
+- duplicate Health state;
+- duplicate Operations state;
+- duplicate Privacy Governance state;
+- call providers directly;
+- mutate production systems;
+- execute project-management decisions.
+
+Architecture:
+
+    Authoritative Application Services / Registries
+                         |
+                         v
+                 PCD Source Adapters
+                         |
+                         v
+                ProjectControlService
+                         |
+                         v
+                ProjectControlSnapshot
+"""
+
+from __future__ import annotations
+
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+from app.application.privacy.privacy_governance_case_registry import (
+    PrivacyGovernanceCaseRegistry,
+)
+
+from ..application.service import ProjectControlService
+from ..domain.ports import ProjectRegistry, SnapshotRepository
+from .governance_risk_source import (
+    GovernanceRiskProjectStatusSource,
+)
+from .health_source import (
+    ProductionHealthProjectStatusSource,
+)
+from .operations_source import (
+    OperationsProjectStatusSource,
+)
+
+
+def create_project_control_service(
+    *,
+    registry: ProjectRegistry,
+    snapshots: SnapshotRepository,
+    health_service: ProductionHealthService,
+    dashboard_service: OperationalDashboardService,
+    case_registry: PrivacyGovernanceCaseRegistry,
+) -> ProjectControlService:
+    """
+    Create the production ProjectControlService.
+
+    All dependencies are supplied explicitly.
+
+    The function constructs only the PCD read-only adapters. The
+    authoritative application services and registries remain owned
+    by their respective bounded contexts.
+
+    Args:
+        registry:
+            Authoritative PCD project registry.
+
+        snapshots:
+            PCD snapshot repository.
+
+        health_service:
+            Existing ProductionHealthService.
+
+        dashboard_service:
+            Existing OperationalDashboardService.
+
+        case_registry:
+            Existing PrivacyGovernanceCaseRegistry.
+
+    Returns:
+        Fully composed ProjectControlService.
+
+    Raises:
+        ValueError:
+            If a required dependency is None.
+    """
+
+    if registry is None:
+        raise ValueError(
+            "registry cannot be None."
+        )
+
+    if snapshots is None:
+        raise ValueError(
+            "snapshots cannot be None."
+        )
+
+    if health_service is None:
+        raise ValueError(
+            "health_service cannot be None."
+        )
+
+    if dashboard_service is None:
+        raise ValueError(
+            "dashboard_service cannot be None."
+        )
+
+    if case_registry is None:
+        raise ValueError(
+            "case_registry cannot be None."
+        )
+
+    health_source = ProductionHealthProjectStatusSource(
+        health_service=health_service,
+    )
+
+    operations_source = OperationsProjectStatusSource(
+        dashboard_service=dashboard_service,
+    )
+
+    governance_source = GovernanceRiskProjectStatusSource(
+        case_registry=case_registry,
+    )
+
+    return ProjectControlService(
+        registry=registry,
+        sources=(
+            health_source,
+            operations_source,
+            governance_source,
+        ),
+        snapshots=snapshots,
+    )
+
+
+__all__ = [
+    "create_project_control_service",
+]
+
+

@@ -14,7 +14,7 @@ from sqlalchemy.orm import (
     mapped_column,
 )
 
-from backend.app.infrastructure.persistence.database import (
+from app.infrastructure.persistence.database import (
     Base,
 )
 

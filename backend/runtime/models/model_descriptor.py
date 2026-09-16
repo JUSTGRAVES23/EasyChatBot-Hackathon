@@ -1,4 +1,4 @@
-"""
+﻿"""
 Model Descriptor.
 
 Combines model identity and capabilities.
@@ -9,8 +9,8 @@ without depending on a specific provider.
 
 from dataclasses import dataclass
 
-from backend.runtime.models.model_id import ModelId
-from backend.runtime.models.model_capabilities import ModelCapabilities
+from runtime.models.model_id import ModelId
+from runtime.models.model_capabilities import ModelCapabilities
 
 
 @dataclass(frozen=True)

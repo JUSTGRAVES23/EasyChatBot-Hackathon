@@ -1,17 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.app.application.privacy.privacy_governance_reminder_history import (
+from app.application.privacy.privacy_governance_reminder_history import (
     PrivacyGovernanceReminderHistory,
 )
-from backend.app.application.privacy.privacy_governance_reminder_policy import (
+from app.application.privacy.privacy_governance_reminder_policy import (
     PrivacyGovernanceReminderPolicy,
 )
-from backend.app.application.privacy.privacy_governance_reminder_scheduler import (
+from app.application.privacy.privacy_governance_reminder_scheduler import (
     PrivacyGovernanceReminderScheduler,
 )
 

@@ -1,10 +1,10 @@
-import pytest
+﻿import pytest
 
-from backend.agents.quality_agent import (
+from agents.quality_agent import (
     QualityAgent,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

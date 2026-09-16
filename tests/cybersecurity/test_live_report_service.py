@@ -1,7 +1,7 @@
 ﻿import pytest
 
 
-from backend.cybersecurity.live_report_service import (
+from cybersecurity.live_report_service import (
     CybersecurityLiveReportService,
 )
 
@@ -19,3 +19,4 @@ async def test_live_report_service_creation():
 
 
     assert service is not None
+

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Management Composition.
 
 Composition root for persistent
@@ -18,12 +18,12 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.app.application.uai.voice.voice_call_management_service import (
+from app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
 
-from backend.app.application.composition.voice_call_dependencies import (
+from app.application.composition.voice_call_dependencies import (
     voice_call_repository,
 )
 
@@ -61,4 +61,7 @@ __all__ = [
     "create_voice_call_management_service",
     "build_voice_call_management_service",
 ]
+
+
+
 

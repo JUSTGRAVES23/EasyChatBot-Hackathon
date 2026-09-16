@@ -1,4 +1,4 @@
-"""
+﻿"""
 Threat Prioritisation Skill.
 
 Ranks already-analysed cybersecurity signals using
@@ -13,12 +13,12 @@ It does not:
 
 from __future__ import annotations
 
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
 
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

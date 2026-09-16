@@ -1,4 +1,4 @@
-"""
+﻿"""
 Shared Governance Runtime Composition.
 
 Provides the shared governance dependencies used by:
@@ -23,11 +23,11 @@ evidence are observed through the same runtime instances.
 
 from __future__ import annotations
 
-from backend.governance.governance_audit_service import (
+from governance.governance_audit_service import (
     GovernanceAuditService,
 )
 
-from backend.provider_management.control.provider_delivery_control import (
+from provider_management.control.provider_delivery_control import (
     ProviderDeliveryControl,
 )
 
@@ -52,11 +52,11 @@ provider_delivery_control = ProviderDeliveryControl(
 # Governance Operations Center read model
 # ------------------------------------------------------------------
 
-from backend.governance.operations_center.governance_dashboard_service import (
+from governance.operations_center.governance_dashboard_service import (
     GovernanceDashboardService,
 )
 
-from backend.governance.operations_center.governance_evidence_service import (
+from governance.operations_center.governance_evidence_service import (
     GovernanceEvidenceService,
 )
 

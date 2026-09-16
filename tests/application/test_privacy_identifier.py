@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 import pytest
 
 
-from backend.app.application.privacy.privacy_identifier_service import (
+from app.application.privacy.privacy_identifier_service import (
     PrivacyIdentifierService,
 )
 

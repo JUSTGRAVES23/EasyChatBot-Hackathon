@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -518,3 +518,4 @@ async def test_ws11_rate_limit_state_is_not_shared_between_boundary_instances():
             "message": "Bonjour",
         }
     ]
+

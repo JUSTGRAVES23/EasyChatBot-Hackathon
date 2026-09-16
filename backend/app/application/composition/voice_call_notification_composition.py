@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Notification Composition.
 
 Composition root for voice call
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 
 
-from backend.app.application.uai.notifications.voice_call_notification_service import (
+from app.application.uai.notifications.voice_call_notification_service import (
     VoiceCallNotificationService,
 )
 
@@ -84,3 +84,5 @@ __all__ = [
     "create_voice_call_notification_service",
     "build_voice_call_notification_service",
 ]
+
+

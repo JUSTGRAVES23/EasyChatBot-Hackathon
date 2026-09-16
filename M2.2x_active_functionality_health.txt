@@ -1,0 +1,588 @@
+===== M2.2.x ACTIVE FUNCTIONALITY HEALTH INSPECTION =====
+
+===== FILE: frontend\src\router.tsx =====
+import {
+  Navigate,
+  Route,
+  Routes,
+} from "react-router-dom";
+
+import OperationsCenterGovernancePage from "../app/operations-center/governance/page";
+import PrivacyGovernancePage from "../app/privacy-governance/page";
+import FunctionalityHealthPage from "../app/operations-center/functionality-health/page";
+import EmailWorkflowsPage from "../app/operations-center/email-workflows/page";
+import RiskIntelligencePage from "../app/operations-center/compliance/cmp/risk-intelligence/risk-coverage/page";
+import WelcomePage from "../app/welcome/page";
+
+export default function AppRouter() {
+  return (
+    <Routes>
+      {/* Academy Welcome */}
+      <Route
+        path="/welcome"
+        element={<WelcomePage />}
+      />
+
+      {/* Operations Center Governance */}
+      <Route
+        path="/operations-center/governance"
+        element={<OperationsCenterGovernancePage />}
+      />
+
+      {/* Operations Center Functionality Health */}
+      <Route
+        path="/operations-center/functionality-health"
+        element={<FunctionalityHealthPage />}
+      />
+
+      {/* Operations Center Email Workflows */}
+      <Route
+        path="/operations-center/email-workflows"
+        element={<EmailWorkflowsPage />}
+      />
+
+      {/* Compliance → CMP → Risk Intelligence → Risk Coverage */}
+      <Route
+        path="/operations-center/compliance/cmp/risk-intelligence/risk-coverage"
+        element={<RiskIntelligencePage />}
+      />
+
+      {/* Backward-compatible redirect for the initial Risk Intelligence URL */}
+      <Route
+        path="/operations-center/risk-intelligence"
+        element={
+          <Navigate
+            to="/operations-center/compliance/cmp/risk-intelligence/risk-coverage"
+            replace
+          />
+        }
+      />
+
+      {/* Privacy Governance dashboard */}
+      <Route
+        path="/privacy-governance"
+        element={<PrivacyGovernancePage />}
+      />
+
+      {/* Privacy Governance specific case */}
+      <Route
+        path="/privacy-governance/:caseId"
+        element={<PrivacyGovernancePage />}
+      />
+
+      {/* Application root */}
+      <Route
+        path="/"
+        element={
+          <Navigate
+            to="/operations-center/governance"
+            replace
+          />
+        }
+      />
+
+      {/* Unknown routes */}
+      <Route
+        path="*"
+        element={
+          <Navigate
+            to="/operations-center/governance"
+            replace
+          />
+        }
+      />
+    </Routes>
+  );
+}
+
+
+===== FILE: frontend\app\operations-center\functionality-health\page.tsx =====
+import OperationsCenterShell from "@/app/components/operations-center/OperationsCenterShell";
+import FunctionalityHealthDashboard from "@/app/components/operations-center/functionality-health/FunctionalityHealthDashboard";
+
+export default function FunctionalityHealthPage() {
+  return (
+    <OperationsCenterShell>
+      <FunctionalityHealthDashboard />
+    </OperationsCenterShell>
+  );
+}
+
+
+===== FILE: frontend\app\components\operations-center\functionality-health\FunctionalityHealth.tsx =====
+[FILE NOT FOUND]
+
+===== FILE: frontend\app\components\operations-center\functionality-health\FunctionalityHealth.module.css =====
+[FILE NOT FOUND]
+
+===== FILE: frontend\app\lib\api\functionalityHealth.ts =====
+export type FunctionalityStatus =
+  | "healthy"
+  | "degraded"
+  | "unavailable"
+  | "maintenance"
+  | "disabled"
+  | "unknown";
+
+export type OperationsEnvironment = "kids" | "adults";
+export type UserImpact = "low" | "medium" | "high" | "unknown";
+
+export interface FunctionalityHealth {
+  functionality_id: string;
+  name: string;
+  category: string;
+  description: string;
+  status: FunctionalityStatus;
+  health_score: number | null;
+  latency_ms: number | null;
+  provider: string | null;
+  model: string | null;
+  capability: string | null;
+  checked_at: string | null;
+  controllable: boolean;
+  risk_level: string;
+  reason: string;
+  environment: OperationsEnvironment;
+  availability: "enabled" | "restricted" | "disabled" | "unknown";
+  policy_status: "compliant" | "not_evaluated" | "restricted" | "unknown";
+}
+
+export interface FunctionalityHealthPayload {
+  generated_at: string;
+  environment: OperationsEnvironment;
+  platform_health: "healthy" | "degraded" | "incident" | "unknown";
+  platform_health_score: number | null;
+  user_impact: UserImpact;
+  counts: Record<"healthy" | "degraded" | "incident" | "maintenance" | "disabled" | "unknown", number>;
+  functionalities: FunctionalityHealth[];
+  attention: FunctionalityHealth[];
+}
+
+export async function getFunctionalityHealth(
+  environment?: OperationsEnvironment,
+): Promise<FunctionalityHealthPayload> {
+  const query = environment
+    ? `?environment=${encodeURIComponent(environment)}`
+    : "";
+
+  const response = await fetch(
+    `/api/operations-center/functionality-health${query}`,
+    { headers: { Accept: "application/json" } },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Functionality health API failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<FunctionalityHealthPayload>;
+}
+
+
+
+
+===== FILE: frontend\app\lib\api\functionalityHealthControls.ts =====
+import type { OperationsEnvironment } from "./functionalityHealth";
+
+export interface FunctionalityControlResult {
+  functionality_id: string;
+  environment: OperationsEnvironment;
+  availability: "enabled" | "disabled";
+  action: "stop" | "resume";
+  reason: string | null;
+  changed_at: string;
+  changed_by: string;
+}
+
+async function postControl(
+  functionalityId: string,
+  action: "stop" | "resume",
+  payload: { environment: OperationsEnvironment; reason?: string },
+): Promise<FunctionalityControlResult> {
+  const response = await fetch(
+    `/api/operations-center/functionality/${encodeURIComponent(functionalityId)}/${action}`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  if (!response.ok) {
+    let message = `Functionality ${action} failed: ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // Preserve the safe status-based error.
+    }
+    throw new Error(message);
+  }
+  return (await response.json()) as FunctionalityControlResult;
+}
+
+export function stopFunctionality(
+  functionalityId: string,
+  environment: OperationsEnvironment,
+  reason: string,
+) {
+  return postControl(functionalityId, "stop", { environment, reason });
+}
+
+export function resumeFunctionality(
+  functionalityId: string,
+  environment: OperationsEnvironment,
+) {
+  return postControl(functionalityId, "resume", { environment });
+}
+
+
+===== FILE: frontend\tests\frontend\functionality-health.spec.tsx =====
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+
+import FunctionalityHealthDashboard from "../../app/components/operations-center/functionality-health/FunctionalityHealthDashboard";
+
+const healthPayload = {
+  generated_at: "2026-09-05T08:00:00Z",
+  environment: "adults" as const,
+  platform_health: "healthy" as const,
+  platform_health_score: 96,
+  user_impact: "LOW" as const,
+  counts: {
+    healthy: 11,
+    degraded: 2,
+    incident: 1,
+    maintenance: 0,
+    disabled: 0,
+    unknown: 0,
+  },
+  functionalities: [
+    {
+      functionality_id: "conversation",
+      name: "AI Conversation",
+      category: "AI",
+      description: "Core AI conversation capability.",
+      status: "healthy" as const,
+      health_score: 98,
+      latency_ms: 240,
+      provider: "openai",
+      model: "gpt-5-mini",
+      capability: "conversation",
+      checked_at: "2026-09-05T08:00:00Z",
+      controllable: true,
+      risk_level: "low",
+      reason: "Operating normally.",
+    },
+    {
+      functionality_id: "voice_tts",
+      name: "Voice / TTS",
+      category: "AI",
+      description: "Text-to-speech capability.",
+      status: "degraded" as const,
+      health_score: 72,
+      latency_ms: 1800,
+      provider: "openai",
+      model: "tts",
+      capability: "voice_tts",
+      checked_at: "2026-09-05T08:00:00Z",
+      controllable: true,
+      risk_level: "medium",
+      reason: "Provider latency above threshold.",
+    },
+  ],
+  attention: [],
+};
+
+describe("Functionality Health", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(healthPayload), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  });
+
+  it("renders the professional Functionality Health dashboard", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Functionality Health",
+      }),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText(
+        "Real-time operational health across all EasyChatBot capabilities.",
+      ),
+    ).toBeInTheDocument();
+
+    expect(screen.getByText("Platform Health")).toBeInTheDocument();
+    expect(screen.getByText("Functionality Status")).toBeInTheDocument();
+    expect(screen.getByText("Status by Category")).toBeInTheDocument();
+    expect(screen.getByText("Functionality Overview")).toBeInTheDocument();
+  });
+
+  it("renders live health data from the API", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    expect(screen.getByText("96%")).toBeInTheDocument();
+
+    const table = screen.getByRole("table");
+
+    expect(
+      within(table).getByText("AI Conversation"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(table).getByText("Voice / TTS"),
+    ).toBeInTheDocument();
+
+    expect(within(table).getByText("98%")).toBeInTheDocument();
+    expect(within(table).getByText("72%")).toBeInTheDocument();
+    expect(within(table).getByText("240 ms")).toBeInTheDocument();
+    expect(within(table).getByText("1800 ms")).toBeInTheDocument();
+
+    const conversationRow = within(table).getByRole("row", {
+      name: /AI Conversation.*AI.*Healthy.*98%.*240 ms/i,
+    });
+
+    const voiceRow = within(table).getByRole("row", {
+      name: /Voice \/ TTS.*AI.*Degraded.*72%.*1800 ms/i,
+    });
+
+    expect(
+      within(conversationRow).getByText("openai"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(voiceRow).getByText("openai"),
+    ).toBeInTheDocument();
+  });
+
+  it("allows an operator to inspect a functionality by selecting its row", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    const table = screen.getByRole("table");
+
+    const voiceRow = within(table).getByRole("row", {
+      name: /Voice \/ TTS.*AI.*Degraded.*72%.*1800 ms/i,
+    });
+
+    fireEvent.click(voiceRow);
+
+    const detailsPanel = await screen.findByRole("complementary");
+
+    expect(
+      within(detailsPanel).getByRole("heading", {
+        name: "Voice / TTS",
+      }),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText("Text-to-speech capability."),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText("voice_tts"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText("tts"),
+    ).toBeInTheDocument();
+
+    expect(
+      within(detailsPanel).getByText(
+        "Provider latency above threshold.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("refreshes the health data when Refresh is clicked", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(healthPayload), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    const initialCallCount = fetchSpy.mock.calls.length;
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Refresh",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(
+        initialCallCount,
+      );
+    });
+
+    expect(fetchSpy).toHaveBeenLastCalledWith(
+      "/api/operations-center/functionality-health?environment=adults",
+      {
+        headers: {
+          Accept: "application/json",
+        },
+      },
+    );
+  });
+
+  it("shows an accessible error when the health API fails", async () => {
+    vi.restoreAllMocks();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Service unavailable", {
+        status: 503,
+      }),
+    );
+
+    render(<FunctionalityHealthDashboard />);
+
+    expect(
+      await screen.findByRole("alert"),
+    ).toHaveTextContent(
+      "Functionality health API failed: 503",
+    );
+  });
+
+  it("keeps the M1 dashboard read-only", async () => {
+    render(<FunctionalityHealthDashboard />);
+
+    await screen.findByRole("heading", {
+      name: "Functionality Health",
+    });
+
+    expect(
+      screen.getByText(
+        "M1 is read-only. Operational actions will be introduced through backend-authorised controls with confirmation and audit logging.",
+      ),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText("Read-only operational visibility"),
+    ).toBeInTheDocument();
+
+    const buttons = screen.getAllByRole("button");
+
+    expect(
+      buttons.some((button) =>
+        /stop|restart|reroute|modify/i.test(
+          button.textContent ?? "",
+        ),
+      ),
+    ).toBe(false);
+  });
+});
+
+
+
+===== FILE: frontend\package.json =====
+{
+  "name": "easychatbot-governance-center",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.18.2"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.0.4",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.0",
+    "vitest": "^4.1.11"
+  }
+}
+
+
+===== ACTIVE FUNCTIONALITY HEALTH REFERENCES =====
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:5: getFunctionalityHealth,
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:6: type FunctionalityHealth,
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:7: type FunctionalityHealthPayload,
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:9: } from "@/app/lib/api/functionalityHealth";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:10: import styles from "./FunctionalityHealthDashboard.module.css";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:12: const statusText: Record<FunctionalityHealth["status"], string> = {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:21: const statusClass: Record<FunctionalityHealth["status"], string> = {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:146: status: FunctionalityHealth["status"];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:225: functionalities: FunctionalityHealth[];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:277: counts: FunctionalityHealthPayload["counts"];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:278: functionalities: FunctionalityHealth[];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:345: functionalities: FunctionalityHealth[];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:399: anchor.download = "easychatbot-functionality-health.csv";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:515: export default function FunctionalityHealthDashboard() {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:516: const [data, setData] = useState<FunctionalityHealthPayload | null>(null);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\functionality-health\FunctionalityHealthDashboard.tsx:526: const next = await getFunctionalityHealth(environment);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\components\operations-center\navigation\OperationsCenterSidebar.tsx:19: ["Functionality Health", "/operations-center/functionality-health", "health"],
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:12: export interface FunctionalityHealth {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:32: export interface FunctionalityHealthPayload {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:39: functionalities: FunctionalityHealth[];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:40: attention: FunctionalityHealth[];
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:43: export async function getFunctionalityHealth(
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:45: ): Promise<FunctionalityHealthPayload> {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:51: `/api/operations-center/functionality-health${query}`,
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealth.ts:59: return response.json() as Promise<FunctionalityHealthPayload>;
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealthControls.ts:1: import type { OperationsEnvironment } from "./functionalityHealth";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\lib\api\functionalityHealthControls.ts:19: `/api/operations-center/functionality/${encodeURIComponent(functionalityId)}/${action}`,
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\operations-center\functionality-health\page.tsx:2: import FunctionalityHealthDashboard from "@/app/components/operations-center/functionality-health/FunctionalityHealthDashboard";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\operations-center\functionality-health\page.tsx:4: export default function FunctionalityHealthPage() {
+C:\AI Folder\EasyChatBot-Hackathon\frontend\app\operations-center\functionality-health\page.tsx:7: <FunctionalityHealthDashboard />
+C:\AI Folder\EasyChatBot-Hackathon\frontend\navigation\operationsControlNavigation.ts:14: href: "/operations-center/functionality-health",
+C:\AI Folder\EasyChatBot-Hackathon\frontend\src\router.tsx:9: import FunctionalityHealthPage from "../app/operations-center/functionality-health/page";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\src\router.tsx:31: path="/operations-center/functionality-health"
+C:\AI Folder\EasyChatBot-Hackathon\frontend\src\router.tsx:32: element={<FunctionalityHealthPage />}
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:11: import FunctionalityHealthDashboard from "../../app/components/operations-center/functionality-health/FunctionalityHealthDashboard";
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:79: render(<FunctionalityHealthDashboard />);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:100: render(<FunctionalityHealthDashboard />);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:141: render(<FunctionalityHealthDashboard />);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:192: render(<FunctionalityHealthDashboard />);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:213: "/api/operations-center/functionality-health?environment=adults",
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:231: render(<FunctionalityHealthDashboard />);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:241: render(<FunctionalityHealthDashboard />);
+C:\AI Folder\EasyChatBot-Hackathon\frontend\tests\frontend\functionality-health.spec.tsx:261: /stop|restart|reroute|modify/i.test(

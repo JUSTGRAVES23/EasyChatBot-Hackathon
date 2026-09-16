@@ -1,10 +1,10 @@
-from fastapi import APIRouter, HTTPException
+﻿from fastapi import APIRouter, HTTPException
 
-from backend.governance.change_management.change_management_service import (
+from governance.change_management.change_management_service import (
     ChangeManagementService,
 )
-from backend.governance.change_management.change_risk import ChangeRisk
-from backend.governance.change_management.change_type import ChangeType
+from governance.change_management.change_risk import ChangeRisk
+from governance.change_management.change_type import ChangeType
 
 
 router = APIRouter(
@@ -85,3 +85,4 @@ def _serialize(record):
         "status": record.status.value,
         "created_at": record.created_at.isoformat(),
     }
+

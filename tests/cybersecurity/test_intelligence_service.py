@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 
-from backend.cybersecurity.demo_data_source import (
+from cybersecurity.demo_data_source import (
     DemoCybersecurityDataSource,
 )
-from backend.cybersecurity.intelligence_service import (
+from cybersecurity.intelligence_service import (
     CybersecurityIntelligenceService,
 )
 
@@ -26,3 +26,4 @@ async def test_demo_data_flows_through_intelligence_agent():
     assert result.output["high_count"] == 2
     assert result.output["posture"] == "CRITICAL ATTENTION REQUIRED"
     assert result.output["priority_signals"][0]["severity"] == "critical"
+

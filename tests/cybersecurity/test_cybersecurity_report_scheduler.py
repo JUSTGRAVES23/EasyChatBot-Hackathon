@@ -1,6 +1,6 @@
 ﻿import pytest
 
-from backend.cybersecurity.cybersecurity_report_scheduler import (
+from cybersecurity.cybersecurity_report_scheduler import (
     CybersecurityReportScheduler,
 )
 
@@ -35,4 +35,5 @@ async def test_scheduler_daily_weekly_critical():
     result = await scheduler.process_critical_event({})
 
     assert result["type"] == "critical"
+
 

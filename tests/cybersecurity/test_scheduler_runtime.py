@@ -17,12 +17,12 @@ Does NOT test:
 import pytest
 
 
-from backend.cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+from cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
     CybersecuritySchedulerRuntime,
 )
 
 
-from backend.cybersecurity.scheduler.cybersecurity_job_registry import (
+from cybersecurity.scheduler.cybersecurity_job_registry import (
     CybersecurityJobRegistry,
 )
 
@@ -94,3 +94,4 @@ async def test_scheduler_runtime_shutdown():
         status["started"]
         is False
     )
+

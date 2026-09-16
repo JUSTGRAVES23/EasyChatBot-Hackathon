@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.app.application.beta_access.beta_access_service import BetaAccessService
+from app.application.beta_access.beta_access_service import BetaAccessService
 
 
 class BetaPrivateChatGate:
@@ -41,3 +41,4 @@ class BetaPrivateChatGate:
         return await self._access.authorize_private_chat(
             telegram_user_id,
         )
+

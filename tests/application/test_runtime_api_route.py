@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime API route integration tests.
 
 Validates:
@@ -30,13 +30,13 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from backend.api.main import (
+from api.main import (
     create_app,
 )
 
-from backend.api import routes
+from api import routes
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 

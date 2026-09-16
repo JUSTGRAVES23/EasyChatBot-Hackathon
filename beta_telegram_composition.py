@@ -1,33 +1,33 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from backend.app.ai_runtime.conversation.conversation_runtime import (
+from app.ai_runtime.conversation.conversation_runtime import (
     ConversationRuntime,
 )
-from backend.app.application.beta_access.beta_access_service import (
+from app.application.beta_access.beta_access_service import (
     BetaAccessService,
 )
-from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+from app.application.beta_access.beta_telegram_conversation_boundary import (
     BetaTelegramConversationBoundary,
 )
-from backend.app.application.beta_access.telegram_conversation_service import (
+from app.application.beta_access.telegram_conversation_service import (
     TelegramConversationService,
 )
-from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+from app.infrastructure.telegram.telegram_bot_runtime import (
     TelegramBotRuntime,
 )
-from backend.app.interfaces.telegram.beta_private_chat_gate import (
+from app.interfaces.telegram.beta_private_chat_gate import (
     BetaPrivateChatGate,
 )
-from backend.app.interfaces.telegram.beta_start_handler import (
+from app.interfaces.telegram.beta_start_handler import (
     BetaTelegramStartHandler,
 )
-from backend.app.interfaces.telegram.beta_telegram_adapter import (
+from app.interfaces.telegram.beta_telegram_adapter import (
     BetaTelegramAdapter,
 )
-from backend.app.providers.llm.llm_provider_factory import (
+from app.providers.llm.llm_provider_factory import (
     LLMProviderFactory,
 )
 
@@ -71,9 +71,9 @@ def create_beta_telegram_composition(
     Runtime resolution order:
 
         explicit conversation_runtime
-                    ↓
+                    â†“
         conversation_runtime_factory
-                    ↓
+                    â†“
         production ConversationRuntime
 
     The default production runtime uses the platform LLM provider
@@ -83,11 +83,11 @@ def create_beta_telegram_composition(
     Dependency direction:
 
         Infrastructure
-              ↓
+              â†“
         Application services
-              ↓
+              â†“
         AI Runtime
-              ↓
+              â†“
         Provider abstraction
     """
 

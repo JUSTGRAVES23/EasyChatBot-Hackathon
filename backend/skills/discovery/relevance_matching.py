@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Relevance Matching Skill.
 
 Evaluates how well discovered candidates match the learner's
@@ -21,17 +21,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from backend.skills.discovery.content_product_discovery import (
+from skills.discovery.content_product_discovery import (
     DiscoveryCandidate,
 )
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     DiscoveryProfile,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

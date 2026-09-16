@@ -1,4 +1,4 @@
-"""
+﻿"""
 Base Provider Contract.
 
 Defines the interface for external AI and knowledge providers.
@@ -16,8 +16,8 @@ The Agent layer must remain independent from provider details.
 
 from abc import ABC, abstractmethod
 
-from backend.providers.provider_result import ProviderResult
-from backend.runtime.context.execution_context import ExecutionContext
+from providers.provider_result import ProviderResult
+from runtime.context.execution_context import ExecutionContext
 
 
 class BaseProvider(ABC):

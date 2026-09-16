@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Recommendation Ranking Skill.
 
 Ranks already-matched discovery candidates using their
@@ -37,14 +37,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from backend.skills.discovery.relevance_matching import (
+from skills.discovery.relevance_matching import (
     RelevanceMatch,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

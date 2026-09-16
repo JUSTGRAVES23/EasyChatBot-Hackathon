@@ -1,15 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from typing import Any
 
 import resend
 
-from backend.app.application.privacy.privacy_approval_email_service import (
+from app.application.privacy.privacy_approval_email_service import (
     ApprovalEmailRequest,
 )
 
-from backend.cybersecurity.email.email_provider_manager import (
+from cybersecurity.email.email_provider_manager import (
     EmailProviderManager,
 )
 
@@ -20,13 +20,13 @@ class ResendApprovalEmailSender:
     Preferred production delivery path:
 
         PrivacyApprovalEmailService
-            ↓
+            â†“
         ResendApprovalEmailSender
-            ↓
+            â†“
         EmailProviderManager
-            ↓
+            â†“
         ResendEmailProvider
-            ↓
+            â†“
         Resend
 
     The explicit ``api_key`` / ``sender_email`` constructor arguments are
@@ -283,3 +283,4 @@ class ResendApprovalEmailSender:
 __all__ = [
     "ResendApprovalEmailSender",
 ]
+

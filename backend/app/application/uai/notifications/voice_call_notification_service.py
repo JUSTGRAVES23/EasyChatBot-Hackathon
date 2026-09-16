@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Notification Service.
 
 Application service responsible for
@@ -34,7 +34,7 @@ from datetime import (
 import uuid
 
 
-from backend.app.application.uai.notifications.voice_call_notification_repository import (
+from app.application.uai.notifications.voice_call_notification_repository import (
     VoiceCallNotificationRepository,
 )
 
@@ -254,3 +254,4 @@ class VoiceCallNotificationService:
 __all__ = [
     "VoiceCallNotificationService",
 ]
+

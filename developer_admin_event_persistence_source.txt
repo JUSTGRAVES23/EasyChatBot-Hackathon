@@ -1,0 +1,481 @@
+
+============================================================
+FILE: .\backend\app\project_control_center\domain\models.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+
+
+class ProjectStatus(str, Enum):
+    ON_TRACK = "on_track"
+    AT_RISK = "at_risk"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    UNKNOWN = "unknown"
+
+
+class WorkstreamStatus(str, Enum):
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    UNKNOWN = "unknown"
+
+
+class SourceStatus(str, Enum):
+    AVAILABLE = "available"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
+class Severity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class IssueStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+class ActionStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+
+class ProjectEventType(str, Enum):
+    PROJECT_CREATED = "project_created"
+    WORKSTREAM_UPDATED = "workstream_updated"
+    ISSUE_OPENED = "issue_opened"
+    ISSUE_RESOLVED = "issue_resolved"
+    RISK_OPENED = "risk_opened"
+    RISK_RESOLVED = "risk_resolved"
+    MILESTONE_COMPLETED = "milestone_completed"
+    ACTION_CREATED = "action_created"
+    ACTION_COMPLETED = "action_completed"
+    APPROVAL_GRANTED = "approval_granted"
+    READINESS_CHANGED = "readiness_changed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkstreamSnapshot:
+    workstream_id: str
+    name: str
+    completion_percent: float | None
+    status: WorkstreamStatus
+    source: str
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSnapshot:
+    key: str
+    label: str
+    value: float | int | str
+    unit: str | None = None
+    source: str = ""
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssueSnapshot:
+    issue_id: str
+    project_id: str
+    title: str
+    severity: Severity
+    status: IssueStatus
+    workstream_id: str | None = None
+    owner: str | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RiskSnapshot:
+    risk_id: str
+    project_id: str
+    title: str
+    severity: Severity
+    status: str
+    workstream_id: str | None = None
+    owner: str | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ActionSnapshot:
+    action_id: str
+    project_id: str
+    title: str
+    priority: Severity
+    status: ActionStatus
+    owner: str | None = None
+    workstream_id: str | None = None
+    due_at: datetime | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MilestoneSnapshot:
+    milestone_id: str
+    project_id: str
+    name: str
+    status: str
+    target_date: datetime | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSnapshot:
+    source_id: str
+    name: str
+    status: SourceStatus
+    updated_at: datetime | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectControlSnapshot:
+    project_id: str
+    project_name: str
+    project_status: ProjectStatus
+    overall_progress_percent: float | None
+    current_milestone: str | None
+    current_workstream: str | None
+    release_readiness: str
+    open_blockers: int
+    open_risks: int
+    workstreams: tuple[WorkstreamSnapshot, ...] = ()
+    metrics: tuple[MetricSnapshot, ...] = ()
+    issues: tuple[IssueSnapshot, ...] = ()
+    risks: tuple[RiskSnapshot, ...] = ()
+    actions: tuple[ActionSnapshot, ...] = ()
+    milestones: tuple[MilestoneSnapshot, ...] = ()
+    sources: tuple[SourceSnapshot, ...] = ()
+    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectDefinition:
+    project_id: str
+    name: str
+    description: str = ""
+    owner: str | None = None
+    active: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectEvent:
+    event_id: str
+    project_id: str
+    event_type: ProjectEventType
+    occurred_at: datetime
+    summary: str
+    source: str
+    metadata: tuple[tuple[str, str], ...] = ()
+
+============================================================
+FILE: .\backend\app\project_control_center\domain\ports.py
+============================================================
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from .models import (
+    ActionSnapshot,
+    IssueSnapshot,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    ProjectDefinition,
+    ProjectEvent,
+    ProjectControlSnapshot,
+    RiskSnapshot,
+    SourceSnapshot,
+    WorkstreamSnapshot,
+)
+
+
+class ProjectRegistry(ABC):
+    @abstractmethod
+    def get(self, project_id: str) -> ProjectDefinition | None: ...
+
+    @abstractmethod
+    def list_active(self) -> list[ProjectDefinition]: ...
+
+    @abstractmethod
+    def save(self, project: ProjectDefinition) -> ProjectDefinition: ...
+
+
+class ProjectStatusSource(ABC):
+    """Read-only adapter over an existing authoritative EasyChatBot source."""
+
+    @property
+    @abstractmethod
+    def source_id(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def source_name(self) -> str: ...
+
+    @abstractmethod
+    def fetch_workstreams(self, project_id: str) -> list[WorkstreamSnapshot]: ...
+
+    @abstractmethod
+    def fetch_metrics(self, project_id: str) -> list[MetricSnapshot]: ...
+
+    @abstractmethod
+    def fetch_issues(self, project_id: str) -> list[IssueSnapshot]: ...
+
+    @abstractmethod
+    def fetch_risks(self, project_id: str) -> list[RiskSnapshot]: ...
+
+    @abstractmethod
+    def fetch_actions(self, project_id: str) -> list[ActionSnapshot]: ...
+
+    @abstractmethod
+    def fetch_milestones(self, project_id: str) -> list[MilestoneSnapshot]: ...
+
+    @abstractmethod
+    def health(self) -> SourceSnapshot: ...
+
+
+class SnapshotRepository(ABC):
+    @abstractmethod
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot: ...
+
+    @abstractmethod
+    def list_for_project(self, project_id: str, limit: int = 30) -> list[ProjectControlSnapshot]: ...
+
+
+class ProjectEventRepository(ABC):
+    @abstractmethod
+    def save(self, event: ProjectEvent) -> ProjectEvent: ...
+
+    @abstractmethod
+    def list_for_project(self, project_id: str, limit: int = 100) -> list[ProjectEvent]: ...
+
+============================================================
+FILE: .\backend\app\project_control_center\application\event_service.py
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from ..domain.models import ProjectEvent, ProjectEventType
+from ..domain.ports import ProjectEventRepository
+
+
+class ProjectEventService:
+    """Records project-control events; it does not mutate source systems."""
+
+    def __init__(self, repository: ProjectEventRepository) -> None:
+        self._repository = repository
+
+    def record(
+        self,
+        *,
+        project_id: str,
+        event_type: ProjectEventType,
+        summary: str,
+        source: str,
+        metadata: dict[str, str] | None = None,
+    ) -> ProjectEvent:
+        event = ProjectEvent(
+            event_id=f"pev-{uuid4()}",
+            project_id=project_id,
+            event_type=event_type,
+            occurred_at=datetime.now(timezone.utc),
+            summary=summary,
+            source=source,
+            metadata=tuple(sorted((metadata or {}).items())),
+        )
+        return self._repository.save(event)
+
+============================================================
+FILE: .\backend\app\project_control_center\infrastructure\in_memory.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..domain.models import ProjectControlSnapshot, ProjectDefinition, ProjectEvent
+from ..domain.ports import (
+    ProjectEventRepository,
+    ProjectRegistry,
+    SnapshotRepository,
+)
+
+
+@dataclass
+class InMemoryProjectRegistry(ProjectRegistry):
+    projects: dict[str, ProjectDefinition] = field(default_factory=dict)
+
+    def get(self, project_id: str) -> ProjectDefinition | None:
+        return self.projects.get(project_id)
+
+    def list_active(self) -> list[ProjectDefinition]:
+        return [p for p in self.projects.values() if p.active]
+
+    def save(self, project: ProjectDefinition) -> ProjectDefinition:
+        self.projects[project.project_id] = project
+        return project
+
+
+@dataclass
+class InMemorySnapshotRepository(SnapshotRepository):
+    data: dict[str, list[ProjectControlSnapshot]] = field(default_factory=dict)
+
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot:
+        self.data.setdefault(snapshot.project_id, []).insert(0, snapshot)
+        return snapshot
+
+    def list_for_project(
+        self, project_id: str, limit: int = 30
+    ) -> list[ProjectControlSnapshot]:
+        return self.data.get(project_id, [])[:limit]
+
+
+@dataclass
+class InMemoryProjectEventRepository(ProjectEventRepository):
+    data: dict[str, list[ProjectEvent]] = field(default_factory=dict)
+
+    def save(self, event: ProjectEvent) -> ProjectEvent:
+        self.data.setdefault(event.project_id, []).insert(0, event)
+        return event
+
+    def list_for_project(
+        self, project_id: str, limit: int = 100
+    ) -> list[ProjectEvent]:
+        return self.data.get(project_id, [])[:limit]
+
+============================================================
+FILE: .\backend\alembic\versions\1bead328cddf_create_events_table.py
+============================================================
+"""create events table
+
+Revision ID: 1bead328cddf
+Revises: 536722d48314
+Create Date: 2026-07-28 23:23:42.150465
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '1bead328cddf'
+down_revision: Union[str, Sequence[str], None] = '536722d48314'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_column('events', 'source')
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.add_column('events', sa.Column('source', sa.VARCHAR(length=100), autoincrement=False, nullable=False))
+    # ### end Alembic commands ###
+
+============================================================
+FILE: .\backend\alembic\versions\536722d48314_create_events_table.py
+============================================================
+"""create events table
+
+Revision ID: 536722d48314
+Revises: 
+Create Date: 2026-07-28 22:49:58.733443
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+# revision identifiers, used by Alembic.
+revision: str = '536722d48314'
+down_revision: Union[str, Sequence[str], None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('events',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('event_type', sa.String(length=100), nullable=False),
+    sa.Column('source', sa.String(length=100), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=True),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_events_created_at'), 'events', ['created_at'], unique=False)
+    op.create_index(op.f('ix_events_event_type'), 'events', ['event_type'], unique=False)
+    op.create_index(op.f('ix_events_user_id'), 'events', ['user_id'], unique=False)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index(op.f('ix_events_user_id'), table_name='events')
+    op.drop_index(op.f('ix_events_event_type'), table_name='events')
+    op.drop_index(op.f('ix_events_created_at'), table_name='events')
+    op.drop_table('events')
+    # ### end Alembic commands ###
+
+============================================================
+FILE: .\backend\alembic\versions\d355a996cfdd_create_events_table.py
+============================================================
+"""create events table
+
+Revision ID: d355a996cfdd
+Revises: 1bead328cddf
+Create Date: 2026-07-28 23:26:09.915786
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'd355a996cfdd'
+down_revision: Union[str, Sequence[str], None] = '1bead328cddf'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###

@@ -4,12 +4,12 @@
 import pytest
 
 
-from backend.cybersecurity.email.cybersecurity_email_service import (
+from cybersecurity.email.cybersecurity_email_service import (
     CybersecurityEmailService,
 )
 
 
-from backend.cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+from cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
     CybersecuritySchedulerWorkflow,
 )
 
@@ -94,3 +94,4 @@ async def test_critical_alert_email_flow():
         result["email"]["status"]
         == "prepared"
     )
+

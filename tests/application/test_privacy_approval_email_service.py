@@ -1,7 +1,7 @@
-from backend.app.application.privacy.privacy_approval_email_service import (
+﻿from app.application.privacy.privacy_approval_email_service import (
     PrivacyApprovalEmailService,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
 )
@@ -61,3 +61,4 @@ def test_email_escalation_refuses_failed_validation():
         raise AssertionError("Escalation was allowed despite failed validation")
 
     assert sender.requests == []
+

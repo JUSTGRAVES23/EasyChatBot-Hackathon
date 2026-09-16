@@ -1,4 +1,4 @@
-
+﻿
 import pytest
 
 from fastapi import FastAPI
@@ -8,12 +8,12 @@ from httpx import (
     AsyncClient,
 )
 
-from backend.governance.api.governance_operations_api import (
+from governance.api.governance_operations_api import (
     router,
     get_dashboard_service,
 )
 
-from backend.governance.operations_center.governance_dashboard_service import (
+from governance.operations_center.governance_dashboard_service import (
     GovernanceDashboardService,
 )
 
@@ -77,3 +77,4 @@ async def test_operations_center_returns_governance_state():
         "Security incident"
         in body["yeti"]["message"]
     )
+

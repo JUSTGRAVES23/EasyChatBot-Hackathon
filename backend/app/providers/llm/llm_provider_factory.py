@@ -20,15 +20,15 @@ from __future__ import annotations
 
 import os
 
-from backend.app.providers.llm.llm_provider import (
+from app.providers.llm.llm_provider import (
     LLMProvider,
 )
 
-from backend.app.providers.llm.openai_llm_provider import (
+from app.providers.llm.openai_llm_provider import (
     OpenAILLMProvider,
 )
 
-from backend.app.providers.llm.ollama_llm_provider import (
+from app.providers.llm.ollama_llm_provider import (
     OllamaLLMProvider,
 )
 

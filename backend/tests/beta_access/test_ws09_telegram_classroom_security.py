@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -499,3 +499,4 @@ async def test_ws09_history_limit_is_applied_within_user_scope():
         "three",
         "four",
     ]
+

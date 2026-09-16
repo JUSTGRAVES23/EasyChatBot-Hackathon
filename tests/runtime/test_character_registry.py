@@ -1,4 +1,4 @@
-from backend.characters.character_registry import (
+﻿from characters.character_registry import (
     CharacterRegistry,
 )
 

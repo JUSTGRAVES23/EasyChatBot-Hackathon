@@ -1,4 +1,4 @@
-from backend.app.application.privacy.data_processing_map import (
+﻿from app.application.privacy.data_processing_map import (
     DataProcessingMap,
     DataProcessingMapEntry,
 )
@@ -44,3 +44,4 @@ def test_data_processing_map_rejects_duplicate_processing_id():
         assert "already exists" in str(exc)
     else:
         raise AssertionError("Duplicate processing map was accepted")
+

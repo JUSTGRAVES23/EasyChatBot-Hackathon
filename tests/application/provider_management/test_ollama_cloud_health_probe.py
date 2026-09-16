@@ -10,7 +10,7 @@ from app.application.provider_management.provider_health_models import (
     ProviderHealthStatus,
 )
 
-from backend.providers.health.ollama_cloud_health_probe import (
+from providers.health.ollama_cloud_health_probe import (
     OllamaCloudHealthProbe,
 )
 
@@ -145,3 +145,4 @@ def test_cloud_probe_rejects_invalid_timeout() -> None:
             api_key="test-key",
             timeout_seconds=0,
         )
+

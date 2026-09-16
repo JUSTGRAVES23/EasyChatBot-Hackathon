@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Repository Infrastructure Adapter.
 
 Infrastructure implementation for
@@ -25,7 +25,7 @@ Beta implementation:
 from __future__ import annotations
 
 
-from backend.app.application.uai.voice.voice_call_repository import (
+from app.application.uai.voice.voice_call_repository import (
     VoiceCallRepository,
 )
 
@@ -99,3 +99,4 @@ class InMemoryVoiceCallRepository(
 __all__ = [
     "InMemoryVoiceCallRepository",
 ]
+

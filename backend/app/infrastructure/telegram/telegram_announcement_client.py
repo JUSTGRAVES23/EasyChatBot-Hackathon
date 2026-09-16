@@ -10,20 +10,21 @@ class TelegramAnnouncementClient:
     """
     Outbound-only Telegram client for controlled announcements.
 
+    This client is completely separate from TelegramBotRuntime.
+
     Responsibilities:
-    - authenticate using TELEGRAM_BOT_TOKEN;
-    - send outbound announcement messages;
-    - provide controlled Telegram transport.
+    - resolve TELEGRAM_BOT_TOKEN;
+    - create an outbound Telegram Bot client lazily;
+    - send controlled announcement messages;
+    - release client resources.
 
-    This client MUST NOT:
-    - start Telegram polling;
-    - register Telegram handlers;
+    This client does NOT:
+    - poll Telegram updates;
+    - register handlers;
+    - start polling;
     - execute classroom conversations;
-    - perform authorization;
+    - perform administrator authorization;
     - bypass ControlledAnnouncementPublisher.
-
-    The classroom Telegram runtime owns inbound update polling.
-    This client is strictly outbound.
     """
 
     def __init__(
@@ -31,44 +32,64 @@ class TelegramAnnouncementClient:
         *,
         token: str | None = None,
     ) -> None:
-        resolved_token = (
+        self._token = (
             token
             or os.getenv("TELEGRAM_BOT_TOKEN")
         )
 
-        if not resolved_token:
+        if not self._token:
             raise RuntimeError(
                 "TELEGRAM_BOT_TOKEN is missing."
             )
 
-        self._bot = Bot(
-            token=resolved_token,
-        )
+        self._bot: Bot | None = None
+
+    def _get_bot(self) -> Bot:
+        """
+        Return the outbound-only Telegram Bot client.
+
+        The Bot is created lazily and never starts polling.
+        """
+
+        if self._bot is None:
+            self._bot = Bot(
+                token=self._token,
+            )
+
+        return self._bot
 
     async def send_message(
         self,
         *,
         chat_id: str,
         text: str,
+        parse_mode: str | None = None,
     ) -> Any:
         """
-        Send one outbound Telegram announcement.
+        Send one outbound Telegram message.
 
-        This operation does not start polling and does not
-        interact with the inbound Telegram update lifecycle.
+        No Telegram polling is performed.
         """
 
-        return await self._bot.send_message(
+        bot = self._get_bot()
+
+        return await bot.send_message(
             chat_id=chat_id,
             text=text,
+            parse_mode=parse_mode,
         )
 
     async def close(self) -> None:
         """
-        Release the underlying Telegram client resources.
+        Release the outbound Telegram client.
         """
 
+        if self._bot is None:
+            return
+
         await self._bot.shutdown()
+
+        self._bot = None
 
 
 __all__ = [

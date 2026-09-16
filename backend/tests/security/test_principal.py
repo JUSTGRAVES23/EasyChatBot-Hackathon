@@ -1,4 +1,4 @@
-from backend.app.domain.identity.principal import (
+﻿from app.domain.identity.principal import (
     AccountStatus,
     Principal,
 )
@@ -24,3 +24,4 @@ def test_unverified_principal_is_not_active():
     )
 
     assert principal.is_active is False
+

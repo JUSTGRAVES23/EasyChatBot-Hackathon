@@ -1,0 +1,615 @@
+﻿===== WORLD CONTEXT =====
+"""
+World Context.
+
+Represents the active learning world
+for an AI interaction.
+
+Examples:
+
+- French World
+- Spanish World
+- Business French World
+
+The world determines:
+- language
+- learning environment
+- available experience rules
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class WorldContext:
+    """
+    Immutable learning world context.
+    """
+
+    world_id: str
+
+    name: str
+
+    language_code: str
+
+    available_characters: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """
+        Validate world context.
+        """
+
+        if not self.world_id.strip():
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        if not self.name.strip():
+            raise ValueError(
+                "world name cannot be empty."
+            )
+
+        if not self.language_code.strip():
+            raise ValueError(
+                "language_code cannot be empty."
+            )
+
+===== INTERACTION CONTEXT =====
+"""
+UAI Interaction Context.
+
+Represents the complete context of one AI interaction.
+
+This object is a domain contract between:
+
+- User interaction layer
+- AI Runtime
+- Character Runtime
+- Voice Runtime
+
+Responsibilities
+----------------
+- Hold validated interaction state.
+- Provide immutable runtime context.
+- Ensure all required context exists.
+
+Does NOT
+--------
+- Call AI providers.
+- Create conversations.
+- Manage LiveKit.
+- Persist data.
+- Execute agents.
+
+Architecture
+------------
+
+Learner Context
+        +
+World Context
+        +
+Character Context
+        +
+Voice Context
+
+        |
+
+        v
+
+InteractionContext
+
+        |
+
+        v
+
+AI Runtime
+
+
+Design principles
+-----------------
+- Immutable
+- Explicit dependencies
+- Provider independent
+- Easy to test
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.domain.uai.context.character_context import (
+    CharacterContext,
+)
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class InteractionContext:
+    """
+    Complete context required for an AI interaction.
+    """
+
+    learner: LearnerContext
+
+    world: WorldContext
+
+    character: CharacterContext
+
+    voice: VoiceContext
+
+
+    def __post_init__(self) -> None:
+        """
+        Validate mandatory contexts.
+        """
+
+        if self.learner is None:
+            raise ValueError(
+                "Learner context is required."
+            )
+
+        if self.world is None:
+            raise ValueError(
+                "World context is required."
+            )
+
+        if self.character is None:
+            raise ValueError(
+                "Character context is required."
+            )
+
+        if self.voice is None:
+            raise ValueError(
+                "Voice context is required."
+            )
+
+
+===== INTERACTION CONTEXT BUILDER =====
+"""
+Interaction Context Builder.
+
+Application service responsible for composing
+the complete UAI interaction context.
+
+Responsibilities:
+- Combine domain contexts.
+- Coordinate runtime preparation.
+- Create InteractionContext.
+
+Does NOT:
+- Call AI providers.
+- Create LiveKit sessions.
+- Persist memory.
+- Execute agents.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from app.domain.uai.context.interaction_context import (
+    InteractionContext,
+)
+
+from app.domain.uai.context.learner_context import (
+    LearnerContext,
+)
+
+from app.domain.uai.context.voice_context import (
+    VoiceContext,
+)
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+from app.application.uai.character.character_resolver import (
+    CharacterResolver,
+)
+
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class InteractionContextBuilder:
+    """
+    Builds the complete UAI interaction context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_resolver: WorldResolver,
+        character_resolver: CharacterResolver,
+    ) -> None:
+
+        self._world_resolver = (
+            world_resolver
+        )
+
+        self._character_resolver = (
+            character_resolver
+        )
+
+
+    def build(
+        self,
+        *,
+        learner: LearnerContext,
+        world_id: str,
+        character_id: str,
+        voice: VoiceContext,
+    ) -> InteractionContext:
+        """
+        Build interaction context.
+        """
+
+        logger.info(
+            "Building interaction context",
+            extra={
+                "world_id": world_id,
+                "character_id": character_id,
+            },
+        )
+
+
+        world = (
+            self._world_resolver
+            .resolve(world_id)
+        )
+
+
+        character = (
+            self._character_resolver
+            .resolve(character_id)
+        )
+
+
+        context = InteractionContext(
+            learner=learner,
+            world=world,
+            character=character,
+            voice=voice,
+        )
+
+
+        logger.info(
+            "Interaction context created",
+        )
+
+
+        return context
+
+
+
+===== WORLD RESOLVER =====
+"""
+World Resolver.
+
+Application service responsible for resolving
+the learner's active AI learning world.
+
+Responsibilities
+----------------
+
+- Retrieve world configuration.
+- Validate world availability.
+- Create WorldContext.
+
+Does NOT
+--------
+
+- Execute AI models.
+- Manage characters.
+- Create conversations.
+- Handle persistence directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Protocol
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class WorldRepository(Protocol):
+    """
+    Repository contract for world retrieval.
+    """
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ):
+        """
+        Retrieve a world configuration.
+        """
+        ...
+
+
+class WorldResolver:
+    """
+    Resolves a learning world into runtime context.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_repository: WorldRepository,
+    ) -> None:
+        self._world_repository = world_repository
+
+    def resolve(
+        self,
+        world_id: str,
+    ) -> WorldContext:
+        """
+        Resolve world configuration.
+
+        Returns
+        -------
+        WorldContext
+            Validated world interaction context.
+        """
+
+        logger.info(
+            "Resolving world context",
+            extra={
+                "world_id": world_id,
+            },
+        )
+
+        world = (
+            self._world_repository
+            .get_by_id(world_id)
+        )
+
+        if world is None:
+            raise ValueError(
+                f"World not found: {world_id}"
+            )
+
+        return WorldContext(
+            world_id=world.id,
+            name=world.name,
+            language_code=world.language_code,
+            available_characters=(
+                tuple(
+                    world.available_characters
+                )
+            ),
+        )
+
+
+===== YAML WORLD REPOSITORY =====
+"""
+YAML World Repository.
+
+Infrastructure implementation for loading
+World configurations from YAML files.
+
+Implements:
+
+WorldRepository
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+class WorldConfiguration:
+    """
+    Infrastructure representation of a world.
+
+    Validates the shape and required values of the
+    loaded YAML configuration before it can be consumed
+    by the application layer.
+    """
+
+    def __init__(
+        self,
+        data: dict[str, Any],
+    ) -> None:
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "World configuration must be a mapping."
+            )
+
+        self.id = self._required_string(
+            data,
+            "id",
+            "World id cannot be empty.",
+        )
+
+        self.name = self._required_string(
+            data,
+            "name",
+            "World name cannot be empty.",
+        )
+
+        self.language_code = self._required_string(
+            data,
+            "language_code",
+            "Language code cannot be empty.",
+        )
+
+        available_characters = data.get(
+            "available_characters",
+            [],
+        )
+
+        if not isinstance(
+            available_characters,
+            list,
+        ):
+            raise ValueError(
+                "available_characters must be a list."
+            )
+
+        validated_characters: list[str] = []
+
+        for character_id in available_characters:
+
+            if not isinstance(
+                character_id,
+                str,
+            ):
+                raise ValueError(
+                    "Character id must be a string."
+                )
+
+            if not character_id.strip():
+                raise ValueError(
+                    "Character id cannot be empty."
+                )
+
+            validated_characters.append(
+                character_id
+            )
+
+        self.available_characters = (
+            validated_characters
+        )
+
+    @staticmethod
+    def _required_string(
+        data: dict[str, Any],
+        field_name: str,
+        error_message: str,
+    ) -> str:
+        """
+        Return a required non-empty string field.
+        """
+
+        value = data.get(field_name)
+
+        if not isinstance(value, str):
+            raise ValueError(error_message)
+
+        if not value.strip():
+            raise ValueError(error_message)
+
+        return value
+
+
+class YamlWorldRepository:
+    """
+    Loads worlds from YAML files.
+    """
+
+    def __init__(
+        self,
+        *,
+        worlds_path: Path,
+    ) -> None:
+
+        self._worlds_path = worlds_path
+
+    def get_by_id(
+        self,
+        world_id: str,
+    ) -> WorldConfiguration | None:
+        """
+        Load a world configuration by its identifier.
+        """
+
+        file_path = (
+            self._worlds_path.resolve()
+            / f"{world_id}.yaml"
+        )
+
+        if not file_path.exists():
+            return None
+
+        with file_path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = yaml.safe_load(file)
+
+        return WorldConfiguration(data)
+
+===== WORLD CONTEXT TEST =====
+"""
+Tests for WorldContext.
+"""
+
+import pytest
+
+from app.domain.uai.context.world_context import (
+    WorldContext,
+)
+
+
+def test_create_valid_world_context():
+
+    context = WorldContext(
+        world_id="french_world",
+        name="French World",
+        language_code="fr",
+    )
+
+    assert context.language_code == "fr"
+
+
+def test_empty_world_id_is_rejected():
+
+    with pytest.raises(ValueError):
+
+        WorldContext(
+            world_id="",
+            name="French",
+            language_code="fr",
+        )
+
+
+def test_world_supports_characters():
+
+    context = WorldContext(
+        world_id="french_world",
+        name="French World",
+        language_code="fr",
+        available_characters=(
+            "yeti",
+        ),
+    )
+
+    assert (
+        "yeti"
+        in context.available_characters
+    )

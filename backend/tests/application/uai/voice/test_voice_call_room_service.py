@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for Voice Call Room Service.
 
 Validates application orchestration
@@ -111,3 +111,6 @@ def test_character_identity_is_preserved():
     assert character.participant_id == (
         "yeti"
     )
+
+
+

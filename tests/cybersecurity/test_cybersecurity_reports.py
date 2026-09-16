@@ -1,6 +1,6 @@
 ﻿import pytest
 
-from backend.cybersecurity.intelligence_report_service import (
+from cybersecurity.intelligence_report_service import (
     CybersecurityIntelligenceReportService,
 )
 
@@ -59,3 +59,4 @@ async def test_daily_report_from_intelligence():
         ==
         "test@example.com"
     )
+

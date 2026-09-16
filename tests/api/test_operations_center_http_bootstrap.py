@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyChatBot Operations Center HTTP bootstrap tests.
 
 Validates that the existing FastAPI application bootstrap
@@ -11,7 +11,7 @@ or a second Runtime.
 
 from fastapi.testclient import TestClient
 
-from backend.api.main import create_app
+from api.main import create_app
 
 
 def test_operations_center_dashboard_route_is_registered() -> None:

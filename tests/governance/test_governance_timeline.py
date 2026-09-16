@@ -1,4 +1,4 @@
-from backend.governance.timeline.governance_timeline_service import (
+﻿from governance.timeline.governance_timeline_service import (
     GovernanceTimelineService,
 )
 
@@ -26,3 +26,4 @@ def test_timeline_is_read_only():
 
     assert not hasattr(service, "execute")
     assert not hasattr(service, "approve")
+

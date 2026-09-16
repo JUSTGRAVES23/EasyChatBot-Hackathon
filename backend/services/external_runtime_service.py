@@ -1,94 +1,43 @@
-"""
+﻿"""
 External Runtime Application Service.
 
-Provides the application-layer boundary to the external/user-assistance
-AI Runtime.
-
-Architecture:
-
-Application
-    |
-    v
-ExternalRuntimeService
-    |
-    v
-CapabilityGateway
-    |
-    v
-CapabilityRegistry
-    |
-    v
-Capability Executor
-
+Application-facing boundary for governed Runtime capability execution.
 
 Responsibilities:
 
-- receive approved capability requests from application services;
-- delegate execution to the external Runtime;
-- keep API routes independent from Runtime implementation details;
-- preserve dependency injection.
+- accept application CapabilityRequest instances;
+- validate the request;
+- delegate execution to the injected CapabilityGateway.
 
-This service does not:
+Does NOT:
 
-- implement capability business logic;
-- construct capability executors;
-- construct the CapabilityRegistry;
-- construct the CapabilityGateway;
-- make governance decisions;
-- call providers directly;
-- execute agents directly;
-- modify production systems.
-
-The external Runtime remains responsible for capability execution
-and governance enforcement.
+- compose Runtime dependencies;
+- create providers;
+- create gateways;
+- access the ExternalRuntimeContainer;
+- bypass Runtime governance;
+- execute providers directly.
 """
 
 from __future__ import annotations
 
+from typing import Any
 
-from src.ai_runtime.capabilities.gateway import (
-    CapabilityGateway,
-)
-
-from src.ai_runtime.capabilities.models import (
-    CapabilityRequest,
-    CapabilityResult,
-)
+from src.ai_runtime.capabilities.gateway import CapabilityGateway
+from src.ai_runtime.capabilities.models import CapabilityRequest
 
 
 class ExternalRuntimeService:
-    """
-    Application-layer adapter for the external AI Runtime.
-
-    The CapabilityGateway is injected by the application
-    composition layer.
-
-    This keeps the application layer independent from:
-
-    - capability registry;
-    - executor implementations;
-    - provider integrations.
-    """
+    """Application-facing boundary for governed Runtime execution."""
 
     def __init__(
         self,
+        *,
         gateway: CapabilityGateway,
     ) -> None:
-        """
-        Initialise External Runtime service.
-
-        Args:
-            gateway:
-                Configured external Runtime gateway.
-
-        Raises:
-            ValueError:
-                If gateway is missing.
-        """
-
         if gateway is None:
             raise ValueError(
-                "CapabilityGateway cannot be None."
+                "CapabilityGateway cannot be None"
             )
 
         self._gateway = gateway
@@ -96,30 +45,23 @@ class ExternalRuntimeService:
     async def execute(
         self,
         request: CapabilityRequest,
-    ) -> CapabilityResult:
+    ) -> Any:
         """
-        Execute an approved Runtime capability.
-
-        Governance and execution remain delegated to
-        CapabilityGateway.
+        Delegate a validated application request to the
+        canonical CapabilityGateway.
 
         Args:
             request:
-                Explicit Runtime capability request.
-
-        Returns:
-            Provider-independent CapabilityResult.
+                Application Runtime capability request.
 
         Raises:
             ValueError:
-                If request is missing.
+                If request is None.
         """
 
         if request is None:
             raise ValueError(
-                "CapabilityRequest cannot be None."
+                "CapabilityRequest cannot be None"
             )
 
-        return await self._gateway.execute(
-            request,
-        )
+        return await self._gateway.execute(request)

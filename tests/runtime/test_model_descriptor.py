@@ -1,6 +1,6 @@
-from backend.runtime.models.model_id import ModelId
-from backend.runtime.models.model_capabilities import ModelCapabilities
-from backend.runtime.models.model_descriptor import ModelDescriptor
+﻿from runtime.models.model_id import ModelId
+from runtime.models.model_capabilities import ModelCapabilities
+from runtime.models.model_descriptor import ModelDescriptor
 
 
 def test_model_id():

@@ -1,82 +1,39 @@
-"""
-Runtime Application Service.
+﻿from __future__ import annotations
 
-Application boundary for External Runtime execution.
-
-Responsibilities:
-
-- translate application requests into Runtime contracts;
-- create CapabilityRequest objects;
-- generate request identifiers;
-- delegate execution to ExternalRuntimeService;
-- return Runtime capability results.
-
-This service does not:
-
-- expose HTTP concerns;
-- raise FastAPI HTTP exceptions;
-- create providers;
-- create agents;
-- implement capabilities;
-- implement governance;
-- bypass Runtime controls.
-
-Architecture:
-
-API
- |
- v
-RuntimeApplicationService
- |
- v
-ExternalRuntimeService
- |
- v
-CapabilityGateway
- |
- v
-CapabilityExecutor
-"""
-
-from __future__ import annotations
-
-from collections.abc import Mapping
+from typing import Any
 from uuid import uuid4
 
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
 
+from src.ai_runtime.capabilities.actor_context import RuntimeActorContext
 from src.ai_runtime.capabilities.models import (
-    CapabilityName,
     CapabilityRequest,
-    CapabilityResult,
 )
 
 
 class RuntimeApplicationService:
     """
-    Application service for External Runtime execution.
+    Application service translating application requests into
+    governed Runtime capability requests.
 
-    Keeps API routes thin by moving Runtime
-    application orchestration outside HTTP layer.
+    This service delegates execution to ExternalRuntimeService.
+
+    It does not:
+
+    - access the Runtime container;
+    - access the CapabilityGateway directly;
+    - select providers;
+    - call provider SDKs;
+    - implement Runtime governance.
     """
 
     def __init__(
         self,
+        *,
         runtime_service: ExternalRuntimeService,
     ) -> None:
-        """
-        Initialise RuntimeApplicationService.
-
-        Args:
-            runtime_service:
-                Configured ExternalRuntimeService.
-
-        Raises:
-            ValueError:
-                If runtime service is missing.
-        """
 
         if runtime_service is None:
             raise ValueError(
@@ -89,73 +46,41 @@ class RuntimeApplicationService:
         self,
         *,
         capability: str,
-        payload: Mapping[str, object],
-    ) -> CapabilityResult:
+        payload: dict[str, Any],
+        actor: RuntimeActorContext | None = None,
+    ) -> Any:
         """
-        Execute an External Runtime capability.
-
-        The application layer translates external
-        application requests into Runtime contracts.
-
-        Args:
-
-            capability:
-                Requested Runtime capability.
-
-            payload:
-                Capability execution payload.
-
-        Returns:
-
-            CapabilityResult produced by Runtime.
-
-        Raises:
-
-            ValueError:
-                If input is invalid.
+        Validate application input, create a CapabilityRequest,
+        and delegate execution to ExternalRuntimeService.
         """
 
-        if not isinstance(
-            capability,
-            str,
+        if (
+            not isinstance(capability, str)
+            or not capability.strip()
         ):
             raise ValueError(
-                "Capability must be a string."
-            )
-
-        if not capability.strip():
-            raise ValueError(
-                "Capability cannot be empty."
+                "Capability cannot be empty"
             )
 
         if payload is None:
             raise ValueError(
-                "Payload cannot be None."
+                "Payload cannot be None"
             )
 
-        try:
-            capability_name = CapabilityName(
-                capability,
-            )
-
-        except ValueError as exc:
+        if not isinstance(payload, dict):
             raise ValueError(
-                f"Unsupported capability: {capability}"
-            ) from exc
-
-        execution_payload = {
-            "user_id": "demo-user",
-            **dict(payload),
-        }
+                "Payload must be a dictionary"
+            )
 
         request = CapabilityRequest(
-            request_id=str(
-                uuid4(),
-            ),
-            capability=capability_name,
-            payload=execution_payload,
+            capability=capability,
+            request_id=str(uuid4()),
+            payload=payload,
+            requested_by="application",
+            actor=actor,
         )
 
         return await self._runtime_service.execute(
             request,
         )
+

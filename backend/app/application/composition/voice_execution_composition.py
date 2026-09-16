@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Execution Composition.
 
 Application composition root
@@ -18,7 +18,7 @@ Does NOT:
 from __future__ import annotations
 
 
-from backend.app.application.uai.voice.voice_call_execution_service import (
+from app.application.uai.voice.voice_call_execution_service import (
     VoiceCallExecutionService,
 )
 
@@ -67,3 +67,5 @@ __all__ = [
     "create_voice_call_execution_service",
     "build_voice_call_execution_service",
 ]
+
+

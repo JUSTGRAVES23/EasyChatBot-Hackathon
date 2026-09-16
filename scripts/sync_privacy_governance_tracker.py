@@ -1,12 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
 )
-from backend.app.application.privacy.privacy_governance_excel_sync import (
+from app.application.privacy.privacy_governance_excel_sync import (
     PrivacyGovernanceExcelSync,
 )
 
@@ -38,3 +38,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,0 +1,999 @@
+﻿=== P1.5.2 PRODUCTION BOOTSTRAP WIRING AUDIT ===
+
+=== beta_telegram_production.py ===
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from backend.app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from backend.app.application.composition.beta_telegram_composition import (
+    BetaTelegramComposition,
+    create_beta_telegram_composition,
+)
+from backend.app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+from backend.app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+from backend.app.infrastructure.persistence.postgresql_beta_access_repository import (
+    PostgreSQLBetaTokenRepository,
+    PostgreSQLBetaUserRepository,
+    PostgreSQLTelegramBindingRepository,
+)
+from backend.app.infrastructure.persistence.postgresql_conversation_event_repository import (
+    PostgreSQLConversationEventRepository,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BetaTelegramProductionComposition:
+    """
+    Production infrastructure composition for the Beta Telegram
+    classroom.
+
+    Dependency graph:
+
+        DATABASE_URL
+            â†“
+        SQLAlchemy engine
+            â†“
+        session factory
+            â†“
+        PostgreSQL repositories
+            â†“
+        privacy / validation services
+            â†“
+        conversation runtime
+            â†“
+        Beta Telegram application composition
+            â†“
+        Telegram adapter
+            â†“
+        Telegram runtime
+
+    This class composes dependencies only.
+    It does not start Telegram polling.
+    """
+
+    beta_telegram: BetaTelegramComposition
+    database_engine: Any
+    session_factory: Any
+
+    @property
+    def runtime(self) -> Any:
+        return self.beta_telegram.runtime
+
+    @property
+    def adapter(self) -> Any:
+        return self.beta_telegram.adapter
+
+    @property
+    def beta_access_service(self) -> Any:
+        return self.beta_telegram.beta_access_service
+
+    @property
+    def conversation_runtime(self) -> Any:
+        return self.beta_telegram.conversation_runtime
+
+    @property
+    def conversation_service(self) -> Any:
+        return self.beta_telegram.conversation_service
+
+    @property
+    def conversation_boundary(self) -> Any:
+        return self.beta_telegram.conversation_boundary
+
+    @property
+    def private_chat_gate(self) -> Any:
+        return self.beta_telegram.private_chat_gate
+
+    @property
+    def start_handler(self) -> Any:
+        return self.beta_telegram.start_handler
+
+
+def create_production_beta_telegram_composition(
+    *,
+    expiration_minutes: int = 1440,
+    database_engine: Any | None = None,
+    session_factory: Any | None = None,
+    database_engine_factory: Callable[[], Any] | None = None,
+    session_factory_factory: Callable[[Any], Any] | None = None,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: (
+        Callable[[], ConversationRuntime] | None
+    ) = None,
+) -> BetaTelegramProductionComposition:
+    """
+    Build the production Beta Telegram dependency graph.
+
+    All infrastructure dependencies remain injectable.
+
+    Production:
+
+        DATABASE_URL
+            â†“
+        SQLAlchemy
+            â†“
+        PostgreSQL repositories
+            â†“
+        Beta Telegram application graph
+
+    Tests may inject:
+
+        database_engine_factory
+        session_factory_factory
+        conversation_runtime_factory
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if (
+        database_engine is not None
+        and database_engine_factory is not None
+    ):
+        raise ValueError(
+            "Provide either database_engine or "
+            "database_engine_factory, not both."
+        )
+
+    if (
+        session_factory is not None
+        and session_factory_factory is not None
+    ):
+        raise ValueError(
+            "Provide either session_factory or "
+            "session_factory_factory, not both."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    # =========================================================
+    # DATABASE ENGINE
+    # =========================================================
+
+    if database_engine is None:
+        resolved_engine_factory = (
+            database_engine_factory
+            or create_database_engine
+        )
+
+        database_engine = resolved_engine_factory()
+
+    # =========================================================
+    # SESSION FACTORY
+    # =========================================================
+
+    if session_factory is None:
+        resolved_session_factory = (
+            session_factory_factory
+            or create_session_factory
+        )
+
+        session_factory = resolved_session_factory(
+            database_engine,
+        )
+
+    # =========================================================
+    # PERSISTENCE
+    # =========================================================
+
+    beta_user_repository = PostgreSQLBetaUserRepository(
+        session_factory,
+    )
+
+    beta_token_repository = PostgreSQLBetaTokenRepository(
+        session_factory,
+    )
+
+    telegram_binding_repository = (
+        PostgreSQLTelegramBindingRepository(
+            session_factory,
+        )
+    )
+
+    conversation_event_repository = (
+        PostgreSQLConversationEventRepository(
+            session_factory,
+        )
+    )
+
+    # =========================================================
+    # PRIVACY / VALIDATION
+    # =========================================================
+
+    privacy_identifier_service = (
+        PrivacyIdentifierService()
+    )
+
+    conversation_event_validator = (
+        ConversationEventValidator()
+    )
+
+    # =========================================================
+    # APPLICATION COMPOSITION
+    # =========================================================
+
+    beta_telegram = create_beta_telegram_composition(
+        user_repository=beta_user_repository,
+        token_repository=beta_token_repository,
+        binding_repository=telegram_binding_repository,
+        conversation_event_repository=(
+            conversation_event_repository
+        ),
+        privacy_identifier_service=(
+            privacy_identifier_service
+        ),
+        conversation_event_validator=(
+            conversation_event_validator
+        ),
+        expiration_minutes=expiration_minutes,
+        conversation_runtime=conversation_runtime,
+        conversation_runtime_factory=(
+            conversation_runtime_factory
+        ),
+    )
+
+    logger.info(
+        "Production Beta Telegram composition created."
+    )
+
+    return BetaTelegramProductionComposition(
+        beta_telegram=beta_telegram,
+        database_engine=database_engine,
+        session_factory=session_factory,
+    )
+
+
+__all__ = [
+    "BetaTelegramProductionComposition",
+    "create_production_beta_telegram_composition",
+]
+
+=== telegram_bootstrap.py ===
+from __future__ import annotations
+
+import logging
+
+from backend.app.application.composition.beta_telegram_production import (
+    BetaTelegramProductionComposition,
+    create_production_beta_telegram_composition,
+)
+from backend.app.application.composition.conversation_composition import (
+    create_conversation_runtime,
+)
+from backend.app.infrastructure.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+from backend.app.infrastructure.telegram.telegram_bot_runtime import (
+    TelegramBotRuntime,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+_telegram_production: (
+    BetaTelegramProductionComposition | None
+) = None
+
+
+def create_telegram_runtime() -> TelegramBotRuntime:
+    """
+    Create the production Beta Telegram runtime.
+
+    Existing dependency seams remain exposed at this module level
+    intentionally. This preserves deterministic test composition
+    and allows controlled dependency injection without changing
+    production behavior.
+    """
+
+    global _telegram_production
+
+    if _telegram_production is None:
+        _telegram_production = (
+            create_production_beta_telegram_composition(
+                database_engine_factory=(
+                    create_database_engine
+                ),
+                session_factory_factory=(
+                    create_session_factory
+                ),
+                conversation_runtime_factory=(
+                    create_conversation_runtime
+                ),
+            )
+        )
+
+        logger.info(
+            "Production Beta Telegram composition created."
+        )
+
+    return _telegram_production.beta_telegram.runtime
+
+
+async def start_telegram_runtime() -> None:
+    """
+    Start the production Telegram runtime.
+    """
+
+    runtime = create_telegram_runtime()
+
+    await runtime.start()
+
+    logger.info(
+        "Production Beta Telegram runtime started."
+    )
+
+
+async def stop_telegram_runtime() -> None:
+    """
+    Stop the production Telegram runtime.
+    """
+
+    if _telegram_production is None:
+        return
+
+    await _telegram_production.beta_telegram.runtime.stop()
+
+    logger.info(
+        "Production Beta Telegram runtime stopped."
+    )
+
+
+def reset_telegram_runtime() -> None:
+    """
+    Reset the Telegram production composition.
+
+    Intended primarily for tests and controlled lifecycle
+    management.
+    """
+
+    global _telegram_production
+
+    _telegram_production = None
+
+
+def get_telegram_production_composition() -> (
+    BetaTelegramProductionComposition
+):
+    """
+    Return the active production Beta Telegram composition.
+    """
+
+    if _telegram_production is None:
+        raise RuntimeError(
+            "Telegram production composition has not been created."
+        )
+
+    return _telegram_production
+
+
+__all__ = [
+    "create_telegram_runtime",
+    "start_telegram_runtime",
+    "stop_telegram_runtime",
+    "reset_telegram_runtime",
+    "get_telegram_production_composition",
+]
+
+=== main.py ===
+"""
+EasyChatBot FastAPI Application.
+
+Application entry point.
+
+Responsibilities:
+- Create FastAPI application.
+- Register active API routers.
+- Configure application metadata.
+- Manage application lifecycle.
+
+Does NOT:
+- Execute AI agents.
+- Handle business logic.
+- Manage voice sessions.
+- Call external providers directly.
+- Implement individual application services.
+- Execute cybersecurity workflows.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+
+#
+# Academy activation
+#
+
+from backend.app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+
+from backend.app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+#
+# Existing authentication persistence boundary
+#
+
+from backend.app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+
+
+#
+# Existing canonical async PostgreSQL persistence boundary
+#
+
+from backend.app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+
+
+#
+# Existing outbound-only Telegram announcement boundary
+#
+
+from backend.app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+from backend.app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+
+
+#
+# Scheduler lifecycle boundary
+#
+
+from backend.cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+#
+# Governance APIs
+#
+
+from backend.governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+
+from backend.governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+from backend.governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+
+from backend.governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+
+
+#
+# Provider Management Controls
+#
+
+from backend.app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+
+
+#
+# Privacy Governance
+#
+
+from backend.app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+
+
+#
+# M7.2 Privacy Screening
+#
+
+from backend.app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+
+from backend.app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+
+from backend.app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+
+from backend.app.application.privacy.screening.service import (
+    ScreeningService,
+)
+
+
+#
+# M1.3 Email Workflows
+#
+# Read-only Operations Center visibility.
+#
+# Does NOT:
+# - start workflows;
+# - stop workflows;
+# - modify schedules;
+# - expose provider credentials.
+#
+
+from backend.app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+
+
+#
+# Voice APIs
+#
+
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+
+
+#
+# AI Operations Center
+#
+
+from app.api.operations_center import (
+    router as operations_center_router,
+)
+
+
+#
+# Cybersecurity APIs
+#
+
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+
+
+#
+# Announcement composition boundary
+#
+
+def _create_announcement_components():
+    """
+    Compose the existing outbound-only Telegram announcement boundary.
+
+    This creates an outbound Telegram client only.
+
+    It does NOT:
+    - poll Telegram;
+    - register handlers;
+    - start polling;
+    - create a second Telegram bot runtime.
+    """
+
+    telegram_client = TelegramAnnouncementClient()
+
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    return (
+        telegram_client,
+        announcement_publisher,
+    )
+
+
+#
+# FastAPI lifecycle
+#
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    """
+    Application lifecycle.
+
+    The scheduler is composed once per application and stored on
+    application.state.
+
+    FastAPI only controls scheduler lifecycle.
+    """
+
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+
+def create_application() -> FastAPI:
+    """
+    Create and configure FastAPI application.
+
+    Academy production composition is explicitly activated only when
+    both Academy activation flags are enabled.
+    """
+
+    #
+    # Academy production composition
+    #
+
+    academy_config = AcademyActivationConfig.from_environment()
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+
+        academy_engine = create_async_database_engine()
+
+        academy_session_factory = create_async_session_factory(
+            academy_engine,
+        )
+
+        #
+        # Preserve existing authentication repository boundary.
+        #
+
+        PostgreSQLAuthenticationRepository(
+            academy_session_factory,
+        )
+
+        #
+        # Existing outbound Telegram announcement boundary.
+        #
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        #
+        # Compose Academy using existing boundaries.
+        #
+
+        academy_one_week_workflow = create_academy_one_week_workflow(
+            session_factory=academy_session_factory,
+            telegram_bot=announcement_telegram_client,
+        )
+
+    #
+    # Shared scheduler
+    #
+    # Exactly one scheduler runtime is composed.
+    #
+
+    scheduler_runtime = create_cybersecurity_scheduler_runtime(
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    #
+    # Application state
+    #
+
+    application.state.scheduler_runtime = scheduler_runtime
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    #
+    # CORS
+    #
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=[
+            "*",
+        ],
+        allow_headers=[
+            "*",
+        ],
+    )
+
+    #
+    # Voice APIs
+    #
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    #
+    # AI Operations Center
+    #
+
+    application.include_router(
+        operations_center_router,
+    )
+
+    #
+    # M1.3 Email Workflows
+    #
+    # Read-only visibility only.
+    #
+
+    application.include_router(
+        create_email_workflows_router(),
+    )
+
+    #
+    # Privacy Governance Operations Center
+    #
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    #
+    # M7.2 Privacy Screening
+    #
+
+    processing_registry = create_beta1_processing_registry()
+
+    screening_service = ScreeningService()
+
+    screening_adapter = ProcessingActivityScreeningAdapter(
+        screening_service,
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    #
+    # Provider Management Controls
+    #
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    #
+    # Governance Audit API
+    #
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    #
+    # Governance Operations API
+    #
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    #
+    # Governance Evidence Timeline API
+    #
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    #
+    # Governance Change Lifecycle API
+    #
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    #
+    # Cybersecurity Intelligence
+    #
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    #
+    # Cybersecurity Decision Support
+    #
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    #
+    # Cybersecurity Reports
+    #
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    #
+    # Cybersecurity Live Reports
+    #
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]
+
+=== RELEVANT REFERENCES ===
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:79: def create_beta_telegram_composition(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:192: __all__ = ["BetaTelegramComposition", "create_beta_telegram_composition"]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:12: create_beta_telegram_composition,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:21: create_database_engine,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:22: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:177: or create_database_engine
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:189: or create_session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:236: beta_telegram = create_beta_telegram_composition(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\postgresql_health_check.py:12: create_database_engine,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\health\postgresql_health_check.py:29: engine = self._engine or create_database_engine()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:33: def create_database_engine():
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py:46: def create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:5: from backend.app.application.composition.beta_telegram_production import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:13: create_database_engine,
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:14: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:45: create_database_engine
+C:\AI Folder\EasyChatBot-Hackathon\backend\application\telegram_bootstrap.py:48: create_session_factory
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\check_beta_database.py:39: create_database_engine,
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\check_beta_database.py:50: engine = create_database_engine()
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:68: create_database_engine,
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:69: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:102: engine = create_database_engine()
+C:\AI Folder\EasyChatBot-Hackathon\backend\scripts\create_beta_demo_users.py:104: session_factory = create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_composition.py:49: "backend.application.telegram_bootstrap.create_database_engine",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_telegram_composition.py:54: "backend.application.telegram_bootstrap.create_session_factory",
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:20: create_database_engine,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:21: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:91: engine = create_database_engine()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:92: session_factory = create_session_factory(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws18_production_session_continuity.py:515: engine = create_database_engine()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws19_production_telegram_full_stack.py:13: from backend.app.application.composition.beta_telegram_production import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:11: create_session_factory,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:54: session_factory = create_session_factory(engine)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:65: session_factory = create_session_factory(engine)
+
+=== TARGETED TEST ===
+FF                                                                       [100%]
+================================== FAILURES ===================================
+______________ test_runtime_captures_successful_provider_result _______________
+async def functions are not natively supported.
+You need to install a suitable plugin for your async framework, for example:
+  - anyio
+  - pytest-asyncio
+  - pytest-tornasync
+  - pytest-trio
+  - pytest-twisted
+_________ test_runtime_captures_failed_provider_result_before_raising _________
+async def functions are not natively supported.
+You need to install a suitable plugin for your async framework, for example:
+  - anyio
+  - pytest-asyncio
+  - pytest-tornasync
+  - pytest-trio
+  - pytest-twisted
+============================== warnings summary ===============================
+backend\tests\beta_access\test_conversation_runtime_usage_capture.py:30
+  C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:30: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+backend\tests\beta_access\test_conversation_runtime_usage_capture.py:66
+  C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:66: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED backend/tests/beta_access/test_conversation_runtime_usage_capture.py::test_runtime_captures_successful_provider_result
+FAILED backend/tests/beta_access/test_conversation_runtime_usage_capture.py::test_runtime_captures_failed_provider_result_before_raising
+2 failed, 2 warnings in 0.40s
+

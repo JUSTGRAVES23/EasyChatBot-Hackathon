@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Trigger API.
 
 HTTP boundary for starting
@@ -29,12 +29,12 @@ from fastapi import (
 from pydantic import BaseModel
 
 
-from backend.app.application.uai.voice.voice_call_trigger_service import (
+from app.application.uai.voice.voice_call_trigger_service import (
     VoiceCallTriggerService,
 )
 
 
-from backend.app.application.composition.voice_call_trigger_composition import (
+from app.application.composition.voice_call_trigger_composition import (
     build_voice_call_trigger_service,
 )
 
@@ -145,4 +145,5 @@ def trigger_voice_call(
 __all__ = [
     "router",
 ]
+
 

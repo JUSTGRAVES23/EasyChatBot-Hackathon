@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for OpenAIProvider.
 
 These tests never call the real OpenAI API.
@@ -11,11 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.llm.openai_provider import (
+from providers.llm.openai_provider import (
     OpenAIProvider,
 )
 

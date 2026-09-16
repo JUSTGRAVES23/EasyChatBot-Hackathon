@@ -20,23 +20,17 @@ Does NOT:
 
 from __future__ import annotations
 
-
 from datetime import (
     datetime,
     timedelta,
     timezone,
 )
 
-
 import os
 import uuid
 
-
 from dotenv import load_dotenv
-
-
 from livekit import api
-
 
 from app.domain.uai.voice.voice_connection_token import (
     VoiceConnectionToken,
@@ -46,15 +40,12 @@ from app.domain.uai.voice.voice_connection_token import (
 load_dotenv()
 
 
-
 class LiveKitTokenService:
     """
     Real LiveKit access-token infrastructure adapter.
     """
 
-
-
-    def create_token(
+    def create_connection_token(
         self,
         *,
         room_name: str,
@@ -76,23 +67,15 @@ class LiveKitTokenService:
             Token validity period.
         """
 
-
-
         if not room_name.strip():
-
             raise ValueError(
                 "room_name cannot be empty."
             )
 
-
-
         if expires_minutes <= 0:
-
             raise ValueError(
                 "expires_minutes must be positive."
             )
-
-
 
         participant_identity = (
             identity.strip()
@@ -100,43 +83,28 @@ class LiveKitTokenService:
             else f"learner-{uuid.uuid4()}"
         )
 
-
-
         if not participant_identity:
-
             raise ValueError(
                 "identity cannot be empty."
             )
-
-
 
         api_key = os.getenv(
             "LIVEKIT_API_KEY"
         )
 
-
-
         api_secret = os.getenv(
             "LIVEKIT_API_SECRET"
         )
 
-
-
         if not api_key:
-
             raise RuntimeError(
                 "LIVEKIT_API_KEY is not configured."
             )
 
-
-
         if not api_secret:
-
             raise RuntimeError(
                 "LIVEKIT_API_SECRET is not configured."
             )
-
-
 
         expires_at = (
             datetime.now(
@@ -146,8 +114,6 @@ class LiveKitTokenService:
                 minutes=expires_minutes,
             )
         )
-
-
 
         access_token = (
             api.AccessToken(
@@ -176,13 +142,9 @@ class LiveKitTokenService:
             )
         )
 
-
-
         token = (
             access_token.to_jwt()
         )
-
-
 
         return VoiceConnectionToken(
             token=token,
@@ -191,8 +153,28 @@ class LiveKitTokenService:
             expires_at=expires_at,
         )
 
+    def create_token(
+        self,
+        *,
+        room_name: str,
+        identity: str | None = None,
+        expires_minutes: int = 30,
+    ) -> VoiceConnectionToken:
+        """
+        Backward-compatible alias.
+
+        New application code must use
+        create_connection_token().
+        """
+
+        return self.create_connection_token(
+            room_name=room_name,
+            identity=identity,
+            expires_minutes=expires_minutes,
+        )
 
 
 __all__ = [
     "LiveKitTokenService",
 ]
+

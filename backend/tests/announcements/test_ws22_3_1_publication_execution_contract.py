@@ -1,18 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
 
-from backend.app.application.announcements.execution.contracts import (
+from app.application.announcements.execution.contracts import (
     PublicationExecutionRequest,
     PublicationExecutionStatus,
 )
-from backend.app.application.announcements.execution.publication_execution_service import (
+from app.application.announcements.execution.publication_execution_service import (
     PublicationExecutionService,
 )
-from backend.app.domain.announcements.publication_status import PublicationStatus
+from app.domain.announcements.publication_status import PublicationStatus
 
 
 @dataclass
@@ -147,3 +147,4 @@ async def test_publisher_failure_updates_lifecycle_and_audits_stable_error_code(
     assert len(audit.failures) == 1
     assert audit.failures[0]["error_code"] == "RUNTIMEERROR"
     assert "private provider response" not in str(audit.failures).lower()
+

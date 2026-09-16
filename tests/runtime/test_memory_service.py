@@ -1,8 +1,8 @@
-from backend.memory.memory_service import (
+﻿from memory.memory_service import (
     MemoryService,
 )
 
-from backend.memory.memory_store import (
+from memory.memory_store import (
     MemoryStore,
 )
 

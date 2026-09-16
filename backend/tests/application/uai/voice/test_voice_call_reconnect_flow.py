@@ -1,17 +1,17 @@
-"""
+﻿"""
 Tests for Voice Call Reconnect Flow.
 
 Validates the complete application flow:
 
 VoiceCall
     |
-    ↓
+    â†“
 Disconnect
     |
-    ↓
+    â†“
 Reconnect validation
     |
-    ↓
+    â†“
 New VoiceCallSession
 
 The same VoiceCall identity must
@@ -284,3 +284,6 @@ def test_completed_call_cannot_reconnect():
     except ValueError:
 
         assert True
+
+
+

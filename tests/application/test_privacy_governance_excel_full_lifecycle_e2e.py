@@ -1,23 +1,23 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
 from openpyxl import load_workbook
 
-from backend.app.application.privacy.privacy_approval_record import (
+from app.application.privacy.privacy_approval_record import (
     ApprovalDecision,
 )
-from backend.app.application.privacy.privacy_change import (
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     create_privacy_governance_composition,
 )
-from backend.app.application.privacy.privacy_governance_excel_sync import (
+from app.application.privacy.privacy_governance_excel_sync import (
     PrivacyGovernanceExcelSync,
 )
-from backend.app.application.privacy.privacy_governance_runtime_sync import (
+from app.application.privacy.privacy_governance_runtime_sync import (
     PrivacyGovernanceRuntimeSync,
 )
 
@@ -87,19 +87,19 @@ def test_full_approved_lifecycle_projects_to_excel(
     Prove the complete 6H lifecycle:
 
         NEW_PROCESSING
-            ↓
+            â†“
         Validation PASS
-            ↓
+            â†“
         Governance Case
-            ↓
+            â†“
         PENDING_DPO_GRC
-            ↓
+            â†“
         DPO approval
-            ↓
+            â†“
         GRC approval
-            ↓
+            â†“
         APPROVED
-            ↓
+            â†“
         Excel evidence
 
     The application registries remain authoritative.
@@ -167,7 +167,7 @@ def test_full_approved_lifecycle_projects_to_excel(
     )
 
     # ---------------------------------------------------------
-    # 4. Runtime case sync → Excel.
+    # 4. Runtime case sync â†’ Excel.
     # ---------------------------------------------------------
 
     synced_case = runtime_sync.sync_case(
@@ -482,13 +482,13 @@ def test_rejection_lifecycle_projects_blocked_to_excel(
     Prove:
 
         Validation PASS
-            ↓
+            â†“
         PENDING_DPO_GRC
-            ↓
+            â†“
         Human rejection
-            ↓
+            â†“
         BLOCKED
-            ↓
+            â†“
         Excel evidence
     """
 
@@ -627,13 +627,13 @@ def test_request_changes_lifecycle_projects_blocked_to_excel(
     Prove:
 
         Validation PASS
-            ↓
+            â†“
         PENDING_DPO_GRC
-            ↓
+            â†“
         Request changes
-            ↓
+            â†“
         BLOCKED
-            ↓
+            â†“
         Excel evidence
     """
 

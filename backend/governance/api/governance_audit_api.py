@@ -1,4 +1,4 @@
-"""
+﻿"""
 Governance Audit API.
 
 Read-only API boundary for governance evidence.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from backend.governance.governance_audit_service import (
+from governance.governance_audit_service import (
     GovernanceAuditService,
 )
 
@@ -60,3 +60,4 @@ async def list_audit_events(
         ],
         "count": len(events),
     }
+

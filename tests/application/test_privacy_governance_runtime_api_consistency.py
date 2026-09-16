@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 
@@ -6,13 +6,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.api.privacy_governance import router
-from backend.app.application.privacy.privacy_change import (
+from app.api.privacy_governance import router
+from app.application.privacy.privacy_change import (
     PrivacyChange,
     PrivacyChangeRisk,
     PrivacyChangeStatus,
 )
-from backend.app.application.privacy.privacy_governance_composition import (
+from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
     reset_privacy_governance_composition_for_tests,
 )
@@ -75,19 +75,19 @@ def test_runtime_and_api_share_the_same_governance_state():
     Flow:
 
         NEW_PROCESSING
-              ↓
+              â†“
         Validation PASS
-              ↓
+              â†“
         PENDING_DPO_GRC
-              ↓
+              â†“
         Dashboard
-              ↓
+              â†“
         FastAPI API
-              ↓
+              â†“
         DPO approval
-              ↓
+              â†“
         GRC approval
-              ↓
+              â†“
         APPROVED
     """
 
@@ -319,7 +319,7 @@ def test_runtime_and_api_share_blocked_state_after_validation_failure():
     """
     Prove that validation failure propagates consistently through:
 
-        Runtime → Case Registry → Dashboard → FastAPI
+        Runtime â†’ Case Registry â†’ Dashboard â†’ FastAPI
     """
 
     composition = get_privacy_governance_composition()

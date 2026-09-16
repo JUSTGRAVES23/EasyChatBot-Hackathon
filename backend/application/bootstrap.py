@@ -1,61 +1,34 @@
-"""
-EasyChatBot Application Bootstrap.
-
-Responsible for application startup composition.
-
-Responsibilities:
-
-- create application-level services;
-- compose approved Runtime dependencies;
-- register configured services.
-
-This module does not:
-
-- execute agents;
-- execute capabilities;
-- contain business logic;
-- expose runtime state;
-- serve API requests.
-
-Runtime construction remains delegated to:
-
-    src.ai_runtime.composition
-"""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections.abc import Sequence
 
-from backend.application.factory import (
+from app.domain.authorization.permissions import (
+    Permission,
+    has_permission,
+)
+from application.factory import (
     ApplicationFactory,
 )
-
-from backend.runtime.external_runtime_container import (
+from application.internal_documentation_composition import (
+    create_internal_documentation_agent_from_repository,
+)
+from runtime.external_runtime_container import (
     configure_external_runtime_service,
     get_external_runtime_service as _get_external_runtime_service,
 )
-
-from backend.services.external_runtime_service import (
+from services.external_runtime_service import (
     ExternalRuntimeService,
 )
-
 from src.ai_runtime.composition import (
     create_external_runtime_gateway,
 )
-
+from src.ai_agents.live_intelligence_agent.composition import (
+    create_live_intelligence_agent,
+)
 from src.ai_runtime.podcast.parallel import (
     ParallelPodcastProvider,
 )
-
-from src.ai_agents.live_intelligence_agent.handler import (
-    IntelligenceProcessor,
-    LiveIntelligenceAgent,
-)
-
-from src.providers.search_provider.interface import (
-    SearchProvider,
-    SearchResult,
-)
+from src.ai_runtime.capabilities.actor_context import RuntimeActorContext
 
 
 _bootstrapped = False
@@ -88,6 +61,9 @@ def bootstrap_application() -> None:
         ),
         governance=(
             create_governance()
+        ),
+        internal_documentation_agent=(
+            create_internal_documentation_agent_from_repository()
         ),
     )
 
@@ -123,123 +99,6 @@ def reset_bootstrap() -> None:
 
 
 # =========================================================
-# Live Intelligence Runtime Dependencies
-# =========================================================
-
-
-class BootstrapLiveIntelligenceSearchProvider(
-    SearchProvider,
-):
-    """
-    Deterministic hackathon search provider.
-
-    Implements the provider-independent contract.
-
-    Production replacement:
-        real search provider adapter.
-
-    This class does not belong to Runtime.
-    It exists only as bootstrap wiring.
-    """
-
-    async def search(
-        self,
-        query: str,
-        max_results: int = 5,
-    ) -> list[SearchResult]:
-
-        results = [
-            SearchResult(
-                title=(
-                    "AI Regulation Update"
-                ),
-                url=(
-                    "https://example.com/"
-                    "ai-regulation"
-                ),
-                content=(
-                    "Latest developments in "
-                    "artificial intelligence "
-                    "regulation and technology."
-                ),
-                source="hackathon-demo",
-            ),
-            SearchResult(
-                title=(
-                    "Artificial Intelligence "
-                    "Technology News"
-                ),
-                url=(
-                    "https://example.com/"
-                    "ai-news"
-                ),
-                content=(
-                    "Recent artificial "
-                    "intelligence technology "
-                    "updates."
-                ),
-                source="hackathon-demo",
-            ),
-        ]
-
-        return results[:max_results]
-
-
-class BootstrapIntelligenceProcessor(
-    IntelligenceProcessor,
-):
-    """
-    Deterministic intelligence processor.
-
-    Temporary hackathon implementation.
-
-    Future replacement:
-        approved LLM-based processor.
-    """
-
-    async def summarise(
-        self,
-        results: list[SearchResult],
-        language: str,
-        learner_level: str,
-    ) -> tuple[str, list[str]]:
-
-        summary = (
-            f"AI intelligence summary "
-            f"adapted for {learner_level} "
-            f"learner in {language}."
-        )
-
-        key_information = [
-            "Artificial intelligence regulation",
-            "Technology developments",
-        ]
-
-        return (
-            summary,
-            key_information,
-        )
-
-
-def create_live_intelligence_agent() -> LiveIntelligenceAgent:
-    """
-    Create Live Intelligence Agent.
-
-    Runtime receives the configured agent.
-    Runtime does not create agents.
-    """
-
-    return LiveIntelligenceAgent(
-        search_provider=(
-            BootstrapLiveIntelligenceSearchProvider()
-        ),
-        processor=(
-            BootstrapIntelligenceProcessor()
-        ),
-    )
-
-
-# =========================================================
 # Podcast Runtime Dependencies
 # =========================================================
 
@@ -259,7 +118,6 @@ class BootstrapPlaceholderPodcastAgent:
         memories,
         max_results: int,
     ):
-
         from src.ai_runtime.podcast.models import (
             PodcastSearchIntent,
         )
@@ -360,12 +218,54 @@ class BootstrapGovernanceDecision:
 class BootstrapGovernance:
     """
     Temporary hackathon governance implementation.
+
+    Sensitive internal-data capabilities fail closed.
+
+    The Runtime receives a provider-independent
+    RuntimeActorContext. Application/API identity remains
+    outside the Runtime boundary.
     """
 
     def evaluate(
         self,
         request,
     ) -> BootstrapGovernanceDecision:
+
+        capability = getattr(
+            request,
+            "capability",
+            None,
+        )
+
+        capability_value = getattr(
+            capability,
+            "value",
+            capability,
+        )
+
+        if capability_value == "internal_data_read":
+            actor = getattr(
+                request,
+                "actor",
+                None,
+            )
+
+            if not isinstance(
+                actor,
+                RuntimeActorContext,
+            ):
+                return BootstrapGovernanceDecision(
+                    allowed=False,
+                )
+
+            allowed = has_permission(
+                roles=actor.roles,
+                permission=Permission.INTERNAL_DATA_READ,
+            )
+
+            return BootstrapGovernanceDecision(
+                allowed=allowed,
+            )
 
         return BootstrapGovernanceDecision(
             allowed=True,
@@ -378,3 +278,4 @@ def create_governance():
     """
 
     return BootstrapGovernance()
+

@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
-WS-21.4 — Operational Failure Recovery
+WS-21.4 â€” Operational Failure Recovery
 
 Regression tests proving that transient dependency failures do not
 permanently poison the Telegram classroom flow.
 
 Engineering rule:
-    Failure → safe response → dependency recovery → normal response.
+    Failure â†’ safe response â†’ dependency recovery â†’ normal response.
 
 This suite is intentionally deterministic. It uses failure-injection
 doubles at application boundaries rather than real Telegram/network
@@ -184,7 +184,7 @@ def make_boundary(
 
 
 # ============================================================================
-# WS-21.4.1 — Beta access recovery
+# WS-21.4.1 â€” Beta access recovery
 # ============================================================================
 
 
@@ -220,7 +220,7 @@ async def test_ws21_4_beta_access_recovers_after_transient_failure():
 
 
 # ============================================================================
-# WS-21.4.2 — AI/provider recovery
+# WS-21.4.2 â€” AI/provider recovery
 # ============================================================================
 
 
@@ -248,17 +248,17 @@ async def test_ws21_4_ai_runtime_recovers_after_transient_failure():
 
     recovered_response = await boundary.handle_message(
         telegram_user_id=7102,
-        message="Deuxième message",
+        message="DeuxiÃ¨me message",
     )
 
     assert recovered_response == "response:7102:1"
     assert conversation.history[7102] == [
-        "Deuxième message",
+        "DeuxiÃ¨me message",
     ]
 
 
 # ============================================================================
-# WS-21.4.3 — Persistence recovery
+# WS-21.4.3 â€” Persistence recovery
 # ============================================================================
 
 
@@ -296,7 +296,7 @@ async def test_ws21_4_persistence_recovers_without_poisoning_history():
 
 
 # ============================================================================
-# WS-21.4.4 — Failed request must not become successful history
+# WS-21.4.4 â€” Failed request must not become successful history
 # ============================================================================
 
 
@@ -334,7 +334,7 @@ async def test_ws21_4_failed_request_is_not_added_to_conversation_history():
 
 
 # ============================================================================
-# WS-21.4.5 — No false success observability event
+# WS-21.4.5 â€” No false success observability event
 # ============================================================================
 
 
@@ -399,7 +399,7 @@ async def test_ws21_4_failure_is_not_recorded_as_success():
 
 
 # ============================================================================
-# WS-21.4.6 — User isolation during recovery
+# WS-21.4.6 â€” User isolation during recovery
 # ============================================================================
 
 
@@ -449,7 +449,7 @@ async def test_ws21_4_failure_and_recovery_remain_user_isolated():
 
 
 # ============================================================================
-# WS-21.4.7 — Rate-limit recovery
+# WS-21.4.7 â€” Rate-limit recovery
 # ============================================================================
 
 
@@ -481,7 +481,7 @@ async def test_ws21_4_rate_limit_recovers_after_window():
 
     blocked_response = await boundary.handle_message(
         telegram_user_id=7108,
-        message="Deuxième",
+        message="DeuxiÃ¨me",
     )
 
     assert (
@@ -496,14 +496,14 @@ async def test_ws21_4_rate_limit_recovers_after_window():
 
     recovered_response = await boundary.handle_message(
         telegram_user_id=7108,
-        message="Après récupération",
+        message="AprÃ¨s rÃ©cupÃ©ration",
     )
 
     assert recovered_response == "response:7108:2"
 
 
 # ============================================================================
-# WS-21.4.8 — Abuse-protection recovery
+# WS-21.4.8 â€” Abuse-protection recovery
 # ============================================================================
 
 
@@ -549,14 +549,14 @@ async def test_ws21_4_abuse_protection_recovers_after_reset():
 
     recovered_response = await boundary.handle_message(
         telegram_user_id=7109,
-        message="Après récupération",
+        message="AprÃ¨s rÃ©cupÃ©ration",
     )
 
     assert recovered_response == "response:7109:2"
 
 
 # ============================================================================
-# WS-21.4.9 — Other users are not blocked by another user's recovery state
+# WS-21.4.9 â€” Other users are not blocked by another user's recovery state
 # ============================================================================
 
 
@@ -600,7 +600,7 @@ async def test_ws21_4_policy_recovery_is_identity_scoped():
 
 
 # ============================================================================
-# WS-21.4.10 — Healthy path after recovery
+# WS-21.4.10 â€” Healthy path after recovery
 # ============================================================================
 
 
@@ -627,7 +627,7 @@ async def test_ws21_4_healthy_path_remains_normal_after_recovery():
 
     first_recovered = await boundary.handle_message(
         telegram_user_id=7112,
-        message="Bonjour après panne",
+        message="Bonjour aprÃ¨s panne",
     )
 
     second_recovered = await boundary.handle_message(
@@ -639,6 +639,7 @@ async def test_ws21_4_healthy_path_remains_normal_after_recovery():
     assert second_recovered == "response:7112:2"
 
     assert conversation.history[7112] == [
-        "Bonjour après panne",
+        "Bonjour aprÃ¨s panne",
         "Comment allez-vous ?",
     ]
+

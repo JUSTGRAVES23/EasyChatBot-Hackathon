@@ -1,0 +1,588 @@
+﻿============================================================
+M7.2 IMPORT NAMESPACE + COMPOSITION DIAGNOSTIC
+Generated: 2026-09-05 16:56:35
+============================================================
+
+1. PYTHON / WORKING DIRECTORY
+============================================================
+C:\AI Folder\EasyChatBot-Hackathon
+Python 3.13.14
+PYTHONPATH=
+
+============================================================
+2. APP PACKAGE RESOLUTION
+============================================================
+app.__file__ = C:\AI Folder\EasyChatBot-Hackathon\app\__init__.py app.__path__ = ['C:\\AI Folder\\EasyChatBot-Hackathon\\app'] sys.path:        C:\Users\barbe\AppData\Local\Programs\Python\Python313\python313.zip    C:\Users\barbe\AppData\Local\Programs\Python\Python313\DLLs    C:\Users\barbe\AppData\Local\Programs\Python\Python313\Lib    C:\Users\barbe\AppData\Local\Programs\Python\Python313    C:\AI Folder\EasyChatBot-Hackathon\.venv    C:\AI Folder\EasyChatBot-Hackathon\.venv\Lib\site-packages
+
+============================================================
+3. BACKEND APP FILESYSTEM
+============================================================
+backend\app exists:
+True
+
+backend\app\__init__.py:
+True
+
+backend\app\application exists:
+True
+
+backend\app\application\__init__.py:
+True
+
+backend\app\application\identity exists:
+True
+
+backend\app\application\identity\__init__.py:
+False
+
+backend\app\application\identity\authentication_service.py:
+True
+
+backend\app\application\privacy exists:
+True
+
+backend\app\application\privacy\__init__.py:
+True
+
+backend\app\application\privacy\processing_registry.py:
+True
+
+backend\app\application\privacy\processing_activity.py:
+True
+
+backend\app\application\privacy\screening exists:
+True
+
+============================================================
+4. ROOT APP FILESYSTEM
+============================================================
+root app exists:
+True
+
+root app\__init__.py:
+True
+
+root app\application exists:
+True
+
+root app\application\identity exists:
+False
+
+root app\application\privacy exists:
+False
+
+============================================================
+5. BACKEND APP PYTHON FILES
+============================================================
+__pycache__
+academy
+announcement
+announcement_operations
+announcements
+authorization
+beta_access
+community
+composition
+conversation
+conversation_quality
+health
+identity
+memory
+operations_center
+privacy
+privacy_governance
+provider_management
+uai
+
+
+============================================================
+6. MAIN.PY HEADER / IMPORTS
+============================================================
+"""
+EasyChatBot Academy application composition root.
+
+M7.2 privacy screening is composed here as an application capability.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.authentication import router as authentication_router
+from app.api.operations_center import router as cmp_operations_center_router
+from app.api.privacy_screening import create_privacy_screening_router
+from app.api.routes.academy_routes import router as academy_router
+from app.api.routes.cmp_population_routes import router as cmp_population_router
+from app.api.routes.questionnaire_routes import router as questionnaire_router
+from app.api.routes.world_questionnaire_routes import router as world_questionnaire_router
+from app.application.privacy.beta1_processing_catalog import create_beta1_processing_registry
+from app.application.privacy.screening.adapter import ProcessingActivityScreeningAdapter
+from app.application.privacy.screening.service import ScreeningService
+from app.application.questionnaire.runtime_source import QuestionnaireRuntime
+from app.bootstrap.compositions.runtime_composition import create_runtime_services
+from app.bootstrap.repositories import create_repositories
+
+logger = logging.getLogger(__name__)
+
+
+def create_application() -> FastAPI:
+    logger.info("Creating EasyChatBot Academy application.")
+
+    try:
+        repositories = create_repositories()
+        if repositories is None:
+            raise RuntimeError("Repository composition returned None.")
+
+        runtime_services = create_runtime_services(repositories=repositories)
+        if runtime_services is None:
+            raise RuntimeError("Runtime services composition returned None.")
+
+        questionnaire_runtime = QuestionnaireRuntime()
+
+        application = FastAPI(
+            title="EasyChatBot Academy",
+            version="0.1.0-beta",
+            description="AI-powered learning platform runtime.",
+        )
+
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=[
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        application.state.repositories = repositories
+        application.state.runtime_services = runtime_services
+        application.state.questionnaire_runtime = questionnaire_runtime
+
+        learning_world_repository = getattr(
+            repositories,
+            "learning_world_repository",
+            None,
+        )
+        if learning_world_repository is None:
+            raise RuntimeError("LearningWorldRepository was not composed.")
+
+        application.state.learning_world_repository = learning_world_repository
+
+        # M7.2 privacy screening composition.
+        processing_registry = create_beta1_processing_registry()
+        screening_service = ScreeningService()
+        screening_adapter = ProcessingActivityScreeningAdapter(screening_service)
+
+
+
+============================================================
+7. PRIVACY SCREENING FILES
+============================================================
+M7.2 API:
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from app.application.privacy.processing_registry import ProcessingRegistry
+from app.application.privacy.screening.adapter import ProcessingActivityScreeningAdapter
+
+
+class ScreeningRequest(BaseModel):
+    """Production screening command. Only processing_id is client-controlled."""
+
+    processing_id: str = Field(min_length=1)
+
+
+def create_privacy_screening_router(
+    *,
+    processing_registry: ProcessingRegistry,
+    screening_adapter: ProcessingActivityScreeningAdapter,
+) -> APIRouter:
+    router = APIRouter(
+        prefix="/api/privacy/screening",
+        tags=["privacy-screening"],
+    )
+
+    @router.get("/processing-activities")
+    def list_processing_activities() -> list[dict[str, Any]]:
+        return [
+            {
+                "processing_id": activity.processing_id,
+                "name": activity.name,
+                "purpose": activity.purpose,
+                "data_subjects": list(activity.data_subjects),
+                "data_categories": list(activity.data_categories),
+                "special_category_data": bool(
+                    activity.metadata.get("special_category_data", False)
+                ),
+                "processor_ids": list(activity.processor_ids),
+                "transfer_status": activity.metadata.get("transfer_status"),
+                "last_material_change_at": activity.metadata.get(
+                    "last_material_change_at"
+                ),
+            }
+            for activity in processing_registry.all()
+        ]
+
+    @router.post("/screen")
+    def screen(request: ScreeningRequest) -> dict[str, Any]:
+        try:
+            activity = processing_registry.get(request.processing_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Processing activity not found.",
+            ) from exc
+
+        result = screening_adapter.screen(activity)
+
+        def criterion_payload(criterion: Any) -> dict[str, Any]:
+            return {
+                "code": criterion.code,
+                "label": criterion.label,
+                "satisfied": criterion.satisfied,
+                "source": criterion.source,
+                "source_version": criterion.source_version,
+                "rationale": criterion.rationale,
+            }
+
+        return {
+            "screening_id": result.screening_id,
+            "processing_id": result.processing_id,
+            "status": result.status,
+            "outcomes": [
+                {
+                    "assessment": outcome["assessment"],
+                    "outcome": str(outcome["outcome"]),
+                    "matched_criteria": [
+                        criterion_payload(c)
+                        for c in outcome.get("matched_criteria", [])
+                    ],
+                    "rationale": outcome["rationale"],
+                }
+                for outcome in result.outcomes
+            ],
+            "reassessment_required": result.reassessment_required,
+            "provenance": [
+                criterion_payload(c) for c in result.provenance
+            ],
+            "rationale": result.rationale,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    return router
+
+
+__all__ = ["ScreeningRequest", "create_privacy_screening_router"]
+
+
+M7.2 catalog:
+from __future__ import annotations
+
+"""Controlled Beta 1 Processing Activity composition.
+
+This module composes the existing canonical ProcessingActivity /
+ProcessingRegistry capability. Validation fixtures remain separate.
+"""
+
+from .processing_activity import ProcessingActivity
+from .processing_registry import ProcessingRegistry
+
+BETA1_TELEGRAM_PROCESSING_ID = "PA-BETA1-001"
+
+
+def create_beta1_processing_registry() -> ProcessingRegistry:
+    """Create the controlled Beta 1 processing registry."""
+    activity = ProcessingActivity(
+        processing_id=BETA1_TELEGRAM_PROCESSING_ID,
+        name="Beta 1 Telegram conversation processing",
+        purpose="Beta 1 Telegram learning conversations.",
+        data_categories=(
+            "identity/account data",
+            "Telegram conversation content",
+            "learning interaction data",
+        ),
+        data_subjects=("Beta learners",),
+        source=("Telegram",),
+        destinations=("EasyChatBot application", "LLM provider"),
+        legal_basis="PENDING_DPO_LEGAL",
+        retention_id="PENDING_DPO_GRC",
+        processor_ids=(),
+        data_map_id="",
+        dpia_screening_id="",
+        gdpr_references=(),
+        security_controls=(),
+        metadata={
+            "governance_status": "PENDING_DPO_GRC",
+            "legal_materiality_established": False,
+            "material_change_detected": False,
+            "special_category_data": False,
+            "transfer_status": "PENDING_DPO_GRC",
+            "last_material_change_at": None,
+        },
+        approval_status="PENDING",
+    )
+    return ProcessingRegistry([activity])
+
+
+__all__ = ["BETA1_TELEGRAM_PROCESSING_ID", "create_beta1_processing_registry"]
+
+
+M7.2 adapter:
+from __future__ import annotations
+
+"""Adapter between authoritative ProcessingActivity data and M3 screening."""
+
+from ..processing_activity import ProcessingActivity
+from .models import ScreeningCriterion, ScreeningResult
+from .service import ScreeningService
+
+
+class ProcessingActivityScreeningAdapter:
+    """Derive governed screening input and invoke the existing M3 seam.
+
+    The browser never supplies screening criteria or legal-materiality
+    assertions. Missing legally material information fails closed.
+    """
+
+    def __init__(self, screening_service: ScreeningService | None = None) -> None:
+        self._screening_service = screening_service or ScreeningService()
+
+    def screen(self, activity: ProcessingActivity) -> ScreeningResult:
+        metadata = activity.metadata
+
+        criteria = (
+            ScreeningCriterion(
+                code="SPECIAL_CATEGORY_DATA",
+                label="Special-category data is explicitly recorded",
+                satisfied=bool(metadata.get("special_category_data", False)),
+                source="ProcessingActivity.metadata",
+                source_version="beta1-processing-catalog-v1",
+                rationale="Derived from the controlled Processing Activity record.",
+            ),
+            ScreeningCriterion(
+                code="EXTERNAL_DESTINATION",
+                label="External destination is recorded",
+                satisfied=bool(activity.destinations),
+                source="ProcessingActivity",
+                source_version="beta1-processing-catalog-v1",
+                rationale="Derived from authoritative processing destinations.",
+            ),
+            ScreeningCriterion(
+                code="LEGAL_BASIS_PENDING",
+                label="Lawful basis is not yet finally established",
+                satisfied=activity.legal_basis.startswith("PENDING_"),
+                source="ProcessingActivity",
+                source_version="beta1-processing-catalog-v1",
+                rationale="A pending lawful-basis value prevents final applicability.",
+            ),
+        )
+
+        return self._screening_service.screen(
+            processing_id=activity.processing_id,
+            criteria=criteria,
+            legal_materiality_established=bool(
+                metadata.get("legal_materiality_established", False)
+            ),
+            material_change_detected=bool(
+                metadata.get("material_change_detected", False)
+            ),
+        )
+
+
+__all__ = ["ProcessingActivityScreeningAdapter"]
+
+
+M7.2 service:
+from __future__ import annotations
+
+from uuid import uuid4
+
+from .models import AssessmentOutcome, ScreeningCriterion, ScreeningResult
+
+
+class ScreeningService:
+    """M3 screening/applicability execution seam.
+
+    Final DPO/legal decisions remain outside this service. Unknown legally
+    material inputs fail closed.
+    """
+
+    def screen(
+        self,
+        *,
+        processing_id: str,
+        criteria: tuple[ScreeningCriterion, ...],
+        legal_materiality_established: bool,
+        material_change_detected: bool,
+    ) -> ScreeningResult:
+        screening_id = f"SCR-{uuid4().hex[:12].upper()}"
+
+        if not legal_materiality_established:
+            return ScreeningResult(
+                screening_id=screening_id,
+                processing_id=processing_id,
+                status="LEGAL_REVIEW_REQUIRED",
+                outcomes=(
+                    {
+                        "assessment": "DPIA",
+                        "outcome": AssessmentOutcome.LEGAL_REVIEW_REQUIRED,
+                        "matched_criteria": [],
+                        "rationale": "Legally material screening input cannot be established.",
+                    },
+                    {
+                        "assessment": "FRIA",
+                        "outcome": AssessmentOutcome.LEGAL_REVIEW_REQUIRED,
+                        "matched_criteria": [],
+                        "rationale": "Fundamental-rights applicability requires human/legal determination.",
+                    },
+                    {
+                        "assessment": "TIA",
+                        "outcome": AssessmentOutcome.LEGAL_REVIEW_REQUIRED,
+                        "matched_criteria": [],
+                        "rationale": "Transfer applicability requires approved methodology and transfer context.",
+                    },
+                ),
+                reassessment_required=material_change_detected,
+                provenance=criteria,
+                rationale="Human DPO/legal review is required before applicability can be concluded.",
+            )
+
+        matched = tuple(item for item in criteria if item.satisfied)
+        return ScreeningResult(
+            screening_id=screening_id,
+            processing_id=processing_id,
+            status="COMPLETED",
+            outcomes=(
+                {
+                    "assessment": "DPIA",
+                    "outcome": AssessmentOutcome.REQUIRED if matched else AssessmentOutcome.NOT_REQUIRED,
+                    "matched_criteria": list(matched),
+                    "rationale": (
+                        "At least one configured governed criterion is satisfied."
+                        if matched
+                        else "No configured governed criterion is satisfied."
+                    ),
+                },
+            ),
+            reassessment_required=material_change_detected,
+            provenance=criteria,
+            rationale="Screening completed from governed processing context.",
+        )
+
+
+__all__ = ["ScreeningService"]
+
+
+============================================================
+8. COMPOSITION SEARCH
+============================================================
+References to ProcessingRegistry:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_screening.py:9:from app.application.privacy.processing_registry import ProcessingRegistry
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_screening.py:21:processing_registry: ProcessingRegistry,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\beta1_processing_catalog.py:6:ProcessingRegistry capability. Validation fixtures remain separate.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\beta1_processing_catalog.py:10:from .processing_registry import ProcessingRegistry
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\beta1_processing_catalog.py:15:def create_beta1_processing_registry() -> ProcessingRegistry:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\beta1_processing_catalog.py:46:return ProcessingRegistry([activity])
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_validation_service.py:7:from .processing_registry import ProcessingRegistry
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_validation_service.py:37:processing_registry: ProcessingRegistry,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\processing_registry.py:8:class ProcessingRegistry:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:6:from .processing_registry import ProcessingRegistry
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\validate.py:47:processing = ProcessingRegistry([activity])
+
+
+References to create_privacy_screening_router:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_screening.py:19:def create_privacy_screening_router(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_screening.py:99:__all__ = ["ScreeningRequest", "create_privacy_screening_router"]
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:16:from app.api.privacy_screening import create_privacy_screening_router
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py:93:create_privacy_screening_router(
+
+
+============================================================
+9. MAIN.PY PRIVACY / ROUTER AREA
+============================================================
+
+  """
+  EasyChatBot Academy application composition root.
+  
+> M7.2 privacy screening is composed here as an application capability.
+  """
+  
+  from __future__ import annotations
+  
+  import logging
+  from fastapi import FastAPI
+  from fastapi.middleware.cors import CORSMiddleware
+  
+> from app.api.authentication import router as authentication_router
+> from app.api.operations_center import router as cmp_operations_center_router
+> from app.api.privacy_screening import create_privacy_screening_router
+> from app.api.routes.academy_routes import router as academy_router
+> from app.api.routes.cmp_population_routes import router as cmp_population_router
+> from app.api.routes.questionnaire_routes import router as questionnaire_router
+> from app.api.routes.world_questionnaire_routes import router as world_questionnaire_router
+> from app.application.privacy.beta1_processing_catalog import create_beta1_processing_registry
+> from app.application.privacy.screening.adapter import ProcessingActivityScreeningAdapter
+> from app.application.privacy.screening.service import ScreeningService
+  from app.application.questionnaire.runtime_source import QuestionnaireRuntime
+  from app.bootstrap.compositions.runtime_composition import create_runtime_services
+  from app.bootstrap.repositories import create_repositories
+  
+  logger = logging.getLogger(__name__)
+  
+          application.state.learning_world_repository = learning_world_repository
+  
+>         # M7.2 privacy screening composition.
+          processing_registry = create_beta1_processing_registry()
+          screening_service = ScreeningService()
+          screening_adapter = ProcessingActivityScreeningAdapter(screening_service)
+  
+>         application.state.privacy_processing_registry = processing_registry
+>         application.state.privacy_screening_service = screening_service
+>         application.state.privacy_screening_adapter = screening_adapter
+  
+>         application.include_router(authentication_router)
+>         application.include_router(academy_router)
+>         application.include_router(questionnaire_router)
+>         application.include_router(world_questionnaire_router)
+>         application.include_router(cmp_operations_center_router)
+>         application.include_router(cmp_population_router)
+  
+>         application.include_router(
+>             create_privacy_screening_router(
+                  processing_registry=processing_registry,
+                  screening_adapter=screening_adapter,
+              )
+          )
+  
+
+
+
+
+============================================================
+10. BACKUP COMPOSITION COMPARISON
+============================================================
+Current main bytes:
+4343
+
+Academy backup bytes:
+14136
+
+Current main SHA256:
+8ED8DFCFC84D56756C4AB57AB39A2F083FA6FFD27B44BCA49D1A5477CA0B4510
+
+Academy backup SHA256:
+589B496A294552D5FC746F1AA68BAC1A698624BCD4FE56AA1FFFF1101EC9B9DE
+
+============================================================
+END
+============================================================

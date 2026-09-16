@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Call Lifecycle Service.
 
 Application facade for the complete
@@ -21,54 +21,43 @@ Does NOT:
 
 from __future__ import annotations
 
-
 from dataclasses import dataclass
 
-
-from backend.app.application.uai.voice.voice_call_execution_coordinator import (
+from app.application.uai.voice.voice_call_execution_coordinator import (
     VoiceCallExecutionCoordinator,
 )
 
-
-from backend.app.application.uai.voice.voice_connection_service import (
+from app.application.uai.voice.voice_connection_service import (
     VoiceConnectionService,
 )
 
-
-from backend.app.application.uai.voice.voice_call_management_service import (
+from app.application.uai.voice.voice_call_management_service import (
     VoiceCallManagementService,
 )
 
-
-from backend.app.application.uai.voice.voice_call_session_service import (
+from app.application.uai.voice.voice_call_session_service import (
     VoiceCallSessionService,
 )
 
-
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
-
 
 from app.domain.uai.voice.voice_call_execution_context import (
     VoiceCallExecutionContext,
 )
 
-
 from app.domain.uai.voice.voice_call import (
     VoiceCall,
 )
-
 
 from app.domain.uai.voice.voice_call_session import (
     VoiceCallSession,
 )
 
-
 from app.domain.uai.voice.voice_call_event import (
     VoiceCallEventType,
 )
-
 
 
 @dataclass(
@@ -80,32 +69,25 @@ class VoiceCallLifecycleService:
     Application lifecycle facade.
     """
 
-
     execution_coordinator: (
         VoiceCallExecutionCoordinator
     )
-
 
     connection_service: (
         VoiceConnectionService | None
     ) = None
 
-
     voice_call_management_service: (
         VoiceCallManagementService | None
     ) = None
-
 
     voice_call_session_service: (
         VoiceCallSessionService | None
     ) = None
 
-
     voice_call_event_service: (
         VoiceCallEventService | None
     ) = None
-
-
 
     def start_call(
         self,
@@ -128,7 +110,6 @@ class VoiceCallLifecycleService:
         VoiceCall.id when a VoiceCall is available.
         """
 
-
         result = (
             self.execution_coordinator
             .start(
@@ -136,45 +117,23 @@ class VoiceCallLifecycleService:
             )
         )
 
-
         session = result["session"]
 
-
         if self.voice_call_event_service is not None:
-
-            #
-            # Preserve the persistent VoiceCall
-            # identity for lifecycle events.
-            #
-            # The execution session has its own
-            # session_id, but that must not replace
-            # the VoiceCall business identity.
-            #
             voice_call_id = (
                 context.voice_call.id
                 if context.voice_call is not None
                 else session.session_id
             )
 
-
             self.voice_call_event_service.record_event(
-                voice_call_id=(
-                    voice_call_id
-                ),
-                learner_id=(
-                    session.learner_id
-                ),
-                character_id=(
-                    session.character_id
-                ),
-                event_type=(
-                    VoiceCallEventType.STARTED
-                ),
+                voice_call_id=voice_call_id,
+                learner_id=session.learner_id,
+                character_id=session.character_id,
+                event_type=VoiceCallEventType.STARTED,
             )
 
-
         if self.connection_service is not None:
-
             connection = (
                 self.connection_service
                 .create_connection(
@@ -184,15 +143,9 @@ class VoiceCallLifecycleService:
                 )
             )
 
-
-            result["connection"] = (
-                connection
-            )
-
+            result["connection"] = connection
 
         return result
-
-
 
     def create_voice_call(
         self,
@@ -206,7 +159,6 @@ class VoiceCallLifecycleService:
         Create persistent voice identity.
         """
 
-
         if (
             self.voice_call_management_service
             is None
@@ -215,7 +167,6 @@ class VoiceCallLifecycleService:
                 "Voice call management service "
                 "not configured."
             )
-
 
         return (
             self.voice_call_management_service
@@ -227,8 +178,6 @@ class VoiceCallLifecycleService:
             )
         )
 
-
-
     def create_session(
         self,
         *,
@@ -237,7 +186,6 @@ class VoiceCallLifecycleService:
         """
         Create execution session.
         """
-
 
         if (
             self.voice_call_session_service
@@ -248,15 +196,12 @@ class VoiceCallLifecycleService:
                 "not configured."
             )
 
-
         return (
             self.voice_call_session_service
             .create_session(
                 voice_call=voice_call,
             )
         )
-
-
 
     def reconnect_call(
         self,
@@ -267,7 +212,6 @@ class VoiceCallLifecycleService:
         Reconnect existing voice call.
         """
 
-
         if (
             self.voice_call_session_service
             is None
@@ -277,7 +221,6 @@ class VoiceCallLifecycleService:
                 "not configured."
             )
 
-
         session = (
             self.voice_call_session_service
             .reconnect_session(
@@ -285,27 +228,15 @@ class VoiceCallLifecycleService:
             )
         )
 
-
         if self.voice_call_event_service is not None:
-
             self.voice_call_event_service.record_event(
-                voice_call_id=(
-                    voice_call.id
-                ),
-                learner_id=(
-                    voice_call.learner_id
-                ),
-                character_id=(
-                    voice_call.character_id
-                ),
-                event_type=(
-                    VoiceCallEventType.RECONNECTED
-                ),
+                voice_call_id=voice_call.id,
+                learner_id=voice_call.learner_id,
+                character_id=voice_call.character_id,
+                event_type=VoiceCallEventType.RECONNECTED,
             )
 
-
         return session
-
 
 
 __all__ = [

@@ -1,7 +1,7 @@
 ﻿import pytest
 
 
-from backend.cybersecurity.email.email_circuit_breaker import (
+from cybersecurity.email.email_circuit_breaker import (
     EmailCircuitBreaker,
 )
 
@@ -30,3 +30,4 @@ def test_email_circuit_opens_after_failures():
         status["open"]
         is True
     )
+

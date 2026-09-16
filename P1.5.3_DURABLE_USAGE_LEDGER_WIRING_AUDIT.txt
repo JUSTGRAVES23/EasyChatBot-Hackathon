@@ -1,0 +1,749 @@
+﻿=== P1.5.3 DURABLE USAGE LEDGER WIRING AUDIT ===
+
+=== BETA TELEGRAM COMPOSITION ===
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from backend.app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from backend.app.application.beta_access.beta_access_service import BetaAccessService
+from backend.app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from backend.app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
+from backend.app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+from backend.app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from backend.app.interfaces.telegram.beta_private_chat_gate import BetaPrivateChatGate
+from backend.app.interfaces.telegram.beta_start_handler import BetaTelegramStartHandler
+from backend.app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
+from backend.app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from backend.app.providers.llm.llm_provider_factory import LLMProviderFactory
+from src.ai_runtime.providers.usage.repository import InMemoryProviderUsageRepository
+from src.ai_runtime.providers.usage.service import ProviderUsageService
+
+
+@dataclass(frozen=True)
+class BetaTelegramComposition:
+    """Fully composed Beta Telegram classroom application graph."""
+
+    beta_access_service: BetaAccessService
+    conversation_runtime: ConversationRuntime
+    conversation_service: TelegramConversationService
+    conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_gate: BetaPrivateChatGate
+    start_handler: BetaTelegramStartHandler
+    adapter: BetaTelegramAdapter
+    runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+    provider_usage_repository: InMemoryProviderUsageRepository | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number.") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive number.")
+    return value
+
+
+def create_beta_telegram_composition(
+    *,
+    user_repository: Any,
+    token_repository: Any,
+    binding_repository: Any,
+    conversation_event_repository: Any,
+    privacy_identifier_service: Any,
+    conversation_event_validator: Any,
+    expiration_minutes: int = 1440,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
+    provider_usage_capture: ProviderUsageCapture | None = None,
+) -> BetaTelegramComposition:
+    """Compose the production Beta Telegram classroom graph."""
+
+    if expiration_minutes <= 0:
+        raise ValueError("expiration_minutes must be greater than zero.")
+
+    if conversation_runtime is not None and conversation_runtime_factory is not None:
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    beta_access_service = BetaAccessService(
+        user_repository=user_repository,
+        token_repository=token_repository,
+        binding_repository=binding_repository,
+        expiration_minutes=expiration_minutes,
+    )
+
+    resolved_usage_repository = None
+    if conversation_runtime is not None:
+        resolved_conversation_runtime = conversation_runtime
+    elif conversation_runtime_factory is not None:
+        resolved_conversation_runtime = conversation_runtime_factory()
+    else:
+        if provider_usage_capture is None:
+            resolved_usage_repository = InMemoryProviderUsageRepository()
+            provider_usage_service = ProviderUsageService(resolved_usage_repository)
+            provider_usage_capture = ProviderUsageCapture(provider_usage_service)
+
+        resolved_conversation_runtime = ConversationRuntime(
+            llm_provider=LLMProviderFactory.create(),
+            usage_capture=provider_usage_capture,
+            usage_context=ProviderUsageContext(
+                capability="conversation",
+                functionality="chat",
+                agent="conversation_agent",
+            ),
+        )
+
+    conversation_service = TelegramConversationService(
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+    )
+
+    resolved_rate_limiter = rate_limiter or InMemoryTelegramRateLimiter(
+        max_messages=_env_positive_int("TELEGRAM_RATE_LIMIT_MAX_MESSAGES", 100),
+        window_seconds=_env_positive_float(
+            "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS", 86400.0
+        ),
+    )
+    resolved_abuse_protector = abuse_protector or InMemoryTelegramAbuseProtector(
+        max_messages=_env_positive_int("TELEGRAM_ABUSE_MAX_MESSAGES", 10),
+        window_seconds=_env_positive_float(
+            "TELEGRAM_ABUSE_WINDOW_SECONDS", 60.0
+        ),
+    )
+    resolved_observability = observability or LoggingTelegramObservability(
+        privacy_identifier_service=privacy_identifier_service,
+    )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+    )
+    private_chat_gate = BetaPrivateChatGate(beta_access_service=beta_access_service)
+    start_handler = BetaTelegramStartHandler(beta_access_service=beta_access_service)
+    adapter = BetaTelegramAdapter(
+        start_handler=start_handler,
+        private_chat_gate=private_chat_gate,
+        conversation_boundary=conversation_boundary,
+    )
+    runtime = TelegramBotRuntime(
+        adapter=adapter,
+        conversation_boundary=conversation_boundary,
+    )
+
+    return BetaTelegramComposition(
+        beta_access_service=beta_access_service,
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_service=conversation_service,
+        conversation_boundary=conversation_boundary,
+        private_chat_gate=private_chat_gate,
+        start_handler=start_handler,
+        adapter=adapter,
+        runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        provider_usage_repository=resolved_usage_repository,
+    )
+
+
+__all__ = ["BetaTelegramComposition", "create_beta_telegram_composition"]
+
+
+
+=== POSTGRES USAGE REPOSITORY ===
+from __future__ import annotations
+
+from src.ai_runtime.providers.usage.models import ProviderUsageEvent
+from src.ai_runtime.providers.usage.repository import ProviderUsageRepository
+
+from .provider_usage_records import ProviderUsageRecord
+
+
+class PostgreSQLProviderUsageRepository(ProviderUsageRepository):
+    """PostgreSQL implementation of the provider usage repository.
+
+    Uses the existing synchronous SQLAlchemy session boundary because the
+    ProviderUsageRepository contract is synchronous.
+    """
+
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    def save(self, event: ProviderUsageEvent) -> None:
+        if event is None:
+            raise ValueError("Provider usage event cannot be None.")
+
+        with self._session_factory() as session:
+            session.add(
+                ProviderUsageRecord(
+                    provider=event.provider,
+                    model=event.model,
+                    capability=event.capability,
+                    functionality=event.functionality,
+                    agent=event.agent,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    latency_ms=event.latency_ms,
+                    estimated_cost=event.estimated_cost,
+                    quality_score=event.quality_score,
+                    success=event.success,
+                    created_at=event.created_at,
+                )
+            )
+            session.commit()
+
+    def get_all(self) -> list[ProviderUsageEvent]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ProviderUsageRecord)
+                .order_by(ProviderUsageRecord.created_at.asc(), ProviderUsageRecord.id.asc())
+                .all()
+            )
+
+        return [_event_from_record(row) for row in rows]
+
+    def clear(self) -> None:
+        with self._session_factory() as session:
+            session.query(ProviderUsageRecord).delete()
+            session.commit()
+
+
+def _event_from_record(row: ProviderUsageRecord) -> ProviderUsageEvent:
+    return ProviderUsageEvent(
+        provider=row.provider,
+        model=row.model,
+        capability=row.capability,
+        functionality=row.functionality,
+        agent=row.agent,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        latency_ms=row.latency_ms,
+        estimated_cost=row.estimated_cost,
+        quality_score=float(row.quality_score),
+        success=row.success,
+        created_at=row.created_at,
+    )
+
+
+=== USAGE INTERFACE ===
+"""
+AI Runtime provider usage repository.
+
+Defines the persistence boundary for AI Runtime
+usage intelligence.
+
+This module does not:
+
+- call providers;
+- execute agents;
+- calculate costs;
+- render dashboards.
+
+Responsibilities:
+
+- store usage events;
+- retrieve usage events.
+
+Architecture:
+
+ProviderUsageService
+        |
+        v
+ProviderUsageRepository
+        |
+        v
+Storage implementation
+
+
+Current implementation:
+
+- in-memory repository.
+
+Future implementations:
+
+- SQLite;
+- PostgreSQL;
+- analytics warehouse.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from src.ai_runtime.providers.usage.models import (
+    ProviderUsageEvent,
+)
+
+
+class ProviderUsageRepository(ABC):
+    """
+    Persistence contract for provider usage events.
+
+    Application services depend on this abstraction,
+    not directly on storage technology.
+    """
+
+    @abstractmethod
+    def save(
+        self,
+        event: ProviderUsageEvent,
+    ) -> None:
+        """
+        Store one provider usage event.
+        """
+
+        raise NotImplementedError(
+            "Repository save must be implemented."
+        )
+
+    @abstractmethod
+    def get_all(
+        self,
+    ) -> list[ProviderUsageEvent]:
+        """
+        Retrieve stored provider usage events.
+        """
+
+        raise NotImplementedError(
+            "Repository get_all must be implemented."
+        )
+
+    @abstractmethod
+    def clear(
+        self,
+    ) -> None:
+        """
+        Remove stored usage events.
+
+        Mainly used for testing.
+        """
+
+        raise NotImplementedError(
+            "Repository clear must be implemented."
+        )
+
+
+class InMemoryProviderUsageRepository(
+    ProviderUsageRepository,
+):
+    """
+    In-memory repository implementation.
+
+    Used for:
+
+    - development;
+    - testing;
+    - hackathon validation.
+
+    This implementation can later be replaced
+    by a database-backed repository.
+    """
+
+    def __init__(
+        self,
+    ) -> None:
+
+        self._events: list[
+            ProviderUsageEvent
+        ] = []
+
+    def save(
+        self,
+        event: ProviderUsageEvent,
+    ) -> None:
+        """
+        Save a usage event.
+        """
+
+        if event is None:
+            raise ValueError(
+                "Provider usage event cannot be None."
+            )
+
+        self._events.append(
+            event
+        )
+
+    def get_all(
+        self,
+    ) -> list[ProviderUsageEvent]:
+        """
+        Return all stored usage events.
+
+        A copy is returned to prevent
+        external mutation.
+        """
+
+        return list(
+            self._events
+        )
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Remove all stored usage events.
+        """
+
+        self._events.clear()
+
+=== USAGE SERVICE ===
+"""
+AI Runtime provider usage service.
+
+Application service responsible for collecting
+and aggregating AI Runtime usage events.
+
+Responsibilities:
+
+- record usage events;
+- retrieve usage events through repository;
+- generate usage summaries.
+
+Non-responsibilities:
+
+- provider execution;
+- API calls;
+- billing APIs;
+- database implementation;
+- dashboard rendering;
+- agent execution.
+
+Persistence is handled through the repository
+boundary.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+from src.ai_runtime.providers.usage.models import (
+    ProviderUsageEvent,
+    ProviderUsageSummary,
+)
+
+from src.ai_runtime.providers.usage.repository import (
+    ProviderUsageRepository,
+)
+
+
+class ProviderUsageService:
+    """
+    Application service for AI Runtime usage intelligence.
+
+    The service depends on the repository abstraction.
+
+    It does not know whether storage is:
+
+    - memory;
+    - SQLite;
+    - PostgreSQL;
+    - analytics warehouse.
+    """
+
+    def __init__(
+        self,
+        repository: ProviderUsageRepository,
+    ) -> None:
+
+        if repository is None:
+            raise ValueError(
+                "ProviderUsageRepository cannot be None."
+            )
+
+        self._repository = repository
+
+    def record(
+        self,
+        event: ProviderUsageEvent,
+    ) -> None:
+        """
+        Record one Runtime usage event.
+
+        The event is delegated to the repository.
+
+        The service does not:
+
+        - call providers;
+        - enrich events;
+        - calculate external billing.
+        """
+
+        if event is None:
+            raise ValueError(
+                "Provider usage event cannot be None."
+            )
+
+        self._repository.save(
+            event
+        )
+
+    def summary(
+        self,
+    ) -> ProviderUsageSummary:
+        """
+        Generate aggregated usage information.
+        """
+
+        events = (
+            self._repository.get_all()
+        )
+
+        total_requests = len(
+            events
+        )
+
+        total_input_tokens = sum(
+            event.input_tokens
+            for event in events
+        )
+
+        total_output_tokens = sum(
+            event.output_tokens
+            for event in events
+        )
+
+        successful_requests = sum(
+            1
+            for event in events
+            if event.success
+        )
+
+        failed_requests = (
+            total_requests
+            - successful_requests
+        )
+
+        providers = tuple(
+            sorted(
+                {
+                    event.provider
+                    for event in events
+                }
+            )
+        )
+
+        total_cost = sum(
+            (
+                event.estimated_cost
+                for event in events
+            ),
+            Decimal("0"),
+        )
+
+        return ProviderUsageSummary(
+            total_requests=(
+                total_requests
+            ),
+            total_input_tokens=(
+                total_input_tokens
+            ),
+            total_output_tokens=(
+                total_output_tokens
+            ),
+            successful_requests=(
+                successful_requests
+            ),
+            failed_requests=(
+                failed_requests
+            ),
+            providers=providers,
+            total_cost=total_cost,
+        )
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Clear repository data.
+
+        Mainly useful for:
+
+        - tests;
+        - demonstrations.
+
+        Production systems should not rely
+        on clearing runtime usage history.
+        """
+
+        self._repository.clear()
+
+=== USAGE CAPTURE ===
+"""Application boundary for translating canonical provider results into usage events."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+from backend.app.providers.provider_result import ProviderResult
+from src.ai_runtime.providers.usage.models import ProviderUsageEvent
+from src.ai_runtime.providers.usage.service import ProviderUsageService
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUsageContext:
+    """Application-owned attribution for one provider execution."""
+
+    capability: str
+    functionality: str
+    agent: str
+    quality_score: float = 0.0
+    estimated_cost: Decimal = Decimal("0")
+
+
+class ProviderUsageCapture:
+    """Translate a canonical ProviderResult into the existing usage contract.
+
+    This boundary owns application attribution. Provider adapters remain
+    responsible only for provider-neutral execution metadata.
+    """
+
+    def __init__(self, usage_service: ProviderUsageService) -> None:
+        if usage_service is None:
+            raise ValueError("usage_service cannot be None.")
+        self._usage_service = usage_service
+
+    def capture(
+        self,
+        *,
+        result: ProviderResult,
+        context: ProviderUsageContext,
+    ) -> ProviderUsageEvent:
+        if result is None:
+            raise ValueError("ProviderResult cannot be None.")
+        if context is None:
+            raise ValueError("ProviderUsageContext cannot be None.")
+
+        input_tokens = result.usage.input_tokens
+        output_tokens = result.usage.output_tokens
+
+        # The current usage model requires concrete counters. Do not invent
+        # provider metrics: unavailable counters are represented as zero at
+        # this legacy intelligence boundary and can be distinguished from
+        # provider-native values through ProviderResult before capture.
+        input_tokens = input_tokens if input_tokens is not None else 0
+        output_tokens = output_tokens if output_tokens is not None else 0
+
+        latency_ms = (
+            int(round(result.latency_ms))
+            if result.latency_ms is not None
+            else 0
+        )
+
+        event = ProviderUsageEvent(
+            provider=result.provider_id,
+            model=result.model,
+            capability=context.capability,
+            functionality=context.functionality,
+            agent=context.agent,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            estimated_cost=context.estimated_cost,
+            quality_score=context.quality_score,
+            success=result.success,
+        )
+
+        self._usage_service.record(event)
+        return event
+
+
+=== REFERENCES ===
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py:6: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\ai_runtime\conversation\conversation_runtime.py:18: usage_capture: ProviderUsageCapture | None = None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:23: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:31: from src.ai_runtime.providers.usage.repository import InMemoryProviderUsageRepository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:32: from src.ai_runtime.providers.usage.service import ProviderUsageService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:50: provider_usage_repository: InMemoryProviderUsageRepository | None = None
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:93: provider_usage_capture: ProviderUsageCapture | None = None,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:120: resolved_usage_repository = InMemoryProviderUsageRepository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:121: provider_usage_service = ProviderUsageService(resolved_usage_repository)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_composition.py:122: provider_usage_capture = ProviderUsageCapture(provider_usage_service)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py:10: from src.ai_runtime.providers.usage.service import ProviderUsageService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py:24: class ProviderUsageCapture:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\providers\provider_usage_capture.py:31: def __init__(self, usage_service: ProviderUsageService) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py:9: class PostgreSQLProviderUsageRepository(ProviderUsageRepository):
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:6: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:11: InMemoryProviderUsageRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:13: from src.ai_runtime.providers.usage.service import ProviderUsageService
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:16: def create_capture() -> tuple[ProviderUsageCapture, InMemoryProviderUsageRepository]:
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:17: repository = InMemoryProviderUsageRepository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:18: service = ProviderUsageService(repository=repository)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\providers\test_provider_usage_capture.py:19: return ProviderUsageCapture(service), repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:7: ProviderUsageCapture,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:12: from src.ai_runtime.providers.usage.repository import InMemoryProviderUsageRepository
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:13: from src.ai_runtime.providers.usage.service import ProviderUsageService
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:25: repository = InMemoryProviderUsageRepository()
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:26: service = ProviderUsageService(repository)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_conversation_runtime_usage_capture.py:27: return ProviderUsageCapture(service), repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:14: PostgreSQLProviderUsageRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:55: repository = PostgreSQLProviderUsageRepository(session_factory)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:66: repository = PostgreSQLProviderUsageRepository(session_factory)
+
+=== TARGETED TESTS ===
+
+=================================== ERRORS ====================================
+_ ERROR collecting backend/tests/infrastructure/persistence/test_postgresql_provider_usage_repository.py _
+ImportError while importing test module 'C:\AI Folder\EasyChatBot-Hackathon\backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+C:\Users\barbe\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\tests\infrastructure\persistence\test_postgresql_provider_usage_repository.py:8: in <module>
+    from sqlalchemy import create_engine, text
+E   ModuleNotFoundError: No module named 'sqlalchemy'
+=========================== short test summary info ===========================
+ERROR backend/tests/infrastructure/persistence/test_postgresql_provider_usage_repository.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 2.03s
+

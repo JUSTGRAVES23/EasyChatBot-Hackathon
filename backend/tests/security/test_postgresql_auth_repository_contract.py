@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
 
-from backend.app.infrastructure.auth.postgresql_auth_repository import (
+from app.infrastructure.auth.postgresql_auth_repository import (
     PostgreSQLAuthenticationRepository,
 )
 
@@ -61,3 +61,4 @@ async def test_repository_uses_existing_users_table_contract():
 
 def test_repository_is_provider_neutral_at_application_boundary():
     assert PostgreSQLAuthenticationRepository.__name__ == "PostgreSQLAuthenticationRepository"
+

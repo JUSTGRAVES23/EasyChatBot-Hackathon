@@ -1,6 +1,6 @@
-from fastapi import APIRouter
+﻿from fastapi import APIRouter
 
-from backend.governance.approval.approval_service import ApprovalService
+from governance.approval.approval_service import ApprovalService
 
 
 router = APIRouter(
@@ -23,3 +23,4 @@ async def create_request(payload: dict):
     )
 
     return request
+

@@ -1,21 +1,21 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
-from backend.app.application.announcements.audit import (
+from app.application.announcements.audit import (
     AnnouncementAuditEventType,
     InMemoryAnnouncementAuditSink,
 )
-from backend.app.application.announcements.publication_service import AnnouncementPublicationService
-from backend.app.application.announcements.template_registry import AnnouncementTemplateRegistry
-from backend.app.domain.announcements.publication import Publication
-from backend.app.domain.announcements.template_models import (
+from app.application.announcements.publication_service import AnnouncementPublicationService
+from app.application.announcements.template_registry import AnnouncementTemplateRegistry
+from app.domain.announcements.publication import Publication
+from app.domain.announcements.template_models import (
     AnnouncementTemplate,
     AnnouncementTemplateVersion,
     PublicationStatus,
     PublicationType,
 )
-from backend.app.infrastructure.announcements.in_memory_repositories import (
+from app.infrastructure.announcements.in_memory_repositories import (
     InMemoryAnnouncementTemplateRepository,
     InMemoryPublicationRepository,
 )

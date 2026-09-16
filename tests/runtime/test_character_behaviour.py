@@ -1,14 +1,14 @@
-import pytest
+﻿import pytest
 
-from backend.agents.conversation_agent import (
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.characters.character_registry import (
+from characters.character_registry import (
     CharacterRegistry,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

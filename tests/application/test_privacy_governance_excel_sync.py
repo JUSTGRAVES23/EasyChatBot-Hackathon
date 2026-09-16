@@ -1,25 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
 
 from openpyxl import load_workbook
 
-from backend.app.application.privacy.privacy_approval_record import (
+from app.application.privacy.privacy_approval_record import (
     ApprovalDecision,
     PrivacyApprovalRecord,
 )
-from backend.app.application.privacy.privacy_approval_registry import (
+from app.application.privacy.privacy_approval_registry import (
     PrivacyApprovalRegistry,
 )
-from backend.app.application.privacy.privacy_governance_case import (
+from app.application.privacy.privacy_governance_case import (
     PrivacyGovernanceCase,
     PrivacyTriggerType,
 )
-from backend.app.application.privacy.privacy_governance_case_registry import (
+from app.application.privacy.privacy_governance_case_registry import (
     PrivacyGovernanceCaseRegistry,
 )
-from backend.app.application.privacy.privacy_governance_excel_sync import (
+from app.application.privacy.privacy_governance_excel_sync import (
     PrivacyGovernanceExcelSync,
 )
 
@@ -170,3 +170,4 @@ def test_existing_workbook_sheets_are_preserved(tmp_path: Path):
     assert "Privacy Governance Cases" in workbook.sheetnames
     assert "Approval Evidence" in workbook.sheetnames
     assert "Governance Dashboard" in workbook.sheetnames
+

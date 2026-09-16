@@ -77,6 +77,10 @@ from src.ai_runtime.capabilities.flashcard_generation_executor import (
     FlashcardGenerationExecutor,
 )
 
+from src.ai_runtime.capabilities.internal_documentation_executor import (
+    InternalDocumentationExecutor,
+)
+
 from src.ai_runtime.capabilities.registry import (
     CapabilityRegistry,
 )
@@ -95,6 +99,7 @@ def create_capability_executors(
     live_intelligence_agent: LiveIntelligenceAgent,
     podcast_discovery_agent: PodcastDiscoveryAgent,
     podcast_providers: Sequence[PodcastProvider],
+    internal_documentation_agent: Any | None = None,
 ) -> tuple[CapabilityExecutor, ...]:
     """
     Create Runtime capability executors.
@@ -139,6 +144,16 @@ def create_capability_executors(
         ListeningProposalExecutor(),
 
         FlashcardGenerationExecutor(),
+
+        *(
+            (
+                InternalDocumentationExecutor(
+                    agent=internal_documentation_agent,
+                ),
+            )
+            if internal_documentation_agent is not None
+            else ()
+        ),
     )
 
 
@@ -147,6 +162,7 @@ def create_capability_registry(
     live_intelligence_agent: LiveIntelligenceAgent,
     podcast_discovery_agent: PodcastDiscoveryAgent,
     podcast_providers: Sequence[PodcastProvider],
+    internal_documentation_agent: Any | None = None,
 ) -> CapabilityRegistry:
     """
     Create Runtime capability registry.
@@ -169,6 +185,9 @@ def create_capability_registry(
         ),
         podcast_providers=(
             podcast_providers
+        ),
+        internal_documentation_agent=(
+            internal_documentation_agent
         ),
     )
 
@@ -216,6 +235,7 @@ def create_external_runtime_gateway(
     podcast_discovery_agent: PodcastDiscoveryAgent,
     podcast_providers: Sequence[PodcastProvider],
     governance: Any,
+    internal_documentation_agent: Any | None = None,
 ) -> CapabilityGateway:
     """
     Main Runtime composition entry point.
@@ -270,6 +290,9 @@ def create_external_runtime_gateway(
         ),
         podcast_providers=(
             podcast_providers
+        ),
+        internal_documentation_agent=(
+            internal_documentation_agent
         ),
     )
 

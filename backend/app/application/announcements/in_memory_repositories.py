@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from backend.app.domain.announcements.announcement import Announcement
-from backend.app.domain.announcements.publication_event import PublicationEvent
+from app.domain.announcements.announcement import Announcement
+from app.domain.announcements.publication_event import PublicationEvent
 
 
 class InMemoryAnnouncementRepository:
@@ -32,3 +32,4 @@ class InMemoryPublicationEventRepository:
 
     async def list_for_publication(self, publication_id: UUID) -> tuple[PublicationEvent, ...]:
         return tuple(e for e in self._events if e.publication_id == publication_id)
+

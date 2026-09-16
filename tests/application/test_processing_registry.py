@@ -1,5 +1,5 @@
-from backend.app.application.privacy.processing_activity import ProcessingActivity
-from backend.app.application.privacy.processing_registry import ProcessingRegistry
+﻿from app.application.privacy.processing_activity import ProcessingActivity
+from app.application.privacy.processing_registry import ProcessingRegistry
 
 
 def activity() -> ProcessingActivity:
@@ -38,3 +38,4 @@ def test_registry_rejects_duplicate_processing_id():
         assert "already registered" in str(exc)
     else:
         raise AssertionError("Duplicate processing ID was accepted")
+

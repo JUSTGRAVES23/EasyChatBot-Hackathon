@@ -1,14 +1,14 @@
-"""
+﻿"""
 Tests for Voice Call Start Event.
 
 Validates:
 
 VoiceCall
       |
-      ↓
+      â†“
 Execution Runtime
       |
-      ↓
+      â†“
 VOICE_CALL_STARTED Event
 
 
@@ -98,3 +98,6 @@ def test_failed_runtime_does_not_create_started_event():
 
 
     assert events == []
+
+
+

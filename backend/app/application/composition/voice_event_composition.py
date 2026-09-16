@@ -1,4 +1,4 @@
-﻿"""
+"""
 Voice Event Composition.
 
 Composition root for voice lifecycle
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 
 
-from backend.app.application.uai.voice.voice_call_event_service import (
+from app.application.uai.voice.voice_call_event_service import (
     VoiceCallEventService,
 )
 
@@ -84,3 +84,6 @@ __all__ = [
     "create_voice_call_event_service",
     "build_voice_call_event_service",
 ]
+
+
+

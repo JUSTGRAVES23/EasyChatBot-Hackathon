@@ -1,7 +1,7 @@
 ﻿import pytest
 
 
-from backend.cybersecurity.decision_support.agent.agent import (
+from cybersecurity.decision_support.agent.agent import (
     CybersecurityDecisionSupportAgent,
 )
 
@@ -61,3 +61,4 @@ async def test_agent_creates_decision_brief():
     assert len(
         result.high_priority_items
     ) == 1
+

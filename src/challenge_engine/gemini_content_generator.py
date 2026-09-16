@@ -42,11 +42,11 @@ import asyncio
 import json
 from typing import Any
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.providers.llm.llm_provider import (
+from providers.llm.llm_provider import (
     LLMProvider,
 )
 
@@ -536,3 +536,4 @@ Required structure:
                 raise RuntimeError(
                     "Gemini generated an empty discussion question."
                 )
+

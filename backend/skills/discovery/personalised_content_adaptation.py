@@ -1,4 +1,4 @@
-"""
+﻿"""
 Discovery Personalised Content Adaptation Skill.
 
 Adapts already-ranked recommendations to the learner's
@@ -34,17 +34,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     DiscoveryProfile,
 )
-from backend.skills.discovery.recommendation_explanation import (
+from skills.discovery.recommendation_explanation import (
     RecommendationExplanation,
 )
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

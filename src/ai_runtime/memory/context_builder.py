@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import re
 
-from backend.memory.memory_record import (
+from memory.memory_record import (
     MemoryRecord,
 )
 

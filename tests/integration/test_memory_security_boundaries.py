@@ -1,5 +1,5 @@
-"""
-H3-04A — Memory Security Boundary Tests.
+﻿"""
+H3-04A â€” Memory Security Boundary Tests.
 
 Purpose
 -------
@@ -21,24 +21,24 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from backend.agents.conversation_agent import (
+from agents.conversation_agent import (
     ConversationAgent,
 )
 
-from backend.characters.character_profile import (
+from characters.character_profile import (
     CharacterProfile,
 )
 
-from backend.conversation.conversation_request import (
+from conversation.conversation_request import (
     ConversationRequest,
 )
 
-from backend.intelligence.intelligence_context import (
+from intelligence.intelligence_context import (
     IntelligenceContext,
     IntelligenceSource,
 )
 
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
 

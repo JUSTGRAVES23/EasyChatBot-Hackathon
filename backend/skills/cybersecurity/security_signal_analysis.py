@@ -1,4 +1,4 @@
-"""
+﻿"""
 Security Signal Analysis Skill.
 
 Deterministically validates and analyses supplied
@@ -17,16 +17,16 @@ Does NOT:
 
 from __future__ import annotations
 
-from backend.cybersecurity.intelligence_models import (
+from cybersecurity.intelligence_models import (
     CybersecuritySignal,
 )
 
-from backend.skills.skill import (
+from skills.skill import (
     Skill,
     SkillInput,
 )
 
-from backend.skills.skill_result import (
+from skills.skill_result import (
     SkillResult,
 )
 

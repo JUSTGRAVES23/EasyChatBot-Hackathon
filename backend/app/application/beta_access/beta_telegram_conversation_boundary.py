@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Protocol
 
-from backend.app.application.beta_access.beta_access_service import (
+from app.application.beta_access.beta_access_service import (
     BetaAccessService,
 )
-from backend.app.application.beta_access.policies.telegram_policy_messages import (
+from app.application.beta_access.policies.telegram_policy_messages import (
     TelegramPolicyMessageService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,35 +39,12 @@ class TelegramObservability(Protocol):
 
 
 class BetaTelegramConversationBoundary:
-    """Application policy boundary for Beta Telegram conversations.
-
-    Security / resilience order:
-
-        Telegram identity
-              ↓
-        Message validation
-              ↓
-        Beta authorization / context
-              ↓
-        Rate limit
-              ↓
-        Abuse protection
-              ↓
-        Conversation service
-              ↓
-        Observability
-              ↓
-        Safe response
-
-    Rate limiting and abuse protection deliberately remain outside
-    TelegramConversationService and outside Telegram transport.
-
-    Dependency failures are contained at this application boundary so
-    infrastructure/provider exceptions never become learner-facing Telegram
-    responses.
-    """
+    """Application policy boundary for Beta Telegram conversations."""
 
     MAX_TELEGRAM_MESSAGE_LENGTH = 4096
+
+    TELEGRAM_FUNCTIONALITY_ID = "telegram"
+    TELEGRAM_OPERATIONS_ENVIRONMENT = "adults"
 
     SAFE_ERROR_RESPONSE = (
         "Sorry, something went wrong while processing your message. "
@@ -75,6 +56,11 @@ class BetaTelegramConversationBoundary:
         "and is not approved for Beta access."
     )
 
+    FUNCTIONALITY_DISABLED_RESPONSE = (
+        "Sorry, the Telegram classroom is temporarily unavailable. "
+        "Please try again later."
+    )
+
     def __init__(
         self,
         *,
@@ -84,6 +70,9 @@ class BetaTelegramConversationBoundary:
         abuse_protector: TelegramPolicy | None = None,
         observability: TelegramObservability | None = None,
         policy_message_service: TelegramPolicyMessageService | None = None,
+        functionality_control_service: (
+            FunctionalityOperationalControlService | None
+        ) = None,
     ) -> None:
         if conversation_service is None:
             raise ValueError(
@@ -103,6 +92,9 @@ class BetaTelegramConversationBoundary:
         self._policy_message_service = (
             policy_message_service
             or TelegramPolicyMessageService()
+        )
+        self._functionality_control_service = (
+            functionality_control_service
         )
 
     async def _record(
@@ -124,11 +116,70 @@ class BetaTelegramConversationBoundary:
                 metadata=metadata,
             )
         except Exception:
-            # Observability must never break classroom processing.
             logger.exception(
                 "Telegram observability failure for event_type=%s.",
                 event_type,
             )
+
+    async def _functionality_is_enabled(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> bool:
+        control_service = self._functionality_control_service
+
+        # Legacy/unit-test compositions may omit operational control.
+        # Production composition always supplies it.
+        if control_service is None:
+            return True
+
+        environment = self.TELEGRAM_OPERATIONS_ENVIRONMENT
+        environment_value = getattr(
+            environment,
+            "value",
+            environment,
+        )
+
+        try:
+            availability = await asyncio.to_thread(
+                control_service.get_availability,
+                environment=environment,
+                functionality_id=self.TELEGRAM_FUNCTIONALITY_ID,
+            )
+
+        except Exception as exc:
+            await self._record(
+                event_type="telegram_classroom_functionality_control",
+                telegram_user_id=telegram_user_id,
+                outcome="error",
+                metadata={
+                    "functionality_id": self.TELEGRAM_FUNCTIONALITY_ID,
+                    "environment": environment_value,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            logger.exception(
+                "Telegram functionality-control lookup failed."
+            )
+
+            # Fail closed: an unavailable control plane must not
+            # permit Telegram classroom processing.
+            return False
+
+        enabled = availability == "enabled"
+
+        await self._record(
+            event_type="telegram_classroom_functionality_control",
+            telegram_user_id=telegram_user_id,
+            outcome="allowed" if enabled else "blocked",
+            metadata={
+                "functionality_id": self.TELEGRAM_FUNCTIONALITY_ID,
+                "environment": environment_value,
+            },
+        )
+
+        return enabled
 
     async def handle_message(
         self,
@@ -165,9 +216,6 @@ class BetaTelegramConversationBoundary:
             return self.UNAUTHORIZED_RESPONSE
 
         except Exception as exc:
-            # Infrastructure failures such as PostgreSQL outages must not
-            # escape to Telegram. Log only the exception type here; the
-            # learner must never receive internal dependency details.
             await self._record(
                 event_type="telegram_classroom_authorization",
                 telegram_user_id=telegram_user_id,
@@ -182,6 +230,18 @@ class BetaTelegramConversationBoundary:
             )
 
             return self.SAFE_ERROR_RESPONSE
+
+        # ---------------------------------------------------------------
+        # Functionality operational control
+        # ---------------------------------------------------------------
+        #
+        # This deliberately occurs after authorization/context resolution
+        # but before rate limiting, abuse protection, persistence or AI.
+        #
+        if not await self._functionality_is_enabled(
+            telegram_user_id=telegram_user_id,
+        ):
+            return self.FUNCTIONALITY_DISABLED_RESPONSE
 
         # ---------------------------------------------------------------
         # Rate limiting
@@ -351,13 +411,6 @@ class BetaTelegramConversationBoundary:
         return response
 
     def _get_rate_limit_retry_after_seconds(self) -> int:
-        """Return the configured rate-limit retry period.
-
-        The policy message service is responsible for learner-facing
-        language. This method deliberately avoids exposing implementation
-        internals.
-        """
-
         limiter = self._rate_limiter
 
         if limiter is None:
@@ -378,8 +431,6 @@ class BetaTelegramConversationBoundary:
             return 60
 
     def _get_abuse_retry_after_seconds(self) -> int:
-        """Return the configured abuse-protection retry period."""
-
         protector = self._abuse_protector
 
         if protector is None:
@@ -449,8 +500,7 @@ class BetaTelegramConversationBoundary:
 
         if len(clean_message) > cls.MAX_TELEGRAM_MESSAGE_LENGTH:
             raise ValueError(
-                "Telegram message is too long. "
-                "Maximum length is "
+                "Telegram message is too long. Maximum length is "
                 f"{cls.MAX_TELEGRAM_MESSAGE_LENGTH} characters."
             )
 
@@ -460,3 +510,5 @@ class BetaTelegramConversationBoundary:
 __all__ = [
     "BetaTelegramConversationBoundary",
 ]
+
+

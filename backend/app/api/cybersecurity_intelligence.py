@@ -52,15 +52,15 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from backend.cybersecurity.dashboard_data_source import (
+from cybersecurity.dashboard_data_source import (
     DashboardCybersecurityDataSource,
 )
 
-from backend.cybersecurity.email.cybersecurity_email_service import (
+from cybersecurity.email.cybersecurity_email_service import (
     CybersecurityEmailService,
 )
 
-from backend.cybersecurity.intelligence_service import (
+from cybersecurity.intelligence_service import (
     CybersecurityIntelligenceService,
 )
 

@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from unittest.mock import MagicMock
 
 import pytest
 from dotenv import load_dotenv
@@ -10,19 +11,47 @@ load_dotenv(".env")
 
 from sqlalchemy import text
 
-from backend.app.application.beta_access.telegram_conversation_service import (
+from app.application.beta_access.telegram_conversation_service import (
     TelegramConversationService,
 )
-from backend.app.application.conversation.conversation_event_models import (
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+from app.domain.uai.context.world_context import (
+    LanguagePolicy,
+    WorldContext,
+)
+from app.application.conversation.conversation_event_models import (
     ConversationEvent,
 )
-from backend.app.infrastructure.persistence.database import (
+from app.infrastructure.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
-from backend.app.infrastructure.persistence.postgresql_conversation_event_repository import (
+from app.infrastructure.persistence.postgresql_conversation_event_repository import (
     PostgreSQLConversationEventRepository,
 )
+
+
+class DeterministicLanguageDetector:
+    """
+    Deterministic language-detector test double for WS18.
+
+    The real TelegramConversationService and real PostgreSQL repository
+    remain under test. Only language detection is made deterministic so
+    the test has no external language-detection dependency.
+    """
+
+    def __init__(self, language: str = "fr") -> None:
+        self.language = language
+        self.calls: list[str] = []
+
+    def detect(self, text: str) -> str:
+        self.calls.append(text)
+        return self.language
 
 
 class FakeConversationRuntime:
@@ -89,6 +118,7 @@ def production_repository():
     """Exercise the real PostgreSQL repository and configured database."""
 
     engine = create_database_engine()
+
     session_factory = create_session_factory(
         engine,
     )
@@ -491,6 +521,32 @@ async def test_ws18_real_service_persists_user_and_assistant_in_same_conversatio
 ):
     runtime = FakeConversationRuntime()
 
+    language_response_policy = LanguageResponsePolicy()
+
+    language_detector = DeterministicLanguageDetector(
+        "fr",
+    )
+
+    world_resolver = MagicMock(
+        spec=WorldResolver,
+    )
+
+    world_resolver.resolve.return_value = WorldContext(
+        world_id="world-fr",
+        name="French World",
+        language_code="fr",
+        available_characters=[
+            "yeti",
+            "alix",
+        ],
+        world_type="language",
+        learning_domain="language",
+        language_policy=LanguagePolicy(
+            mode="target_language",
+            target_language="fr",
+        ),
+    )
+
     service = TelegramConversationService(
         conversation_runtime=runtime,
         conversation_event_repository=(
@@ -502,6 +558,11 @@ async def test_ws18_real_service_persists_user_and_assistant_in_same_conversatio
         conversation_event_validator=(
             FakeConversationEventValidator()
         ),
+        language_response_policy=(
+            language_response_policy
+        ),
+        language_detector=language_detector,
+        world_resolver=world_resolver,
     )
 
     response = await service.handle_telegram_message(

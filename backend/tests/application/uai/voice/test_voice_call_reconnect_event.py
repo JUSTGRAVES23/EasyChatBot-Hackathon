@@ -1,20 +1,20 @@
-"""
+﻿"""
 Tests for Voice Call Reconnect Event.
 
 Validates:
 
 VoiceCall
       |
-      ↓
+      â†“
 ACTIVE state
       |
-      ↓
+      â†“
 Reconnect
       |
-      ↓
+      â†“
 VoiceCallSession
       |
-      ↓
+      â†“
 VOICE_CALL_RECONNECTED event
 
 
@@ -292,3 +292,6 @@ def test_reconnect_events_are_isolated():
 
 
     assert events == []
+
+
+

@@ -1,4 +1,4 @@
-﻿"""
+"""
 In-Memory Voice Call Event Repository.
 
 Infrastructure implementation for
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 
 
-from backend.app.application.uai.voice.voice_call_event_repository import (
+from app.application.uai.voice.voice_call_event_repository import (
     VoiceCallEventRepository,
 )
 
@@ -117,3 +117,4 @@ class InMemoryVoiceCallEventRepository(
 __all__ = [
     "InMemoryVoiceCallEventRepository",
 ]
+

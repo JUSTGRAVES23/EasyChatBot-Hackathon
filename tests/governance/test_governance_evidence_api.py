@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 
 from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
 
-from backend.governance.api.governance_evidence_api import (
+from governance.api.governance_evidence_api import (
     router,
     get_evidence_service,
 )
@@ -43,3 +43,4 @@ async def test_governance_timeline_endpoint():
 
     assert response.status_code == 200
     assert response.json()["events"][0]["event"] == "PROVIDER_PAUSED"
+

@@ -1,16 +1,16 @@
-"""
+﻿"""
 Tests for the EasyChatBot Discovery Agent.
 
 These tests verify the Beta 1 vertical slice:
 
 PreferenceSource
-    ↓
+    â†“
 PreferenceContext
-    ↓
+    â†“
 PreferenceUnderstandingSkill
-    ↓
+    â†“
 DiscoveryProfile
-    ↓
+    â†“
 DiscoveryAgent
 """
 
@@ -18,19 +18,19 @@ from __future__ import annotations
 
 import pytest
 
-from backend.agents.discovery.discovery_agent import (
+from agents.discovery.discovery_agent import (
     DiscoveryAgent,
 )
-from backend.runtime.context.execution_context import (
+from runtime.context.execution_context import (
     ExecutionContext,
 )
-from backend.skills.discovery.hackathon_preference_source import (
+from skills.discovery.hackathon_preference_source import (
     HackathonPreferenceSource,
 )
-from backend.skills.discovery.preference_source import (
+from skills.discovery.preference_source import (
     PreferenceContext,
 )
-from backend.skills.discovery.preference_understanding import (
+from skills.discovery.preference_understanding import (
     PreferenceUnderstandingSkill,
 )
 
@@ -183,7 +183,7 @@ async def test_preference_skill_accepts_preference_context():
     through generic SkillInput metadata.
     """
 
-    from backend.skills.skill import SkillInput
+    from skills.skill import SkillInput
 
     skill = PreferenceUnderstandingSkill()
 

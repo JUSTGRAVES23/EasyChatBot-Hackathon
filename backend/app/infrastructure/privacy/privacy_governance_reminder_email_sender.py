@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -6,13 +6,13 @@ from typing import Any
 
 from dotenv import dotenv_values
 
-from backend.app.application.privacy.email.privacy_governance_reminder_email_service import (
+from app.application.privacy.email.privacy_governance_reminder_email_service import (
     PrivacyGovernanceEmailSender,
 )
-from backend.cybersecurity.email.email_provider_manager import (
+from cybersecurity.email.email_provider_manager import (
     EmailProviderManager,
 )
-from backend.cybersecurity.email.resend_email_provider import (
+from cybersecurity.email.resend_email_provider import (
     ResendEmailProvider,
 )
 
@@ -229,3 +229,4 @@ class ResendGovernanceReminderEmailSender:
 __all__ = [
     "ResendGovernanceReminderEmailSender",
 ]
+
