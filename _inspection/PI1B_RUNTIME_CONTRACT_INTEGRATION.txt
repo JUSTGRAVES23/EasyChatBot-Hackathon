@@ -1,0 +1,1632 @@
+﻿============================================================
+PI-1B RUNTIME CONTRACT INTEGRATION INSPECTION
+============================================================
+
+
+============================================================
+FILE: .\runtime\agents\services\agent_execution_service.py
+============================================================
+"""Provider-neutral governed Agent execution boundary.
+
+This service owns execution orchestration only. Provider selection and SDK
+access remain below the existing provider/application boundary.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from backend.conversation.conversation_request import ConversationRequest
+from backend.services.llm_service import LLMService
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.contracts.agent_execution_response import AgentExecutionResponse
+from runtime.core.runtime_context import RuntimeContext
+
+
+class AgentExecutionService:
+    def __init__(self, llm_service: LLMService) -> None:
+        self._llm_service = llm_service
+
+    async def execute(
+        self,
+        request: AgentExecutionRequest,
+        context: RuntimeContext,
+    ) -> AgentExecutionResponse:
+        if request is None:
+            raise ValueError("request must not be None")
+        if context is None:
+            raise ValueError("context must not be None")
+
+        context.capability_id = request.capability
+        context.capability_name = request.capability
+        context.work_item = request.instruction
+
+        conversation = ConversationRequest(
+            system_instruction=context.system_prompt or "",
+            user_prompt=request.instruction,
+            conversation_context=None,
+        )
+
+        result = self._llm_service.generate(conversation)
+
+        if not result.success:
+            error = result.error or "Provider execution failed"
+            context.errors.append(error)
+            return AgentExecutionResponse(
+                execution_id=context.execution_id,
+                agent_id=request.agent_id,
+                capability=request.capability,
+                success=False,
+                error=error,
+                metadata=dict(request.metadata),
+            )
+
+        context.raw_response = result.output
+        context.parsed_response = result.output
+
+        return AgentExecutionResponse(
+            execution_id=context.execution_id,
+            agent_id=request.agent_id,
+            capability=request.capability,
+            content=str(result.output or ""),
+            success=True,
+            metadata=dict(request.metadata),
+        )
+
+============================================================
+FILE: .\runtime\agents\services\skill_execution_service.py
+============================================================
+from __future__ import annotations
+
+import logging
+
+from runtime.agents.services.agent_execution_service import AgentExecutionService
+from runtime.agents.services.source_skill_executor import SourceSkillExecutor
+from runtime.capabilities.registries.skill_registry import SkillRegistry
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.contracts.agent_execution_response import AgentExecutionResponse
+from runtime.core.runtime_context import RuntimeContext
+
+
+logger = logging.getLogger(__name__)
+
+
+class SkillExecutionService:
+    """
+    Runtime-controlled execution boundary for Skills.
+
+    Authorization is reusable independently from direct Skill execution.
+
+    Skill manifests may use governed agent aliases for compatibility.
+    Canonical Runtime agent IDs remain authoritative internally.
+
+    Analysis Skills are delegated to AgentExecutionService. Source Skills are
+    delegated to SourceSkillExecutor so source-grounded Evidence is produced
+    without crossing the provider boundary.
+    """
+
+    AGENT_COMPATIBILITY_ALIASES: dict[str, tuple[str, ...]] = {
+        "project_manager": ("aurelius",),
+        "platform_intelligence_agent": ("romanoide",),
+    }
+
+    def __init__(
+        self,
+        *,
+        skill_registry: SkillRegistry,
+        agent_execution_service: AgentExecutionService,
+        source_skill_executor: SourceSkillExecutor | None = None,
+    ) -> None:
+        if skill_registry is None:
+            raise ValueError("SkillRegistry cannot be None.")
+
+        if agent_execution_service is None:
+            raise ValueError("AgentExecutionService cannot be None.")
+
+        self._skill_registry = skill_registry
+        self._agent_execution_service = agent_execution_service
+        self._source_skill_executor = (
+            source_skill_executor or SourceSkillExecutor()
+        )
+
+        logger.info("SkillExecutionService initialised.")
+
+    @classmethod
+    def _agent_is_compatible(
+        cls,
+        *,
+        agent_id: str,
+        compatible_agents: tuple[str, ...] | list[str],
+    ) -> bool:
+        """Determine whether a canonical Runtime agent is authorised."""
+        if agent_id in compatible_agents:
+            return True
+
+        aliases = cls.AGENT_COMPATIBILITY_ALIASES.get(agent_id, ())
+
+        return any(alias in compatible_agents for alias in aliases)
+
+    def authorize(
+        self,
+        *,
+        skill_id: str,
+        agent_id: str,
+        context: RuntimeContext,
+    ):
+        """
+        Resolve and authorize a Skill for an Agent.
+
+        This method performs governance and Runtime-context enrichment only.
+        It does not execute the Agent or call a provider.
+        """
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise ValueError("skill_id cannot be empty.")
+
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            raise ValueError("agent_id cannot be empty.")
+
+        if context is None:
+            raise ValueError("RuntimeContext cannot be None.")
+
+        manifest = self._skill_registry.get(skill_id)
+
+        if manifest is None:
+            raise KeyError(f"Skill '{skill_id}' is not registered.")
+
+        manifest.validate()
+
+        if manifest.status.lower() != "active":
+            raise PermissionError(
+                f"Skill '{skill_id}' is not active and cannot be executed."
+            )
+
+        if manifest.compatible_agents:
+            if not self._agent_is_compatible(
+                agent_id=agent_id,
+                compatible_agents=manifest.compatible_agents,
+            ):
+                raise PermissionError(
+                    f"Agent '{agent_id}' is not authorised "
+                    f"to execute Skill '{skill_id}'."
+                )
+
+        context.add_metadata("skill_id", manifest.id)
+        context.add_metadata("skill_name", manifest.name)
+        context.add_metadata("skill_description", manifest.description)
+        context.add_metadata(
+            "skill_prompt",
+            self._skill_registry.load_prompt(manifest.id),
+        )
+        context.add_metadata("skill_version", manifest.version)
+        context.add_metadata("skill_status", manifest.status)
+        context.add_metadata("skill_owner", manifest.owner)
+        context.add_metadata("skill_category", manifest.category)
+        context.add_metadata("skill_execution_mode", "read_only")
+
+        context.add_event(
+            "Runtime Skill authorization validated.",
+            metadata={
+                "skill_id": manifest.id,
+                "agent_id": agent_id,
+            },
+        )
+
+        logger.info(
+            "Runtime Skill authorization validated. skill=%s agent=%s execution_id=%s",
+            manifest.id,
+            agent_id,
+            context.execution_id,
+        )
+
+        return manifest
+
+    async def execute(
+        self,
+        *,
+        skill_id: str,
+        request: AgentExecutionRequest,
+        context: RuntimeContext,
+    ) -> AgentExecutionResponse:
+        """Execute a Runtime-authorised Skill."""
+        if request is None:
+            raise ValueError("AgentExecutionRequest cannot be None.")
+
+        if context is None:
+            raise ValueError("RuntimeContext cannot be None.")
+
+        request.validate_request()
+
+        manifest = self.authorize(
+            skill_id=skill_id,
+            agent_id=request.agent_id,
+            context=context,
+        )
+
+        logger.info(
+            "Executing governed Skill. skill=%s agent=%s execution_id=%s",
+            manifest.id,
+            request.agent_id,
+            context.execution_id,
+        )
+
+        if manifest.category.lower() == "source":
+            response = await self._source_skill_executor.execute(
+                skill_id=manifest.id,
+                request=request,
+                context=context,
+            )
+        else:
+            response = await self._agent_execution_service.execute(
+                request=request,
+                context=context,
+            )
+
+        if response is None:
+            raise RuntimeError("Skill execution returned no response.")
+
+        context.add_event(
+            "Runtime Skill execution completed.",
+            metadata={
+                "skill_id": manifest.id,
+                "agent_id": request.agent_id,
+                "skill_category": manifest.category,
+            },
+        )
+
+        return response
+
+============================================================
+FILE: .\runtime\agents\services\source_skill_executor.py
+============================================================
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.contracts.agent_execution_response import AgentExecutionResponse
+from runtime.contracts.evidence import Evidence
+from runtime.core.runtime_context import RuntimeContext
+
+
+logger = logging.getLogger(__name__)
+
+
+class SourceSkillExecutor:
+    """
+    Runtime-controlled executor for governed source Skills.
+
+    Source Skills are deliberately kept outside the LLM/provider execution
+    boundary. The executor consumes source material that has already been
+    supplied through the Runtime execution context and converts that material
+    into canonical Evidence.
+
+    This class does not:
+    - discover repositories or files;
+    - access databases or external systems;
+    - call an LLM/provider;
+    - select a provider/model;
+    - modify source systems;
+    - perform authorization itself.
+
+    Authorization remains the responsibility of SkillExecutionService and
+    must occur before this executor is invoked.
+    """
+
+    SOURCE_INPUT_ARTIFACT = "source_input"
+
+    def __init__(self) -> None:
+        logger.info("SourceSkillExecutor initialised.")
+
+    async def execute(
+        self,
+        *,
+        skill_id: str,
+        request: AgentExecutionRequest,
+        context: RuntimeContext,
+    ) -> AgentExecutionResponse:
+        """Execute an already-authorized source Skill from supplied input."""
+
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise ValueError("skill_id cannot be empty.")
+
+        if request is None:
+            raise ValueError("AgentExecutionRequest cannot be None.")
+
+        if context is None:
+            raise ValueError("RuntimeContext cannot be None.")
+
+        request.validate_request()
+
+        source_input = self._resolve_source_input(
+            request=request,
+            context=context,
+        )
+
+        source_code = source_input.get("source_code")
+        if not isinstance(source_code, str) or not source_code.strip():
+            raise ValueError(
+                "Source Skill execution requires non-empty 'source_code'."
+            )
+
+        source_path = source_input.get("source_path", "")
+        if source_path is None:
+            source_path = ""
+        if not isinstance(source_path, str):
+            raise TypeError("source_path must be a string when supplied.")
+
+        evidence = Evidence(
+            evidence_id=(
+                f"{context.execution_id}:"
+                f"{skill_id}:source"
+            ),
+            source="repository",
+            source_type="repository",
+            authority="AUTHORITATIVE",
+            content=source_code,
+            location=source_path,
+            metadata={
+                "skill_id": skill_id,
+                "agent_id": request.agent_id,
+                "execution_id": str(context.execution_id),
+                "provenance": "runtime_supplied_source",
+            },
+        )
+        evidence.validate()
+
+        context.add_artifact(
+            "evidence",
+            (evidence,),
+        )
+        context.add_event(
+            "Governed source Skill produced Evidence.",
+            metadata={
+                "skill_id": skill_id,
+                "agent_id": request.agent_id,
+                "evidence_id": evidence.evidence_id,
+            },
+        )
+
+        logger.info(
+            (
+                "Governed source Skill executed. skill=%s agent=%s "
+                "execution_id=%s evidence_id=%s"
+            ),
+            skill_id,
+            request.agent_id,
+            context.execution_id,
+            evidence.evidence_id,
+        )
+
+        return AgentExecutionResponse(
+            execution_id=context.execution_id,
+            agent_id=request.agent_id,
+            capability=request.capability,
+            content=(
+                f"Source Skill '{skill_id}' produced "
+                f"{len((evidence,))} evidence record."
+            ),
+            structured_output={
+                "evidence": [evidence],
+            },
+            success=True,
+            error=None,
+            metadata={
+                "skill_id": skill_id,
+                "execution_mode": "read_only",
+                "evidence_count": 1,
+            },
+        )
+
+    @classmethod
+    def _resolve_source_input(
+        cls,
+        *,
+        request: AgentExecutionRequest,
+        context: RuntimeContext,
+    ) -> dict[str, Any]:
+        """
+        Resolve source input already present in the Runtime boundary.
+
+        Request context takes precedence because it is the explicit input of
+        the Skill execution. Runtime artifacts provide the canonical pipeline
+        hand-off when the source was attached by an earlier stage.
+        """
+
+        request_source = request.context.get(cls.SOURCE_INPUT_ARTIFACT)
+        if request_source is None:
+            request_source = request.context
+
+        if request_source:
+            if not isinstance(request_source, dict):
+                raise TypeError("source_input must be a mapping.")
+            if "source_code" in request_source:
+                return dict(request_source)
+
+        artifact_source = context.artifacts.get(cls.SOURCE_INPUT_ARTIFACT)
+        if artifact_source is None:
+            raise ValueError(
+                "No governed source input was supplied in the Runtime context."
+            )
+
+        if not isinstance(artifact_source, dict):
+            raise TypeError("Runtime source_input artifact must be a mapping.")
+
+        return dict(artifact_source)
+
+============================================================
+FILE: .\runtime\core\runtime_context.py
+============================================================
+"""Canonical governed AI Runtime execution context.
+
+This context is the runtime state envelope shared across governed execution
+stages. It is intentionally provider-neutral and does not perform I/O.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class RuntimeContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    execution_id: str
+    pipeline_name: str = ""
+    capability_id: str = ""
+    capability_name: str = ""
+    work_item: Any = None
+
+    system_prompt: str = ""
+    rendered_prompt: str = ""
+
+    provider_id: str = ""
+    model_name: str = ""
+
+    raw_response: Any = None
+    parsed_response: Any = None
+
+    memory: Any = None
+    artifacts: list[Any] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    events: list[Any] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    def add_metadata(self, key: str, value: Any) -> None:
+        self.metadata[key] = value
+
+    def add_event(self, event: Any) -> None:
+        self.events.append(event)
+
+    def add_warning(self, warning: str) -> None:
+        self.warnings.append(warning)
+
+    def add_error(self, error: str) -> None:
+        self.errors.append(error)
+
+============================================================
+FILE: .\runtime\contracts\agent_execution_request.py
+============================================================
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+
+class AgentExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_id: str
+    capability: str
+    instruction: str
+    context: Any
+    metadata: dict[str, Any] = {}
+
+============================================================
+FILE: .\runtime\contracts\agent_execution_response.py
+============================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AgentExecutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    execution_id: str
+    agent_id: str
+    capability: str
+    content: str = ""
+    structured_output: dict[str, Any] = Field(default_factory=dict)
+    success: bool = True
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+============================================================
+FILE: .\backend\services\llm_service.py
+============================================================
+"""
+LLM Service.
+
+Application-level service responsible for executing
+provider-independent ConversationRequest objects.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+Concrete LLM Provider
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- receive a ConversationRequest
+- delegate execution to an injected LLMProvider
+- return the provider-independent ProviderResult
+- keep provider execution behind an application service boundary
+
+Does not:
+
+- build prompts
+- manage characters
+- perform research
+- select providers
+- create providers
+- call provider SDKs directly
+- manage memory
+- manage conversations
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+
+from conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class LLMService:
+    """
+    Application service for LLM execution.
+
+    The service depends only on the provider-independent
+    LLMProvider contract.
+
+    Provider construction and provider selection remain
+    outside this service.
+    """
+
+    def __init__(
+        self,
+        llm_provider: LLMProvider,
+    ) -> None:
+        """
+        Initialise the LLM service.
+
+        Parameters
+        ----------
+        llm_provider:
+            Provider implementing the LLMProvider contract.
+        """
+
+        if llm_provider is None:
+            raise ValueError(
+                "LLM provider cannot be None."
+            )
+
+        self.llm_provider = llm_provider
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        The service delegates execution to the injected
+        provider without knowing the provider's concrete
+        implementation.
+
+        Parameters
+        ----------
+        request:
+            Provider-independent conversation request.
+
+        Returns
+        -------
+        ProviderResult
+            Standard provider execution result.
+
+        Raises
+        ------
+        ValueError
+            If the conversation request is None.
+
+        RuntimeError
+            If the provider returns no result.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        logger.info(
+            "LLM generation started."
+        )
+
+        result = await self.llm_provider.generate(
+            request
+        )
+
+        if result is None:
+            raise RuntimeError(
+                "LLM provider returned no result."
+            )
+
+        logger.info(
+            (
+                "LLM generation completed. "
+                "success=%s provider=%s"
+            ),
+            result.success,
+            result.provider_id,
+        )
+
+        return result
+
+============================================================
+FILE: .\backend\conversation\conversation_request.py
+============================================================
+"""
+Provider-independent conversation request.
+
+Represents the information required to generate a
+character-aware conversational response.
+
+The contract remains provider-independent. Optional
+structured-output requirements are expressed as a
+provider-neutral JSON schema and translated by the
+selected provider adapter.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRequest:
+    """
+    Immutable provider-independent conversation request.
+
+    Attributes
+    ----------
+    system_instruction:
+        Stable instruction defining how the character
+        should behave.
+
+    user_prompt:
+        User-facing request to be answered.
+
+    conversation_context:
+        Optional contextual information.
+
+    character_id:
+        Identifier of the character producing the response.
+
+    character_name:
+        Display name of the character.
+
+    response_schema:
+        Optional provider-independent JSON schema describing
+        the structured response expected from the provider.
+        Providers are responsible for translating this schema
+        into their native structured-output mechanism.
+    """
+
+    system_instruction: str
+
+    user_prompt: str
+
+    conversation_context: str | None = None
+
+    character_id: str = ""
+
+    character_name: str = ""
+
+    response_schema: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate request invariants."""
+
+        if not isinstance(
+            self.system_instruction,
+            str,
+        ):
+            raise ValueError(
+                "system_instruction must be a string."
+            )
+
+        if not isinstance(
+            self.user_prompt,
+            str,
+        ):
+            raise ValueError(
+                "user_prompt must be a string."
+            )
+
+        system_instruction = (
+            self.system_instruction.strip()
+        )
+
+        user_prompt = (
+            self.user_prompt.strip()
+        )
+
+        if not system_instruction:
+            raise ValueError(
+                "system_instruction cannot be empty."
+            )
+
+        if not user_prompt:
+            raise ValueError(
+                "user_prompt cannot be empty."
+            )
+
+        object.__setattr__(
+            self,
+            "system_instruction",
+            system_instruction,
+        )
+
+        object.__setattr__(
+            self,
+            "user_prompt",
+            user_prompt,
+        )
+
+        if self.conversation_context is not None:
+            context = (
+                self.conversation_context.strip()
+            )
+
+            if not context:
+                raise ValueError(
+                    "conversation_context cannot be blank."
+                )
+
+            object.__setattr__(
+                self,
+                "conversation_context",
+                context,
+            )
+
+        if not isinstance(
+            self.character_id,
+            str,
+        ):
+            raise ValueError(
+                "character_id must be a string."
+            )
+
+        if not isinstance(
+            self.character_name,
+            str,
+        ):
+            raise ValueError(
+                "character_name must be a string."
+            )
+
+        if self.response_schema is not None:
+            if not isinstance(
+                self.response_schema,
+                dict,
+            ):
+                raise ValueError(
+                    "response_schema must be a dictionary."
+                )
+
+            if not self.response_schema:
+                raise ValueError(
+                    "response_schema cannot be empty."
+                )
+
+            object.__setattr__(
+                self,
+                "response_schema",
+                dict(self.response_schema),
+            )
+
+        object.__setattr__(
+            self,
+            "character_id",
+            self.character_id.strip(),
+        )
+
+        object.__setattr__(
+            self,
+            "character_name",
+            self.character_name.strip(),
+        )
+
+    @property
+    def has_conversation_context(self) -> bool:
+        """Return whether contextual information exists."""
+
+        return bool(
+            self.conversation_context
+        )
+
+    @property
+    def has_response_schema(self) -> bool:
+        """Return whether structured output was requested."""
+
+        return self.response_schema is not None
+
+    @property
+    def context_length(self) -> int:
+        """Return the length of the conversation context."""
+
+        if not self.conversation_context:
+            return 0
+
+        return len(
+            self.conversation_context
+        )
+
+    def summary(self) -> dict[str, str]:
+        """
+        Return a safe diagnostic summary.
+
+        Prompt, context and schema content are deliberately
+        excluded from the summary.
+        """
+
+        return {
+            "character_id": self.character_id,
+            "character_name": self.character_name,
+            "has_context": str(
+                self.has_conversation_context
+            ),
+            "has_response_schema": str(
+                self.has_response_schema
+            ),
+            "system_instruction_length": str(
+                len(self.system_instruction)
+            ),
+            "user_prompt_length": str(
+                len(self.user_prompt)
+            ),
+            "context_length": str(
+                self.context_length
+            ),
+        }
+
+============================================================
+FILE: .\backend\providers\base_provider.py
+============================================================
+"""
+Base Provider Contract.
+
+Defines the interface for external AI and knowledge providers.
+
+Examples:
+- Gemini
+- Parallel Search
+- Future LLM providers
+
+The Runtime communicates with providers through this contract.
+
+Providers are replaceable implementations.
+The Agent layer must remain independent from provider details.
+"""
+
+from abc import ABC, abstractmethod
+
+from providers.provider_result import ProviderResult
+from runtime.context.execution_context import ExecutionContext
+
+
+class BaseProvider(ABC):
+    """
+    Abstract base class for EasyChatBot providers.
+
+    Providers are responsible for communicating
+    with external services.
+
+    They are NOT responsible for:
+    - agent decisions
+    - workflow orchestration
+    - memory management
+    - user interaction
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ):
+        """
+        Initialise provider.
+
+        Args:
+            provider_id:
+                Unique provider identifier.
+        """
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute provider operation.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            ProviderResult containing provider output.
+        """
+
+        pass
+
+============================================================
+FILE: .\backend\providers\provider_result.py
+============================================================
+"""
+Provider Result Contract.
+
+Defines the standard response returned
+by external providers.
+
+All providers return this structure so
+the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    """
+    Immutable provider execution result.
+
+    Attributes:
+
+        success:
+            Indicates whether provider execution succeeded.
+
+        provider_id:
+            Identifier of the provider.
+
+        output:
+            Provider response payload.
+
+        error:
+            Error details if execution failed.
+    """
+
+    success: bool
+    provider_id: str
+    output: Any = None
+    error: str | None = None
+
+============================================================
+FILE: .\backend\providers\llm\llm_provider.py
+============================================================
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+
+============================================================
+FILE: .\runtime\contracts\evidence.py
+============================================================
+!!! FILE NOT FOUND !!!
+
+============================================================
+FILE: .\runtime\contracts\confidence.py
+============================================================
+!!! FILE NOT FOUND !!!
+
+============================================================
+FILE: .\runtime\contracts\investigation_plan.py
+============================================================
+!!! FILE NOT FOUND !!!
+
+============================================================
+FILE: .\runtime\contracts\investigation_request.py
+============================================================
+!!! FILE NOT FOUND !!!
+
+============================================================
+FILE: .\runtime\contracts\investigation_result.py
+============================================================
+!!! FILE NOT FOUND !!!
+
+============================================================
+FILE: .\runtime\contracts\output_assessment.py
+============================================================
+!!! FILE NOT FOUND !!!
+
+============================================================
+FILE: .\tests\unit\runtime\agents\services\test_skill_execution_service.py
+============================================================
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from runtime.agents.services.skill_execution_service import (
+    SkillExecutionService,
+)
+
+
+class FakeManifest:
+    id = "architecture_review"
+    name = "Architecture Review"
+    description = "Architecture review."
+    version = "1.0.0"
+    status = "active"
+    owner = "Engineering Board"
+    compatible_agents = ["platform_intelligence_agent"]
+
+    def validate(self) -> None:
+        return None
+
+
+class FakeRegistry:
+    def __init__(self, manifest=None):
+        self.manifest = manifest or FakeManifest()
+
+    def get(self, skill_id: str):
+        if skill_id != self.manifest.id:
+            raise KeyError(skill_id)
+        return self.manifest
+
+
+class FakeExecutionService:
+    def __init__(self):
+        self.called = False
+
+    async def execute(self, *, request, context):
+        self.called = True
+        return SimpleNamespace(
+            execution_id=context.execution_id,
+            agent_id=request.agent_id,
+            capability=request.capability,
+            content="result",
+        )
+
+
+def make_context():
+    metadata = {}
+    events = []
+    return SimpleNamespace(
+        execution_id="exec-1",
+        metadata=metadata,
+        events=events,
+        add_metadata=lambda key, value: metadata.__setitem__(key, value),
+        add_event=lambda message, metadata=None: events.append(
+            (message, metadata)
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_execution_requires_compatible_agent():
+    class IncompatibleManifest(FakeManifest):
+        compatible_agents = ["project_manager"]
+
+    execution = FakeExecutionService()
+    service = SkillExecutionService(
+        skill_registry=FakeRegistry(IncompatibleManifest()),
+        agent_execution_service=execution,
+    )
+
+    request = SimpleNamespace(
+        agent_id="platform_intelligence_agent",
+        capability="platform_intelligence",
+        validate_request=lambda: None,
+    )
+
+    with pytest.raises(PermissionError):
+        await service.execute(
+            skill_id="architecture_review",
+            request=request,
+            context=make_context(),
+            skill_prompt="Review architecture.",
+        )
+
+    assert execution.called is False
+
+
+@pytest.mark.asyncio
+async def test_skill_execution_delegates_after_authorization():
+    execution = FakeExecutionService()
+    service = SkillExecutionService(
+        skill_registry=FakeRegistry(),
+        agent_execution_service=execution,
+    )
+
+    request = SimpleNamespace(
+        agent_id="platform_intelligence_agent",
+        capability="platform_intelligence",
+        validate_request=lambda: None,
+    )
+
+    context = make_context()
+
+    response = await service.execute(
+        skill_id="architecture_review",
+        request=request,
+        context=context,
+        skill_prompt="Review architecture.",
+    )
+
+    assert execution.called is True
+    assert response.content == "result"
+    assert context.metadata["skill_id"] == "architecture_review"
+
+============================================================
+FILE: .\tests\unit\runtime\agents\services\test_skill_execution_source_routing.py
+============================================================
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from runtime.agents.services.skill_execution_service import SkillExecutionService
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.core.runtime_context import RuntimeContext
+
+
+def make_context() -> RuntimeContext:
+    return RuntimeContext.model_construct(
+        execution_id="exec-routing-001",
+        pipeline_name="test",
+        capability_id="platform_intelligence",
+        capability_name="Platform Intelligence",
+        work_item=MagicMock(),
+        system_prompt="",
+        rendered_prompt="",
+        provider_id="",
+        model_name="",
+        raw_response="",
+        parsed_response=None,
+        memory={},
+        artifacts={},
+        metrics={},
+        metadata={},
+        events=[],
+        warnings=[],
+        errors=[],
+    )
+
+
+def make_request() -> AgentExecutionRequest:
+    return AgentExecutionRequest(
+        agent_id="platform_intelligence_agent",
+        capability="repository_reader",
+        instruction="Read source.",
+        context={"source_code": "value = 1", "source_path": "app.py"},
+        metadata={},
+    )
+
+
+def make_manifest(category: str):
+    manifest = MagicMock()
+    manifest.id = "repository_reader" if category == "source" else "architecture_review"
+    manifest.name = "Repository Reader" if category == "source" else "Architecture Review"
+    manifest.description = "Test skill"
+    manifest.version = "1.0.0"
+    manifest.status = "active"
+    manifest.owner = "AI Engineering Runtime"
+    manifest.category = category
+    manifest.compatible_agents = ("romanoide",)
+    manifest.validate.return_value = None
+    return manifest
+
+
+@pytest.mark.asyncio
+async def test_source_skill_routes_to_source_executor_not_llm():
+    registry = MagicMock()
+    registry.get.return_value = make_manifest("source")
+    registry.load_prompt.return_value = "source prompt"
+
+    agent_execution_service = MagicMock()
+    agent_execution_service.execute = AsyncMock()
+
+    source_executor = MagicMock()
+    source_response = MagicMock()
+    source_response.success = True
+    source_executor.execute = AsyncMock(return_value=source_response)
+
+    service = SkillExecutionService(
+        skill_registry=registry,
+        agent_execution_service=agent_execution_service,
+        source_skill_executor=source_executor,
+    )
+
+    response = await service.execute(
+        skill_id="repository_reader",
+        request=make_request(),
+        context=make_context(),
+    )
+
+    assert response is source_response
+    source_executor.execute.assert_awaited_once()
+    agent_execution_service.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_analysis_skill_keeps_existing_agent_execution_path():
+    registry = MagicMock()
+    registry.get.return_value = make_manifest("analysis")
+    registry.load_prompt.return_value = "analysis prompt"
+
+    agent_execution_service = MagicMock()
+    response = MagicMock()
+    response.success = True
+    agent_execution_service.execute = AsyncMock(return_value=response)
+
+    source_executor = MagicMock()
+    source_executor.execute = AsyncMock()
+
+    service = SkillExecutionService(
+        skill_registry=registry,
+        agent_execution_service=agent_execution_service,
+        source_skill_executor=source_executor,
+    )
+
+    request = make_request()
+    request = request.model_copy(update={"capability": "architecture_review"})
+
+    result = await service.execute(
+        skill_id="architecture_review",
+        request=request,
+        context=make_context(),
+    )
+
+    assert result is response
+    agent_execution_service.execute.assert_awaited_once()
+    source_executor.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_source_skill_still_requires_authorization():
+    registry = MagicMock()
+    manifest = make_manifest("source")
+    manifest.compatible_agents = ("some_other_agent",)
+    registry.get.return_value = manifest
+    registry.load_prompt.return_value = "source prompt"
+
+    source_executor = MagicMock()
+    source_executor.execute = AsyncMock()
+
+    service = SkillExecutionService(
+        skill_registry=registry,
+        agent_execution_service=MagicMock(),
+        source_skill_executor=source_executor,
+    )
+
+    with pytest.raises(PermissionError, match="not authorised"):
+        await service.execute(
+            skill_id="repository_reader",
+            request=make_request(),
+            context=make_context(),
+        )
+
+    source_executor.execute.assert_not_awaited()
+
+============================================================
+FILE: .\tests\unit\runtime\agents\services\test_source_skill_executor.py
+============================================================
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from runtime.agents.services.source_skill_executor import SourceSkillExecutor
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.contracts.evidence import Evidence
+from runtime.core.runtime_context import RuntimeContext
+
+
+def make_context() -> RuntimeContext:
+    return RuntimeContext.model_construct(
+        execution_id="exec-001",
+        pipeline_name="test",
+        capability_id="platform_intelligence",
+        capability_name="Platform Intelligence",
+        work_item=MagicMock(),
+        system_prompt="",
+        rendered_prompt="",
+        provider_id="",
+        model_name="",
+        raw_response="",
+        parsed_response=None,
+        memory={},
+        artifacts={},
+        metrics={},
+        metadata={},
+        events=[],
+        warnings=[],
+        errors=[],
+    )
+
+
+def make_request(context: dict) -> AgentExecutionRequest:
+    return AgentExecutionRequest(
+        agent_id="platform_intelligence_agent",
+        capability="repository_reader",
+        instruction="Read the supplied repository source.",
+        context=context,
+        metadata={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_skill_executor_creates_canonical_evidence():
+    runtime_context = make_context()
+    source = "class Example:\n    pass\n"
+    request = make_request(
+        {
+            "source_code": source,
+            "source_path": "runtime/example.py",
+        }
+    )
+
+    response = await SourceSkillExecutor().execute(
+        skill_id="repository_reader",
+        request=request,
+        context=runtime_context,
+    )
+
+    assert response.success is True
+    assert response.structured_output["evidence"]
+
+    evidence = response.structured_output["evidence"][0]
+    assert isinstance(evidence, Evidence)
+    assert evidence.content == source
+    assert evidence.source == "repository"
+    assert evidence.source_type == "repository"
+    assert evidence.authority == "AUTHORITATIVE"
+    assert evidence.location == "runtime/example.py"
+    assert evidence.metadata["skill_id"] == "repository_reader"
+    assert evidence.metadata["provenance"] == "runtime_supplied_source"
+
+    assert runtime_context.artifacts["evidence"] == (evidence,)
+
+
+@pytest.mark.asyncio
+async def test_source_skill_executor_reads_only_runtime_supplied_source():
+    runtime_context = make_context()
+    source = "print('governed input')"
+    runtime_context.add_artifact(
+        "source_input",
+        {
+            "source_code": source,
+            "source_path": "app/example.py",
+        },
+    )
+
+    request = make_request({})
+
+    response = await SourceSkillExecutor().execute(
+        skill_id="repository_reader",
+        request=request,
+        context=runtime_context,
+    )
+
+    evidence = response.structured_output["evidence"][0]
+    assert evidence.content == source
+    assert evidence.location == "app/example.py"
+
+
+@pytest.mark.asyncio
+async def test_source_skill_executor_rejects_missing_source():
+    runtime_context = make_context()
+    request = make_request({})
+
+    with pytest.raises(ValueError, match="No governed source input"):
+        await SourceSkillExecutor().execute(
+            skill_id="repository_reader",
+            request=request,
+            context=runtime_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_skill_executor_rejects_empty_source_code():
+    runtime_context = make_context()
+    request = make_request({"source_code": "   "})
+
+    with pytest.raises(ValueError, match="non-empty 'source_code'"):
+        await SourceSkillExecutor().execute(
+            skill_id="repository_reader",
+            request=request,
+            context=runtime_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_skill_executor_does_not_require_provider():
+    runtime_context = make_context()
+    request = make_request({"source_code": "value = 1"})
+
+    response = await SourceSkillExecutor().execute(
+        skill_id="repository_reader",
+        request=request,
+        context=runtime_context,
+    )
+
+    assert response.metadata["execution_mode"] == "read_only"
+    assert runtime_context.provider_id == ""
+    assert runtime_context.model_name == ""
+
+============================================================
+IMPORT REFERENCES
+============================================================
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py:10: from backend.conversation.conversation_request import ConversationRequest
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py:11: from backend.services.llm_service import LLMService
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py:12: from runtime.contracts.agent_execution_request import AgentExecutionRequest
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py:13: from runtime.contracts.agent_execution_response import AgentExecutionResponse
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py:18: def __init__(self, llm_service: LLMService) -> None:
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py:35: conversation = ConversationRequest(
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\skill_execution_service.py:8: from runtime.contracts.agent_execution_request import AgentExecutionRequest
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\skill_execution_service.py:9: from runtime.contracts.agent_execution_response import AgentExecutionResponse
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\source_skill_executor.py:6: from runtime.contracts.agent_execution_request import AgentExecutionRequest
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\source_skill_executor.py:7: from runtime.contracts.agent_execution_response import AgentExecutionResponse
+C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\source_skill_executor.py:8: from runtime.contracts.evidence import Evidence

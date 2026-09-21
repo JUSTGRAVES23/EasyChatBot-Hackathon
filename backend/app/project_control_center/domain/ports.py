@@ -27,6 +27,22 @@ class ProjectRegistry(ABC):
     def save(self, project: ProjectDefinition) -> ProjectDefinition: ...
 
 
+class ProjectRegistryBulkWriter(ABC):
+    """Atomic persistence boundary for validated registry imports."""
+
+    @abstractmethod
+    def create_many(
+        self,
+        projects: list[ProjectDefinition],
+    ) -> list[ProjectDefinition]: ...
+
+    @abstractmethod
+    def upsert_many(
+        self,
+        projects: list[ProjectDefinition],
+    ) -> list[ProjectDefinition]: ...
+
+
 class ProjectStatusSource(ABC):
     """Read-only adapter over an existing authoritative EasyChatBot source."""
 
@@ -65,7 +81,11 @@ class SnapshotRepository(ABC):
     def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot: ...
 
     @abstractmethod
-    def list_for_project(self, project_id: str, limit: int = 30) -> list[ProjectControlSnapshot]: ...
+    def list_for_project(
+        self,
+        project_id: str,
+        limit: int = 30,
+    ) -> list[ProjectControlSnapshot]: ...
 
 
 class ProjectEventRepository(ABC):
@@ -73,4 +93,8 @@ class ProjectEventRepository(ABC):
     def save(self, event: ProjectEvent) -> ProjectEvent: ...
 
     @abstractmethod
-    def list_for_project(self, project_id: str, limit: int = 100) -> list[ProjectEvent]: ...
+    def list_for_project(
+        self,
+        project_id: str,
+        limit: int = 100,
+    ) -> list[ProjectEvent]: ...

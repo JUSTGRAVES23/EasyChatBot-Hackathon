@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -86,7 +86,7 @@ def test_private_chat_repository_round_trip(
             conversation_id=conversation.conversation_id,
             role="assistant",
             content="Cześć! Jak mogę Ci pomóc?",
-            created_at=now,
+            created_at=now + timedelta(microseconds=1),
         )
 
         repository.save_message(

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -6,6 +6,10 @@ from uuid import UUID, uuid4
 import hashlib
 import hmac
 import secrets
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class AuthenticationError(ValueError):
@@ -21,6 +25,8 @@ class SessionResult:
 
 @dataclass(frozen=True, slots=True)
 class PasswordResetContext:
+    """Safe reset-link context exposed to the frontend."""
+
     email: str
 
 
@@ -44,6 +50,7 @@ class PasswordHasher:
             salt,
             self.iterations,
         )
+
         return (
             f"{self.algorithm}${self.iterations}$"
             f"{salt.hex()}${digest.hex()}"
@@ -268,40 +275,21 @@ class AuthenticationService:
 
         await self._email_service.send_password_reset_email(
             email=user.email,
-            username=user.username,
+            username=user.email,
             reset_token=reset_token,
         )
-
-    @staticmethod
-    def _validate_password_policy(password: str) -> None:
-        """Enforce the application password policy before persistence."""
-        if len(password) < 12:
-            raise AuthenticationError(
-                "Password must contain at least 12 characters."
-            )
-        if not any(character.isupper() for character in password):
-            raise AuthenticationError(
-                "Password must contain at least one uppercase letter."
-            )
-        if not any(character.islower() for character in password):
-            raise AuthenticationError(
-                "Password must contain at least one lowercase letter."
-            )
-        if not any(character.isdigit() for character in password):
-            raise AuthenticationError(
-                "Password must contain at least one number."
-            )
-        if not any(not character.isalnum() for character in password):
-            raise AuthenticationError(
-                "Password must contain at least one special character."
-            )
 
     async def get_password_reset_context(
         self,
         *,
         token: str,
     ) -> PasswordResetContext:
-        """Return non-sensitive account context for a valid reset token."""
+        """Return safe account context for a valid reset token.
+
+        The raw token is used only for transient lookup. The repository
+        validates its digest, expiry and single-use state. No credential
+        material is exposed to the caller.
+        """
         normalized_token = token.strip()
 
         if not normalized_token:
@@ -309,16 +297,51 @@ class AuthenticationService:
                 "Password reset token is required."
             )
 
-        context = await self._repository.get_password_reset_context(
-            token=normalized_token,
+        user = await self._repository.get_password_reset_user(
+            normalized_token,
         )
 
-        if context is None:
+        if user is None:
             raise AuthenticationError(
                 "Invalid or expired password reset token."
             )
 
-        return PasswordResetContext(email=context.email)
+        return PasswordResetContext(
+            email=user.email,
+        )
+
+    @staticmethod
+    def _validate_password_reset_password(
+        password: str,
+    ) -> None:
+        """Enforce the reset-specific password policy."""
+        if len(password) < 12:
+            raise AuthenticationError(
+                "Password must contain at least 12 characters."
+            )
+
+        if not any(character.isupper() for character in password):
+            raise AuthenticationError(
+                "Password must contain at least one uppercase letter."
+            )
+
+        if not any(character.islower() for character in password):
+            raise AuthenticationError(
+                "Password must contain at least one lowercase letter."
+            )
+
+        if not any(character.isdigit() for character in password):
+            raise AuthenticationError(
+                "Password must contain at least one number."
+            )
+
+        if not any(
+            not character.isalnum()
+            for character in password
+        ):
+            raise AuthenticationError(
+                "Password must contain at least one special character."
+            )
 
     async def confirm_password_reset(
         self,
@@ -334,20 +357,31 @@ class AuthenticationService:
                 "Password reset token is required."
             )
 
-        self._validate_password_policy(new_password)
-
-        context = await self._repository.get_password_reset_context(
-            token=normalized_token,
+        user = await self._repository.get_password_reset_user(
+            normalized_token,
         )
 
-        if context is None:
+        if user is None:
             raise AuthenticationError(
                 "Invalid or expired password reset token."
             )
 
+        # PasswordResetContextRecord exposes the authenticated account
+        # identifier as user_id, not id.
+        credential = await self._repository.get_password_credential(
+            user.user_id,
+        )
+
+        if credential is None:
+            raise AuthenticationError(
+                "Password reset is not available for this account."
+            )
+
+        self._validate_password_reset_password(new_password)
+
         if self._password_hasher.verify(
             new_password,
-            context.password_hash,
+            credential.password_hash,
         ):
             raise AuthenticationError(
                 "New password must be different from your previous password."
@@ -358,13 +392,33 @@ class AuthenticationService:
         reset = await self._repository.reset_password(
             token=normalized_token,
             password_hash=password_hash,
-            expected_password_hash=context.password_hash,
+            expected_password_hash=credential.password_hash,
         )
 
         if not reset:
             raise AuthenticationError(
                 "Invalid or expired password reset token."
             )
+
+        # The password transaction has succeeded. Confirmation email delivery
+        # is deliberately best-effort: a provider outage must not turn a
+        # successful password change into a misleading API failure. The
+        # timestamp below is the application-level confirmation time and is
+        # rendered by the email service in UTC.
+        reset_at = datetime.now(timezone.utc)
+
+        if self._email_service is not None:
+            try:
+                await self._email_service.send_password_reset_confirmation_email(
+                    email=user.email,
+                    username=user.email,
+                    reset_at=reset_at,
+                )
+            except Exception:
+                logger.exception(
+                    "Password reset confirmation email delivery failed."
+                )
+
     async def verify_email(
         self,
         token: str,
@@ -376,7 +430,6 @@ class AuthenticationService:
         The application service exposes the business operation without
         depending on the persistence implementation.
         """
-
         normalized_token = token.strip()
 
         if not normalized_token:

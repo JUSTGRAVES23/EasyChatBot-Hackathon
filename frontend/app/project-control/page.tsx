@@ -1,4 +1,5 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import type { CSSProperties } from "react";
 
 import {
@@ -6,10 +7,15 @@ import {
   ProjectControlApiError,
   type ProjectControlSnapshot,
 } from "@/app/lib/api/projectControl";
+import {
+  listProjectRegistryProjects,
+  ProjectRegistryApiError,
+  type ProjectRegistryProject,
+} from "@/app/lib/api/projectRegistry";
 
 import styles from "./ProjectControlPage.module.css";
 
-const DEFAULT_PROJECT_ID = "easychatbot";
+const PREFERRED_PROJECT_ID = "easychatbot";
 
 // Deduplicate concurrent reads. This is deliberately limited to in-flight
 // requests: a completed snapshot is never cached, so Refresh always asks the
@@ -115,7 +121,7 @@ function MetricValue({
   value: string | number | boolean | null;
   unit: string | null;
 }) {
-  if (value === null || value === undefined) return <>â€”</>;
+  if (value === null || value === undefined) return <>-</>;
 
   return (
     <>
@@ -125,7 +131,14 @@ function MetricValue({
   );
 }
 
+export interface ProjectPortfolioItem {
+  registry: ProjectRegistryProject;
+  snapshot: ProjectControlSnapshot | null;
+  error: string | null;
+}
+
 export default function ProjectControlPage() {
+  const [portfolio, setPortfolio] = useState<ProjectPortfolioItem[]>([]);
   const [snapshot, setSnapshot] = useState<ProjectControlSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -134,10 +147,10 @@ export default function ProjectControlPage() {
   // React StrictMode intentionally replays effects in development.
   // The initial authoritative GET must remain idempotent per mounted
   // component instance, while explicit Retry/Refresh actions remain
-  // allowed to issue a fresh request.
+  // allowed to issue fresh requests.
   const initialLoadStartedRef = useRef(false);
 
-  const loadSnapshot = useCallback(async (isRefresh = false) => {
+  const loadPortfolio = useCallback(async (isRefresh = false) => {
     if (isRefresh) {
       setRefreshing(true);
     } else {
@@ -147,14 +160,61 @@ export default function ProjectControlPage() {
     setError(null);
 
     try {
-      const result = await getSnapshotOnce(DEFAULT_PROJECT_ID);
-      setSnapshot(result);
+      const projects = await listProjectRegistryProjects();
+
+      if (projects.length === 0) {
+        setPortfolio([]);
+        setSnapshot(null);
+        return;
+      }
+
+      const results = await Promise.all(
+        projects.map(async (project): Promise<ProjectPortfolioItem> => {
+          try {
+            const projectSnapshot = await getSnapshotOnce(project.project_id);
+            return {
+              registry: project,
+              snapshot: projectSnapshot,
+              error: null,
+            };
+          } catch (cause) {
+            return {
+              registry: project,
+              snapshot: null,
+              error:
+                cause instanceof ProjectControlApiError
+                  ? cause.message
+                  : "Project Control snapshot unavailable.",
+            };
+          }
+        }),
+      );
+
+      setPortfolio(results);
+
+      // Keep the established EasyChatBot dashboard as the preferred
+      // detailed view while allowing the portfolio itself to be registry-driven.
+      const preferred =
+        results.find(
+          (item) => item.registry.project_id === PREFERRED_PROJECT_ID,
+        ) ?? results[0];
+
+      setSnapshot(preferred?.snapshot ?? null);
+
+      if (!preferred?.snapshot) {
+        setError(
+          preferred?.error ??
+            "No authoritative Project Control snapshot is available.",
+        );
+      }
     } catch (cause) {
-      if (cause instanceof ProjectControlApiError) {
+      if (cause instanceof ProjectRegistryApiError) {
         setError(cause.message);
       } else {
-        setError("Unable to load Project Control data.");
+        setError("Unable to load Project Registry data.");
       }
+      setPortfolio([]);
+      setSnapshot(null);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -167,8 +227,8 @@ export default function ProjectControlPage() {
     }
 
     initialLoadStartedRef.current = true;
-    void loadSnapshot();
-  }, [loadSnapshot]);
+    void loadPortfolio();
+  }, [loadPortfolio]);
 
   const unavailableSources = useMemo(
     () =>
@@ -181,11 +241,11 @@ export default function ProjectControlPage() {
       <main className={styles.page} aria-label="Project Control Center">
         <div className={styles.loadingPanel} role="status">
           <div className={styles.loaderOrb} aria-hidden="true">
-            âœ¦
+            *
           </div>
           <p className={styles.eyebrow}>PROJECT CONTROL CENTER</p>
           <h1>Consulting the Observatory</h1>
-          <p>Loading project control dataâ€¦</p>
+          <p>Loading project control data...</p>
         </div>
       </main>
     );
@@ -201,9 +261,9 @@ export default function ProjectControlPage() {
           <button
             type="button"
             className={styles.primaryButton}
-            onClick={() => void loadSnapshot()}
+            onClick={() => void loadPortfolio()}
           >
-            <span aria-hidden="true">â†»</span>
+            <span aria-hidden="true">&gt;</span>
             Retry
           </button>
         </section>
@@ -232,16 +292,13 @@ export default function ProjectControlPage() {
       <div className={styles.content}>
         <nav className={styles.breadcrumb} aria-label="Breadcrumb">
           <span>Home</span>
-          <span aria-hidden="true">â€º</span>
+          <span aria-hidden="true">&gt;</span>
           <span>Operations Center</span>
-          <span aria-hidden="true">â€º</span>
+          <span aria-hidden="true">&gt;</span>
           <strong>Project Control Center</strong>
         </nav>
 
         <section className={styles.hero}>
-          <div className={styles.heroImage} role="img" aria-label="EasyChatBot Academy observatory library" />
-          <div className={styles.heroOverlay} />
-
           <div className={styles.heroContent}>
             <p className={styles.eyebrow}>PROJECT CONTROL CENTER</p>
             <h1>
@@ -253,68 +310,179 @@ export default function ProjectControlPage() {
 
             <div className={styles.principles} aria-label="Project control principles">
               <div>
-                <span className={styles.principleIcon}>â—‡</span>
+                <span className={styles.principleIcon}>+</span>
                 <span>Clear<br />Progress</span>
               </div>
               <div>
-                <span className={styles.principleIcon}>â–¥</span>
+                <span className={styles.principleIcon}>=</span>
                 <span>Informed<br />Decisions</span>
               </div>
               <div>
-                <span className={styles.principleIcon}>â™§</span>
+                <span className={styles.principleIcon}>+</span>
                 <span>Aligned<br />Teams</span>
               </div>
               <div>
-                <span className={styles.principleIcon}>âœ¦</span>
+                <span className={styles.principleIcon}>*</span>
                 <span>A Brighter<br />Tomorrow</span>
               </div>
             </div>
           </div>
 
           <blockquote className={styles.heroQuote}>
-            â€œDisciplined execution today,<br />
-            a brighter tomorrow.â€
+            "Disciplined execution today,<br />
+            a brighter tomorrow."
           </blockquote>
         </section>
 
-        <section className={styles.projectBar} aria-label="Project identity">
-          <div className={styles.projectIdentity}>
-            <div className={styles.projectEmblem} aria-hidden="true">âœ¦</div>
+        <section className={styles.panel} aria-label="Tracked projects">
+          <div className={styles.panelHeader}>
             <div>
-              <div className={styles.projectNameRow}>
-                <h2>{snapshot.project_name}</h2>
-                <span
-                  className={styles.statusBadge}
-                  data-tone={statusTone(snapshot.project_status)}
-                >
-                  â— {statusLabel(snapshot.project_status)}
-                </span>
-              </div>
-              <p>AI-powered language learning for a brighter tomorrow.</p>
-            </div>
-          </div>
-
-          <div className={styles.projectControls}>
-            <div className={styles.updated}>
-              <span>Last updated</span>
-              <strong>{formatDate(snapshot.generated_at)}</strong>
+              <span className={styles.panelKicker}>PROJECT PORTFOLIO</span>
+              <h2>
+                Tracked Projects <small>({portfolio.length})</small>
+              </h2>
             </div>
             <button
               type="button"
-              className={styles.refreshButton}
-              onClick={() => void loadSnapshot(true)}
+              className={styles.primaryButton}
+              onClick={() => void loadPortfolio(true)}
               disabled={refreshing}
               aria-label="Refresh project control data"
+              aria-busy={refreshing}
             >
-              <span aria-hidden="true">â†»</span>
-              {refreshing ? "Refreshingâ€¦" : "Refresh"}
+              {refreshing ? "Refreshing..." : "Refresh"}
             </button>
           </div>
+
+          {portfolio.length === 0 ? (
+            <p className={styles.emptyText}>
+              No active projects are currently registered.
+            </p>
+          ) : (
+            <div className={styles.workstreamGrid}>
+              {portfolio.map((item) => {
+                const projectSnapshot = item.snapshot;
+                const projectProgress = projectSnapshot
+                  ? Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        projectSnapshot.overall_progress_percent,
+                      ),
+                    )
+                  : 0;
+
+                return (
+                  <Link
+                    className={styles.workstreamCard}
+                    key={item.registry.project_id}
+                    to={`/project-control/projects/${encodeURIComponent(item.registry.project_id)}`}
+                    aria-label={`Open ${item.registry.name} project control`}
+                    style={{ textDecoration: "none", color: "inherit" }}
+                  >
+                    <div className={styles.cardTopline}>
+                      <strong>{item.registry.name}</strong>
+                      <span
+                        className={styles.miniBadge}
+                        data-tone={
+                          projectSnapshot
+                            ? statusTone(projectSnapshot.project_status)
+                            : "neutral"
+                        }
+                      >
+                        *{" "}
+                        {projectSnapshot
+                          ? statusLabel(projectSnapshot.project_status)
+                          : "UNKNOWN"}
+                      </span>
+                    </div>
+
+                    <p>
+                      {item.registry.description ||
+                        "Registered project tracked through Project Control."}
+                    </p>
+
+                    <div className={styles.cardMeta}>
+                      <span>
+                        Project ID: {item.registry.project_id}
+                      </span>
+                      <span>
+                        Owner: {item.registry.owner ?? "Not assigned"}
+                      </span>
+                    </div>
+
+                    <div className={styles.workstreamPercent}>
+                      {projectSnapshot
+                        ? formatWholePercent(projectProgress)
+                        : "Not available"}
+                    </div>
+
+                    <div
+                      className={styles.progressTrack}
+                      aria-label={`${item.registry.name} project progress`}
+                    >
+                      <span
+                        style={{
+                          width: `${projectProgress}%`,
+                        }}
+                      />
+                    </div>
+
+                    {projectSnapshot ? (
+                      <>
+                        <div className={styles.cardMeta}>
+                          <span>
+                            Milestone:{" "}
+                            {projectSnapshot.current_milestone ??
+                              "Not available"}
+                          </span>
+                          <span>
+                            Workstream:{" "}
+                            {projectSnapshot.current_workstream ??
+                              "Not available"}
+                          </span>
+                        </div>
+
+                        <div className={styles.cardMeta}>
+                          <span>
+                            Risks: {projectSnapshot.open_risks}
+                          </span>
+                          <span>
+                            Blockers: {projectSnapshot.open_blockers}
+                          </span>
+                          <span>
+                            Readiness:{" "}
+                            {formatReadiness(
+                              projectSnapshot.release_readiness,
+                            )}
+                          </span>
+                        </div>
+
+                        <div className={styles.cardMeta}>
+                          <span>
+                            Updated{" "}
+                            {formatDate(projectSnapshot.generated_at)}
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className={styles.cardMeta}>
+                        <span>
+                          Snapshot:{" "}
+                          {item.error ?? "Not available"}
+                        </span>
+                      </div>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         <section className={styles.kpiGrid} aria-label="Project status">
           <article className={styles.kpiCard}>
-            <span className={styles.kpiIcon} data-tone={statusTone(snapshot.project_status)}>â—</span>
+            <span className={styles.kpiIcon} data-tone={statusTone(snapshot.project_status)}>*</span>
             <div>
               <span className={styles.kpiLabel}>Project Status</span>
               <strong data-tone={statusTone(snapshot.project_status)}>
@@ -336,7 +504,7 @@ export default function ProjectControlPage() {
           </article>
 
           <article className={styles.kpiCard}>
-            <span className={styles.kpiIcon} data-tone="success">âœ¦</span>
+            <span className={styles.kpiIcon} data-tone="success">*</span>
             <div>
               <span className={styles.kpiLabel}>Release Readiness</span>
               <strong>{formatReadiness(snapshot.release_readiness)}</strong>
@@ -354,7 +522,7 @@ export default function ProjectControlPage() {
           </article>
 
           <article className={styles.kpiCard}>
-            <span className={styles.kpiIcon} data-tone="warning">â–³</span>
+            <span className={styles.kpiIcon} data-tone="warning">!</span>
             <div>
               <span className={styles.kpiLabel}>Open Risks</span>
               <strong>{snapshot.open_risks}</strong>
@@ -370,12 +538,12 @@ export default function ProjectControlPage() {
                 <span className={styles.panelKicker}>DELIVERY FOCUS</span>
                 <h2>Current Focus</h2>
               </div>
-              <span className={styles.goldMark}>âœ¦</span>
+              <span className={styles.goldMark}>*</span>
             </div>
 
             <div className={styles.focusCards}>
               <div className={styles.focusCard}>
-                <span className={styles.focusIcon}>âš‘</span>
+                <span className={styles.focusIcon}>M</span>
                 <div>
                   <span>Current Milestone</span>
                   <strong>{snapshot.current_milestone ?? "Not available"}</strong>
@@ -383,7 +551,7 @@ export default function ProjectControlPage() {
               </div>
 
               <div className={styles.focusCard}>
-                <span className={styles.focusIcon}>â—ˆ</span>
+                <span className={styles.focusIcon}>W</span>
                 <div>
                   <span>Current Workstream</span>
                   <strong>{snapshot.current_workstream ?? "Not available"}</strong>
@@ -438,7 +606,7 @@ export default function ProjectControlPage() {
                       className={styles.miniBadge}
                       data-tone={statusTone(workstream.status)}
                     >
-                      â— {workstream.status.replaceAll("_", " ")}
+                      * {workstream.status.replaceAll("_", " ")}
                     </span>
                   </div>
                   <div className={styles.workstreamPercent}>
@@ -473,7 +641,7 @@ export default function ProjectControlPage() {
                   <strong>
                     <MetricValue value={metric.value} unit={metric.unit} />
                   </strong>
-                  <small>{metric.source} Â· {formatDate(metric.observed_at)}</small>
+                  <small>{metric.source}  |  {formatDate(metric.observed_at)}</small>
                 </article>
               ))}
             </div>
@@ -635,14 +803,14 @@ export default function ProjectControlPage() {
               {snapshot.sources.map((source) => (
                 <li className={styles.sourceListItem} key={source.source_id}>
                   <article className={styles.sourceCard}>
-                    <div className={styles.sourceIcon}>âœ¦</div>
+                    <div className={styles.sourceIcon}>*</div>
                     <div className={styles.sourceBody}>
                       <strong>{source.name}</strong>
                       <span
                         className={styles.miniBadge}
                         data-tone={statusTone(source.status)}
                       >
-                        â— {source.status === "unavailable"
+                        * {source.status === "unavailable"
                           ? "Unavailable"
                           : source.status === "stale"
                             ? "Stale"
@@ -666,7 +834,7 @@ export default function ProjectControlPage() {
 
           {unavailableSources.length > 0 && (
             <aside className={styles.sourceNotice} role="status" aria-label="Source warning">
-              <span aria-hidden="true">â–³</span>
+              <span aria-hidden="true">!</span>
               <div>
                 <strong>Some project-control sources are unavailable or stale.</strong>
                 <p>The dashboard continues to show the latest safe snapshot available from authoritative sources.</p>
@@ -678,14 +846,12 @@ export default function ProjectControlPage() {
         <footer className={styles.footer}>
           <div>
             <strong>EasyChatBot Academy</strong>
-            <span>Learn Â· Practice Â· Grow Â· Belong</span>
+            <span>Learn  |  Practice  |  Grow  |  Belong</span>
           </div>
-          <p>â€œBetter learning. Better people. A brighter tomorrow.â€</p>
+          <p>"Better learning. Better people. A brighter tomorrow."</p>
           <small>Snapshot generated {formatDate(snapshot.generated_at)}</small>
         </footer>
       </div>
     </main>
   );
 }
-
-

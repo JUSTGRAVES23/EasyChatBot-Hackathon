@@ -1,0 +1,20 @@
+from __future__ import annotations
+from datetime import datetime
+from sqlalchemy import DateTime, Enum as SAEnum, String
+from sqlalchemy.orm import Mapped, mapped_column
+from app.infrastructure.persistence.database import Base
+from app.project_control_center.domain.discovery_models import DiscoveryCandidateStatus
+
+class ProjectDiscoveryCandidateRecord(Base):
+    __tablename__ = "project_discovery_candidates"
+    candidate_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    candidate_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_reference: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    status: Mapped[DiscoveryCandidateStatus] = mapped_column(SAEnum(DiscoveryCandidateStatus, native_enum=False), nullable=False)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    registered_project_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

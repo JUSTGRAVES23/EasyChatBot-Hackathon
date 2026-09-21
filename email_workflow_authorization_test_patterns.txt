@@ -1,0 +1,415 @@
+============================================================
+EMAIL WORKFLOW — AUTHORIZATION TEST PATTERNS
+Repository: C:\AI Folder\EasyChatBot-Hackathon
+Generated: 2026-09-19 08:59:56
+============================================================
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\operations_center\test_persistence_operations_api.py
+============================================================
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.routes.persistence_operations_routes import (
+    create_persistence_operations_router,
+)
+
+
+class FakeService:
+    def snapshot(self, *, environment: str):
+        return {"environment": environment, "kind": "snapshot"}
+
+    def health_snapshot(self, *, environment: str):
+        return {"environment": environment, "kind": "health"}
+
+
+def make_client():
+    app = FastAPI()
+
+    def operator_dependency():
+        return {"role": "operator"}
+
+    app.include_router(
+        create_persistence_operations_router(
+            FakeService(),
+            operator_dependency=operator_dependency,
+        )
+    )
+
+    return TestClient(app)
+
+
+def test_operator_can_read_overview_and_health():
+    client = make_client()
+
+    overview = client.get(
+        "/api/operations-center/persistence?environment=dev"
+    )
+    health = client.get(
+        "/api/operations-center/persistence/health?environment=staging"
+    )
+
+    assert overview.status_code == 200
+    assert overview.json() == {
+        "environment": "dev",
+        "kind": "snapshot",
+    }
+
+    assert health.status_code == 200
+    assert health.json() == {
+        "environment": "staging",
+        "kind": "health",
+    }
+
+
+def test_environment_contract_rejects_unknown_values():
+    response = make_client().get(
+        "/api/operations-center/persistence?environment=qa"
+    )
+
+    assert response.status_code == 422
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from fastapi import Depends, FastAPI
+from fastapi.testclient import TestClient
+
+from app.api.dependencies.authorization import (
+    require_permission,
+)
+from app.api.dependencies.identity import (
+    get_current_principal,
+)
+from app.domain.authorization.permissions import (
+    Permission,
+)
+from app.domain.identity.principal import (
+    AccountStatus,
+    Principal,
+)
+from app.project_control_center.api.project_control_router import (
+    create_project_control_router,
+)
+from app.project_control_center.application.service import (
+    ProjectControlService,
+)
+from app.project_control_center.domain.models import (
+    ProjectDefinition,
+    SourceSnapshot,
+    SourceStatus,
+)
+from app.project_control_center.domain.ports import (
+    ProjectStatusSource,
+)
+from app.project_control_center.infrastructure.in_memory import (
+    InMemoryProjectRegistry,
+    InMemorySnapshotRepository,
+)
+
+
+@dataclass
+class AuthorizationTestSource(
+    ProjectStatusSource,
+):
+    @property
+    def source_id(self) -> str:
+        return "authorization-test"
+
+    @property
+    def source_name(self) -> str:
+        return "Authorization Test"
+
+    def health(self) -> SourceSnapshot:
+        return SourceSnapshot(
+            source_id=self.source_id,
+            name=self.source_name,
+            status=SourceStatus.AVAILABLE,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def fetch_workstreams(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_metrics(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_issues(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_risks(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_actions(
+        self,
+        project_id: str,
+    ):
+        return []
+
+    def fetch_milestones(
+        self,
+        project_id: str,
+    ):
+        return []
+
+
+def make_project_control() -> ProjectControlService:
+    registry = InMemoryProjectRegistry()
+
+    registry.save(
+        ProjectDefinition(
+            project_id="easychatbot",
+            name="EasyChatBot",
+        )
+    )
+
+    return ProjectControlService(
+        registry=registry,
+        sources=(AuthorizationTestSource(),),
+        snapshots=InMemorySnapshotRepository(),
+    )
+
+
+def make_router():
+    return create_project_control_router(
+        make_project_control(),
+    )
+
+
+def make_app() -> FastAPI:
+    application = FastAPI()
+
+    application.include_router(
+        make_router(),
+    )
+
+    return application
+
+
+def make_principal(
+    *,
+    roles: frozenset[str],
+) -> Principal:
+    return Principal(
+        user_id="authorization-test-user",
+        email="operator@example.test",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=roles,
+    )
+
+
+def test_beta_user_does_not_have_functionality_control_permission():
+    principal = make_principal(
+        roles=frozenset({"beta_user"}),
+    )
+
+    dependency = require_permission(
+        Permission.FUNCTIONALITY_CONTROL,
+    )
+
+    application = FastAPI()
+
+    @application.get("/test")
+    async def protected(
+        _: Principal = Depends(dependency),
+    ):
+        return {"ok": True}
+
+    # Override the identity dependency, not the permission dependency.
+    #
+    # This preserves the real authorization path:
+    #
+    # get_current_principal
+    #       -> require_permission(...)
+    #       -> AuthorizationService
+    #       -> PermissionDeniedError
+    #       -> HTTP 403
+    application.dependency_overrides[
+        get_current_principal
+    ] = lambda: principal
+
+    with TestClient(application) as client:
+        response = client.get("/test")
+
+    assert response.status_code == 403
+
+
+def test_operator_has_functionality_control_permission():
+    principal = make_principal(
+        roles=frozenset({"operator"}),
+    )
+
+    dependency = require_permission(
+        Permission.FUNCTIONALITY_CONTROL,
+    )
+
+    application = FastAPI()
+
+    @application.get("/test")
+    async def protected(
+        _: Principal = Depends(dependency),
+    ):
+        return {"ok": True}
+
+    # Override only identity so that the real authorization
+    # service evaluates the operator's permission.
+    application.dependency_overrides[
+        get_current_principal
+    ] = lambda: principal
+
+    with TestClient(application) as client:
+        response = client.get("/test")
+
+    assert response.status_code == 200
+
+
+def test_project_control_router_uses_functionality_control_permission():
+    router = make_router()
+
+    routes = [
+        route
+        for route in router.routes
+        if hasattr(route, "path")
+        and route.path
+        == "/project-control/projects/{project_id}"
+    ]
+
+    assert len(routes) == 1
+
+    route = routes[0]
+
+    assert route.methods == {"GET"}
+
+    dependency_calls = {
+        dependency.call
+        for dependency in route.dependant.dependencies
+    }
+
+    assert len(dependency_calls) == 1
+
+    permission_dependency = next(
+        iter(dependency_calls)
+    )
+
+    assert permission_dependency is not None
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authorization_service.py
+============================================================
+from app.application.authorization.authorization_service import (
+    AuthenticationRequiredError,
+    AuthorizationService,
+    PermissionDeniedError,
+)
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.principal import (
+    AccountStatus,
+    Principal,
+)
+
+
+def operator() -> Principal:
+    return Principal(
+        user_id="operator-1",
+        email="operator@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset({"operator"}),
+    )
+
+
+def admin() -> Principal:
+    return Principal(
+        user_id="admin-1",
+        email="admin@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset({"admin"}),
+    )
+
+
+def beta_user() -> Principal:
+    return Principal(
+        user_id="beta-1",
+        email="beta@example.com",
+        email_verified=True,
+        account_status=AccountStatus.ACTIVE,
+        roles=frozenset({"beta_user"}),
+    )
+
+
+def test_operator_can_publish_announcements():
+    principal = AuthorizationService().require_permission(
+        principal=operator(),
+        permission=Permission.ANNOUNCEMENT_PUBLISH,
+    )
+    assert principal.user_id == "operator-1"
+
+
+def test_beta_user_cannot_publish_announcements():
+    try:
+        AuthorizationService().require_permission(
+            principal=beta_user(),
+            permission=Permission.ANNOUNCEMENT_PUBLISH,
+        )
+    except PermissionDeniedError:
+        return
+
+    raise AssertionError("Beta users must not publish announcements.")
+
+
+def test_operator_can_control_functionality():
+    principal = AuthorizationService().require_permission(
+        principal=operator(),
+        permission=Permission.FUNCTIONALITY_CONTROL,
+    )
+    assert principal.user_id == "operator-1"
+
+
+def test_admin_can_control_functionality():
+    principal = AuthorizationService().require_permission(
+        principal=admin(),
+        permission=Permission.FUNCTIONALITY_CONTROL,
+    )
+    assert principal.user_id == "admin-1"
+
+
+def test_beta_user_cannot_control_functionality():
+    try:
+        AuthorizationService().require_permission(
+            principal=beta_user(),
+            permission=Permission.FUNCTIONALITY_CONTROL,
+        )
+    except PermissionDeniedError:
+        return
+
+    raise AssertionError("Beta users must not control functionalities.")
+
+
+def test_missing_identity_is_rejected():
+    try:
+        AuthorizationService().require_authenticated(None)
+    except AuthenticationRequiredError:
+        return
+
+    raise AssertionError("Missing identity must be rejected.")
+
+

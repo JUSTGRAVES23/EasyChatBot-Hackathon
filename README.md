@@ -1,55 +1,46 @@
-# EasyChatBot — P0.2.9D.3 Secure Governance Package
+# EasyChatBot — Platform Intelligence Build Package
 
-## Objective
-Secure the sensitive `internal_data_read` capability before P0.2.9E wires
-the BetaUserReadService into the canonical Runtime.
+## Purpose
 
-## Changes
-1. `BootstrapGovernance` fails closed for `internal_data_read` when:
-   - no Runtime actor is present;
-   - the actor has no `internal_data.read` permission;
-   - the actor only has `beta_user` or an unknown role.
-2. `operator` and `admin` are allowed according to the existing application
-   permission contract.
-3. The `/runtime/execute` API obtains the authenticated `Principal` through
-   the existing identity dependency and converts it to the provider-neutral
-   `RuntimeActorContext`.
-4. Actor identity/roles come from the authenticated Principal, never from the
-   request payload.
-5. Existing non-sensitive hackathon capabilities retain the previous
-   allow behavior.
+This package advances the Platform Intelligence (PI) workstream from PI-1A
+Skill Infrastructure into PI-1B Governed Skill Execution.
 
-## Files
-- `P0.2.9D3_secure_governance_and_api_actor.patch`
-- `tests/unit/application/test_bootstrap_governance.py`
-- `tests/unit/api/test_runtime_route_actor_propagation.py`
+This is an additive build package. It does not replace the canonical Runtime,
+Provider, AgentFactory, or existing Project Manager execution path.
 
-## Apply
-Run from:
-`C:\AI Folder\EasyChatBot-Hackathon`
+## Current project position
 
-Inspect the patch first, then apply with:
+- PI-1A Skill infrastructure: GREEN
+- Runtime unit suite: GREEN (per project execution results)
+- AgentFactory: generic and future-agent ready
+- Prompt composition: RuntimePromptBuilder with registered builders
+- PI prompt builder: implemented and syntax-checked in the active workstream
+- Per-agent execution-service composition: implemented and regression-tested
+- PI-1B governed Skill execution: IN PROGRESS
+- Evidence-producing/retrieval Skills: NOT YET IMPLEMENTED
+- Deep Dive investigation: NOT YET COMPLETE
+- Screen/page intelligence: NOT YET COMPLETE
+- Escalation workflow: NOT YET COMPLETE
 
-```powershell
-git apply .\P0.2.9D3_secure_governance_and_api_actor.patch
-```
+## Delivery status
 
-If the repository's existing working tree prevents a clean patch application,
-STOP. Do not force, reset, or overwrite unrelated changes. Apply the two
-small source edits manually using the exact diff as the change specification.
+This ZIP is a build package, not a claim that these files have already been
+merged into the user's local repository. The canonical repository is
+`C:\AI Folder\ai_agents`.
 
-## Test
-Use the project-local `.venv`:
+Apply the package incrementally, preserving local changes. Run the project's
+own regression suite after each integration step.
 
-```powershell
-Set-Location "C:\AI Folder\EasyChatBot-Hackathon"
-.\.venv\Scripts\python.exe -m pytest tests/unit/application/test_bootstrap_governance.py tests/unit/api/test_runtime_route_actor_propagation.py -q
-```
+## Architecture guardrails
 
-Then run the relevant Runtime/auth regression suite already used for P0.2.9D.
-
-## Acceptance
-P0.2.9D.3 is NOT complete merely because the two new test files pass.
-The existing relevant regression suite must also pass.
-
-No commit is included or requested.
+1. Keep `AgentFactory` generic.
+2. Keep provider independence.
+3. Keep `AgentExecutionService` as the provider-facing application boundary.
+4. Keep Skill governance in Runtime.
+5. Keep Skill resources behind the Skill loading boundary.
+6. Keep Platform Intelligence read-only in this phase.
+7. Never fabricate evidence, source dates, authority, or confidence.
+8. Do not add a vector database/RAG platform before direct governed search
+   demonstrates a real need.
+9. Do not create another AI Runtime.
+10. No autonomous production side effects.

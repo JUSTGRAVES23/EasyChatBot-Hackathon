@@ -77,12 +77,6 @@ export default defineConfig({
     proxy: {
       // =================================================
       // Authentication API
-      //
-      // IMPORTANT:
-      // The browser never receives or stores the session ID.
-      //
-      // The existing backend authentication service creates
-      // the HttpOnly easychatbot_session cookie.
       // =================================================
 
       "/auth": {
@@ -91,20 +85,39 @@ export default defineConfig({
       },
 
       // =================================================
-      // Project Control API
+      // Project Control snapshot API
       //
       // IMPORTANT:
-      // Do NOT proxy /project-control itself.
+      // /project-control/projects is a React application
+      // route and MUST NOT be proxied.
       //
-      // /project-control is a React application route.
+      // Only the project-specific snapshot endpoint is
+      // proxied:
       //
-      // The API client uses:
       // /project-control/projects/{project_id}
-      //
-      // Therefore only the API resource path is proxied.
       // =================================================
 
-      "/project-control/projects": {
+      "^/project-control/projects/[^/]+$": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+
+      // =================================================
+      // Project Registry API
+      //
+      // D5.3 authoritative Project Registry endpoints:
+      //
+      // GET   /project-control/registry/projects
+      // POST  /project-control/registry/projects
+      // GET   /project-control/registry/projects/{id}
+      // PATCH /project-control/registry/projects/{id}
+      //
+      // This is deliberately separate from the React route:
+      //
+      // /project-control/projects
+      // =================================================
+
+      "/project-control/registry": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },
@@ -135,16 +148,6 @@ export default defineConfig({
 
       // =================================================
       // API boundary
-      //
-      // Includes:
-      //
-      // /api/privacy/governance/summary
-      // /api/privacy/governance/status-chart
-      // /api/privacy/governance/cases
-      // /api/privacy/governance/cases/{case_id}
-      // /api/operations-center/functionality-health
-      // /api/operations-center/risk-intelligence
-      //
       // =================================================
 
       "/api": {

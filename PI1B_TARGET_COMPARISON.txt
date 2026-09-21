@@ -1,0 +1,424 @@
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\agent_execution_service.py
+====================================================================================================
+"""Provider-neutral governed Agent execution boundary.
+
+This service owns execution orchestration only. Provider selection and SDK
+access remain below the existing provider/application boundary.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from backend.conversation.conversation_request import ConversationRequest
+from backend.services.llm_service import LLMService
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.contracts.agent_execution_response import AgentExecutionResponse
+from runtime.core.runtime_context import RuntimeContext
+
+
+class AgentExecutionService:
+    def __init__(self, llm_service: LLMService) -> None:
+        self._llm_service = llm_service
+
+    async def execute(
+        self,
+        request: AgentExecutionRequest,
+        context: RuntimeContext,
+    ) -> AgentExecutionResponse:
+        if request is None:
+            raise ValueError("request must not be None")
+        if context is None:
+            raise ValueError("context must not be None")
+
+        context.capability_id = request.capability
+        context.capability_name = request.capability
+        context.work_item = request.instruction
+
+        conversation = ConversationRequest(
+            system_instruction=context.system_prompt or "",
+            user_prompt=request.instruction,
+            conversation_context=None,
+        )
+
+        result = self._llm_service.generate(conversation)
+
+        if not result.success:
+            error = result.error or "Provider execution failed"
+            context.errors.append(error)
+            return AgentExecutionResponse(
+                execution_id=context.execution_id,
+                agent_id=request.agent_id,
+                capability=request.capability,
+                success=False,
+                error=error,
+                metadata=dict(request.metadata),
+            )
+
+        context.raw_response = result.output
+        context.parsed_response = result.output
+
+        return AgentExecutionResponse(
+            execution_id=context.execution_id,
+            agent_id=request.agent_id,
+            capability=request.capability,
+            content=str(result.output or ""),
+            success=True,
+            metadata=dict(request.metadata),
+        )
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\agents\services\skill_execution_service.py
+====================================================================================================
+from __future__ import annotations
+
+import logging
+
+from runtime.agents.services.agent_execution_service import AgentExecutionService
+from runtime.agents.services.source_skill_executor import SourceSkillExecutor
+from runtime.capabilities.registries.skill_registry import SkillRegistry
+from runtime.contracts.agent_execution_request import AgentExecutionRequest
+from runtime.contracts.agent_execution_response import AgentExecutionResponse
+from runtime.core.runtime_context import RuntimeContext
+
+
+logger = logging.getLogger(__name__)
+
+
+class SkillExecutionService:
+    """
+    Runtime-controlled execution boundary for Skills.
+
+    Authorization is reusable independently from direct Skill execution.
+
+    Skill manifests may use governed agent aliases for compatibility.
+    Canonical Runtime agent IDs remain authoritative internally.
+
+    Analysis Skills are delegated to AgentExecutionService. Source Skills are
+    delegated to SourceSkillExecutor so source-grounded Evidence is produced
+    without crossing the provider boundary.
+    """
+
+    AGENT_COMPATIBILITY_ALIASES: dict[str, tuple[str, ...]] = {
+        "project_manager": ("aurelius",),
+        "platform_intelligence_agent": ("romanoide",),
+    }
+
+    def __init__(
+        self,
+        *,
+        skill_registry: SkillRegistry,
+        agent_execution_service: AgentExecutionService,
+        source_skill_executor: SourceSkillExecutor | None = None,
+    ) -> None:
+        if skill_registry is None:
+            raise ValueError("SkillRegistry cannot be None.")
+
+        if agent_execution_service is None:
+            raise ValueError("AgentExecutionService cannot be None.")
+
+        self._skill_registry = skill_registry
+        self._agent_execution_service = agent_execution_service
+        self._source_skill_executor = (
+            source_skill_executor or SourceSkillExecutor()
+        )
+
+        logger.info("SkillExecutionService initialised.")
+
+    @classmethod
+    def _agent_is_compatible(
+        cls,
+        *,
+        agent_id: str,
+        compatible_agents: tuple[str, ...] | list[str],
+    ) -> bool:
+        """Determine whether a canonical Runtime agent is authorised."""
+        if agent_id in compatible_agents:
+            return True
+
+        aliases = cls.AGENT_COMPATIBILITY_ALIASES.get(agent_id, ())
+
+        return any(alias in compatible_agents for alias in aliases)
+
+    def authorize(
+        self,
+        *,
+        skill_id: str,
+        agent_id: str,
+        context: RuntimeContext,
+    ):
+        """
+        Resolve and authorize a Skill for an Agent.
+
+        This method performs governance and Runtime-context enrichment only.
+        It does not execute the Agent or call a provider.
+        """
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise ValueError("skill_id cannot be empty.")
+
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            raise ValueError("agent_id cannot be empty.")
+
+        if context is None:
+            raise ValueError("RuntimeContext cannot be None.")
+
+        manifest = self._skill_registry.get(skill_id)
+
+        if manifest is None:
+            raise KeyError(f"Skill '{skill_id}' is not registered.")
+
+        manifest.validate()
+
+        if manifest.status.lower() != "active":
+            raise PermissionError(
+                f"Skill '{skill_id}' is not active and cannot be executed."
+            )
+
+        if manifest.compatible_agents:
+            if not self._agent_is_compatible(
+                agent_id=agent_id,
+                compatible_agents=manifest.compatible_agents,
+            ):
+                raise PermissionError(
+                    f"Agent '{agent_id}' is not authorised "
+                    f"to execute Skill '{skill_id}'."
+                )
+
+        context.add_metadata("skill_id", manifest.id)
+        context.add_metadata("skill_name", manifest.name)
+        context.add_metadata("skill_description", manifest.description)
+        context.add_metadata(
+            "skill_prompt",
+            self._skill_registry.load_prompt(manifest.id),
+        )
+        context.add_metadata("skill_version", manifest.version)
+        context.add_metadata("skill_status", manifest.status)
+        context.add_metadata("skill_owner", manifest.owner)
+        context.add_metadata("skill_category", manifest.category)
+        context.add_metadata("skill_execution_mode", "read_only")
+
+        context.add_event(
+            "Runtime Skill authorization validated.",
+            metadata={
+                "skill_id": manifest.id,
+                "agent_id": agent_id,
+            },
+        )
+
+        logger.info(
+            "Runtime Skill authorization validated. skill=%s agent=%s execution_id=%s",
+            manifest.id,
+            agent_id,
+            context.execution_id,
+        )
+
+        return manifest
+
+    async def execute(
+        self,
+        *,
+        skill_id: str,
+        request: AgentExecutionRequest,
+        context: RuntimeContext,
+    ) -> AgentExecutionResponse:
+        """Execute a Runtime-authorised Skill."""
+        if request is None:
+            raise ValueError("AgentExecutionRequest cannot be None.")
+
+        if context is None:
+            raise ValueError("RuntimeContext cannot be None.")
+
+        request.validate_request()
+
+        manifest = self.authorize(
+            skill_id=skill_id,
+            agent_id=request.agent_id,
+            context=context,
+        )
+
+        logger.info(
+            "Executing governed Skill. skill=%s agent=%s execution_id=%s",
+            manifest.id,
+            request.agent_id,
+            context.execution_id,
+        )
+
+        if manifest.category.lower() == "source":
+            response = await self._source_skill_executor.execute(
+                skill_id=manifest.id,
+                request=request,
+                context=context,
+            )
+        else:
+            response = await self._agent_execution_service.execute(
+                request=request,
+                context=context,
+            )
+
+        if response is None:
+            raise RuntimeError("Skill execution returned no response.")
+
+        context.add_event(
+            "Runtime Skill execution completed.",
+            metadata={
+                "skill_id": manifest.id,
+                "agent_id": request.agent_id,
+                "skill_category": manifest.category,
+            },
+        )
+
+        return response
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\capabilities\skill_manifest.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\capabilities\registries\skill_registry.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\contracts\agent_execution_request.py
+====================================================================================================
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+
+class AgentExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_id: str
+    capability: str
+    instruction: str
+    context: Any
+    metadata: dict[str, Any] = {}
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\contracts\agent_execution_response.py
+====================================================================================================
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AgentExecutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    execution_id: str
+    agent_id: str
+    capability: str
+    content: str = ""
+    structured_output: dict[str, Any] = Field(default_factory=dict)
+    success: bool = True
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\contracts\execution_request.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\contracts\evidence.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\contracts\investigation_plan.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\core\runtime_context.py
+====================================================================================================
+"""Canonical governed AI Runtime execution context.
+
+This context is the runtime state envelope shared across governed execution
+stages. It is intentionally provider-neutral and does not perform I/O.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class RuntimeContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    execution_id: str
+    pipeline_name: str = ""
+    capability_id: str = ""
+    capability_name: str = ""
+    work_item: Any = None
+
+    system_prompt: str = ""
+    rendered_prompt: str = ""
+
+    provider_id: str = ""
+    model_name: str = ""
+
+    raw_response: Any = None
+    parsed_response: Any = None
+
+    memory: Any = None
+    artifacts: list[Any] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    events: list[Any] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    def add_metadata(self, key: str, value: Any) -> None:
+        self.metadata[key] = value
+
+    def add_event(self, event: Any) -> None:
+        self.events.append(event)
+
+    def add_warning(self, warning: str) -> None:
+        self.warnings.append(warning)
+
+    def add_error(self, error: str) -> None:
+        self.errors.append(error)
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\core\work_item.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\core\runtime_event.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\providers\provider_runtime.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\runtime\providers\provider_result.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+
+====================================================================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\prompt_builder\runtime_prompt_builder.py
+====================================================================================================
+STATUS: FILE NOT FOUND
+

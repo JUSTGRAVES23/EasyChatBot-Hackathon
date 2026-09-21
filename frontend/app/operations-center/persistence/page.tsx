@@ -184,11 +184,31 @@ function Sidebar({
     ],
     ["project", "Project Control", "/project-control"],
     ["agents", "Agents", "/operations-center/agents"],
-    ["health", "Quality Management", ""],
-    ["shield", "Security & Governance", ""],
-    ["monitor", "Monitoring", ""],
-    ["logs", "Logs", ""],
-    ["settings", "Configuration", ""],
+    [
+      "health",
+      "Quality Management",
+      "/operations-center/functionality-health",
+    ],
+    [
+      "shield",
+      "Security & Governance",
+      "/operations-center/governance",
+    ],
+    [
+      "monitor",
+      "Monitoring",
+      "/operations-center/compliance/cmp/risk-intelligence/risk-coverage",
+    ],
+    [
+      "logs",
+      "Logs",
+      "/operations-center/governance",
+    ],
+    [
+      "settings",
+      "Configuration",
+      "/operations-center/configuration",
+    ],
   ] as const;
 
   return (

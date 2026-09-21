@@ -1,0 +1,770 @@
+﻿BEGIN;
+
+CREATE TABLE alembic_version (
+    version_num VARCHAR(32) NOT NULL, 
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);
+
+-- Running upgrade  -> 536722d48314
+
+CREATE TABLE events (
+    id UUID NOT NULL, 
+    event_type VARCHAR(100) NOT NULL, 
+    source VARCHAR(100) NOT NULL, 
+    user_id UUID, 
+    payload JSONB NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_events_created_at ON events (created_at);
+
+CREATE INDEX ix_events_event_type ON events (event_type);
+
+CREATE INDEX ix_events_user_id ON events (user_id);
+
+INSERT INTO alembic_version (version_num) VALUES ('536722d48314') RETURNING alembic_version.version_num;
+
+-- Running upgrade 536722d48314 -> 1bead328cddf
+
+ALTER TABLE events DROP COLUMN source;
+
+UPDATE alembic_version SET version_num='1bead328cddf' WHERE alembic_version.version_num = '536722d48314';
+
+-- Running upgrade 1bead328cddf -> d355a996cfdd
+
+UPDATE alembic_version SET version_num='d355a996cfdd' WHERE alembic_version.version_num = '1bead328cddf';
+
+-- Running upgrade d355a996cfdd -> db461433a79d
+
+CREATE TABLE worlds (
+    id UUID NOT NULL, 
+    name VARCHAR(100) NOT NULL, 
+    language VARCHAR(100) NOT NULL, 
+    culture VARCHAR(255) NOT NULL, 
+    status VARCHAR(50) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_worlds_language ON worlds (language);
+
+CREATE UNIQUE INDEX ix_worlds_name ON worlds (name);
+
+CREATE INDEX ix_worlds_status ON worlds (status);
+
+UPDATE alembic_version SET version_num='db461433a79d' WHERE alembic_version.version_num = 'd355a996cfdd';
+
+-- Running upgrade db461433a79d -> e75bf3e7c80b
+
+CREATE TABLE users (
+    id UUID NOT NULL, 
+    email VARCHAR(255) NOT NULL, 
+    username VARCHAR(100) NOT NULL, 
+    selected_world_id UUID, 
+    status VARCHAR(50) NOT NULL, 
+    trial_status VARCHAR(50) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(selected_world_id) REFERENCES worlds (id) ON DELETE SET NULL
+);
+
+CREATE UNIQUE INDEX ix_users_email ON users (email);
+
+CREATE INDEX ix_users_selected_world_id ON users (selected_world_id);
+
+CREATE INDEX ix_users_status ON users (status);
+
+CREATE INDEX ix_users_trial_status ON users (trial_status);
+
+CREATE UNIQUE INDEX ix_users_username ON users (username);
+
+UPDATE alembic_version SET version_num='e75bf3e7c80b' WHERE alembic_version.version_num = 'db461433a79d';
+
+-- Running upgrade e75bf3e7c80b -> 405914bece20
+
+CREATE TABLE learning_worlds (
+    id UUID NOT NULL, 
+    identifier VARCHAR(100) NOT NULL, 
+    name VARCHAR(150) NOT NULL, 
+    description VARCHAR(500) NOT NULL, 
+    language VARCHAR(100) NOT NULL, 
+    version VARCHAR(50) NOT NULL, 
+    status VARCHAR(50) NOT NULL, 
+    enabled BOOLEAN NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX ix_learning_worlds_identifier ON learning_worlds (identifier);
+
+CREATE INDEX ix_learning_worlds_language ON learning_worlds (language);
+
+ALTER TABLE events ADD COLUMN learning_world_id UUID;
+
+CREATE INDEX ix_events_learning_world_id ON events (learning_world_id);
+
+UPDATE alembic_version SET version_num='405914bece20' WHERE alembic_version.version_num = 'e75bf3e7c80b';
+
+-- Running upgrade 405914bece20 -> 8f1522bc0a08
+
+ALTER TABLE users ADD COLUMN telegram_id INTEGER;
+
+ALTER TABLE users ADD COLUMN active_world_id UUID;
+
+DROP INDEX ix_users_selected_world_id;
+
+CREATE INDEX ix_users_active_world_id ON users (active_world_id);
+
+CREATE UNIQUE INDEX ix_users_telegram_id ON users (telegram_id);
+
+ALTER TABLE users DROP CONSTRAINT users_selected_world_id_fkey;
+
+ALTER TABLE users ADD FOREIGN KEY(active_world_id) REFERENCES learning_worlds (id) ON DELETE SET NULL;
+
+ALTER TABLE users DROP COLUMN selected_world_id;
+
+UPDATE alembic_version SET version_num='8f1522bc0a08' WHERE alembic_version.version_num = '405914bece20';
+
+-- Running upgrade 8f1522bc0a08 -> 20260902_m2_3_world_catalogue
+
+ALTER TABLE learning_worlds ADD COLUMN world_type VARCHAR(50);
+
+ALTER TABLE learning_worlds ADD COLUMN learning_domain VARCHAR(100);
+
+UPDATE learning_worlds
+            SET world_type = 'language',
+                learning_domain = 'language_learning'
+            WHERE world_type IS NULL
+               OR learning_domain IS NULL;
+
+ALTER TABLE learning_worlds ALTER COLUMN world_type SET NOT NULL;
+
+ALTER TABLE learning_worlds ALTER COLUMN world_type SET DEFAULT 'language';
+
+ALTER TABLE learning_worlds ALTER COLUMN learning_domain SET NOT NULL;
+
+ALTER TABLE learning_worlds ALTER COLUMN learning_domain SET DEFAULT 'language_learning';
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'french',
+                    'French World',
+                    'French language learning world.',
+                    'fr',
+                    '1.0.0',
+                    'published',
+                    true,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'french'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'spanish',
+                    'Spanish World',
+                    'Spanish language learning world.',
+                    'es',
+                    '1.0.0',
+                    'published',
+                    true,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'spanish'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'english',
+                    'English World',
+                    'English language learning world.',
+                    'en',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'english'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'italian',
+                    'Italian World',
+                    'Italian language learning world.',
+                    'it',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'italian'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'german',
+                    'German World',
+                    'German language learning world.',
+                    'de',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'german'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'russian',
+                    'Russian World',
+                    'Russian language learning world.',
+                    'ru',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'russian'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'portuguese',
+                    'Portuguese World',
+                    'Portuguese language learning world.',
+                    'pt',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'portuguese'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'polish',
+                    'Polish World',
+                    'Polish language learning world.',
+                    'pl',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'polish'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'chinese',
+                    'Chinese World',
+                    'Chinese language learning world.',
+                    'zh',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'chinese'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'arabic',
+                    'Arabic World',
+                    'Arabic language learning world.',
+                    'ar',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'language',
+                    'language_learning',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'arabic'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'cybersecurity',
+                    'Cybersecurity World',
+                    'Cybersecurity learning world.',
+                    '',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'thematic',
+                    'cybersecurity',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'cybersecurity'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'artificial-intelligence',
+                    'Artificial Intelligence World',
+                    'Artificial intelligence learning world.',
+                    '',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'thematic',
+                    'artificial_intelligence',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'artificial-intelligence'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'science',
+                    'Science World',
+                    'Science learning world.',
+                    '',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'thematic',
+                    'science',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'science'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'sports',
+                    'Sports World',
+                    'Sports learning world.',
+                    '',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'thematic',
+                    'sports',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'sports'
+                );
+
+INSERT INTO learning_worlds
+                    (
+                        id,
+                        identifier,
+                        name,
+                        description,
+                        language,
+                        version,
+                        status,
+                        enabled,
+                        world_type,
+                        learning_domain,
+                        created_at
+                    )
+                SELECT
+                    gen_random_uuid(),
+                    'technology',
+                    'Technology World',
+                    'Technology learning world.',
+                    '',
+                    '1.0.0',
+                    'published',
+                    false,
+                    'thematic',
+                    'technology',
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM learning_worlds
+                    WHERE identifier = 'technology'
+                );
+
+UPDATE alembic_version SET version_num='20260902_m2_3_world_catalogue' WHERE alembic_version.version_num = '8f1522bc0a08';
+
+-- Running upgrade 20260902_m2_3_world_catalogue -> 20260919_learning_skill_state
+
+CREATE TABLE learner_skill_states (
+    state_id UUID NOT NULL, 
+    learner_id VARCHAR(255) NOT NULL, 
+    world_id UUID NOT NULL, 
+    skill_id VARCHAR(255) NOT NULL, 
+    attempt_count INTEGER NOT NULL, 
+    correct_count INTEGER NOT NULL, 
+    incorrect_count INTEGER NOT NULL, 
+    failure_streak INTEGER NOT NULL, 
+    success_streak INTEGER NOT NULL, 
+    last_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    last_failure_at TIMESTAMP WITH TIME ZONE, 
+    last_success_at TIMESTAMP WITH TIME ZONE, 
+    reinforcement_required BOOLEAN NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    CONSTRAINT pk_learner_skill_states PRIMARY KEY (state_id), 
+    CONSTRAINT fk_learner_skill_states_world FOREIGN KEY(world_id) REFERENCES learning_worlds (id) ON DELETE RESTRICT, 
+    CONSTRAINT uq_learner_skill_states_learner_world_skill UNIQUE (learner_id, world_id, skill_id), 
+    CONSTRAINT ck_learner_skill_states_attempt_count_nonnegative CHECK (attempt_count >= 0), 
+    CONSTRAINT ck_learner_skill_states_correct_count_nonnegative CHECK (correct_count >= 0), 
+    CONSTRAINT ck_learner_skill_states_incorrect_count_nonnegative CHECK (incorrect_count >= 0), 
+    CONSTRAINT ck_learner_skill_states_failure_streak_nonnegative CHECK (failure_streak >= 0), 
+    CONSTRAINT ck_learner_skill_states_success_streak_nonnegative CHECK (success_streak >= 0)
+);
+
+CREATE INDEX ix_learner_skill_states_world_reinforcement ON learner_skill_states (world_id, reinforcement_required);
+
+UPDATE alembic_version SET version_num='20260919_learning_skill_state' WHERE alembic_version.version_num = '20260902_m2_3_world_catalogue';
+
+-- Running upgrade 20260919_learning_skill_state -> 20260919_learning_assessment
+
+CREATE TABLE assessment_questions (
+    question_id VARCHAR(255) NOT NULL, 
+    world_id UUID NOT NULL, 
+    skill_id VARCHAR(255) NOT NULL, 
+    prompt TEXT NOT NULL, 
+    expected_answer TEXT NOT NULL, 
+    question_type VARCHAR(50) NOT NULL, 
+    difficulty INTEGER NOT NULL, 
+    explanation TEXT, 
+    PRIMARY KEY (question_id), 
+    FOREIGN KEY(world_id) REFERENCES learning_worlds (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_assessment_questions_world_skill ON assessment_questions (world_id, skill_id);
+
+CREATE TABLE assessment_attempts (
+    attempt_id VARCHAR(255) NOT NULL, 
+    learner_id VARCHAR(255) NOT NULL, 
+    world_id UUID NOT NULL, 
+    question_id VARCHAR(255) NOT NULL, 
+    answer TEXT NOT NULL, 
+    outcome VARCHAR(50) NOT NULL, 
+    score FLOAT NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (attempt_id), 
+    FOREIGN KEY(world_id) REFERENCES learning_worlds (id) ON DELETE RESTRICT, 
+    FOREIGN KEY(question_id) REFERENCES assessment_questions (question_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_assessment_attempts_learner_world_question ON assessment_attempts (learner_id, world_id, question_id);
+
+CREATE TABLE learning_events (
+    event_id VARCHAR(255) NOT NULL, 
+    learner_id VARCHAR(255) NOT NULL, 
+    world_id UUID NOT NULL, 
+    question_id VARCHAR(255) NOT NULL, 
+    skill_id VARCHAR(255) NOT NULL, 
+    outcome VARCHAR(50) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (event_id), 
+    FOREIGN KEY(world_id) REFERENCES learning_worlds (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_learning_events_learner_world_skill_created ON learning_events (learner_id, world_id, skill_id, created_at);
+
+UPDATE alembic_version SET version_num='20260919_learning_assessment' WHERE alembic_version.version_num = '20260919_learning_skill_state';
+
+-- Running upgrade 20260919_learning_assessment -> 20260919_learning_evidence
+
+CREATE TABLE learning_evidence (
+    evidence_id VARCHAR(255) NOT NULL, 
+    observation_id VARCHAR(255) NOT NULL, 
+    learner_id VARCHAR(255) NOT NULL, 
+    world_id UUID NOT NULL, 
+    skill_id VARCHAR(255) NOT NULL, 
+    category VARCHAR(50) NOT NULL, 
+    status VARCHAR(50) NOT NULL, 
+    severity VARCHAR(50) NOT NULL, 
+    confidence FLOAT NOT NULL, 
+    subtype VARCHAR(255), 
+    learner_text TEXT, 
+    expected_text TEXT, 
+    explanation TEXT, 
+    source VARCHAR(50) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (evidence_id), 
+    CONSTRAINT uq_learning_evidence_observation_id UNIQUE (observation_id), 
+    FOREIGN KEY(world_id) REFERENCES learning_worlds (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_learning_evidence_learner_world_skill_created ON learning_evidence (learner_id, world_id, skill_id, created_at);
+
+CREATE INDEX ix_learning_evidence_world_category_created ON learning_evidence (world_id, category, created_at);
+
+ALTER TABLE learning_evidence ADD CONSTRAINT ck_learning_evidence_confidence_range CHECK (confidence >= 0.0 AND confidence <= 1.0);
+
+UPDATE alembic_version SET version_num='20260919_learning_evidence' WHERE alembic_version.version_num = '20260919_learning_assessment';
+
+-- Running upgrade 20260919_learning_evidence -> 20260920_w18_1_world_access
+
+CREATE TABLE learner_world_access (
+    id UUID NOT NULL, 
+    user_id UUID NOT NULL, 
+    world_id UUID NOT NULL, 
+    status VARCHAR(50) NOT NULL, 
+    access_source VARCHAR(50) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    FOREIGN KEY(world_id) REFERENCES learning_worlds (id) ON DELETE CASCADE, 
+    CONSTRAINT uq_learner_world_access_user_world UNIQUE (user_id, world_id)
+);
+
+CREATE INDEX ix_learner_world_access_user_id ON learner_world_access (user_id);
+
+CREATE INDEX ix_learner_world_access_world_id ON learner_world_access (world_id);
+
+CREATE INDEX ix_learner_world_access_status ON learner_world_access (status);
+
+CREATE INDEX ix_learner_world_access_source ON learner_world_access (access_source);
+
+UPDATE alembic_version SET version_num='20260920_w18_1_world_access' WHERE alembic_version.version_num = '20260919_learning_evidence';
+
+COMMIT;
+

@@ -4,6 +4,14 @@ from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load the repository-root environment before application composition.
+# This preserves the project's established .env configuration convention
+# used by the production database and Telegram runtime scripts.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -15,6 +23,9 @@ from app.application.composition.conversation_composition import (
 )
 from app.application.composition.private_chat_composition import (
     build_private_chat_service_factory,
+)
+from app.application.composition.learner_context_composition import (
+    build_production_learner_context_service,
 )
 from app.application.identity.authentication_email_service import (
     AuthenticationEmailService,
@@ -61,7 +72,9 @@ from app.application.health.production_health_service import (
 from app.application.operations_center.dashboard_composition import (
     create_operations_center_composition,
 )
-from app.application.persistence_operations import PersistenceDiagnosticsService
+from app.application.persistence_operations import (
+    PersistenceDiagnosticsService,
+)
 from app.application.privacy.privacy_governance_composition import (
     get_privacy_governance_composition,
 )
@@ -74,11 +87,32 @@ from app.application.provider_management.functionality_operational_control_servi
 from app.application.provider_management.provider_usage_dashboard_service import (
     ProviderUsageDashboardService,
 )
+from app.application.study_material.service import (
+    StudyMaterialService,
+)
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+from app.application.world_catalogue.service import (
+    LearningWorldCatalogueService,
+)
 
 from app.api.academy_questionnaires import (
     router as academy_questionnaires_router,
 )
+from app.api.questionnaire_runtime import (
+    create_questionnaire_runtime_router,
+)
+from app.application.learning_assessment.questionnaire_runtime_composition import (
+    create_questionnaire_runtime,
+)
 from app.api.private_chat import router as private_chat_router
+from app.api.learner_context import (
+    router as learner_context_router,
+)
+from app.api.study_material import (
+    router as study_material_router,
+)
 from app.api.authentication import (
     router as authentication_router,
 )
@@ -146,14 +180,20 @@ from app.infrastructure.persistence.database import (
 from app.infrastructure.persistence.postgresql_functionality_control_repository import (
     PostgreSQLFunctionalityControlRepository,
 )
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_study_material_repository import (
+    PostgreSQLStudyMaterialRepository,
+)
 from app.infrastructure.security.trusted_clock import SystemTrustedClock
 from app.domain.authorization.permissions import Permission
 from app.domain.identity.transaction_authorization import (
     TransactionAuthorizationConsumer,
     TransactionAuthorizationRegistry,
-)
-from app.infrastructure.persistence.postgresql_provider_usage_repository import (
-    PostgreSQLProviderUsageRepository,
 )
 from app.infrastructure.telegram.telegram_announcement_client import (
     TelegramAnnouncementClient,
@@ -161,16 +201,36 @@ from app.infrastructure.telegram.telegram_announcement_client import (
 from app.infrastructure.telegram.telegram_announcement_publisher import (
     TelegramAnnouncementPublisher,
 )
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
 
 from app.project_control_center.api.project_control_router import (
     create_project_control_router,
+)
+from app.project_control_center.api.project_registry_router import (
+    create_project_registry_router,
+)
+from app.project_control_center.application.project_registry_service import (
+    ProjectRegistryService,
+)
+from app.project_control_center.application.project_discovery_service import (
+    ProjectDiscoveryService,
+)
+from app.project_control_center.api.project_discovery_router import (
+    create_project_discovery_router,
 )
 from app.project_control_center.infrastructure.composition import (
     create_project_control_service,
 )
 from app.project_control_center.infrastructure.in_memory import (
-    InMemoryProjectRegistry,
     InMemorySnapshotRepository,
+)
+from app.infrastructure.persistence.postgresql_project_registry import (
+    PostgreSQLProjectRegistry,
+)
+from app.infrastructure.persistence.postgresql_project_discovery import (
+    PostgreSQLProjectDiscoveryRepository,
 )
 
 from cybersecurity.email.email_provider_manager import (
@@ -429,12 +489,15 @@ def create_application() -> FastAPI:
         )
     )
 
-    # Provider-usage repository is synchronous by
-    # contract. It therefore receives a synchronous
-    # engine/session factory.
+    # ------------------------------------------------------------------
+    # Provider usage / synchronous application persistence
     #
-    # It must not receive the async authentication
-    # session factory.
+    # The provider-usage repository is synchronous by contract.
+    # It therefore receives a synchronous engine/session factory.
+    #
+    # It must not receive the async authentication session factory.
+    # ------------------------------------------------------------------
+
     provider_usage_engine = (
         create_database_engine()
     )
@@ -449,6 +512,19 @@ def create_application() -> FastAPI:
         create_session_factory(
             provider_usage_engine,
         )
+    )
+
+    # ------------------------------------------------------------------
+    # Q7 / M4 - Questionnaire Runtime
+    #
+    # Reuse the existing synchronous application persistence boundary.
+    # The runtime composition owns the assessment repositories and
+    # AssessmentService wiring; the API remains responsible for the
+    # authenticated learner boundary.
+    # ------------------------------------------------------------------
+
+    questionnaire_runtime = create_questionnaire_runtime(
+        session_factory=provider_usage_session_factory,
     )
 
     # ------------------------------------------------------------------
@@ -476,6 +552,67 @@ def create_application() -> FastAPI:
         session_factory=provider_usage_session_factory,
         conversation_runtime=private_chat_runtime,
         character_instruction=private_chat_character_instruction,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C4.2 / Cross-Channel Learner Context
+    #
+    # The learner-context service projects the existing Telegram learner
+    # context into the authenticated Web boundary. Telegram remains the
+    # authoritative transport; this composition does not create a second
+    # Telegram identity, memory store, or conversation runtime.
+    # ------------------------------------------------------------------
+
+    learner_context_service = build_production_learner_context_service(
+        session_factory=provider_usage_session_factory,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C5 / Study Materials
+    #
+    # The Learning World catalogue is composed once at the application
+    # root and acts as the authoritative World boundary for learner
+    # Study Material access.
+    #
+    # One WorldResolver is shared by the catalogue service.
+    # StudyMaterialService consumes that catalogue service rather than
+    # creating another World resolution mechanism.
+    #
+    # Persistence uses the existing synchronous application session
+    # factory. No additional database engine or session factory is
+    # created for Study Materials.
+    # ------------------------------------------------------------------
+
+    app_root = Path(__file__).resolve().parents[2]
+
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds",
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = (
+        PostgreSQLLearningWorldCatalogueRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
+
+    study_material_repository = (
+        PostgreSQLStudyMaterialRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    study_material_service = StudyMaterialService(
+        repository=study_material_repository,
+        world_catalogue_service=catalogue_service,
     )
 
     provider_usage_repository = (
@@ -555,8 +692,21 @@ def create_application() -> FastAPI:
         get_privacy_governance_composition()
     )
 
-    project_registry = (
-        InMemoryProjectRegistry()
+    project_registry = PostgreSQLProjectRegistry(
+        provider_usage_session_factory,
+    )
+
+    project_registry_service = ProjectRegistryService(
+        project_registry,
+    )
+
+    project_discovery_repository = PostgreSQLProjectDiscoveryRepository(
+        provider_usage_session_factory,
+    )
+
+    project_discovery_service = ProjectDiscoveryService(
+        discovery_repository=project_discovery_repository,
+        project_registry=project_registry_service,
     )
 
     project_snapshot_repository = (
@@ -648,12 +798,24 @@ def create_application() -> FastAPI:
         private_chat_service_factory
     )
 
+    application.state.learner_context_service = (
+        learner_context_service
+    )
+
+    application.state.study_material_service = (
+        study_material_service
+    )
+
     application.state.private_chat_character_instruction = (
         private_chat_character_instruction
     )
 
     application.state.project_control_service = (
         project_control_service
+    )
+
+    application.state.project_discovery_service = (
+        project_discovery_service
     )
 
     application.state.production_health_service = (
@@ -688,6 +850,15 @@ def create_application() -> FastAPI:
     application.include_router(
         private_chat_router,
         prefix="/api",
+    )
+
+    application.include_router(
+        learner_context_router,
+        prefix="/api",
+    )
+
+    application.include_router(
+        study_material_router,
     )
 
     application.include_router(
@@ -743,7 +914,24 @@ def create_application() -> FastAPI:
     )
 
     application.include_router(
-        create_email_workflows_router(),
+        create_project_registry_router(
+            project_registry=project_registry_service,
+        ),
+    )
+
+    application.include_router(
+        create_project_discovery_router(
+            project_discovery=project_discovery_service,
+        ),
+    )
+
+    application.include_router(
+        create_email_workflows_router(
+            session_factory=provider_usage_session_factory,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        ),
     )
 
     application.include_router(
@@ -805,6 +993,20 @@ def create_application() -> FastAPI:
         cybersecurity_live_reports_router,
     )
 
+    # Q7 / M4 - Questionnaire Runtime
+    #
+    # Authenticated learner runtime endpoint:
+    # POST /api/academy/questionnaires/answers
+    #
+    # Learner identity is derived server-side from the authenticated
+    # principal. The runtime reuses the existing AssessmentService and
+    # synchronous PostgreSQL persistence boundary.
+    application.include_router(
+        create_questionnaire_runtime_router(
+            runtime=questionnaire_runtime,
+        ),
+    )
+
     # Academy World - Static Questionnaires
     #
     # This exposes:
@@ -827,3 +1029,5 @@ __all__ = [
     "app",
     "create_application",
 ]
+
+

@@ -1,0 +1,1031 @@
+﻿=== backend/providers/base_provider.py ===
+"""
+Base Provider Contract.
+
+Defines the interface for external AI and knowledge providers.
+
+Examples:
+- Gemini
+- Parallel Search
+- Future LLM providers
+
+The Runtime communicates with providers through this contract.
+
+Providers are replaceable implementations.
+The Agent layer must remain independent from provider details.
+"""
+
+from abc import ABC, abstractmethod
+
+from providers.provider_result import ProviderResult
+from runtime.context.execution_context import ExecutionContext
+
+
+class BaseProvider(ABC):
+    """
+    Abstract base class for EasyChatBot providers.
+
+    Providers are responsible for communicating
+    with external services.
+
+    They are NOT responsible for:
+    - agent decisions
+    - workflow orchestration
+    - memory management
+    - user interaction
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ):
+        """
+        Initialise provider.
+
+        Args:
+            provider_id:
+                Unique provider identifier.
+        """
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def execute(
+        self,
+        context: ExecutionContext,
+    ) -> ProviderResult:
+        """
+        Execute provider operation.
+
+        Args:
+            context:
+                Runtime execution context.
+
+        Returns:
+            ProviderResult containing provider output.
+        """
+
+        pass
+
+=== backend/providers/provider_result.py ===
+"""
+Provider Result Contract.
+
+Defines the standard response returned
+by external providers.
+
+All providers return this structure so
+the Runtime can process results consistently.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    """
+    Immutable provider execution result.
+
+    Attributes:
+
+        success:
+            Indicates whether provider execution succeeded.
+
+        provider_id:
+            Identifier of the provider.
+
+        output:
+            Provider response payload.
+
+        error:
+            Error details if execution failed.
+    """
+
+    success: bool
+    provider_id: str
+    output: Any = None
+    error: str | None = None
+
+=== backend/providers/llm/llm_provider.py ===
+"""
+LLM Provider Contract.
+
+Defines the provider-independent contract for language
+model providers used by the EasyChatBot hackathon runtime.
+
+The contract sits between the Conversation Agent and
+concrete LLM provider implementations.
+
+Architecture:
+
+ConversationAgent
+        |
+        v
+ConversationRequest
+        |
+        v
+LLMProvider
+        |
+        v
+Concrete LLM Provider
+        |
+        v
+ProviderResult
+
+Responsibilities:
+
+- define the LLM generation boundary
+- keep ConversationAgent independent from provider SDKs
+- provide a stable contract for concrete LLM providers
+
+Does not:
+
+- call an external API
+- contain provider SDK logic
+- select models
+- implement routing
+- manage memory
+- manage conversations
+"""
+
+from __future__ import annotations
+
+from abc import ABC
+from abc import abstractmethod
+
+from conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from providers.provider_result import (
+    ProviderResult,
+)
+
+
+class LLMProvider(ABC):
+    """
+    Abstract provider contract for language model generation.
+
+    Concrete implementations may use OpenAI, Ollama,
+    Gemini, or another approved LLM provider.
+
+    The application and agent layers depend only on
+    this contract.
+    """
+
+    provider_id: str
+
+    def __init__(
+        self,
+        provider_id: str,
+    ) -> None:
+        """
+        Initialise the LLM provider.
+
+        Args:
+            provider_id:
+                Stable identifier for the concrete provider.
+        """
+
+        if not provider_id.strip():
+            raise ValueError(
+                "LLM provider_id cannot be empty."
+            )
+
+        self.provider_id = provider_id
+
+    @abstractmethod
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate an LLM response.
+
+        Args:
+            request:
+                Provider-independent conversation request.
+
+        Returns:
+            ProviderResult containing the generated
+            response or an error.
+
+        Implementations must not expose provider SDK
+        objects through the result.
+        """
+
+        raise NotImplementedError
+
+=== backend/providers/llm/llm_provider_factory.py ===
+"""
+LLM Provider Factory.
+
+Creates approved LLM provider implementations.
+
+The factory is the composition boundary between
+application/runtime code and infrastructure providers.
+
+Architecture:
+
+Application/API
+|
+v
+LLMProviderFactory
+|
+v
+LLMProvider
+|
++--> OpenAIProvider
++--> Future OllamaProvider
++--> GeminiProvider
+
+Responsibilities:
+
+- create configured LLM providers
+- isolate provider construction
+- provide provider independence
+- obtain approved provider configuration
+
+Does not:
+
+- execute LLM requests
+- build prompts
+- manage conversations
+- manage memory
+- apply routing decisions
+- call provider SDKs directly
+"""
+
+from __future__ import annotations
+
+from providers.llm.config import (
+    get_gemini_model,
+    get_llm_model,
+    get_llm_provider_name,
+)
+
+from providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from providers.llm.openai_provider import (
+    OpenAIProvider,
+)
+
+from providers.llm.gemini_provider import (
+    GeminiProvider,
+)
+
+
+class LLMProviderFactory:
+    """
+    Factory responsible for creating LLM providers.
+
+    Provider selection and configuration are centralised
+    here so application/runtime code does not depend
+    directly on concrete infrastructure implementations.
+    """
+
+    @staticmethod
+    def create(
+        provider: str | None = None,
+    ) -> LLMProvider:
+        """
+        Create a configured LLM provider.
+
+        Parameters
+        ----------
+        provider:
+            Optional provider identifier.
+
+            When omitted, the configured provider from
+            LLM provider configuration is used.
+
+        Returns
+        -------
+        LLMProvider
+            Configured provider implementation.
+
+        Raises
+        ------
+        ValueError
+            If provider is invalid or unsupported.
+        """
+
+        if provider is None:
+            provider_name = (
+                get_llm_provider_name()
+            )
+        else:
+            if not isinstance(
+                provider,
+                str,
+            ):
+                raise ValueError(
+                    "Provider name must be a string."
+                )
+
+            provider_name = (
+                provider.strip().lower()
+            )
+
+            if not provider_name:
+                raise ValueError(
+                    "Provider name cannot be empty."
+                )
+
+        if provider_name == "openai":
+            return OpenAIProvider(
+                model=get_llm_model(),
+            )
+
+        if provider_name == "gemini":
+            return GeminiProvider(
+                model=get_gemini_model(),
+            )
+
+        raise ValueError(
+            (
+                "Unsupported LLM provider: "
+                f"{provider_name}"
+            )
+        )
+
+
+=== backend/providers/llm/openai_provider.py ===
+"""
+OpenAI LLM Provider.
+
+Concrete LLM provider implementation for the EasyChatBot
+hackathon runtime.
+
+Architecture:
+
+ConversationAgent
+|
+v
+LLMService
+|
+v
+LLMProvider
+|
+v
+OpenAIProvider
+|
+v
+OpenAI Responses API
+|
+v
+ProviderResult
+
+Responsibilities:
+
+- execute ConversationRequest through OpenAI
+- use the configured OpenAI model
+- translate the OpenAI response into ProviderResult
+- isolate the OpenAI SDK from the application layer
+
+Does not:
+
+- build prompts
+- manage characters
+- manage memory
+- perform research
+- perform routing
+- modify application state
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from openai import AsyncOpenAI
+
+from conversation.conversation_request import (
+    ConversationRequest,
+)
+
+from providers.llm.llm_provider import (
+    LLMProvider,
+)
+
+from providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIProvider(LLMProvider):
+    """
+    OpenAI implementation of the LLMProvider contract.
+
+    The OpenAI SDK is deliberately isolated inside this
+    infrastructure adapter.
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5-mini",
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        """
+        Initialise the OpenAI provider.
+
+        Parameters
+        ----------
+        model:
+            OpenAI model identifier.
+
+        client:
+            Optional injected AsyncOpenAI client.
+
+            Dependency injection allows unit tests to
+            provide a fake client without making a real
+            API call.
+        """
+
+        super().__init__(
+            provider_id="openai",
+        )
+
+        if not isinstance(
+            model,
+            str,
+        ):
+            raise ValueError(
+                "OpenAI model must be a string."
+            )
+
+        model = model.strip()
+
+        if not model:
+            raise ValueError(
+                "OpenAI model cannot be empty."
+            )
+
+        self.model = model
+
+        if client is not None:
+            self._client = client
+            return
+
+        api_key = os.getenv(
+            "OPENAI_API_KEY"
+        )
+
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is not configured."
+            )
+
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+        )
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate a response using OpenAI.
+
+        The provider translates the provider-independent
+        ConversationRequest into the OpenAI Responses API
+        request.
+
+        Parameters
+        ----------
+        request:
+            Provider-independent conversation request.
+
+        Returns
+        -------
+        ProviderResult
+            Provider-independent execution result.
+
+        Raises
+        ------
+        ValueError
+            If request is None.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": request.system_instruction,
+            },
+        ]
+
+        if request.conversation_context:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Additional context:\n"
+                        f"{request.conversation_context}"
+                    ),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": request.user_prompt,
+            }
+        )
+
+        try:
+            response = (
+                await self._client.responses.create(
+                    model=self.model,
+                    input=messages,
+                )
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "OpenAI provider execution failed."
+            )
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=str(exc),
+            )
+
+        output_text = getattr(
+            response,
+            "output_text",
+            None,
+        )
+
+        if not output_text:
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                error=(
+                    "OpenAI returned an empty response."
+                ),
+            )
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output=output_text,
+        )
+
+=== backend/providers/llm/gemini_provider.py ===
+"""
+Gemini LLM Provider.
+
+Concrete Gemini implementation of the provider-independent
+LLMProvider contract used by the EasyChatBot hackathon runtime.
+
+The provider isolates the Google Gemini SDK from application
+and runtime layers.
+
+Structured output is opt-in through ConversationRequest.
+
+The hackathon runtime uses Google Cloud Vertex AI authentication
+rather than Gemini API-key authentication. The Google Cloud project
+is resolved from Application Default Credentials, while the Gemini
+execution location is controlled independently from the Agent Runtime
+deployment location.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from conversation.conversation_request import (
+    ConversationRequest,
+)
+from providers.llm.llm_provider import (
+    LLMProvider,
+)
+from providers.provider_result import (
+    ProviderResult,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiProvider(LLMProvider):
+    """
+    Gemini implementation of the LLMProvider contract.
+
+    The Google Gemini SDK is deliberately isolated inside this
+    infrastructure adapter.
+
+    Authentication is performed through Google Cloud Vertex AI.
+    The Google Cloud project is resolved through Application Default
+    Credentials rather than a Gemini API key.
+
+    The Gemini model location is controlled independently through:
+
+        EASYCHATBOT_GEMINI_LOCATION
+
+    This is intentionally separate from the Agent Runtime deployment
+    location.
+    """
+
+    def __init__(
+        self,
+        model: str = "gemini-3.6-flash",
+        client: Any | None = None,
+    ) -> None:
+        super().__init__(
+            provider_id="gemini",
+        )
+
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(
+                "Gemini model cannot be empty."
+            )
+
+        self.model = model.strip()
+        self._client = client
+
+    def _get_client(self) -> Any:
+        """
+        Lazily create the Google GenAI Vertex AI client.
+
+        Agent Runtime reserves GOOGLE_CLOUD_PROJECT and
+        GOOGLE_CLOUD_LOCATION, so those variables are not injected
+        through Agent Runtime env_vars.
+
+        The Google Cloud project is resolved from Application Default
+        Credentials / the Agent Runtime execution identity.
+
+        Gemini model execution location is controlled through:
+
+            EASYCHATBOT_GEMINI_LOCATION
+
+        Default:
+
+            eu
+        """
+
+        if self._client is not None:
+            return self._client
+
+        location = os.getenv(
+            "EASYCHATBOT_GEMINI_LOCATION",
+            "eu",
+        )
+
+        location = location.strip()
+
+        if not location:
+            raise RuntimeError(
+                "EASYCHATBOT_GEMINI_LOCATION cannot be empty."
+            )
+
+        try:
+            from google import genai
+            from google.auth import default as google_auth_default
+        except ImportError as exc:
+            raise RuntimeError(
+                "The google-genai and google-auth packages are required "
+                "for GeminiProvider."
+            ) from exc
+
+        try:
+            _, project = google_auth_default()
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to resolve the Google Cloud project from "
+                "Application Default Credentials."
+            ) from exc
+
+        if not project:
+            raise RuntimeError(
+                "Google Cloud project could not be resolved from "
+                "Application Default Credentials."
+            )
+
+        self._client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+        )
+
+        return self._client
+
+    @staticmethod
+    def _build_contents(
+        request: ConversationRequest,
+    ) -> str:
+        """
+        Convert the provider-independent request into Gemini content.
+        """
+
+        sections: list[str] = []
+
+        if request.conversation_context:
+            sections.extend(
+                (
+                    "CONTEXT:",
+                    request.conversation_context.strip(),
+                    "",
+                )
+            )
+
+        sections.extend(
+            (
+                "USER REQUEST:",
+                request.user_prompt.strip(),
+            )
+        )
+
+        return "\n".join(sections)
+
+    @staticmethod
+    def _build_config(
+        request: ConversationRequest,
+        types: Any,
+    ) -> Any:
+        """
+        Translate provider-independent request configuration
+        into Gemini-specific generation configuration.
+        """
+
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": request.system_instruction,
+        }
+
+        if request.response_schema is not None:
+            config_kwargs.update(
+                {
+                    "response_mime_type": "application/json",
+                    "response_schema": request.response_schema,
+                }
+            )
+
+        return types.GenerateContentConfig(
+            **config_kwargs,
+        )
+
+    async def generate(
+        self,
+        request: ConversationRequest,
+    ) -> ProviderResult:
+        """
+        Generate a response using Gemini through Vertex AI.
+
+        Returns a provider-independent ProviderResult and never
+        exposes Gemini SDK response objects to the application.
+        """
+
+        if request is None:
+            raise ValueError(
+                "Conversation request cannot be None."
+            )
+
+        try:
+            client = self._get_client()
+
+            from google.genai import types
+
+            contents = self._build_contents(
+                request,
+            )
+
+            config = self._build_config(
+                request,
+                types,
+            )
+
+            response = await client.aio.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Gemini provider execution failed."
+            )
+
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error=str(exc),
+            )
+
+        output_text = getattr(
+            response,
+            "text",
+            None,
+        )
+
+        if not output_text or not output_text.strip():
+            return ProviderResult(
+                success=False,
+                provider_id=self.provider_id,
+                output=None,
+                error="Gemini returned an empty response.",
+            )
+
+        return ProviderResult(
+            success=True,
+            provider_id=self.provider_id,
+            output=output_text.strip(),
+        )
+
+
+=== backend/providers/llm/config.py ===
+"""
+LLM Provider Configuration.
+
+Defines approved provider configuration
+for the EasyChatBot hackathon runtime.
+
+Configuration is environment-driven so the
+application does not hard-code deployment-specific
+provider settings.
+
+Local development supports a .env file located
+at the EasyChatBot project root.
+
+For the Hackathon runtime, the project .env file
+is authoritative. This prevents stale local shell
+environment variables from silently overriding the
+configured development credentials.
+
+Future production versions should use an external
+secret/configuration management system.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+# Resolve the EasyChatBot project root.
+#
+# config.py:
+# backend/
+#   providers/
+#     llm/
+#       config.py
+#
+# parents[3] -> EasyChatBot-Hackathon/
+PROJECT_ROOT = Path(
+    __file__
+).resolve().parents[3]
+
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+# Load the Hackathon project's local configuration.
+#
+# override=True is intentional for the local Hackathon
+# runtime because .env is the authoritative project
+# configuration source.
+#
+# Production deployments must not rely on this mechanism.
+load_dotenv(
+    dotenv_path=ENV_FILE,
+    override=True,
+)
+
+
+DEFAULT_PROVIDER = "openai"
+
+DEFAULT_MODEL = "gpt-5-mini"
+
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+
+
+def get_llm_provider_name() -> str:
+    """
+    Return the configured LLM provider name.
+
+    Environment variable:
+
+        EASYCHATBOT_LLM_PROVIDER
+
+    Default:
+
+        openai
+
+    Returns
+    -------
+    str
+        Normalised provider identifier.
+
+    Raises
+    ------
+    ValueError
+        If the configured provider name is empty.
+    """
+
+    provider = os.getenv(
+        "EASYCHATBOT_LLM_PROVIDER",
+        DEFAULT_PROVIDER,
+    )
+
+    provider = provider.strip().lower()
+
+    if not provider:
+        raise ValueError(
+            "LLM provider name cannot be empty."
+        )
+
+    return provider
+
+
+def get_llm_model() -> str:
+    """
+    Return the configured model for the
+    default/current LLM path.
+
+    Environment variable:
+
+        EASYCHATBOT_LLM_MODEL
+
+    Default:
+
+        gpt-5-mini
+
+    Returns
+    -------
+    str
+        Configured model identifier.
+
+    Raises
+    ------
+    ValueError
+        If the configured model is empty.
+    """
+
+    model = os.getenv(
+        "EASYCHATBOT_LLM_MODEL",
+        DEFAULT_MODEL,
+    )
+
+    model = model.strip()
+
+    if not model:
+        raise ValueError(
+            "LLM model cannot be empty."
+        )
+
+    return model
+
+
+def get_gemini_model() -> str:
+    """
+    Return the configured Gemini model.
+
+    Environment variable:
+
+        EASYCHATBOT_GEMINI_MODEL
+
+    Default:
+
+        gemini-3.6-flash
+
+    Returns
+    -------
+    str
+        Configured Gemini model identifier.
+
+    Raises
+    ------
+    ValueError
+        If the configured Gemini model is empty.
+    """
+
+    model = os.getenv(
+        "EASYCHATBOT_GEMINI_MODEL",
+        DEFAULT_GEMINI_MODEL,
+    )
+
+    model = model.strip()
+
+    if not model:
+        raise ValueError(
+            "Gemini model cannot be empty."
+        )
+
+    return model

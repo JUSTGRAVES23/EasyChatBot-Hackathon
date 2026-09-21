@@ -55,6 +55,11 @@ export const WORLD_CATALOGUE: readonly WorldCatalogueEntry[] = [
     name: "Italian World",
   },
   {
+    slug: "luxembourgish",
+    worldId: "luxembourgish_world",
+    name: "Luxembourgish World",
+  },
+  {
     slug: "polish",
     worldId: "polish_world",
     name: "Polish World",

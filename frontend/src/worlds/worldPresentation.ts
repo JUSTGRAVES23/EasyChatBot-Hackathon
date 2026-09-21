@@ -38,9 +38,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#735564",
     atmosphere:
       "radial-gradient(circle at 82% 8%, rgba(255, 188, 215, .68), transparent 30%), linear-gradient(135deg, #fff7fb 0%, #fceaf3 48%, #f8d9e7 100%)",
-    decorative: ["Parisian atmosphere", "soft blossoms", "friendly conversation"],
-    prompts: ["Introduce yourself", "Basic greetings", "French culture", "Help with grammar", "Daily conversation"],
+    decorative: [
+      "Parisian atmosphere",
+      "soft blossoms",
+      "friendly conversation",
+    ],
+    prompts: [
+      "Introduce yourself",
+      "Basic greetings",
+      "French culture",
+      "Help with grammar",
+      "Daily conversation",
+    ],
   },
+
   english: {
     slug: "english",
     languageCode: "en",
@@ -60,8 +71,15 @@ const presentations: Record<string, WorldPresentation> = {
     atmosphere:
       "radial-gradient(circle at 80% 10%, rgba(127, 164, 180, .38), transparent 34%), linear-gradient(135deg, #f4f8fa, #e5eef2)",
     decorative: ["calm light", "clean lines", "real-life practice"],
-    prompts: ["Introduce yourself", "Small talk", "Travel English", "Grammar help", "Daily conversation"],
+    prompts: [
+      "Introduce yourself",
+      "Small talk",
+      "Travel English",
+      "Grammar help",
+      "Daily conversation",
+    ],
   },
+
   spanish: {
     slug: "spanish",
     languageCode: "es",
@@ -80,9 +98,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#76594C",
     atmosphere:
       "radial-gradient(circle at 82% 10%, rgba(240, 161, 93, .48), transparent 30%), linear-gradient(135deg, #fff8f1, #fcebdd)",
-    decorative: ["warm sunlight", "cultural discovery", "lively practice"],
-    prompts: ["Preséntate", "Saludos básicos", "Cultura española", "Ayuda con gramática", "Conversación diaria"],
+    decorative: [
+      "warm sunlight",
+      "cultural discovery",
+      "lively practice",
+    ],
+    prompts: [
+      "Preséntate",
+      "Saludos básicos",
+      "Cultura española",
+      "Ayuda con gramática",
+      "Conversación diaria",
+    ],
   },
+
   german: {
     slug: "german",
     languageCode: "de",
@@ -101,9 +130,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#5D6A76",
     atmosphere:
       "linear-gradient(135deg, #f5f7fa, #e9edf2 55%, #e4e8ed)",
-    decorative: ["structured learning", "clean geometry", "steady progress"],
-    prompts: ["Sich vorstellen", "Grundbegrüßungen", "Alltag", "Grammatik", "Freies Gespräch"],
+    decorative: [
+      "structured learning",
+      "clean geometry",
+      "steady progress",
+    ],
+    prompts: [
+      "Sich vorstellen",
+      "Grundbegrüßungen",
+      "Alltag",
+      "Grammatik",
+      "Freies Gespräch",
+    ],
   },
+
   italian: {
     slug: "italian",
     languageCode: "it",
@@ -122,9 +162,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#5A7062",
     atmosphere:
       "radial-gradient(circle at 80% 8%, rgba(145, 200, 168, .42), transparent 34%), linear-gradient(135deg, #f5fbf6, #e8f4eb)",
-    decorative: ["Mediterranean warmth", "culture", "expressive practice"],
-    prompts: ["Presentati", "Saluti", "Cultura italiana", "Grammatica", "Conversazione quotidiana"],
+    decorative: [
+      "Mediterranean warmth",
+      "culture",
+      "expressive practice",
+    ],
+    prompts: [
+      "Presentati",
+      "Saluti",
+      "Cultura italiana",
+      "Grammatica",
+      "Conversazione quotidiana",
+    ],
   },
+
   portuguese: {
     slug: "portuguese",
     languageCode: "pt",
@@ -143,9 +194,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#567064",
     atmosphere:
       "radial-gradient(circle at 82% 10%, rgba(145, 201, 175, .46), transparent 32%), linear-gradient(135deg, #f3faf6, #e5f2eb)",
-    decorative: ["coastal light", "cultural discovery", "conversation"],
-    prompts: ["Apresente-se", "Saudações", "Cultura", "Ajuda com gramática", "Conversa diária"],
+    decorative: [
+      "coastal light",
+      "cultural discovery",
+      "conversation",
+    ],
+    prompts: [
+      "Apresente-se",
+      "Saudações",
+      "Cultura",
+      "Ajuda com gramática",
+      "Conversa diária",
+    ],
   },
+
   dutch: {
     slug: "dutch",
     languageCode: "nl",
@@ -164,9 +226,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#5B6A80",
     atmosphere:
       "radial-gradient(circle at 82% 8%, rgba(157, 181, 215, .42), transparent 32%), linear-gradient(135deg, #f4f7fc, #e8eef8)",
-    decorative: ["clear structure", "urban discovery", "daily practice"],
-    prompts: ["Stel jezelf voor", "Begroetingen", "Nederlandse cultuur", "Grammatica", "Dagelijks gesprek"],
+    decorative: [
+      "clear structure",
+      "urban discovery",
+      "daily practice",
+    ],
+    prompts: [
+      "Stel jezelf voor",
+      "Begroetingen",
+      "Nederlandse cultuur",
+      "Grammatica",
+      "Dagelijks gesprek",
+    ],
   },
+
   russian: {
     slug: "russian",
     languageCode: "ru",
@@ -185,9 +258,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#645D75",
     atmosphere:
       "radial-gradient(circle at 82% 8%, rgba(169, 155, 210, .45), transparent 32%), linear-gradient(135deg, #f7f5fc, #ece8f7)",
-    decorative: ["storybook atmosphere", "cultural discovery", "guided practice"],
-    prompts: ["Представьтесь", "Приветствия", "Русская культура", "Грамматика", "Повседневный разговор"],
+    decorative: [
+      "storybook atmosphere",
+      "cultural discovery",
+      "guided practice",
+    ],
+    prompts: [
+      "Представьтесь",
+      "Приветствия",
+      "Русская культура",
+      "Грамматика",
+      "Повседневный разговор",
+    ],
   },
+
   polish: {
     slug: "polish",
     languageCode: "pl",
@@ -206,9 +290,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#765765",
     atmosphere:
       "radial-gradient(circle at 84% 8%, rgba(234, 160, 183, .55), transparent 30%), linear-gradient(135deg, #fff7fa 0%, #fbe8ef 52%, #f7dbe5 100%)",
-    decorative: ["Polish cultural atmosphere", "soft rose light", "conversation practice"],
-    prompts: ["Przedstaw się", "Podstawowe powitania", "Kultura Polski", "Pomoc z gramatyką", "Codzienna rozmowa"],
+    decorative: [
+      "Polish cultural atmosphere",
+      "soft rose light",
+      "conversation practice",
+    ],
+    prompts: [
+      "Przedstaw się",
+      "Podstawowe powitania",
+      "Kultura Polski",
+      "Pomoc z gramatyką",
+      "Codzienna rozmowa",
+    ],
   },
+
   arabic: {
     slug: "arabic",
     languageCode: "ar",
@@ -227,9 +322,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#6D5B47",
     atmosphere:
       "radial-gradient(circle at 82% 8%, rgba(210, 174, 114, .42), transparent 32%), linear-gradient(135deg, #fbf7ef, #f1e7d4)",
-    decorative: ["warm lantern light", "cultural discovery", "guided practice"],
-    prompts: ["عرّف بنفسك", "التحيات", "الثقافة العربية", "القواعد", "محادثة يومية"],
+    decorative: [
+      "warm lantern light",
+      "cultural discovery",
+      "guided practice",
+    ],
+    prompts: [
+      "عرّف بنفسك",
+      "التحيات",
+      "الثقافة العربية",
+      "القواعد",
+      "محادثة يومية",
+    ],
   },
+
   chinese: {
     slug: "chinese",
     languageCode: "zh",
@@ -248,9 +354,20 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#745B5D",
     atmosphere:
       "radial-gradient(circle at 82% 8%, rgba(228, 154, 157, .48), transparent 32%), linear-gradient(135deg, #fff7f6, #f7e7e5)",
-    decorative: ["warm red accents", "cultural discovery", "conversation"],
-    prompts: ["自我介绍", "基本问候", "中国文化", "语法帮助", "日常对话"],
+    decorative: [
+      "warm red accents",
+      "cultural discovery",
+      "conversation",
+    ],
+    prompts: [
+      "自我介绍",
+      "基本问候",
+      "中国文化",
+      "语法帮助",
+      "日常对话",
+    ],
   },
+
   cybersecurity: {
     slug: "cybersecurity",
     languageCode: "en",
@@ -269,9 +386,59 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#557060",
     atmosphere:
       "radial-gradient(circle at 82% 8%, rgba(159, 201, 168, .4), transparent 34%), linear-gradient(135deg, #f4faf4, #eaf5ec)",
-    decorative: ["secure learning", "structured exploration", "practical scenarios"],
-    prompts: ["Explain a concept", "Threat modelling", "Security basics", "Risk & controls", "Practice a scenario"],
+    decorative: [
+      "secure learning",
+      "structured exploration",
+      "practical scenarios",
+    ],
+    prompts: [
+      "Explain a concept",
+      "Threat modelling",
+      "Security basics",
+      "Risk & controls",
+      "Practice a scenario",
+    ],
   },
+
+  luxembourgish: {
+    slug: "luxembourgish",
+    languageCode: "lb",
+    flag: "🇱🇺",
+    name: "Luxembourgish World",
+    subtitle: "Learn Luxembourgish through everyday conversation",
+    companionName: "Your AI Companion",
+    companionRole: "Luxembourgish learning companion",
+    primary: "#4D6FA8",
+    secondary: "#9DB5D7",
+    accent: "#D6A83D",
+    background: "#F5F8FC",
+    surface: "#FFFFFF",
+    surfaceAlt: "#E8EEF7",
+    text: "#243042",
+    muted: "#5B6A80",
+    atmosphere:
+      "radial-gradient(circle at 82% 8%, rgba(157, 181, 215, .42), transparent 32%), linear-gradient(135deg, #f5f8fc, #e8eef7)",
+    decorative: [
+      "Luxembourg discovery",
+      "everyday conversation",
+      "guided practice",
+    ],
+    prompts: [
+      "Stell dech vir",
+      "Basis-Begréissungen",
+      "Lëtzebuergesch Kultur",
+      "Hëllef mat der Grammaire",
+      "Alldagsgespréich",
+    ],
+  },
+
+  /*
+   * Compatibility presentation.
+   *
+   * Some existing runtime/catalogue flows may still reference
+   * the legacy "spanish_world" identifier. Keep this entry
+   * aligned with the canonical Spanish presentation.
+   */
   spanish_world: {
     slug: "spanish_world",
     languageCode: "es",
@@ -290,8 +457,18 @@ const presentations: Record<string, WorldPresentation> = {
     muted: "#76594C",
     atmosphere:
       "radial-gradient(circle at 82% 10%, rgba(240, 161, 93, .48), transparent 30%), linear-gradient(135deg, #fff8f1, #fcebdd)",
-    decorative: ["warm sunlight", "cultural discovery", "lively practice"],
-    prompts: ["Preséntate", "Saludos básicos", "Cultura española", "Ayuda con gramática", "Conversación diaria"],
+    decorative: [
+      "warm sunlight",
+      "cultural discovery",
+      "lively practice",
+    ],
+    prompts: [
+      "Preséntate",
+      "Saludos básicos",
+      "Cultura española",
+      "Ayuda con gramática",
+      "Conversación diaria",
+    ],
   },
 };
 
@@ -314,7 +491,13 @@ const fallback: WorldPresentation = {
   atmosphere:
     "radial-gradient(circle at 82% 8%, rgba(181, 156, 255, .38), transparent 34%), linear-gradient(135deg, #f7f6fc, #eeeaf8)",
   decorative: ["guided learning", "friendly practice", "new worlds"],
-  prompts: ["Introduce yourself", "Basic conversation", "Culture", "Grammar help", "Daily conversation"],
+  prompts: [
+    "Introduce yourself",
+    "Basic conversation",
+    "Culture",
+    "Grammar help",
+    "Daily conversation",
+  ],
 };
 
 export function getWorldPresentation(slug: string): WorldPresentation {

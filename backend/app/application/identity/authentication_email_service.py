@@ -123,8 +123,8 @@ class AuthenticationEmailService:
             )
 
         return await self._email_sender.send(
-            "🎓 Welcome to EasyChatBot, "
-            f"@{display_name} — your journey starts here!",
+            "Welcome to EasyChatBot, "
+            f"@{display_name} - your journey starts here!",
             {
                 "recipient": recipient,
                 "email_type": "authentication_verification",
@@ -210,6 +210,339 @@ class AuthenticationEmailService:
             },
         )
 
+
+    async def send_password_reset_confirmation_email(
+        self,
+        *,
+        email: str,
+        username: str,
+        reset_at,
+    ) -> dict:
+        """Build and send the password-reset confirmation email.
+
+        This notification is sent only after the authentication service has
+        successfully changed the user's password.
+        """
+        from datetime import timezone
+
+        recipient = email.strip()
+        display_name = username.strip()
+
+        if not recipient:
+            raise ValueError("email must not be empty")
+
+        if not display_name:
+            raise ValueError("username must not be empty")
+
+        if reset_at is None:
+            raise ValueError("reset_at must not be None")
+
+        if getattr(reset_at, "tzinfo", None) is None:
+            reset_at_utc = reset_at.replace(tzinfo=timezone.utc)
+        else:
+            reset_at_utc = reset_at.astimezone(timezone.utc)
+
+        reset_date = reset_at_utc.strftime("%Y-%m-%d")
+        reset_time = reset_at_utc.strftime("%H:%M:%S UTC")
+
+        safe_username = escape(display_name, quote=True)
+
+        privacy_section_text = ""
+        privacy_section_html = ""
+
+        if self._privacy_url:
+            safe_privacy_url = escape(
+                self._privacy_url,
+                quote=True,
+            )
+
+            privacy_section_text = f"""
+Your privacy matters.
+Learn how EasyChatBot handles and protects your personal data:
+{self._privacy_url}
+"""
+
+            privacy_section_html = f"""
+                            <strong>Your privacy matters.</strong>
+                            Learn how EasyChatBot handles and protects
+                            your personal data:
+                            <a
+                                href="{safe_privacy_url}"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style="
+                                    color:#1565ff;
+                                    font-weight:700;
+                                    text-decoration:none;
+                                "
+                            >
+                                Data Protection &amp; Privacy
+                            </a>
+"""
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <title>Your EasyChatBot password has been reset</title>
+</head>
+<body
+    style="
+        margin:0;
+        padding:0;
+        width:100%;
+        background-color:#eef7ff;
+        font-family:Arial,Helvetica,sans-serif;
+        color:#122a72;
+    "
+>
+    <table
+        role="presentation"
+        width="100%"
+        cellpadding="0"
+        cellspacing="0"
+        border="0"
+        style="width:100%;background-color:#eef7ff;"
+    >
+        <tr>
+            <td align="center" style="padding:32px 16px;">
+                <table
+                    role="presentation"
+                    width="100%"
+                    cellpadding="0"
+                    cellspacing="0"
+                    border="0"
+                    style="
+                        width:100%;
+                        max-width:620px;
+                        background-color:#ffffff;
+                        border-radius:18px;
+                        overflow:hidden;
+                    "
+                >
+                    <tr>
+                        <td
+                            style="
+                                padding:28px 32px 22px 32px;
+                                border-bottom:1px solid #e4efff;
+                            "
+                        >
+                            <div
+                                style="
+                                    font-size:25px;
+                                    line-height:1.15;
+                                    font-weight:700;
+                                    color:#102b73;
+                                "
+                            >
+                                EasyChatBot
+                            </div>
+                            <div
+                                style="
+                                    margin-top:5px;
+                                    font-size:14px;
+                                    line-height:1.2;
+                                    font-style:italic;
+                                    color:#1680ff;
+                                "
+                            >
+                                Growing With You.
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td style="padding:32px 40px 36px 40px;">
+                            <div
+                                style="
+                                    display:inline-block;
+                                    padding:7px 12px;
+                                    border-radius:20px;
+                                    background-color:#e9f5ff;
+                                    color:#1565ff;
+                                    font-size:11px;
+                                    line-height:1;
+                                    font-weight:700;
+                                    letter-spacing:.7px;
+                                "
+                            >
+                                ACCOUNT SECURITY
+                            </div>
+
+                            <h1
+                                style="
+                                    margin:22px 0 18px 0;
+                                    font-size:32px;
+                                    line-height:1.18;
+                                    font-weight:700;
+                                    color:#102b73;
+                                "
+                            >
+                                Your password has been reset
+                            </h1>
+
+                            <p
+                                style="
+                                    margin:0 0 16px 0;
+                                    font-size:18px;
+                                    line-height:1.55;
+                                    color:#173d91;
+                                "
+                            >
+                                Hi {safe_username}!
+                            </p>
+
+                            <p
+                                style="
+                                    margin:0 0 26px 0;
+                                    font-size:16px;
+                                    line-height:1.7;
+                                    color:#35538f;
+                                "
+                            >
+                                Your EasyChatBot password was successfully changed.
+                            </p>
+
+                            <table
+                                role="presentation"
+                                width="100%"
+                                cellpadding="0"
+                                cellspacing="0"
+                                border="0"
+                                style="
+                                    width:100%;
+                                    background-color:#edf7ff;
+                                    border-radius:14px;
+                                    margin-bottom:26px;
+                                "
+                            >
+                                <tr>
+                                    <td style="padding:22px 24px;">
+                                        <div
+                                            style="
+                                                margin-bottom:12px;
+                                                font-size:15px;
+                                                line-height:1.45;
+                                                font-weight:700;
+                                                color:#123d91;
+                                            "
+                                        >
+                                            Password reset details
+                                        </div>
+
+                                        <div
+                                            style="
+                                                font-size:14px;
+                                                line-height:1.7;
+                                                color:#49669d;
+                                            "
+                                        >
+                                            <strong>Date:</strong> {reset_date}<br>
+                                            <strong>Time:</strong> {reset_time}
+                                        </div>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p
+                                style="
+                                    margin:0 0 18px 0;
+                                    font-size:14px;
+                                    line-height:1.6;
+                                    color:#4b5f87;
+                                "
+                            >
+                                If you made this change, no further action is required.
+                            </p>
+
+                            <p
+                                style="
+                                    margin:0;
+                                    font-size:14px;
+                                    line-height:1.6;
+                                    color:#4b5f87;
+                                "
+                            >
+                                If you did not reset your password, please contact
+                                EasyChatBot support immediately and secure your account.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td
+                            style="
+                                padding:24px 40px;
+                                background:#f9fafb;
+                                font-size:12px;
+                                line-height:1.6;
+                                color:#6b7280;
+                            "
+                        >
+                            {privacy_section_html}
+
+                            <br>
+                            This is an automated security notification from EasyChatBot.
+                            <br><br>
+
+                            <strong>EasyChatBot</strong><br>
+                            Growing With You.
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+        text = f"""EasyChatBot
+Growing With You.
+
+Your password has been reset
+
+Hello {display_name},
+
+Your EasyChatBot password was successfully changed.
+
+PASSWORD RESET DETAILS
+
+Date: {reset_date}
+Time: {reset_time}
+
+If you made this change, no further action is required.
+
+If you did not reset your password, please contact EasyChatBot support immediately
+and secure your account.
+
+{privacy_section_text}
+
+This is an automated security notification from EasyChatBot.
+
+EasyChatBot
+Growing With You.
+"""
+
+        return await self._email_sender.send(
+            "Your EasyChatBot password has been reset",
+            {
+                "recipient": recipient,
+                "email_type": "authentication_password_reset_confirmation",
+                "from": self._registration_sender,
+                "username": display_name,
+                "body": text,
+                "html": html,
+                "attachments": [],
+            },
+        )
+
     def _build_password_reset_html(
         self,
         *,
@@ -231,9 +564,9 @@ class AuthenticationEmailService:
         safe_reset_url = escape(reset_url, quote=True)
 
         greeting = (
-            f"Hi {safe_username}! 👋"
+            f"Hi {safe_username}! "
             if safe_username
-            else "Hi there! 👋"
+            else "Hi there! "
         )
 
         privacy_section = ""
@@ -388,7 +721,7 @@ class AuthenticationEmailService:
                                                 font-size:22px;
                                             "
                                         >
-                                            ♥
+                                            &#9829;
                                         </span>
                                     </td>
                                 </tr>
@@ -501,7 +834,7 @@ class AuthenticationEmailService:
                                                     margin-left:6px;
                                                 "
                                             >
-                                                →
+                                                &#8594;
                                             </span>
                                         </a>
                                     </td>
@@ -538,7 +871,7 @@ class AuthenticationEmailService:
                                                 line-height:1;
                                             "
                                         >
-                                            ⏳
+                                            &#8987;
                                         </div>
 
                                         <div
@@ -579,7 +912,7 @@ class AuthenticationEmailService:
                                                 line-height:1;
                                             "
                                         >
-                                            🛡️
+                                            &#128737;
                                         </div>
 
                                         <div
@@ -686,7 +1019,7 @@ class AuthenticationEmailService:
                                                 font-size:22px;
                                             "
                                         >
-                                            💡
+                                            &#128161;
                                         </span>
                                         <strong>P.S.</strong>
                                         Your new password doesn't need to be
@@ -734,7 +1067,7 @@ class AuthenticationEmailService:
                                                 font-size:22px;
                                             "
                                         >
-                                            📖
+                                            &#128218;
                                         </div>
                                         Learn at your pace
                                     </td>
@@ -756,7 +1089,7 @@ class AuthenticationEmailService:
                                                 font-size:22px;
                                             "
                                         >
-                                            👥
+                                            &#128101;
                                         </div>
                                         Improve together
                                     </td>
@@ -778,7 +1111,7 @@ class AuthenticationEmailService:
                                                 font-size:22px;
                                             "
                                         >
-                                            🚀
+                                            &#128640;
                                         </div>
                                         Grow with confidence
                                     </td>
@@ -831,7 +1164,7 @@ class AuthenticationEmailService:
                                     color:#8a9abb;
                                 "
                             >
-                                © 2025 EasyChatBot. All rights reserved.
+                                (c) 2025 EasyChatBot. All rights reserved.
                             </div>
                         </td>
                     </tr>
@@ -872,9 +1205,9 @@ class AuthenticationEmailService:
         display_name = username.strip()
 
         greeting = (
-            f"Hi {display_name}! 👋"
+            f"Hi {display_name}! "
             if display_name
-            else "Hi there! 👋"
+            else "Hi there! "
         )
 
         privacy_section = ""
@@ -916,7 +1249,7 @@ Future-you will thank you.
 Help: {self._frontend_base_url}
 Contact: support@easychatbot.com
 
-© 2025 EasyChatBot. All rights reserved.
+(c) 2025 EasyChatBot. All rights reserved.
 """
 
     def _build_html(
@@ -1004,7 +1337,7 @@ Contact: support@easychatbot.com
                         >
                             <img
                                 src="cid:{self.LOGO_CONTENT_ID}"
-                                alt="EasyChatBot — Growing With You."
+                                alt="EasyChatBot - Growing With You."
                                 style="
                                     display:block;
                                     max-width:260px;
@@ -1027,7 +1360,7 @@ Contact: support@easychatbot.com
                                     font-weight:700;
                                 "
                             >
-                                🎓 Welcome to EasyChatBot
+                                Welcome to EasyChatBot
                             </div>
 
                             <div
@@ -1050,12 +1383,12 @@ Contact: support@easychatbot.com
                                 line-height:1.7;
                             "
                         >
-                            Hey {safe_username} 👋
+                            Hey {safe_username} 
                             <br><br>
                             Welcome to <strong>EasyChatBot!</strong>
                             <br><br>
                             You've just taken your first step into
-                            your learning journey — and we're excited
+                            your learning journey - and we're excited
                             to have you here.
                         </td>
                     </tr>
@@ -1145,7 +1478,7 @@ Contact: support@easychatbot.com
                                     font-weight:700;
                                 "
                             >
-                                🔐 One last step
+                                One last step
                             </div>
 
                             <div
@@ -1181,7 +1514,7 @@ Contact: support@easychatbot.com
                                     font-weight:700;
                                 "
                             >
-                                VERIFY MY EMAIL ✨
+                                VERIFY MY EMAIL &#10024;
                             </a>
 
                             <div
@@ -1283,15 +1616,15 @@ Learn how EasyChatBot handles and protects your personal data:
 {self._privacy_url}
 """
 
-        return f"""🎓 Welcome to EasyChatBot
+        return f"""Welcome to EasyChatBot
 
 Your journey starts here.
 
-Hey {username} 👋
+Hey {username} 
 
 Welcome to EasyChatBot!
 
-You've just taken your first step into your learning journey —
+You've just taken your first step into your learning journey -
 and we're excited to have you here.
 
 YOUR EASYCHATBOT IDENTITY
@@ -1331,3 +1664,4 @@ This is an automated message from EasyChatBot.
 EasyChatBot
 Growing With You.
 """
+

@@ -3,8 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.api.dependencies.identity import get_current_principal
@@ -265,24 +264,18 @@ async def request_password_reset(
 @router.get(
     "/password-reset/context",
     response_model=PasswordResetContextResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Resolve password-reset account context",
+    summary="Get password reset account context",
     description=(
-        "Return the account email associated with a valid, unused, "
-        "unexpired password-reset token. No token, password, credential "
-        "hash, username, or session data is returned."
+        "Return the email address bound to a valid, unused and unexpired "
+        "password reset token. No credential or token material is returned."
     ),
 )
 async def get_password_reset_context(
+    token: str,
     http_request: Request,
     response: Response,
-    token: str = Query(
-        min_length=1,
-        max_length=512,
-    ),
 ) -> PasswordResetContextResponse:
-    """Resolve a reset token to the account email for the reset UI."""
-    response.headers["Cache-Control"] = "no-store"
+    """Resolve safe account context from a reset bearer token."""
     service = http_request.app.state.authentication_service
 
     try:
@@ -290,13 +283,17 @@ async def get_password_reset_context(
             token=token,
         )
     except AuthenticationError as exc:
-        return JSONResponse(
+        response.headers["Cache-Control"] = "no-store"
+        raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content={"detail": str(exc)},
+            detail=str(exc),
             headers={"Cache-Control": "no-store"},
-        )
+        ) from None
 
-    return PasswordResetContextResponse(email=context.email)
+    response.headers["Cache-Control"] = "no-store"
+    return PasswordResetContextResponse(
+        email=context.email,
+    )
 
 
 @router.post(

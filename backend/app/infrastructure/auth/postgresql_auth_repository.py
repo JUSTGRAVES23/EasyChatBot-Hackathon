@@ -55,75 +55,40 @@ class PostgreSQLAuthenticationRepository:
     the inspected database schema while keeping persistence isolated.
     """
 
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         if session_factory is None:
             raise ValueError("session_factory is required.")
-
         self._session_factory = session_factory
 
     async def email_exists(self, email: str) -> bool:
         async with self._session_factory() as session:
             result = await session.execute(
-                text(
-                    "SELECT 1 FROM users "
-                    "WHERE email = :email "
-                    "LIMIT 1"
-                ),
+                text("SELECT 1 FROM users WHERE email = :email LIMIT 1"),
                 {"email": email},
             )
-
             return result.first() is not None
 
     async def username_exists(self, username: str) -> bool:
         async with self._session_factory() as session:
             result = await session.execute(
-                text(
-                    "SELECT 1 FROM users "
-                    "WHERE username = :username "
-                    "LIMIT 1"
-                ),
+                text("SELECT 1 FROM users WHERE username = :username LIMIT 1"),
                 {"username": username},
             )
-
             return result.first() is not None
 
-    async def create_user(
-        self,
-        *,
-        user_id: UUID,
-        email: str,
-        username: str,
-    ) -> None:
+    async def create_user(self, *, user_id: UUID, email: str, username: str) -> None:
         now = datetime.now(timezone.utc)
-
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
                     text(
                         """
                         INSERT INTO users
-                            (
-                                id,
-                                email,
-                                username,
-                                status,
-                                trial_status,
-                                created_at,
-                                email_verified
-                            )
+                            (id, email, username, status, trial_status, created_at,
+                             email_verified)
                         VALUES
-                            (
-                                :id,
-                                :email,
-                                :username,
-                                'active',
-                                'not_started',
-                                :created_at,
-                                FALSE
-                            )
+                            (:id, :email, :username, 'active', 'not_started', :created_at,
+                             FALSE)
                         """
                     ),
                     {
@@ -133,7 +98,6 @@ class PostgreSQLAuthenticationRepository:
                         "created_at": now,
                     },
                 )
-
                 await session.execute(
                     text(
                         """
@@ -145,37 +109,19 @@ class PostgreSQLAuthenticationRepository:
                     {"user_id": user_id},
                 )
 
-    async def create_password_credential(
-        self,
-        *,
-        user_id: UUID,
-        password_hash: str,
-    ) -> None:
+    async def create_password_credential(self, *, user_id: UUID, password_hash: str) -> None:
         now = datetime.now(timezone.utc)
-
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
                     text(
                         """
                         INSERT INTO user_credentials
-                            (
-                                id,
-                                user_id,
-                                password_hash,
-                                credential_type,
-                                created_at,
-                                updated_at
-                            )
+                            (id, user_id, password_hash, credential_type,
+                             created_at, updated_at)
                         VALUES
-                            (
-                                :id,
-                                :user_id,
-                                :password_hash,
-                                'PASSWORD',
-                                :created_at,
-                                :updated_at
-                            )
+                            (:id, :user_id, :password_hash, 'PASSWORD',
+                             :created_at, :updated_at)
                         """
                     ),
                     {
@@ -187,23 +133,14 @@ class PostgreSQLAuthenticationRepository:
                     },
                 )
 
-    async def create_email_verification(
-        self,
-        *,
-        user_id: UUID,
-        email: str,
-    ) -> str:
+    async def create_email_verification(self, *, user_id: UUID, email: str) -> str:
         """Create a one-time verification token.
 
-        The raw token is returned to the application boundary. Only its
-        SHA-256 digest is persisted. Delivery is deliberately outside this
-        repository.
+        The raw token is returned to the application boundary. Only its SHA-256
+        digest is persisted. Delivery is deliberately outside this repository.
         """
         raw_token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(
-            raw_token.encode("utf-8")
-        ).hexdigest()
-
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         now = datetime.now(timezone.utc)
         verification_id = uuid4()
 
@@ -213,23 +150,10 @@ class PostgreSQLAuthenticationRepository:
                     text(
                         """
                         INSERT INTO auth_email_verification_tokens
-                            (
-                                id,
-                                user_id,
-                                email,
-                                token_hash,
-                                expires_at,
-                                created_at
-                            )
+                            (id, user_id, email, token_hash, expires_at, created_at)
                         VALUES
-                            (
-                                :id,
-                                :user_id,
-                                :email,
-                                :token_hash,
-                                :expires_at,
-                                :created_at
-                            )
+                            (:id, :user_id, :email, :token_hash,
+                             :expires_at, :created_at)
                         """
                     ),
                     {
@@ -241,8 +165,8 @@ class PostgreSQLAuthenticationRepository:
                         "created_at": now,
                     },
                 )
-
         return raw_token
+
 
     async def create_password_reset_token(
         self,
@@ -353,17 +277,13 @@ class PostgreSQLAuthenticationRepository:
         token_hash = hashlib.sha256(
             token.encode("utf-8")
         ).hexdigest()
-
         now = datetime.now(timezone.utc)
 
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT
-                        t.user_id,
-                        u.email,
-                        c.password_hash
+                    SELECT t.user_id, u.email, c.password_hash
                     FROM auth_password_reset_tokens AS t
                     INNER JOIN users AS u
                         ON u.id = t.user_id
@@ -381,7 +301,6 @@ class PostgreSQLAuthenticationRepository:
                     "now": now,
                 },
             )
-
             row = result.mappings().first()
 
             if row is None:
@@ -396,16 +315,15 @@ class PostgreSQLAuthenticationRepository:
     async def get_password_reset_user(
         self,
         token: str,
-    ):
-        """Return the bound reset user for a valid, unused, unexpired token."""
-        context = await self.get_password_reset_context(
-            token=token,
-        )
+    ) -> PasswordResetContextRecord | None:
+        """Backward-compatible repository name for password-reset context.
 
-        if context is None:
-            return None
-
-        return context
+        The reset flow historically exposed this operation as
+        ``get_password_reset_user``. Keep that contract as a thin delegate to
+        the canonical context method so callers/tests do not need a second
+        implementation or a duplicate SQL query.
+        """
+        return await self.get_password_reset_context(token=token)
 
     async def reset_password(
         self,
@@ -469,26 +387,47 @@ class PostgreSQLAuthenticationRepository:
                 if credential is None:
                     return False
 
-                update_result = await session.execute(
-                    text(
-                        """
-                        UPDATE user_credentials
-                        SET password_hash = :password_hash,
-                            updated_at = :updated_at
-                        WHERE id = :credential_id
-                          AND (
-                              CAST(:expected_password_hash AS TEXT) IS NULL
-                              OR password_hash = CAST(:expected_password_hash AS TEXT)
-                          )
-                        """
-                    ),
-                    {
-                        "password_hash": password_hash,
-                        "updated_at": now,
-                        "credential_id": credential["id"],
-                        "expected_password_hash": expected_password_hash,
-                    },
-                )
+                # Keep the optimistic-concurrency predicate out of a nullable
+                # PostgreSQL bind expression.  asyncpg/PostgreSQL can otherwise
+                # fail to infer the parameter type for ``:expected_password_hash
+                # IS NULL`` on some database/driver combinations.  Branching
+                # here also makes the two repository contracts explicit: a
+                # normal reset and a reset guarded by the previously observed
+                # password hash.
+                if expected_password_hash is None:
+                    update_result = await session.execute(
+                        text(
+                            """
+                            UPDATE user_credentials
+                            SET password_hash = :password_hash,
+                                updated_at = :updated_at
+                            WHERE id = :credential_id
+                            """
+                        ),
+                        {
+                            "password_hash": password_hash,
+                            "updated_at": now,
+                            "credential_id": credential["id"],
+                        },
+                    )
+                else:
+                    update_result = await session.execute(
+                        text(
+                            """
+                            UPDATE user_credentials
+                            SET password_hash = :password_hash,
+                                updated_at = :updated_at
+                            WHERE id = :credential_id
+                              AND password_hash = :expected_password_hash
+                            """
+                        ),
+                        {
+                            "password_hash": password_hash,
+                            "updated_at": now,
+                            "credential_id": credential["id"],
+                            "expected_password_hash": expected_password_hash,
+                        },
+                    )
 
                 if update_result.rowcount != 1:
                     return False
@@ -523,15 +462,8 @@ class PostgreSQLAuthenticationRepository:
                 )
 
                 return True
-
-    async def verify_email(
-        self,
-        token: str,
-    ) -> bool:
-        token_hash = hashlib.sha256(
-            token.encode("utf-8")
-        ).hexdigest()
-
+    async def verify_email(self, token: str) -> bool:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         now = datetime.now(timezone.utc)
 
         async with self._session_factory() as session:
@@ -547,60 +479,32 @@ class PostgreSQLAuthenticationRepository:
                         FOR UPDATE
                         """
                     ),
-                    {
-                        "token_hash": token_hash,
-                        "now": now,
-                    },
+                    {"token_hash": token_hash, "now": now},
                 )
-
                 row = result.mappings().first()
-
                 if row is None:
                     return False
 
                 await session.execute(
                     text(
-                        """
-                        UPDATE users
-                        SET email_verified = TRUE
-                        WHERE id = :user_id
-                        """
+                        "UPDATE users SET email_verified = TRUE WHERE id = :user_id"
                     ),
-                    {
-                        "user_id": row["user_id"],
-                    },
+                    {"user_id": row["user_id"]},
                 )
-
                 await session.execute(
                     text(
-                        """
-                        UPDATE auth_email_verification_tokens
-                        SET used_at = :now
-                        WHERE id = :id
-                        """
+                        "UPDATE auth_email_verification_tokens SET used_at = :now WHERE id = :id"
                     ),
-                    {
-                        "now": now,
-                        "id": row["id"],
-                    },
+                    {"now": now, "id": row["id"]},
                 )
-
                 return True
 
-    async def get_user_by_email(
-        self,
-        email: str,
-    ) -> AuthUserRecord | None:
+    async def get_user_by_email(self, email: str) -> AuthUserRecord | None:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT
-                        id,
-                        email,
-                        username,
-                        status,
-                        email_verified
+                    SELECT id, email, username, status, email_verified
                     FROM users
                     WHERE email = :email
                     LIMIT 1
@@ -608,37 +512,25 @@ class PostgreSQLAuthenticationRepository:
                 ),
                 {"email": email},
             )
-
             row = result.mappings().first()
-
             return self._user(row) if row else None
 
-    async def get_password_credential(
-        self,
-        user_id: UUID,
-    ) -> AuthCredentialRecord | None:
+    async def get_password_credential(self, user_id: UUID) -> AuthCredentialRecord | None:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT
-                        user_id,
-                        password_hash,
-                        credential_type
+                    SELECT user_id, password_hash, credential_type
                     FROM user_credentials
-                    WHERE user_id = :user_id
-                      AND credential_type = 'PASSWORD'
+                    WHERE user_id = :user_id AND credential_type = 'PASSWORD'
                     LIMIT 1
                     """
                 ),
                 {"user_id": user_id},
             )
-
             row = result.mappings().first()
-
             if row is None:
                 return None
-
             return AuthCredentialRecord(
                 user_id=row["user_id"],
                 password_hash=row["password_hash"],
@@ -661,31 +553,13 @@ class PostgreSQLAuthenticationRepository:
                     text(
                         """
                         INSERT INTO user_sessions
-                            (
-                                session_id,
-                                user_id,
-                                status,
-                                created_at,
-                                expires_at,
-                                last_activity_at,
-                                device_name,
-                                ip_address,
-                                is_revoked,
-                                metadata_json
-                            )
+                            (session_id, user_id, status, created_at, expires_at,
+                             last_activity_at, device_name, ip_address,
+                             is_revoked, metadata_json)
                         VALUES
-                            (
-                                :session_id,
-                                :user_id,
-                                'active',
-                                :created_at,
-                                :expires_at,
-                                :last_activity_at,
-                                :device_name,
-                                :ip_address,
-                                FALSE,
-                                CAST(:metadata_json AS JSON)
-                            )
+                            (:session_id, :user_id, 'active', :created_at, :expires_at,
+                             :last_activity_at, :device_name, :ip_address,
+                             FALSE, CAST(:metadata_json AS JSON))
                         """
                     ),
                     {
@@ -700,25 +574,14 @@ class PostgreSQLAuthenticationRepository:
                     },
                 )
 
-    async def get_session(
-        self,
-        session_id: str | UUID,
-    ) -> AuthSessionRecord | None:
+    async def get_session(self, session_id: str | UUID) -> AuthSessionRecord | None:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT
-                        session_id,
-                        user_id,
-                        status,
-                        created_at,
-                        expires_at,
-                        last_activity_at,
-                        device_name,
-                        ip_address,
-                        is_revoked,
-                        metadata_json
+                    SELECT session_id, user_id, status, created_at, expires_at,
+                           last_activity_at, device_name, ip_address,
+                           is_revoked, metadata_json
                     FROM user_sessions
                     WHERE session_id = :session_id
                     LIMIT 1
@@ -726,12 +589,9 @@ class PostgreSQLAuthenticationRepository:
                 ),
                 {"session_id": session_id},
             )
-
             row = result.mappings().first()
-
             if row is None:
                 return None
-
             return AuthSessionRecord(
                 session_id=row["session_id"],
                 user_id=row["user_id"],
@@ -745,38 +605,26 @@ class PostgreSQLAuthenticationRepository:
                 metadata_json=row["metadata_json"] or {},
             )
 
-    async def revoke_session(
-        self,
-        session_id: UUID,
-    ) -> None:
+    async def revoke_session(self, session_id: UUID) -> None:
         async with self._session_factory() as session:
             async with session.begin():
                 await session.execute(
                     text(
                         """
                         UPDATE user_sessions
-                        SET is_revoked = TRUE,
-                            status = 'revoked'
+                        SET is_revoked = TRUE, status = 'revoked'
                         WHERE session_id = :session_id
                         """
                     ),
                     {"session_id": session_id},
                 )
 
-    async def get_user_for_identity(
-        self,
-        user_id: UUID,
-    ) -> AuthUserRecord | None:
+    async def get_user_for_identity(self, user_id: UUID) -> AuthUserRecord | None:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
                     """
-                    SELECT
-                        id,
-                        email,
-                        username,
-                        status,
-                        email_verified
+                    SELECT id, email, username, status, email_verified
                     FROM users
                     WHERE id = :user_id
                     LIMIT 1
@@ -784,144 +632,18 @@ class PostgreSQLAuthenticationRepository:
                 ),
                 {"user_id": user_id},
             )
-
             row = result.mappings().first()
+            return self._user(row) if row else None
 
-            if row is None:
-                return None
-
-            return self._user(row)
-
-    async def get_user_roles(
-        self,
-        user_id: UUID,
-    ) -> tuple[str, ...]:
+    async def get_user_roles(self, user_id: UUID) -> tuple[str, ...]:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
-                    """
-                    SELECT role
-                    FROM auth_user_roles
-                    WHERE user_id = :user_id
-                    ORDER BY role
-                    """
+                    "SELECT role FROM auth_user_roles WHERE user_id = :user_id ORDER BY role"
                 ),
                 {"user_id": user_id},
             )
-
-            return tuple(
-                row[0]
-                for row in result.all()
-            )
-
-    async def get_users_with_role(
-        self,
-        *,
-        role: str,
-    ) -> tuple[AuthUserRecord, ...]:
-        """Return users holding the supplied role."""
-        async with self._session_factory() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT
-                        u.id,
-                        u.email,
-                        u.username,
-                        u.status,
-                        u.email_verified
-                    FROM users AS u
-                    INNER JOIN auth_user_roles AS r
-                        ON r.user_id = u.id
-                    WHERE r.role = :role
-                    ORDER BY u.email
-                    """
-                ),
-                {"role": role},
-            )
-
-            return tuple(
-                self._user(row)
-                for row in result.mappings().all()
-            )
-
-    async def add_user_role(
-        self,
-        *,
-        user_id: UUID,
-        role: str,
-    ) -> bool:
-        """Grant a role idempotently.
-
-        Returns True when a new assignment was created and False when the
-        assignment already existed.
-        """
-        async with self._session_factory() as session:
-            async with session.begin():
-                result = await session.execute(
-                    text(
-                        """
-                        INSERT INTO auth_user_roles (user_id, role)
-                        VALUES (:user_id, :role)
-                        ON CONFLICT DO NOTHING
-                        """
-                    ),
-                    {
-                        "user_id": user_id,
-                        "role": role,
-                    },
-                )
-
-                return result.rowcount == 1
-
-    async def remove_user_role(
-        self,
-        *,
-        user_id: UUID,
-        role: str,
-    ) -> bool:
-        """Remove a role assignment.
-
-        Returns True when an assignment was removed and False when it did
-        not exist.
-        """
-        async with self._session_factory() as session:
-            async with session.begin():
-                result = await session.execute(
-                    text(
-                        """
-                        DELETE FROM auth_user_roles
-                        WHERE user_id = :user_id
-                          AND role = :role
-                        """
-                    ),
-                    {
-                        "user_id": user_id,
-                        "role": role,
-                    },
-                )
-
-                return result.rowcount == 1
-
-    async def count_users_with_role(
-        self,
-        *,
-        role: str,
-    ) -> int:
-        """Count users holding the supplied role."""
-        async with self._session_factory() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT COUNT(*)
-                    FROM auth_user_roles
-                    WHERE role = :role
-                    """
-                ),
-                {"role": role},
-            )
-
-            return int(result.scalar_one())
+            return tuple(row[0] for row in result.all())
 
     @staticmethod
     def _user(row) -> AuthUserRecord:

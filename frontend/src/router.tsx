@@ -21,6 +21,8 @@ import RiskIntelligencePage from "../app/operations-center/compliance/cmp/risk-i
 
 import WelcomePage from "../app/welcome/page";
 import ProjectControlPage from "../app/project-control/page";
+import ProjectRegistryPage from "../app/project-control/projects/page";
+import ProjectControlProjectPage from "../app/project-control/projects/[projectId]/page";
 
 import LoginPage from "../app/login/page";
 import RegisterPage from "../app/register/page";
@@ -305,6 +307,31 @@ export default function AppRouter() {
         }
       />
 
+      {/* Project Registry
+          Authoritative project definitions used by Project Control.
+          Protected */}
+      <Route
+        path="/project-control/projects"
+        element={
+          <ProtectedRoute>
+            <ProjectRegistryPage />
+          </ProtectedRoute>
+        }
+      />
+
+      {/* Project Control — individual project detail
+          Protected
+          The projectId is taken from the canonical Project Registry
+          project_id and is URL-encoded by the originating page. */}
+      <Route
+        path="/project-control/projects/:projectId"
+        element={
+          <ProtectedRoute>
+            <ProjectControlProjectPage />
+          </ProtectedRoute>
+        }
+      />
+
       {/* =========================================================
           APPLICATION ROOT
           ========================================================= */}
@@ -327,7 +354,7 @@ export default function AppRouter() {
       {/* M2-C3: Reject conversation IDs in public World URLs.
           A World URL identifies the World only.
           Conversation UUIDs remain server-side/internal.
-          
+
           This route MUST appear before the generic catch-all so
           malformed World-chat URLs do not redirect to Operations
           Center. */}

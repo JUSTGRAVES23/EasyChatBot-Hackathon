@@ -1,0 +1,772 @@
+﻿===== D5.3 AUTHORITATIVE PROJECT REGISTRY CONTRACT =====
+
+===== FILE: .\backend\app\project_control_center\domain\models.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+
+
+class ProjectStatus(str, Enum):
+    ON_TRACK = "on_track"
+    AT_RISK = "at_risk"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    UNKNOWN = "unknown"
+
+
+class WorkstreamStatus(str, Enum):
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    UNKNOWN = "unknown"
+
+
+class SourceStatus(str, Enum):
+    AVAILABLE = "available"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
+class Severity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class IssueStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+class ActionStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+
+class ProjectEventType(str, Enum):
+    PROJECT_CREATED = "project_created"
+    WORKSTREAM_UPDATED = "workstream_updated"
+    ISSUE_OPENED = "issue_opened"
+    ISSUE_RESOLVED = "issue_resolved"
+    RISK_OPENED = "risk_opened"
+    RISK_RESOLVED = "risk_resolved"
+    MILESTONE_COMPLETED = "milestone_completed"
+    ACTION_CREATED = "action_created"
+    ACTION_COMPLETED = "action_completed"
+    APPROVAL_GRANTED = "approval_granted"
+    READINESS_CHANGED = "readiness_changed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkstreamSnapshot:
+    workstream_id: str
+    name: str
+    completion_percent: float | None
+    status: WorkstreamStatus
+    source: str
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSnapshot:
+    key: str
+    label: str
+    value: float | int | str
+    unit: str | None = None
+    source: str = ""
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssueSnapshot:
+    issue_id: str
+    project_id: str
+    title: str
+    severity: Severity
+    status: IssueStatus
+    workstream_id: str | None = None
+    owner: str | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RiskSnapshot:
+    risk_id: str
+    project_id: str
+    title: str
+    severity: Severity
+    status: str
+    workstream_id: str | None = None
+    owner: str | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ActionSnapshot:
+    action_id: str
+    project_id: str
+    title: str
+    priority: Severity
+    status: ActionStatus
+    owner: str | None = None
+    workstream_id: str | None = None
+    due_at: datetime | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MilestoneSnapshot:
+    milestone_id: str
+    project_id: str
+    name: str
+    status: str
+    target_date: datetime | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSnapshot:
+    source_id: str
+    name: str
+    status: SourceStatus
+    updated_at: datetime | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectControlSnapshot:
+    project_id: str
+    project_name: str
+    project_status: ProjectStatus
+    overall_progress_percent: float | None
+    current_milestone: str | None
+    current_workstream: str | None
+    release_readiness: str
+    open_blockers: int
+    open_risks: int
+    workstreams: tuple[WorkstreamSnapshot, ...] = ()
+    metrics: tuple[MetricSnapshot, ...] = ()
+    issues: tuple[IssueSnapshot, ...] = ()
+    risks: tuple[RiskSnapshot, ...] = ()
+    actions: tuple[ActionSnapshot, ...] = ()
+    milestones: tuple[MilestoneSnapshot, ...] = ()
+    sources: tuple[SourceSnapshot, ...] = ()
+    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectDefinition:
+    project_id: str
+    name: str
+    description: str = ""
+    owner: str | None = None
+    active: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectEvent:
+    event_id: str
+    project_id: str
+    event_type: ProjectEventType
+    occurred_at: datetime
+    summary: str
+    source: str
+    metadata: tuple[tuple[str, str], ...] = ()
+
+===== FILE: .\backend\app\project_control_center\domain\ports.py =====
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from .models import (
+    ActionSnapshot,
+    IssueSnapshot,
+    MetricSnapshot,
+    MilestoneSnapshot,
+    ProjectDefinition,
+    ProjectEvent,
+    ProjectControlSnapshot,
+    RiskSnapshot,
+    SourceSnapshot,
+    WorkstreamSnapshot,
+)
+
+
+class ProjectRegistry(ABC):
+    @abstractmethod
+    def get(self, project_id: str) -> ProjectDefinition | None: ...
+
+    @abstractmethod
+    def list_active(self) -> list[ProjectDefinition]: ...
+
+    @abstractmethod
+    def save(self, project: ProjectDefinition) -> ProjectDefinition: ...
+
+
+class ProjectStatusSource(ABC):
+    """Read-only adapter over an existing authoritative EasyChatBot source."""
+
+    @property
+    @abstractmethod
+    def source_id(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def source_name(self) -> str: ...
+
+    @abstractmethod
+    def fetch_workstreams(self, project_id: str) -> list[WorkstreamSnapshot]: ...
+
+    @abstractmethod
+    def fetch_metrics(self, project_id: str) -> list[MetricSnapshot]: ...
+
+    @abstractmethod
+    def fetch_issues(self, project_id: str) -> list[IssueSnapshot]: ...
+
+    @abstractmethod
+    def fetch_risks(self, project_id: str) -> list[RiskSnapshot]: ...
+
+    @abstractmethod
+    def fetch_actions(self, project_id: str) -> list[ActionSnapshot]: ...
+
+    @abstractmethod
+    def fetch_milestones(self, project_id: str) -> list[MilestoneSnapshot]: ...
+
+    @abstractmethod
+    def health(self) -> SourceSnapshot: ...
+
+
+class SnapshotRepository(ABC):
+    @abstractmethod
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot: ...
+
+    @abstractmethod
+    def list_for_project(self, project_id: str, limit: int = 30) -> list[ProjectControlSnapshot]: ...
+
+
+class ProjectEventRepository(ABC):
+    @abstractmethod
+    def save(self, event: ProjectEvent) -> ProjectEvent: ...
+
+    @abstractmethod
+    def list_for_project(self, project_id: str, limit: int = 100) -> list[ProjectEvent]: ...
+
+===== FILE: .\backend\app\project_control_center\application\service.py =====
+"""
+Project Control Center application service.
+
+Composes read-only project status sources into a unified
+ProjectControlSnapshot.
+
+The service does not own authoritative project state.
+Authoritative state remains in the source systems exposed
+through ProjectStatusSource adapters.
+
+Both synchronous and asynchronous composition paths are
+supported:
+
+- get_snapshot() for synchronous sources;
+- get_snapshot_async() for sources that expose asynchronous
+  application services.
+
+No event-loop bridging is performed.
+"""
+
+from __future__ import annotations
+
+import inspect
+from dataclasses import dataclass
+from typing import Any
+
+from ..domain.models import (
+    ProjectControlSnapshot,
+    ProjectDefinition,
+    ProjectStatus,
+    WorkstreamStatus,
+)
+from ..domain.ports import (
+    ProjectRegistry,
+    ProjectStatusSource,
+    SnapshotRepository,
+)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """
+    Resolve an awaitable value while preserving synchronous values.
+
+    This helper allows the asynchronous composition path to work
+    with both synchronous and asynchronous source implementations.
+
+    It deliberately does not create or manage an event loop.
+    """
+
+    if inspect.isawaitable(value):
+        return await value
+
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectControlService:
+    """
+    Application service responsible for project-control composition.
+
+    The service is read-oriented. It retrieves project data from
+    registered ProjectStatusSource adapters and builds a unified
+    ProjectControlSnapshot.
+
+    It does not modify authoritative source systems.
+    """
+
+    registry: ProjectRegistry
+    sources: tuple[ProjectStatusSource, ...]
+    snapshots: SnapshotRepository
+
+    def get_snapshot(
+        self,
+        project_id: str,
+        *,
+        persist: bool = True,
+    ) -> ProjectControlSnapshot:
+        """
+        Build a project-control snapshot from synchronous sources.
+
+        This method preserves the original synchronous PCD contract.
+
+        Asynchronous sources must be consumed through
+        get_snapshot_async().
+        """
+
+        project = self.registry.get(project_id)
+
+        if project is None:
+            raise ValueError(
+                f"Unknown project: {project_id}"
+            )
+
+        workstreams = []
+        metrics = []
+        issues = []
+        risks = []
+        actions = []
+        milestones = []
+        source_health = []
+
+        for source in self.sources:
+            source_health.append(source.health())
+
+            workstreams.extend(
+                source.fetch_workstreams(project_id)
+            )
+            metrics.extend(
+                source.fetch_metrics(project_id)
+            )
+            issues.extend(
+                source.fetch_issues(project_id)
+            )
+            risks.extend(
+                source.fetch_risks(project_id)
+            )
+            actions.extend(
+                source.fetch_actions(project_id)
+            )
+            milestones.extend(
+                source.fetch_milestones(project_id)
+            )
+
+        snapshot = self._build_snapshot(
+            project=project,
+            workstreams=workstreams,
+            metrics=metrics,
+            issues=issues,
+            risks=risks,
+            actions=actions,
+            milestones=milestones,
+            source_health=source_health,
+        )
+
+        if persist:
+            self.snapshots.save(snapshot)
+
+        return snapshot
+
+    async def get_snapshot_async(
+        self,
+        project_id: str,
+        *,
+        persist: bool = True,
+    ) -> ProjectControlSnapshot:
+        """
+        Build a project-control snapshot from sync/async sources.
+
+        This is the production composition path for PCD adapters
+        backed by asynchronous application services.
+
+        The method awaits asynchronous source operations directly.
+        It does not call asyncio.run(), create a nested event loop,
+        or otherwise bridge asynchronous execution into synchronous
+        code.
+        """
+
+        project = self.registry.get(project_id)
+
+        if project is None:
+            raise ValueError(
+                f"Unknown project: {project_id}"
+            )
+
+        workstreams = []
+        metrics = []
+        issues = []
+        risks = []
+        actions = []
+        milestones = []
+        source_health = []
+
+        for source in self.sources:
+            source_health.append(source.health())
+
+            workstreams.extend(
+                await _maybe_await(
+                    source.fetch_workstreams(project_id)
+                )
+            )
+            metrics.extend(
+                await _maybe_await(
+                    source.fetch_metrics(project_id)
+                )
+            )
+            issues.extend(
+                await _maybe_await(
+                    source.fetch_issues(project_id)
+                )
+            )
+            risks.extend(
+                await _maybe_await(
+                    source.fetch_risks(project_id)
+                )
+            )
+            actions.extend(
+                await _maybe_await(
+                    source.fetch_actions(project_id)
+                )
+            )
+            milestones.extend(
+                await _maybe_await(
+                    source.fetch_milestones(project_id)
+                )
+            )
+
+        snapshot = self._build_snapshot(
+            project=project,
+            workstreams=workstreams,
+            metrics=metrics,
+            issues=issues,
+            risks=risks,
+            actions=actions,
+            milestones=milestones,
+            source_health=source_health,
+        )
+
+        if persist:
+            self.snapshots.save(snapshot)
+
+        return snapshot
+
+    @staticmethod
+    def _build_snapshot(
+        *,
+        project: ProjectDefinition,
+        workstreams: list,
+        metrics: list,
+        issues: list,
+        risks: list,
+        actions: list,
+        milestones: list,
+        source_health: list,
+    ) -> ProjectControlSnapshot:
+        """
+        Deterministically compose the unified project snapshot.
+
+        No source is mutated and no new authoritative state is
+        created here.
+        """
+
+        progress_values = [
+            workstream.completion_percent
+            for workstream in workstreams
+            if workstream.completion_percent is not None
+        ]
+
+        progress = (
+            round(
+                sum(progress_values) / len(progress_values),
+                1,
+            )
+            if progress_values
+            else None
+        )
+
+        blockers = (
+            sum(
+                1
+                for workstream in workstreams
+                if workstream.status is WorkstreamStatus.BLOCKED
+            )
+            + sum(
+                1
+                for issue in issues
+                if issue.status.value in {
+                    "open",
+                    "in_progress",
+                }
+                and issue.severity.value in {
+                    "high",
+                    "critical",
+                }
+            )
+        )
+
+        open_risks = sum(
+            1
+            for risk in risks
+            if risk.status.lower()
+            not in {
+                "closed",
+                "resolved",
+            }
+        )
+
+        warnings = sum(
+            1
+            for workstream in workstreams
+            if workstream.status is WorkstreamStatus.WARNING
+        )
+
+        if blockers:
+            status = ProjectStatus.BLOCKED
+        elif progress is not None and progress >= 100:
+            status = ProjectStatus.COMPLETE
+        elif warnings or open_risks:
+            status = ProjectStatus.AT_RISK
+        elif workstreams:
+            status = ProjectStatus.ON_TRACK
+        else:
+            status = ProjectStatus.UNKNOWN
+
+        if blockers:
+            readiness = "NOT READY"
+        elif progress is not None and progress >= 80:
+            readiness = "BETA READY"
+        elif progress is not None:
+            readiness = "IN PROGRESS"
+        else:
+            readiness = "UNKNOWN"
+
+        current_milestone = next(
+            (
+                milestone.name
+                for milestone in milestones
+                if milestone.status.lower()
+                in {
+                    "active",
+                    "in_progress",
+                }
+            ),
+            None,
+        )
+
+        current_workstream = next(
+            (
+                workstream.name
+                for workstream in workstreams
+                if workstream.status
+                in {
+                    WorkstreamStatus.WARNING,
+                    WorkstreamStatus.BLOCKED,
+                }
+            ),
+            None,
+        )
+
+        return ProjectControlSnapshot(
+            project_id=project.project_id,
+            project_name=project.name,
+            project_status=status,
+            overall_progress_percent=progress,
+            current_milestone=current_milestone,
+            current_workstream=current_workstream,
+            release_readiness=readiness,
+            open_blockers=blockers,
+            open_risks=open_risks,
+            workstreams=tuple(workstreams),
+            metrics=tuple(metrics),
+            issues=tuple(issues),
+            risks=tuple(risks),
+            actions=tuple(actions),
+            milestones=tuple(milestones),
+            sources=tuple(source_health),
+        )
+
+    def list_projects(self) -> list[ProjectDefinition]:
+        """Return active projects from the authoritative registry."""
+
+        return self.registry.list_active()
+
+===== FILE: .\backend\app\project_control_center\application\history_service.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..domain.models import ProjectControlSnapshot
+from ..domain.ports import SnapshotRepository
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectTrend:
+    project_id: str
+    snapshots: tuple[ProjectControlSnapshot, ...]
+    progress_delta: float | None
+    blocker_delta: int | None
+    risk_delta: int | None
+
+
+class ProjectHistoryService:
+    def __init__(self, repository: SnapshotRepository) -> None:
+        self._repository = repository
+
+    def trend(self, project_id: str, limit: int = 30) -> ProjectTrend:
+        snapshots = tuple(self._repository.list_for_project(project_id, limit))
+        if len(snapshots) < 2:
+            return ProjectTrend(project_id, snapshots, None, None, None)
+
+        latest, previous = snapshots[0], snapshots[1]
+
+        progress_delta = None
+        if (
+            latest.overall_progress_percent is not None
+            and previous.overall_progress_percent is not None
+        ):
+            progress_delta = round(
+                latest.overall_progress_percent
+                - previous.overall_progress_percent,
+                1,
+            )
+
+        return ProjectTrend(
+            project_id=project_id,
+            snapshots=snapshots,
+            progress_delta=progress_delta,
+            blocker_delta=latest.open_blockers - previous.open_blockers,
+            risk_delta=latest.open_risks - previous.open_risks,
+        )
+
+===== FILE: .\backend\app\project_control_center\infrastructure\in_memory.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..domain.models import ProjectControlSnapshot, ProjectDefinition, ProjectEvent
+from ..domain.ports import (
+    ProjectEventRepository,
+    ProjectRegistry,
+    SnapshotRepository,
+)
+
+
+@dataclass
+class InMemoryProjectRegistry(ProjectRegistry):
+    projects: dict[str, ProjectDefinition] = field(default_factory=dict)
+
+    def get(self, project_id: str) -> ProjectDefinition | None:
+        return self.projects.get(project_id)
+
+    def list_active(self) -> list[ProjectDefinition]:
+        return [p for p in self.projects.values() if p.active]
+
+    def save(self, project: ProjectDefinition) -> ProjectDefinition:
+        self.projects[project.project_id] = project
+        return project
+
+
+@dataclass
+class InMemorySnapshotRepository(SnapshotRepository):
+    data: dict[str, list[ProjectControlSnapshot]] = field(default_factory=dict)
+
+    def save(self, snapshot: ProjectControlSnapshot) -> ProjectControlSnapshot:
+        self.data.setdefault(snapshot.project_id, []).insert(0, snapshot)
+        return snapshot
+
+    def list_for_project(
+        self, project_id: str, limit: int = 30
+    ) -> list[ProjectControlSnapshot]:
+        return self.data.get(project_id, [])[:limit]
+
+
+@dataclass
+class InMemoryProjectEventRepository(ProjectEventRepository):
+    data: dict[str, list[ProjectEvent]] = field(default_factory=dict)
+
+    def save(self, event: ProjectEvent) -> ProjectEvent:
+        self.data.setdefault(event.project_id, []).insert(0, event)
+        return event
+
+    def list_for_project(
+        self, project_id: str, limit: int = 100
+    ) -> list[ProjectEvent]:
+        return self.data.get(project_id, [])[:limit]
+
+===== PROJECT REGISTRY TESTS =====
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py; LineNumber=22; Line=    ProjectDefinition,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py; LineNumber=30; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py; LineNumber=95; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py; LineNumber=97; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py; LineNumber=98; Line=        ProjectDefinition(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py; LineNumber=29; Line=    ProjectDefinition,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py; LineNumber=37; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py; LineNumber=100; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py; LineNumber=102; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py; LineNumber=103; Line=        ProjectDefinition(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition.py; LineNumber=18; Line=    ProjectDefinition,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition.py; LineNumber=28; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition.py; LineNumber=206; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition.py; LineNumber=209; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition.py; LineNumber=210; Line=        ProjectDefinition(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py; LineNumber=20; Line=    ProjectDefinition,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py; LineNumber=23; Line=    ProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py; LineNumber=36; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py; LineNumber=55; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py; LineNumber=57; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_composition_factory.py; LineNumber=58; Line=        ProjectDefinition(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_long_term.py; LineNumber=3; Line=from app.project_control_center.domain.models import ProjectDefinition, ProjectEventType}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_long_term.py; LineNumber=7; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_long_term.py; LineNumber=16; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_long_term.py; LineNumber=18; Line=    registry.save(ProjectDefinition("easychatbot", "EasyChatBot"))}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_long_term.py; LineNumber=39; Line=    registry.save(ProjectDefinition("risk-intelligence", "Risk Intelligence"))}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=3; Line=from app.project_control_center.domain.models import ProjectDefinition}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=5; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=9; Line=def create_production_project_registry() -> InMemoryProjectRegistry:}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=11; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=13; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=14; Line=        ProjectDefinition(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_production_composition.py; LineNumber=40; Line=    assert isinstance(project, ProjectDefinition)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_safety.py; LineNumber=12; Line=    ProjectDefinition,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_safety.py; LineNumber=20; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_safety.py; LineNumber=80; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_safety.py; LineNumber=81; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_safety.py; LineNumber=82; Line=        ProjectDefinition(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_service.py; LineNumber=12; Line=    ProjectDefinition,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_service.py; LineNumber=21; Line=    InMemoryProjectRegistry,}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_service.py; LineNumber=78; Line=    registry = InMemoryProjectRegistry()}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_service.py; LineNumber=80; Line=    registry.save(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_manager_agent_service.py; LineNumber=81; Line=        ProjectDefinition(}

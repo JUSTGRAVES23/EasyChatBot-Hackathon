@@ -8,7 +8,21 @@ from pydantic import BaseModel, ConfigDict
 
 class DeveloperAdminCreateTransactionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
     target_user_id: UUID
+
+
+class DeveloperAdminExecuteTransactionRequest(BaseModel):
+    """Request contract for executing one already-authorized transaction.
+
+    The client supplies only the authorization reference.
+    The canonical transaction, including its target, is resolved server-side
+    from the stored transaction authorization.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    authorization_id: str
 
 
 class DeveloperAdminPendingTransactionResponse(BaseModel):
@@ -42,6 +56,7 @@ class DeveloperAdminExecuteTransactionResponse(BaseModel):
 __all__ = [
     "DeveloperAdminApprovalResponse",
     "DeveloperAdminCreateTransactionRequest",
+    "DeveloperAdminExecuteTransactionRequest",
     "DeveloperAdminExecuteTransactionResponse",
     "DeveloperAdminPendingTransactionResponse",
 ]

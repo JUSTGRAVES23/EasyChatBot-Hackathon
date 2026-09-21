@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.api.routes.persistence_operations_routes import create_persistence_operations_router
+from app.api.routes.persistence_operations_routes import (
+    create_persistence_operations_router,
+)
 
 
 class FakeService:
@@ -20,26 +22,40 @@ def make_client():
 
     app.include_router(
         create_persistence_operations_router(
-            FakeService(), operator_dependency=operator_dependency
+            FakeService(),
+            operator_dependency=operator_dependency,
         )
     )
+
     return TestClient(app)
 
 
 def test_operator_can_read_overview_and_health():
     client = make_client()
 
-    overview = client.get("/api/operations-center/persistence?environment=dev")
-    health = client.get("/api/operations-center/persistence/health?environment=staging")
+    overview = client.get(
+        "/api/operations-center/persistence?environment=dev"
+    )
+    health = client.get(
+        "/api/operations-center/persistence/health?environment=staging"
+    )
 
     assert overview.status_code == 200
-    assert overview.json() == {"environment": "dev", "kind": "snapshot"}
+    assert overview.json() == {
+        "environment": "dev",
+        "kind": "snapshot",
+    }
+
     assert health.status_code == 200
-    assert health.json() == {"environment": "staging", "kind": "health"}
+    assert health.json() == {
+        "environment": "staging",
+        "kind": "health",
+    }
 
 
 def test_environment_contract_rejects_unknown_values():
     response = make_client().get(
         "/api/operations-center/persistence?environment=qa"
     )
+
     assert response.status_code == 422

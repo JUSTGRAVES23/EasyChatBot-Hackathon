@@ -42,6 +42,8 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     Role.DEVELOPER_ADMIN: frozenset(
         {
             Permission.DEVELOPER_ADMIN_MANAGE,
+            Permission.INTERNAL_DATA_READ,
+            Permission.FUNCTIONALITY_CONTROL,
         }
     ),
 }

@@ -5,8 +5,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
-from app.application.beta_access.beta_access_service import BetaAccessService
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.application.beta_access.beta_access_service import (
+    BetaAccessService,
+)
 from app.application.beta_access.beta_telegram_conversation_boundary import (
     BetaTelegramConversationBoundary,
 )
@@ -25,16 +29,31 @@ from app.application.providers.provider_usage_capture import (
     ProviderUsageCapture,
     ProviderUsageContext,
 )
-from app.application.uai.language.language_detector import LanguageDetector
+from app.application.services.beta_world_access_service import (
+    BetaWorldAccessService,
+)
+from app.application.uai.language.language_detector import (
+    LanguageDetector,
+)
 from app.application.uai.language.language_response_policy import (
     LanguageResponsePolicy,
 )
 from app.application.uai.world.world_resolver import WorldResolver
-from app.interfaces.telegram.beta_private_chat_gate import BetaPrivateChatGate
-from app.interfaces.telegram.beta_start_handler import BetaTelegramStartHandler
-from app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
-from app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
-from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+from app.interfaces.telegram.beta_private_chat_gate import (
+    BetaPrivateChatGate,
+)
+from app.interfaces.telegram.beta_start_handler import (
+    BetaTelegramStartHandler,
+)
+from app.interfaces.telegram.beta_telegram_adapter import (
+    BetaTelegramAdapter,
+)
+from app.infrastructure.telegram.telegram_bot_runtime import (
+    TelegramBotRuntime,
+)
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
 from app.providers.llm.llm_provider_factory import LLMProviderFactory
 from src.ai_runtime.providers.usage.repository import (
     InMemoryProviderUsageRepository,
@@ -46,6 +65,7 @@ from src.ai_runtime.providers.usage.service import ProviderUsageService
 @dataclass(frozen=True)
 class BetaTelegramComposition:
     beta_access_service: BetaAccessService
+    beta_world_access_service: BetaWorldAccessService
     conversation_runtime: ConversationRuntime
     conversation_service: TelegramConversationService
     conversation_boundary: BetaTelegramConversationBoundary
@@ -109,9 +129,12 @@ def create_beta_telegram_composition(
     conversation_event_repository: Any,
     privacy_identifier_service: Any,
     conversation_event_validator: Any,
+    beta_world_access_service: BetaWorldAccessService,
     expiration_minutes: int = 1440,
     conversation_runtime: ConversationRuntime | None = None,
-    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    conversation_runtime_factory: (
+        Callable[[], ConversationRuntime] | None
+    ) = None,
     rate_limiter: Any | None = None,
     abuse_protector: Any | None = None,
     observability: Any | None = None,
@@ -126,17 +149,22 @@ def create_beta_telegram_composition(
 ) -> BetaTelegramComposition:
     """Create the Beta Telegram application composition.
 
-    ``functionality_control_service`` is optional at this lower-level
-    composition boundary so isolated application/unit compositions can
-    continue to construct Telegram without requiring infrastructure.
+    BetaAccessService owns Telegram identity binding.
 
-    Production composition is responsible for requiring and supplying
-    the authoritative functionality-control service.
+    BetaWorldAccessService owns durable provisioning of the complete
+    Learning World portfolio after successful Beta onboarding.
+
+    Telegram never selects or changes the user's active World.
     """
 
     if expiration_minutes <= 0:
         raise ValueError(
             "expiration_minutes must be greater than zero."
+        )
+
+    if beta_world_access_service is None:
+        raise ValueError(
+            "beta_world_access_service is required."
         )
 
     if (
@@ -243,12 +271,14 @@ def create_beta_telegram_composition(
         )
 
     resolved_language_response_policy = (
-        language_response_policy or LanguageResponsePolicy()
+        language_response_policy
+        or LanguageResponsePolicy()
     )
 
     if language_detector is None:
         raise ValueError(
-            "language_detector is required for Beta Telegram composition."
+            "language_detector is required for "
+            "Beta Telegram composition."
         )
 
     conversation_service = TelegramConversationService(
@@ -306,12 +336,14 @@ def create_beta_telegram_composition(
     )
 
     private_chat_gate = BetaPrivateChatGate(
-        beta_access_service=beta_access_service
+        beta_access_service=beta_access_service,
     )
 
     start_handler = BetaTelegramStartHandler(
-        beta_access_service=beta_access_service
-    )
+    beta_access_service=beta_access_service,
+    beta_world_access_service=beta_world_access_service,
+    privacy_identifier_service=privacy_identifier_service,
+)
 
     adapter = BetaTelegramAdapter(
         start_handler=start_handler,
@@ -326,6 +358,7 @@ def create_beta_telegram_composition(
 
     return BetaTelegramComposition(
         beta_access_service=beta_access_service,
+        beta_world_access_service=beta_world_access_service,
         conversation_runtime=resolved_conversation_runtime,
         conversation_service=conversation_service,
         conversation_boundary=conversation_boundary,

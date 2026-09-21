@@ -1,266 +1,307 @@
-import "@testing-library/jest-dom/vitest";
-
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fireEvent,
   render,
   screen,
   waitFor,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 
 import ProjectControlPage from "../../app/project-control/page";
+import * as projectControlApi from "../../app/lib/api/projectControl";
+import * as projectRegistryApi from "../../app/lib/api/projectRegistry";
 
-const snapshot = {
+vi.mock("../../app/lib/api/projectControl", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../app/lib/api/projectControl")
+  >("../../app/lib/api/projectControl");
+
+  return {
+    ...actual,
+    getProjectControlSnapshot: vi.fn(),
+  };
+});
+
+vi.mock("../../app/lib/api/projectRegistry", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../app/lib/api/projectRegistry")
+  >("../../app/lib/api/projectRegistry");
+
+  return {
+    ...actual,
+    listProjectRegistryProjects: vi.fn(),
+  };
+});
+
+const mockedGetProjectControlSnapshot = vi.mocked(
+  projectControlApi.getProjectControlSnapshot,
+);
+
+const mockedListProjectRegistryProjects = vi.mocked(
+  projectRegistryApi.listProjectRegistryProjects,
+);
+
+function renderProjectControlPage() {
+  return render(
+    <MemoryRouter initialEntries={["/project-control"]}>
+      <ProjectControlPage />
+    </MemoryRouter>,
+  );
+}
+
+const registryProjects: projectRegistryApi.ProjectRegistryProject[] = [
+  {
+    project_id: "easychatbot",
+    name: "EasyChatBot",
+    description: "EasyChatBot Academy project.",
+    owner: "David",
+    active: true,
+    created_at: "2026-01-01T00:00:00Z",
+  },
+  {
+    project_id: "12313",
+    name: "Davidtest",
+    description: "Davidtest project.",
+    owner: "David",
+    active: true,
+    created_at: "2026-01-02T00:00:00Z",
+  },
+];
+
+const easyChatBotSnapshot: projectControlApi.ProjectControlSnapshot = {
   project_id: "easychatbot",
   project_name: "EasyChatBot",
   project_status: "on_track",
   overall_progress_percent: 85,
-  current_milestone: "Beta 1",
-  current_workstream: "Project Control Center",
-  release_readiness: "BETA READY",
+  current_milestone: "D5.4-A",
+  current_workstream: "Project Control",
+  release_readiness: "READY",
   open_blockers: 0,
   open_risks: 0,
-  workstreams: [
-    {
-      workstream_id: "pcd",
-      name: "Project Control Center",
-      completion_percent: 85,
-      status: "healthy",
-      source: "api-test",
-      updated_at: null,
-    },
-  ],
+  workstreams: [],
   metrics: [],
   issues: [],
   risks: [],
   actions: [],
   milestones: [],
-  sources: [
-    {
-      source_id: "api-test",
-      name: "API Test Source",
-      status: "available",
-      updated_at: null,
-      error: null,
-    },
-  ],
-  generated_at:
-    "2026-09-08T15:00:00+00:00",
+  sources: [],
+  generated_at: "2026-09-17T21:00:00Z",
 };
 
-describe(
-  "Project Control Center",
-  () => {
-    it(
-      "renders the authoritative project snapshot",
-      async () => {
-        const fetchMock =
-          vi
-            .spyOn(globalThis, "fetch")
-            .mockResolvedValue(
-              new Response(
-                JSON.stringify(snapshot),
-                {
-                  status: 200,
-                  headers: {
-                    "Content-Type":
-                      "application/json",
-                  },
-                },
-              ),
-            );
+const davidTestSnapshot: projectControlApi.ProjectControlSnapshot = {
+  project_id: "12313",
+  project_name: "Davidtest",
+  project_status: "on_track",
+  overall_progress_percent: 50,
+  current_milestone: "Project Control",
+  current_workstream: "Project Control",
+  release_readiness: "IN_PROGRESS",
+  open_blockers: 0,
+  open_risks: 0,
+  workstreams: [],
+  metrics: [],
+  issues: [],
+  risks: [],
+  actions: [],
+  milestones: [],
+  sources: [],
+  generated_at: "2026-09-17T21:00:00Z",
+};
 
-        render(
-          <ProjectControlPage />,
-        );
+describe("Project Control Center", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
 
-        expect(
-          screen.getByRole(
-            "status",
-          ),
-        ).toHaveTextContent(
-          "Loading project control data",
-        );
-
-        await waitFor(() => {
-          expect(
-            screen.getByText(
-              "EasyChatBot",
-            ),
-          ).toBeInTheDocument();
-        });
-
-        expect(
-          screen.getByText(
-            "ON TRACK",
-          ),
-        ).toBeInTheDocument();
-
-        expect(
-          screen.getByText(
-            "85.0%",
-          ),
-        ).toBeInTheDocument();
-
-        expect(
-          screen.getByText(
-            "BETA READY",
-          ),
-        ).toBeInTheDocument();
-
-        expect(
-          fetchMock,
-        ).toHaveBeenCalledWith(
-          "/project-control/projects/easychatbot",
-          expect.objectContaining({
-            method: "GET",
-            credentials: "include",
-          }),
-        );
-
-        fetchMock.mockRestore();
-      },
+    mockedListProjectRegistryProjects.mockResolvedValue(
+      registryProjects,
     );
 
-    it(
-      "shows an API failure and provides retry",
-      async () => {
-        const fetchMock =
-          vi
-            .spyOn(globalThis, "fetch")
-            .mockRejectedValue(
-              new Error(
-                "Network failure",
-              ),
-            );
-
-        render(
-          <ProjectControlPage />,
-        );
-
-        await waitFor(() => {
-          expect(
-            screen.getByRole(
-              "alert",
-            ),
-          ).toBeInTheDocument();
-        });
-
-        expect(
-          screen.getByText(
-            "Unable to load Project Control data.",
-          ),
-        ).toBeInTheDocument();
-
-        const retryButton =
-          screen.getByRole(
-            "button",
-            {
-              name: "Retry",
-            },
-          );
-
-        fireEvent.click(
-          retryButton,
-        );
-
-        await waitFor(() => {
-          expect(
-            fetchMock,
-          ).toHaveBeenCalledTimes(2);
-
-          expect(
-            screen.getByRole(
-              "alert",
-            ),
-          ).toHaveTextContent(
-            "Unable to load Project Control data.",
-          );
-        });
-
-        fetchMock.mockRestore();
-      },
-    );
-
-    it(
-      "shows unavailable source information",
-      async () => {
-        const degradedSnapshot = {
-          ...snapshot,
-          sources: [
-            {
-              ...snapshot.sources[0],
-              status: "unavailable",
-              error:
-                "Source unavailable",
-            },
-          ],
-        };
-
-        const fetchMock =
-          vi
-            .spyOn(globalThis, "fetch")
-            .mockResolvedValue(
-              new Response(
-                JSON.stringify(
-                  degradedSnapshot,
-                ),
-                {
-                  status: 200,
-                  headers: {
-                    "Content-Type":
-                      "application/json",
-                  },
-                },
-              ),
-            );
-
-        render(
-          <ProjectControlPage />,
-        );
-
-        const warning =
-          await screen.findByRole(
-            "status",
-            {
-              name: "Source warning",
-            },
-          );
-
-        expect(
-          warning,
-        ).toHaveTextContent(
-          "Some project-control sources are unavailable or stale.",
-        );
-
-        const sourceName =
-          screen.getByText(
-            "API Test Source",
-          );
-
-        const sourceRow =
-          sourceName.closest("li");
-
-        if (!sourceRow) {
-          throw new Error(
-            "Expected API Test Source to be rendered inside a list item.",
-          );
+    mockedGetProjectControlSnapshot.mockImplementation(
+      async (projectId: string) => {
+        if (projectId === "easychatbot") {
+          return easyChatBotSnapshot;
         }
 
-        expect(
-          sourceRow,
-        ).toHaveTextContent(
-          "Unavailable",
-        );
+        if (projectId === "12313") {
+          return davidTestSnapshot;
+        }
 
-        expect(
-          sourceRow,
-        ).toHaveTextContent(
-          "Source unavailable",
+        throw new Error(
+          `Unexpected project id: ${projectId}`,
         );
-
-        fetchMock.mockRestore();
       },
     );
-  },
-);
+  });
+
+  it("loads the authoritative EasyChatBot project snapshot", async () => {
+    renderProjectControlPage();
+
+    await waitFor(() => {
+      expect(
+        mockedListProjectRegistryProjects,
+      ).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(
+        mockedGetProjectControlSnapshot,
+      ).toHaveBeenCalledWith("easychatbot");
+    });
+
+    expect(
+      screen.getByText("EasyChatBot"),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText("85.0%"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders all active projects from the Project Registry", async () => {
+    renderProjectControlPage();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("EasyChatBot"),
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("Davidtest"),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText("Tracked Projects"),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText("(2)"),
+    ).toBeInTheDocument();
+
+    expect(
+      mockedGetProjectControlSnapshot,
+    ).toHaveBeenCalledWith("easychatbot");
+
+    expect(
+      mockedGetProjectControlSnapshot,
+    ).toHaveBeenCalledWith("12313");
+  });
+
+  it("renders project navigation links for registered projects", async () => {
+    renderProjectControlPage();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Davidtest"),
+      ).toBeInTheDocument();
+    });
+
+    const easyChatBotLink = screen.getByRole("link", {
+      name: /Open EasyChatBot project control/i,
+    });
+
+    const davidTestLink = screen.getByRole("link", {
+      name: /Open Davidtest project control/i,
+    });
+
+    expect(easyChatBotLink).toHaveAttribute(
+      "href",
+      "/project-control/projects/easychatbot",
+    );
+
+    expect(davidTestLink).toHaveAttribute(
+      "href",
+      "/project-control/projects/12313",
+    );
+  });
+
+  it("refreshes Project Registry and Project Control data", async () => {
+    renderProjectControlPage();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("EasyChatBot"),
+      ).toBeInTheDocument();
+    });
+
+    const initialRegistryCalls =
+      mockedListProjectRegistryProjects.mock.calls.length;
+
+    const initialSnapshotCalls =
+      mockedGetProjectControlSnapshot.mock.calls.length;
+
+    const refreshButton = screen.getByRole("button", {
+      name: /refresh project control data/i,
+    });
+
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => {
+      expect(
+        mockedListProjectRegistryProjects.mock.calls.length,
+      ).toBeGreaterThan(initialRegistryCalls);
+    });
+
+    await waitFor(() => {
+      expect(
+        mockedGetProjectControlSnapshot.mock.calls.length,
+      ).toBeGreaterThan(initialSnapshotCalls);
+    });
+  });
+
+  it("handles Project Registry failure without crashing", async () => {
+    mockedListProjectRegistryProjects.mockRejectedValueOnce(
+      new Error("Project Registry unavailable"),
+    );
+
+    renderProjectControlPage();
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("alert"),
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("Project intelligence unavailable"),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText("Unable to load Project Registry data."),
+    ).toBeInTheDocument();
+
+    expect(
+      mockedGetProjectControlSnapshot,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("keeps the portfolio visible when one project snapshot fails", async () => {
+    mockedGetProjectControlSnapshot.mockImplementation(
+      async (projectId: string) => {
+        if (projectId === "easychatbot") {
+          return easyChatBotSnapshot;
+        }
+
+        throw new Error("Davidtest snapshot unavailable");
+      },
+    );
+
+    renderProjectControlPage();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("EasyChatBot"),
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("Davidtest"),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByText(
+        "Snapshot: Project Control snapshot unavailable.",
+      ),
+    ).toBeInTheDocument();
+  });
+});

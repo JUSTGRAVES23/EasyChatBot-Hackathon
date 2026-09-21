@@ -1,5 +1,7 @@
 import {
-  FormEvent,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
   useEffect,
   useMemo,
   useState,
@@ -13,6 +15,7 @@ import {
 
 import {
   createPrivateChatConversation,
+  getActivePrivateChatConversation,
   sendPrivateChatMessage,
 } from "./worldPrivateChatApi";
 
@@ -29,7 +32,9 @@ type ChatMessage = {
   content: string;
 };
 
-function applyPresentationTheme(presentation: WorldPresentation) {
+function applyPresentationTheme(
+  presentation: WorldPresentation,
+): CSSProperties {
   return {
     "--ecb-study-primary": presentation.primary,
     "--ecb-study-secondary": presentation.secondary,
@@ -40,7 +45,25 @@ function applyPresentationTheme(presentation: WorldPresentation) {
     "--ecb-study-text": presentation.text,
     "--ecb-study-muted": presentation.muted,
     "--ecb-study-atmosphere": presentation.atmosphere,
-  } as React.CSSProperties;
+  } as CSSProperties;
+}
+
+function mapPersistedMessages(
+  conversationId: string,
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    created_at: string;
+  }>,
+): ChatMessage[] {
+  return messages.map((message, index) => ({
+    id:
+      `${conversationId}-` +
+      `${index}-` +
+      `${message.created_at}`,
+    role: message.role,
+    content: message.content,
+  }));
 }
 
 export default function WorldPrivateChatPage() {
@@ -61,11 +84,22 @@ export default function WorldPrivateChatPage() {
   const [conversationId, setConversationId] =
     useState<string | null>(null);
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] =
+    useState<ChatMessage[]>([]);
+
   const [draft, setDraft] = useState("");
-  const [loadingConversation, setLoadingConversation] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const [loadingConversation, setLoadingConversation] =
+    useState(true);
+
+  const [restarting, setRestarting] =
+    useState(false);
+
+  const [sending, setSending] =
+    useState(false);
+
+  const [error, setError] =
+    useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -73,6 +107,8 @@ export default function WorldPrivateChatPage() {
     async function initialiseConversation() {
       if (!world) {
         setLoadingConversation(false);
+        setConversationId(null);
+        setMessages([]);
         return;
       }
 
@@ -82,19 +118,43 @@ export default function WorldPrivateChatPage() {
       setMessages([]);
 
       try {
-        const conversation =
-          await createPrivateChatConversation(world.worldId);
+        const activeConversation =
+          await getActivePrivateChatConversation(
+            world.worldId,
+          );
 
-        if (!active) return;
+        if (!active) {
+          return;
+        }
 
-        setConversationId(conversation.conversation_id);
+        if (
+          activeConversation.world_id !==
+          world.worldId
+        ) {
+          throw new Error(
+            "The active conversation belongs to a different World.",
+          );
+        }
+
+        setConversationId(
+          activeConversation.conversation_id,
+        );
+
+        setMessages(
+          mapPersistedMessages(
+            activeConversation.conversation_id,
+            activeConversation.messages,
+          ),
+        );
       } catch (cause) {
-        if (!active) return;
+        if (!active) {
+          return;
+        }
 
         setError(
           cause instanceof Error
             ? cause.message
-            : "Unable to create the private conversation.",
+            : "Unable to load the active private conversation.",
         );
       } finally {
         if (active) {
@@ -110,12 +170,51 @@ export default function WorldPrivateChatPage() {
     };
   }, [world]);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleRestart() {
+    if (!world || restarting || loadingConversation) {
+      return;
+    }
+
+    setRestarting(true);
+    setError(null);
+
+    try {
+      const conversation =
+        await createPrivateChatConversation(
+          world.worldId,
+        );
+
+      setConversationId(
+        conversation.conversation_id,
+      );
+
+      setMessages([]);
+      setDraft("");
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to restart the private conversation.",
+      );
+    } finally {
+      setRestarting(false);
+    }
+  }
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
 
     const message = draft.trim();
 
-    if (!message || !conversationId || sending) {
+    if (
+      !message ||
+      !conversationId ||
+      loadingConversation ||
+      restarting ||
+      sending
+    ) {
       return;
     }
 
@@ -128,7 +227,11 @@ export default function WorldPrivateChatPage() {
       content: message,
     };
 
-    setMessages((current) => [...current, userMessage]);
+    setMessages((current) => [
+      ...current,
+      userMessage,
+    ]);
+
     setDraft("");
 
     try {
@@ -157,7 +260,34 @@ export default function WorldPrivateChatPage() {
     }
   }
 
+  function handleComposerKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      event.preventDefault();
+
+      const form = event.currentTarget.form;
+
+      if (form) {
+        form.requestSubmit();
+      }
+    }
+  }
+
   function usePrompt(prompt: string) {
+    if (
+      loadingConversation ||
+      restarting ||
+      !conversationId ||
+      sending
+    ) {
+      return;
+    }
+
     setDraft(prompt);
   }
 
@@ -167,18 +297,35 @@ export default function WorldPrivateChatPage() {
         <div className={styles.studyShell}>
           <section className={styles.chatPanel}>
             <div className={styles.chatHeader}>
-              <div className={styles.chatHeaderIdentity}>
-                <div className={styles.avatar}>?</div>
+              <div
+                className={
+                  styles.chatHeaderIdentity
+                }
+              >
+                <div className={styles.avatar}>
+                  ?
+                </div>
+
                 <div>
-                  <strong>EasyChatBot</strong>
-                  <span>Learning World</span>
+                  <strong>
+                    EasyChatBot
+                  </strong>
+
+                  <span>
+                    Learning World
+                  </span>
                 </div>
               </div>
             </div>
+
             <div className={styles.messages}>
-              <h1>World not found</h1>
+              <h1>
+                World not found
+              </h1>
+
               <p>
-                The requested Learning World is not available.
+                The requested Learning World is
+                not available.
               </p>
             </div>
           </section>
@@ -187,64 +334,133 @@ export default function WorldPrivateChatPage() {
     );
   }
 
-  const style = applyPresentationTheme(presentation);
+  const style =
+    applyPresentationTheme(presentation);
+
+  const isConversationReady =
+    !loadingConversation &&
+    !restarting &&
+    Boolean(conversationId);
 
   return (
     <main
       className={styles.studyRoom}
       style={style}
-      aria-label={`${world.name} private study room`}
+      aria-label={
+        `${world.name} private study room`
+      }
     >
       <div className={styles.studyShell}>
         <header className={styles.studyTopbar}>
-          <div className={styles.brand} aria-label="EasyChatBot">
-            <div className={styles.brandMark} aria-hidden="true">
+          <div
+            className={styles.brand}
+            aria-label="EasyChatBot"
+          >
+            <div
+              className={styles.brandMark}
+              aria-hidden="true"
+            >
               💬
             </div>
+
             <div className={styles.brandCopy}>
-              <strong>EasyChatBot</strong>
-              <span>Growing With You.</span>
+              <strong>
+                EasyChatBot
+              </strong>
+
+              <span>
+                Growing With You.
+              </span>
             </div>
           </div>
 
-          <div className={styles.worldBadge}>
-            <span aria-hidden="true">{presentation.flag}</span>
-            <span>{presentation.name}</span>
+          <div className={styles.topbarActions}>
+            <button
+              className={styles.restartButton}
+              type="button"
+              onClick={() => {
+                void handleRestart();
+              }}
+              disabled={
+                loadingConversation ||
+                restarting ||
+                sending
+              }
+              aria-label={
+                "Start a new private conversation"
+              }
+            >
+              {restarting
+                ? "Restarting…"
+                : "Restart conversation"}
+            </button>
+
+            <div className={styles.worldBadge}>
+              <span aria-hidden="true">
+                {presentation.flag}
+              </span>
+
+              <span>
+                {presentation.name}
+              </span>
+            </div>
           </div>
         </header>
 
         <section className={styles.hero}>
           <div className={styles.heroContent}>
-            <p className={styles.eyebrow}>EasyChatBot · Study Mode</p>
-            <h1>{presentation.name}</h1>
+            <p className={styles.eyebrow}>
+              EasyChatBot · Study Mode
+            </p>
+
+            <h1>
+              {presentation.name}
+            </h1>
+
             <p className={styles.heroSubtitle}>
               {presentation.subtitle}
             </p>
 
             <div className={styles.heroTags}>
-              {presentation.decorative.map((item) => (
-                <span
-                  className={styles.heroTag}
-                  key={item}
-                >
-                  {item}
-                </span>
-              ))}
+              {presentation.decorative.map(
+                (item) => (
+                  <span
+                    className={styles.heroTag}
+                    key={item}
+                  >
+                    {item}
+                  </span>
+                ),
+              )}
             </div>
           </div>
 
-          <div className={styles.heroCompanion}>
-            <span className={styles.companionCaption}>
+          <div
+            className={styles.heroCompanion}
+          >
+            <span
+              className={
+                styles.companionCaption
+              }
+            >
               {presentation.companionName}
             </span>
+
             <div
               className={styles.companionHalo}
               aria-hidden="true"
             />
+
             <div
-              className={styles.companionPlaceholder}
-              aria-label={presentation.companionRole}
-              title={presentation.companionRole}
+              className={
+                styles.companionPlaceholder
+              }
+              aria-label={
+                presentation.companionRole
+              }
+              title={
+                presentation.companionRole
+              }
             >
               {presentation.flag}
             </div>
@@ -254,17 +470,47 @@ export default function WorldPrivateChatPage() {
         <div className={styles.workspace}>
           <section className={styles.chatPanel}>
             <header className={styles.chatHeader}>
-              <div className={styles.chatHeaderIdentity}>
+              <div
+                className={
+                  styles.chatHeaderIdentity
+                }
+              >
                 <div className={styles.avatar}>
                   {presentation.flag}
                 </div>
+
                 <div>
-                  <strong>{presentation.companionName}</strong>
-                  <span>{presentation.companionRole}</span>
+                  <strong>
+                    {presentation.companionName}
+                  </strong>
+
+                  <span>
+                    {presentation.companionRole}
+                  </span>
+
+                  {isConversationReady && (
+                    <span
+                      className={
+                        styles.conversationState
+                      }
+                    >
+                      <span
+                        className={
+                          styles.conversationStateDot
+                        }
+                        aria-hidden="true"
+                      />
+                      Active private conversation
+                    </span>
+                  )}
                 </div>
               </div>
 
-              <span className={styles.chatHeaderBadge}>
+              <span
+                className={
+                  styles.chatHeaderBadge
+                }
+              >
                 Private chat
               </span>
             </header>
@@ -274,7 +520,16 @@ export default function WorldPrivateChatPage() {
                 className={styles.status}
                 role="status"
               >
-                Creating your private conversation…
+                Loading your private conversation…
+              </p>
+            )}
+
+            {restarting && (
+              <p
+                className={styles.status}
+                role="status"
+              >
+                Starting a new private conversation…
               </p>
             )}
 
@@ -291,44 +546,97 @@ export default function WorldPrivateChatPage() {
               className={styles.messages}
               aria-label="Conversation"
             >
+              {!loadingConversation &&
+                !restarting &&
+                messages.length > 0 && (
+                  <div
+                    className={
+                      styles.historyNotice
+                    }
+                  >
+                    Your recent conversation history
+                    has been restored for this World.
+                    Restarting creates a new
+                    conversation; previous conversations
+                    remain preserved.
+                  </div>
+                )}
+
               {messages.length === 0 &&
-                !loadingConversation && (
-                  <div className={styles.messageRow}>
-                    <article className={styles.message}>
-                      <div className={styles.messageMeta}>
-                        {presentation.companionName}
+                !loadingConversation &&
+                !restarting && (
+                  <div
+                    className={
+                      styles.emptyState
+                    }
+                  >
+                    <div
+                      className={
+                        styles.emptyStateCard
+                      }
+                    >
+                      <div
+                        className={
+                          styles.emptyStateIcon
+                        }
+                        aria-hidden="true"
+                      >
+                        {presentation.flag}
                       </div>
-                      <p className={styles.messageText}>
-                        Let&apos;s learn together. Choose a study
-                        prompt or write your own message to begin.
+
+                      <strong>
+                        Ready to study{" "}
+                        {presentation.name}
+                      </strong>
+
+                      <p>
+                        Choose a guided prompt or
+                        write your own message to
+                        begin your private learning
+                        conversation.
                       </p>
-                    </article>
+                    </div>
                   </div>
                 )}
 
               {messages.map((message) => (
                 <div
-                  className={`${styles.messageRow} ${
-                    message.role === "user"
-                      ? styles.messageRowUser
-                      : ""
-                  }`}
+                  className={
+                    `${styles.messageRow} ` +
+                    `${
+                      message.role === "user"
+                        ? styles.messageRowUser
+                        : ""
+                    }`
+                  }
                   key={message.id}
                 >
                   <article
-                    className={`${styles.message} ${
-                      message.role === "user"
-                        ? styles.messageUser
-                        : ""
-                    }`}
+                    className={
+                      `${styles.message} ` +
+                      `${
+                        message.role === "user"
+                          ? styles.messageUser
+                          : ""
+                      }`
+                    }
                     aria-label={message.role}
                   >
-                    <div className={styles.messageMeta}>
+                    <div
+                      className={
+                        styles.messageMeta
+                      }
+                    >
                       {message.role === "user"
                         ? "You"
                         : presentation.companionName}
                     </div>
-                    <p className={styles.messageText}>
+
+                    <p
+                      className={
+                        styles.messageText
+                      }
+                    >
                       {message.content}
                     </p>
                   </article>
@@ -340,22 +648,33 @@ export default function WorldPrivateChatPage() {
               className={styles.composer}
               onSubmit={handleSubmit}
             >
-              <div className={styles.composerRow}>
+              <div
+                className={styles.composerRow}
+              >
                 <textarea
                   className={styles.textarea}
                   id="private-chat-message"
                   value={draft}
                   onChange={(event) =>
-                    setDraft(event.target.value)
+                    setDraft(
+                      event.target.value,
+                    )
+                  }
+                  onKeyDown={
+                    handleComposerKeyDown
                   }
                   disabled={
                     loadingConversation ||
+                    restarting ||
                     !conversationId ||
                     sending
                   }
                   rows={3}
                   maxLength={10000}
-                  placeholder={`Write a message in ${world.name}…`}
+                  placeholder={
+                    `Write a message in ` +
+                    `${world.name}…`
+                  }
                   aria-label="Message"
                 />
 
@@ -364,17 +683,21 @@ export default function WorldPrivateChatPage() {
                   type="submit"
                   disabled={
                     loadingConversation ||
+                    restarting ||
                     !conversationId ||
                     sending ||
                     !draft.trim()
                   }
                 >
-                  {sending ? "Sending…" : "Send"}
+                  {sending
+                    ? "Sending…"
+                    : "Send"}
                 </button>
               </div>
 
               <p className={styles.helper}>
-                Enter to send · Shift + Enter for a new line
+                Enter to send · Shift + Enter
+                for a new line
               </p>
             </form>
           </section>
@@ -383,49 +706,79 @@ export default function WorldPrivateChatPage() {
             className={styles.studyPanel}
             aria-label="Study prompts"
           >
-            <h2>Study with me</h2>
+            <h2>
+              Study with me
+            </h2>
+
             <p className={styles.studyLead}>
-              Start with a guided prompt or ask anything about
-              this World.
+              Start with a guided prompt or ask
+              anything about this World.
             </p>
 
             <div className={styles.promptList}>
-              {presentation.prompts.map((prompt) => (
-                <button
-                  className={styles.promptButton}
-                  type="button"
-                  key={prompt}
-                  onClick={() => usePrompt(prompt)}
-                  disabled={
-                    loadingConversation ||
-                    !conversationId ||
-                    sending
-                  }
-                >
-                  {prompt}
-                </button>
-              ))}
+              {presentation.prompts.map(
+                (prompt) => (
+                  <button
+                    className={
+                      styles.promptButton
+                    }
+                    type="button"
+                    key={prompt}
+                    onClick={() =>
+                      usePrompt(prompt)
+                    }
+                    disabled={
+                      loadingConversation ||
+                      restarting ||
+                      !conversationId ||
+                      sending
+                    }
+                  >
+                    {prompt}
+                  </button>
+                ),
+              )}
             </div>
 
-            <div className={styles.studyDivider} />
+            <div
+              className={styles.studyDivider}
+            />
 
             <div className={styles.studyFacts}>
-              <div className={styles.studyFact}>
-                <strong>World</strong>
-                <span>{world.name}</span>
+              <div
+                className={styles.studyFact}
+              >
+                <strong>
+                  World
+                </strong>
+
+                <span>
+                  {world.name}
+                </span>
               </div>
 
-              <div className={styles.studyFact}>
-                <strong>Language</strong>
+              <div
+                className={styles.studyFact}
+              >
+                <strong>
+                  Language
+                </strong>
+
                 <span>
                   {presentation.languageCode.toUpperCase()}
                 </span>
               </div>
 
-              <div className={styles.studyFact}>
-                <strong>Conversation</strong>
+              <div
+                className={styles.studyFact}
+              >
+                <strong>
+                  Conversation
+                </strong>
+
                 <span>
-                  Private and owned by the authenticated learner.
+                  Private and owned by the
+                  authenticated learner.
                 </span>
               </div>
             </div>
@@ -433,8 +786,14 @@ export default function WorldPrivateChatPage() {
         </div>
 
         <footer className={styles.footer}>
-          <span>EasyChatBot · One core experience. Many Worlds.</span>
-          <span>{presentation.name} · Study Mode</span>
+          <span>
+            EasyChatBot · One core experience.
+            Many Worlds.
+          </span>
+
+          <span>
+            {presentation.name} · Study Mode
+          </span>
         </footer>
       </div>
     </main>

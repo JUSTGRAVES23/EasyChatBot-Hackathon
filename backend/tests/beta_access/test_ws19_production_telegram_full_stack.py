@@ -1223,6 +1223,12 @@ def test_ws19_dependency_graph_is_integrated():
             is not None
         )
 
+        # W18.3 — durable World-access provisioning service.
+        assert (
+            composition.beta_world_access_service
+            is not None
+        )
+
         assert (
             composition.conversation_runtime
             is not None

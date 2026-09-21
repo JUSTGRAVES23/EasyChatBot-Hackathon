@@ -1,0 +1,1657 @@
+
+============================================================
+PATH: .\app\application\world_telegram\service.py
+============================================================
+"""Application service for World-to-Telegram destination management."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
+from app.application.world_catalogue.repositories import (
+    LearningWorldCatalogueRepository,
+)
+from app.domain.world_telegram import (
+    TelegramDestinationType,
+    WorldTelegramDestination,
+)
+
+from .repositories import WorldTelegramDestinationRepository
+
+
+class WorldTelegramDestinationService:
+    """Coordinate World Telegram destination configuration."""
+
+    def __init__(
+        self,
+        *,
+        repository: WorldTelegramDestinationRepository,
+        world_catalogue_repository: LearningWorldCatalogueRepository,
+    ) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+        if world_catalogue_repository is None:
+            raise ValueError("world_catalogue_repository cannot be None.")
+
+        self._repository = repository
+        self._world_catalogue_repository = world_catalogue_repository
+
+    def register_destination(
+        self,
+        *,
+        world_id: UUID,
+        telegram_chat_id: str,
+        destination_type: TelegramDestinationType,
+        enabled: bool = True,
+    ) -> WorldTelegramDestination:
+        if not isinstance(world_id, UUID):
+            raise ValueError("world_id must be a UUID.")
+
+        if not telegram_chat_id or not telegram_chat_id.strip():
+            raise ValueError("telegram_chat_id is required.")
+
+        if not isinstance(destination_type, TelegramDestinationType):
+            raise ValueError("destination_type is invalid.")
+
+        normalized_chat_id = telegram_chat_id.strip()
+
+        world = self._world_catalogue_repository.get_by_id(world_id)
+        if world is None:
+            raise ValueError(f"Learning World '{world_id}' does not exist.")
+
+        existing = self._repository.get_by_world_and_chat(
+            world_id=world_id,
+            telegram_chat_id=normalized_chat_id,
+        )
+        if existing is not None:
+            raise ValueError(
+                "Telegram destination is already registered for this World."
+            )
+
+        now = datetime.now(timezone.utc)
+
+        destination = WorldTelegramDestination(
+            id=uuid4(),
+            world_id=world.id,
+            telegram_chat_id=normalized_chat_id,
+            destination_type=destination_type,
+            enabled=enabled,
+            created_at=now,
+            updated_at=now,
+        )
+
+        return self._repository.save(destination)
+
+    def get_destination(
+        self,
+        destination_id: UUID,
+    ) -> WorldTelegramDestination | None:
+        return self._repository.get_by_id(destination_id)
+
+    def list_destinations(
+        self,
+        world_id: UUID,
+    ) -> tuple[WorldTelegramDestination, ...]:
+        if not isinstance(world_id, UUID):
+            raise ValueError("world_id must be a UUID.")
+
+        return self._repository.list_by_world(world_id)
+
+    def set_enabled(
+        self,
+        *,
+        destination_id: UUID,
+        enabled: bool,
+    ) -> WorldTelegramDestination:
+        destination = self._repository.get_by_id(destination_id)
+
+        if destination is None:
+            raise ValueError(
+                f"Telegram destination '{destination_id}' does not exist."
+            )
+
+        updated = WorldTelegramDestination(
+            id=destination.id,
+            world_id=destination.world_id,
+            telegram_chat_id=destination.telegram_chat_id,
+            destination_type=destination.destination_type,
+            enabled=enabled,
+            created_at=destination.created_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        return self._repository.save(updated)
+
+    def delete_destination(
+        self,
+        destination_id: UUID,
+    ) -> bool:
+        return self._repository.delete(destination_id)
+
+============================================================
+PATH: .\app\application\world_telegram\repositories.py
+============================================================
+"""Repository port for World-to-Telegram destination mappings."""
+
+from __future__ import annotations
+
+from typing import Protocol
+from uuid import UUID
+
+from app.domain.world_telegram import WorldTelegramDestination
+
+
+class WorldTelegramDestinationRepository(Protocol):
+    """Persistence contract for World Telegram destinations."""
+
+    def get_by_id(
+        self,
+        destination_id: UUID,
+    ) -> WorldTelegramDestination | None:
+        """Return a destination by UUID."""
+        ...
+
+    def get_by_world_and_chat(
+        self,
+        *,
+        world_id: UUID,
+        telegram_chat_id: str,
+    ) -> WorldTelegramDestination | None:
+        """Return the mapping for a World and Telegram chat."""
+        ...
+
+    def list_by_world(
+        self,
+        world_id: UUID,
+    ) -> tuple[WorldTelegramDestination, ...]:
+        """Return destinations configured for a World."""
+        ...
+
+    def save(
+        self,
+        destination: WorldTelegramDestination,
+    ) -> WorldTelegramDestination:
+        """Create or persist a destination."""
+        ...
+
+    def delete(
+        self,
+        destination_id: UUID,
+    ) -> bool:
+        """Delete a destination and return whether it existed."""
+        ...
+
+============================================================
+PATH: .\app\application\world_telegram\membership_service.py
+============================================================
+"""Application service for World Telegram learner memberships."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
+from app.domain.world_telegram import (
+    TelegramMembershipStatus,
+    WorldTelegramMembership,
+)
+
+from .membership_repositories import WorldTelegramMembershipRepository
+from .repositories import WorldTelegramDestinationRepository
+
+
+class WorldTelegramMembershipService:
+    """Coordinate durable learner membership for a registered destination."""
+
+    def __init__(
+        self,
+        *,
+        repository: WorldTelegramMembershipRepository,
+        destination_repository: WorldTelegramDestinationRepository,
+    ) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+        if destination_repository is None:
+            raise ValueError("destination_repository cannot be None.")
+
+        self._repository = repository
+        self._destination_repository = destination_repository
+
+    def register_membership(
+        self,
+        *,
+        destination_id: UUID,
+        user_id: UUID,
+    ) -> WorldTelegramMembership:
+        if not isinstance(destination_id, UUID):
+            raise ValueError("destination_id must be a UUID.")
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+        normalized_user_id = user_id
+
+        destination = self._destination_repository.get_by_id(destination_id)
+        if destination is None:
+            raise ValueError(
+                f"Telegram destination '{destination_id}' does not exist."
+            )
+
+        existing = self._repository.get_by_destination_and_user(
+            destination_id=destination_id,
+            user_id=normalized_user_id,
+        )
+        if existing is not None:
+            raise ValueError(
+                "Telegram membership is already registered for this "
+                "destination and user."
+            )
+
+        now = datetime.now(timezone.utc)
+
+        membership = WorldTelegramMembership(
+            id=uuid4(),
+            destination_id=destination.id,
+            user_id=normalized_user_id,
+            status=TelegramMembershipStatus.ACTIVE,
+            joined_at=now,
+            left_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+        return self._repository.save(membership)
+
+    def get_membership(
+        self,
+        membership_id: UUID,
+    ) -> WorldTelegramMembership | None:
+        return self._repository.get_by_id(membership_id)
+
+    def get_membership_for_user(
+        self,
+        *,
+        destination_id: UUID,
+        user_id: UUID,
+    ) -> WorldTelegramMembership | None:
+        """
+        Return the membership for a learner and Telegram destination.
+
+        This is the application-service lookup used by higher-level
+        World Telegram access orchestration. It does not grant access
+        or change membership state.
+        """
+        if not isinstance(destination_id, UUID):
+            raise ValueError("destination_id must be a UUID.")
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+        return self._repository.get_by_destination_and_user(
+            destination_id=destination_id,
+            user_id=user_id,
+        )
+
+    def list_memberships(
+        self,
+        destination_id: UUID,
+    ) -> tuple[WorldTelegramMembership, ...]:
+        if not isinstance(destination_id, UUID):
+            raise ValueError("destination_id must be a UUID.")
+
+        return self._repository.list_by_destination(destination_id)
+
+    def set_active(
+        self,
+        *,
+        membership_id: UUID,
+        active: bool,
+    ) -> WorldTelegramMembership:
+        membership = self._repository.get_by_id(membership_id)
+
+        if membership is None:
+            raise ValueError(
+                f"Telegram membership '{membership_id}' does not exist."
+            )
+
+        now = datetime.now(timezone.utc)
+
+        if active:
+            updated = WorldTelegramMembership(
+                id=membership.id,
+                destination_id=membership.destination_id,
+                user_id=membership.user_id,
+                status=TelegramMembershipStatus.ACTIVE,
+                joined_at=membership.joined_at,
+                left_at=None,
+                created_at=membership.created_at,
+                updated_at=now,
+            )
+        else:
+            updated = WorldTelegramMembership(
+                id=membership.id,
+                destination_id=membership.destination_id,
+                user_id=membership.user_id,
+                status=TelegramMembershipStatus.INACTIVE,
+                joined_at=membership.joined_at,
+                left_at=now,
+                created_at=membership.created_at,
+                updated_at=now,
+            )
+
+        return self._repository.save(updated)
+
+    def delete_membership(self, membership_id: UUID) -> bool:
+        return self._repository.delete(membership_id)
+
+============================================================
+PATH: .\app\application\world_telegram\membership_repositories.py
+============================================================
+"""Repository port for World Telegram learner memberships."""
+
+from __future__ import annotations
+
+from typing import Protocol
+from uuid import UUID
+
+from app.domain.world_telegram import WorldTelegramMembership
+
+
+class WorldTelegramMembershipRepository(Protocol):
+    """Persistence contract for World Telegram memberships."""
+
+    def get_by_id(self, membership_id: UUID) -> WorldTelegramMembership | None:
+        ...
+
+    def get_by_destination_and_user(
+        self,
+        *,
+        destination_id: UUID,
+        user_id: UUID,
+    ) -> WorldTelegramMembership | None:
+        ...
+
+    def list_by_destination(
+        self,
+        destination_id: UUID,
+    ) -> tuple[WorldTelegramMembership, ...]:
+        ...
+
+    def save(
+        self,
+        membership: WorldTelegramMembership,
+    ) -> WorldTelegramMembership:
+        ...
+
+    def delete(self, membership_id: UUID) -> bool:
+        ...
+
+============================================================
+PATH: .\app\application\world_telegram\community_access_service.py
+============================================================
+"""Application service for controlled World Telegram community access."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from app.application.services.world_access_service import (
+    WorldAccessService,
+)
+from app.application.world_catalogue.repositories import (
+    LearningWorldCatalogueRepository,
+)
+from app.domain.world_telegram import (
+    TelegramMembershipStatus,
+    WorldTelegramMembership,
+)
+
+from .membership_service import WorldTelegramMembershipService
+from .repositories import WorldTelegramDestinationRepository
+
+
+class WorldTelegramCommunityAccessError(ValueError):
+    """Expected World Telegram community access failure."""
+
+
+class WorldTelegramDestinationNotFoundError(
+    WorldTelegramCommunityAccessError,
+):
+    """No Telegram destination is registered for the World."""
+
+
+class WorldTelegramDestinationDisabledError(
+    WorldTelegramCommunityAccessError,
+):
+    """The registered Telegram destination is disabled."""
+
+
+class WorldTelegramCommunityAccessService:
+    """
+    Coordinate authorized learner access to a World Telegram community.
+
+    World authorization remains owned by WorldAccessService.
+
+    World identity remains owned by the authoritative
+    LearningWorldCatalogueRepository.
+
+    Telegram destination registration remains owned by the
+    WorldTelegramDestinationRepository.
+
+    Telegram membership state remains owned by
+    WorldTelegramMembershipService.
+
+    This service does not grant World access and does not call Telegram.
+    """
+
+    def __init__(
+        self,
+        *,
+        world_access_service: WorldAccessService,
+        world_catalogue_repository: LearningWorldCatalogueRepository,
+        destination_repository: WorldTelegramDestinationRepository,
+        membership_service: WorldTelegramMembershipService,
+    ) -> None:
+        if world_access_service is None:
+            raise ValueError("world_access_service is required.")
+
+        if world_catalogue_repository is None:
+            raise ValueError("world_catalogue_repository is required.")
+
+        if destination_repository is None:
+            raise ValueError("destination_repository is required.")
+
+        if membership_service is None:
+            raise ValueError("membership_service is required.")
+
+        self._world_access_service = world_access_service
+        self._world_catalogue_repository = world_catalogue_repository
+        self._destination_repository = destination_repository
+        self._membership_service = membership_service
+
+    def ensure_membership(
+        self,
+        *,
+        user_id: UUID,
+        world_id: UUID,
+    ) -> WorldTelegramMembership:
+        """
+        Ensure an entitled learner has active membership for a World
+        Telegram destination.
+
+        The operation is idempotent:
+
+        - existing ACTIVE membership is returned unchanged;
+        - existing INACTIVE membership is reactivated;
+        - missing membership is created as ACTIVE.
+
+        World access is never granted by this operation.
+
+        No Telegram API call is performed by this service.
+        """
+        self._validate_uuid(user_id, "user_id")
+        self._validate_uuid(world_id, "world_id")
+
+        world = self._world_catalogue_repository.get_by_id(world_id)
+
+        if world is None:
+            raise ValueError(
+                f"Learning World '{world_id}' does not exist."
+            )
+
+        world_access = self._world_access_service.get_access(
+            user_id=user_id,
+            world_identifier=world.identifier,
+        )
+
+        if world_access is None or not world_access.is_active():
+            raise PermissionError(
+                "Learner does not have active access to this Learning World."
+            )
+
+        destinations = self._destination_repository.list_by_world(world_id)
+
+        if not destinations:
+            raise WorldTelegramDestinationNotFoundError(
+                f"No Telegram destination is registered for "
+                f"World '{world_id}'."
+            )
+
+        enabled_destinations = tuple(
+            destination
+            for destination in destinations
+            if destination.enabled
+        )
+
+        if not enabled_destinations:
+            raise WorldTelegramDestinationDisabledError(
+                f"All Telegram destinations registered for "
+                f"World '{world_id}' are disabled."
+            )
+
+        destination = enabled_destinations[0]
+
+        existing = self._membership_service.get_membership_for_user(
+            destination_id=destination.id,
+            user_id=user_id,
+        )
+
+        if existing is None:
+            return self._membership_service.register_membership(
+                destination_id=destination.id,
+                user_id=user_id,
+            )
+
+        if existing.status is TelegramMembershipStatus.ACTIVE:
+            return existing
+
+        return self._membership_service.set_active(
+            membership_id=existing.id,
+            active=True,
+        )
+
+    @staticmethod
+    def _validate_uuid(
+        value: UUID,
+        field_name: str,
+    ) -> None:
+        if not isinstance(value, UUID):
+            raise ValueError(f"{field_name} must be a UUID.")
+
+
+__all__ = [
+    "WorldTelegramCommunityAccessError",
+    "WorldTelegramCommunityAccessService",
+    "WorldTelegramDestinationDisabledError",
+    "WorldTelegramDestinationNotFoundError",
+]
+
+============================================================
+PATH: .\app\domain\world_telegram\destination.py
+============================================================
+"""Domain model for a Learning World Telegram destination."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from uuid import UUID
+
+
+class TelegramDestinationType(StrEnum):
+    """Supported Telegram community destination types."""
+
+    GROUP = "GROUP"
+    CHANNEL = "CHANNEL"
+
+
+@dataclass(frozen=True, slots=True)
+class WorldTelegramDestination:
+    """Configuration mapping a Learning World to a Telegram destination."""
+
+    id: UUID
+    world_id: UUID
+    telegram_chat_id: str
+    destination_type: TelegramDestinationType
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, UUID):
+            raise ValueError("destination id must be a UUID.")
+        if not isinstance(self.world_id, UUID):
+            raise ValueError("world_id must be a UUID.")
+        if not self.telegram_chat_id or not self.telegram_chat_id.strip():
+            raise ValueError("telegram_chat_id is required.")
+        if len(self.telegram_chat_id.strip()) > 255:
+            raise ValueError("telegram_chat_id cannot exceed 255 characters.")
+        if not isinstance(self.destination_type, TelegramDestinationType):
+            raise ValueError("destination_type must be a TelegramDestinationType.")
+        if not isinstance(self.enabled, bool):
+            raise ValueError("enabled must be a boolean.")
+
+============================================================
+PATH: .\app\domain\world_telegram\membership.py
+============================================================
+"""Domain model for learner membership in a World Telegram destination."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from uuid import UUID
+
+
+class TelegramMembershipStatus(str, Enum):
+    """Lifecycle state of a learner's Telegram community membership."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+@dataclass(frozen=True)
+class WorldTelegramMembership:
+    """Durable learner membership for a registered World Telegram destination."""
+
+    id: UUID
+    destination_id: UUID
+    user_id: UUID
+    status: TelegramMembershipStatus
+    joined_at: datetime
+    left_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, UUID):
+            raise ValueError("membership id must be a UUID.")
+        if not isinstance(self.destination_id, UUID):
+            raise ValueError("destination_id must be a UUID.")
+        if not isinstance(self.user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+        if not isinstance(self.status, TelegramMembershipStatus):
+            raise ValueError("status must be a TelegramMembershipStatus.")
+        if self.status is TelegramMembershipStatus.ACTIVE and self.left_at is not None:
+            raise ValueError("active membership cannot have left_at.")
+
+============================================================
+PATH: .\app\application\composition\beta_telegram_production.py
+============================================================
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.application.composition.beta_telegram_composition import (
+    BetaTelegramComposition,
+    create_beta_telegram_composition,
+)
+from app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+from app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.services.beta_world_access_service import (
+    BetaWorldAccessService,
+)
+from app.application.services.world_access_service import (
+    WorldAccessService,
+)
+from app.application.study_material.service import StudyMaterialService
+from app.application.uai.language.language_detector import LanguageDetector
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.application.world_catalogue.service import (
+    LearningWorldCatalogueService,
+)
+from app.application.world_telegram.community_access_service import (
+    WorldTelegramCommunityAccessService,
+)
+from app.application.world_telegram.membership_service import (
+    WorldTelegramMembershipService,
+)
+from app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from app.infrastructure.persistence.postgresql_beta_access_repository import (
+    PostgreSQLBetaTokenRepository,
+    PostgreSQLBetaUserRepository,
+    PostgreSQLTelegramBindingRepository,
+)
+from app.infrastructure.persistence.postgresql_conversation_event_repository import (
+    PostgreSQLConversationEventRepository,
+)
+from app.infrastructure.persistence.postgresql_learner_world_access_repository import (
+    PostgreSQLLearnerWorldAccessRepository,
+)
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_study_material_repository import (
+    PostgreSQLStudyMaterialRepository,
+)
+from app.infrastructure.persistence.postgresql_world_telegram_destination_repository import (
+    PostgreSQLWorldTelegramDestinationRepository,
+)
+from app.infrastructure.persistence.postgresql_world_telegram_membership_repository import (
+    PostgreSQLWorldTelegramMembershipRepository,
+)
+from app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BetaTelegramProductionComposition:
+    beta_telegram: BetaTelegramComposition
+    database_engine: Any
+    session_factory: Any
+    async_database_engine: Any
+    async_session_factory: Any
+    catalogue_service: LearningWorldCatalogueService
+    study_material_service: StudyMaterialService
+    world_telegram_community_access_service: (
+        WorldTelegramCommunityAccessService
+    )
+
+    @property
+    def runtime(self) -> Any:
+        return self.beta_telegram.runtime
+
+    @property
+    def adapter(self) -> Any:
+        return self.beta_telegram.adapter
+
+    @property
+    def beta_access_service(self) -> Any:
+        return self.beta_telegram.beta_access_service
+
+    @property
+    def beta_world_access_service(
+        self,
+    ) -> BetaWorldAccessService:
+        return self.beta_telegram.beta_world_access_service
+
+    @property
+    def conversation_runtime(self) -> Any:
+        return self.beta_telegram.conversation_runtime
+
+    @property
+    def conversation_service(self) -> Any:
+        return self.beta_telegram.conversation_service
+
+    @property
+    def conversation_boundary(self) -> Any:
+        return self.beta_telegram.conversation_boundary
+
+    @property
+    def private_chat_gate(self) -> Any:
+        return self.beta_telegram.private_chat_gate
+
+    @property
+    def start_handler(self) -> Any:
+        return self.beta_telegram.start_handler
+
+
+def create_production_beta_telegram_composition(
+    *,
+    expiration_minutes: int = 1440,
+    database_engine: Any | None = None,
+    session_factory: Any | None = None,
+    database_engine_factory: Callable[[], Any] | None = None,
+    session_factory_factory: Callable[[Any], Any] | None = None,
+    async_database_engine: Any | None = None,
+    async_session_factory: Any | None = None,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: (
+        Callable[[], ConversationRuntime] | None
+    ) = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+    language_detector: LanguageDetector | None = None,
+) -> BetaTelegramProductionComposition:
+    """
+    Create the production Beta Telegram composition.
+
+    W18.3 production provisioning is wired here.
+
+    W19.3 controlled World Telegram community access is also
+    composed here, but remains outside the Telegram transport/runtime
+    boundary.
+
+    Responsibilities:
+    - Build the existing synchronous Beta Telegram persistence boundary.
+    - Build the canonical asynchronous authentication boundary.
+    - Reuse the existing learner/world access repository.
+    - Build WorldAccessService from the canonical repositories.
+    - Build BetaWorldAccessService from the canonical Beta user,
+      World catalogue and World access services.
+    - Build the W19.3 World Telegram destination and membership
+      persistence boundaries.
+    - Build the W19.3 controlled community access application service.
+    - Inject BetaWorldAccessService into the canonical Telegram
+      composition.
+
+    Telegram remains responsible only for onboarding/binding and
+    existing private-chat conversation handling.
+
+    W19.3 does not register Telegram group handlers, call the
+    Telegram API, grant World access, or invoke the AI runtime.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if functionality_control_service is None:
+        raise ValueError(
+            "functionality_control_service is required "
+            "for production Telegram composition."
+        )
+
+    if language_detector is None:
+        raise ValueError(
+            "language_detector is required "
+            "for production Telegram composition."
+        )
+
+    if (
+        database_engine is not None
+        and database_engine_factory is not None
+    ):
+        raise ValueError(
+            "Provide either database_engine or "
+            "database_engine_factory, not both."
+        )
+
+    if (
+        session_factory is not None
+        and session_factory_factory is not None
+    ):
+        raise ValueError(
+            "Provide either session_factory or "
+            "session_factory_factory, not both."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    if database_engine is None:
+        database_engine = (
+            database_engine_factory
+            or create_database_engine
+        )()
+
+    if session_factory is None:
+        session_factory = (
+            session_factory_factory
+            or create_session_factory
+        )(database_engine)
+
+    if async_database_engine is None:
+        async_database_engine = create_async_database_engine()
+
+    if async_session_factory is None:
+        async_session_factory = create_async_session_factory(
+            async_database_engine
+        )
+
+    # ------------------------------------------------------------------
+    # Existing Beta Telegram persistence
+    # ------------------------------------------------------------------
+
+    beta_user_repository = PostgreSQLBetaUserRepository(
+        session_factory,
+    )
+
+    beta_token_repository = PostgreSQLBetaTokenRepository(
+        session_factory,
+    )
+
+    telegram_binding_repository = (
+        PostgreSQLTelegramBindingRepository(
+            session_factory,
+        )
+    )
+
+    conversation_event_repository = (
+        PostgreSQLConversationEventRepository(
+            session_factory,
+        )
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            session_factory,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Canonical World infrastructure
+    # ------------------------------------------------------------------
+
+    app_root = Path(__file__).resolve().parents[2]
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = (
+        PostgreSQLLearningWorldCatalogueRepository(
+            session_factory,
+        )
+    )
+
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
+
+    # ------------------------------------------------------------------
+    # W18.3 World authorization/provisioning
+    # ------------------------------------------------------------------
+
+    authentication_repository = (
+        PostgreSQLAuthenticationRepository(
+            async_session_factory,
+        )
+    )
+
+    learner_world_access_repository = (
+        PostgreSQLLearnerWorldAccessRepository(
+            session_factory,
+        )
+    )
+
+    world_access_service = WorldAccessService(
+        access_repository=learner_world_access_repository,
+        user_identity_reader=authentication_repository,
+        learning_world_repository=catalogue_repository,
+    )
+
+    # ------------------------------------------------------------------
+    # W19.3 Controlled World Telegram community access
+    # ------------------------------------------------------------------
+
+    world_telegram_destination_repository = (
+        PostgreSQLWorldTelegramDestinationRepository(
+            session_factory,
+        )
+    )
+
+    world_telegram_membership_repository = (
+        PostgreSQLWorldTelegramMembershipRepository(
+            session_factory,
+        )
+    )
+
+    world_telegram_membership_service = (
+        WorldTelegramMembershipService(
+            repository=world_telegram_membership_repository,
+            destination_repository=(
+                world_telegram_destination_repository
+            ),
+        )
+    )
+
+    world_telegram_community_access_service = (
+        WorldTelegramCommunityAccessService(
+            world_access_service=world_access_service,
+            world_catalogue_repository=catalogue_repository,
+            destination_repository=(
+                world_telegram_destination_repository
+            ),
+            membership_service=world_telegram_membership_service,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Beta World authorization/provisioning
+    # ------------------------------------------------------------------
+
+    beta_world_access_service = BetaWorldAccessService(
+        beta_user_reader=beta_user_repository,
+        user_identity_reader=authentication_repository,
+        world_catalogue=catalogue_repository,
+        world_access=world_access_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Study Materials
+    # ------------------------------------------------------------------
+
+    privacy_identifier_service = PrivacyIdentifierService()
+
+    conversation_event_validator = (
+        ConversationEventValidator()
+    )
+
+    study_material_repository = (
+        PostgreSQLStudyMaterialRepository(
+            session_factory,
+        )
+    )
+
+    study_material_service = StudyMaterialService(
+        repository=study_material_repository,
+        world_catalogue_service=catalogue_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Telegram application composition
+    # ------------------------------------------------------------------
+
+    beta_telegram = create_beta_telegram_composition(
+        user_repository=beta_user_repository,
+        token_repository=beta_token_repository,
+        binding_repository=telegram_binding_repository,
+        conversation_event_repository=(
+            conversation_event_repository
+        ),
+        privacy_identifier_service=(
+            privacy_identifier_service
+        ),
+        conversation_event_validator=(
+            conversation_event_validator
+        ),
+        beta_world_access_service=(
+            beta_world_access_service
+        ),
+        expiration_minutes=expiration_minutes,
+        conversation_runtime=conversation_runtime,
+        conversation_runtime_factory=(
+            conversation_runtime_factory
+        ),
+        provider_usage_repository=(
+            provider_usage_repository
+        ),
+        functionality_control_service=(
+            functionality_control_service
+        ),
+        world_resolver=world_resolver,
+        language_response_policy=(
+            LanguageResponsePolicy()
+        ),
+        language_detector=language_detector,
+    )
+
+    logger.info(
+        "Production Beta Telegram composition created "
+        "with W18.3 complete World provisioning, "
+        "W19.3 controlled World Telegram community access, "
+        "durable usage ledger, functionality control, "
+        "and Study Material service."
+    )
+
+    return BetaTelegramProductionComposition(
+        beta_telegram=beta_telegram,
+        database_engine=database_engine,
+        session_factory=session_factory,
+        async_database_engine=async_database_engine,
+        async_session_factory=async_session_factory,
+        catalogue_service=catalogue_service,
+        study_material_service=study_material_service,
+        world_telegram_community_access_service=(
+            world_telegram_community_access_service
+        ),
+    )
+
+
+__all__ = [
+    "BetaTelegramProductionComposition",
+    "create_production_beta_telegram_composition",
+]
+
+============================================================
+PATH: .\app\interfaces\telegram\beta_telegram_adapter.py
+============================================================
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from app.interfaces.telegram.private_chat_gate import (
+    BetaPrivateChatGate,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class BetaTelegramAdapter:
+    """
+    Telegram transport adapter for the Beta private classroom.
+
+    Responsibilities:
+    - handle Telegram transport metadata;
+    - enforce private-chat-only classroom access;
+    - authorize Telegram identity through BetaPrivateChatGate;
+    - forward authorized messages to BetaTelegramConversationBoundary;
+    - deliver safe user-facing Telegram responses.
+
+    Response ownership:
+
+        Conversation Boundary
+                |
+                v
+             response
+                |
+                v
+        BetaTelegramAdapter
+                |
+                +----> Telegram reply_text()
+                |
+                v
+             response
+
+    IMPORTANT:
+
+    The adapter is the SINGLE owner of classroom Telegram response
+    delivery.
+
+    The returned response is provided to the direct caller for
+    testing, observability, and application-level inspection.
+
+    The caller MUST NOT send the returned response to Telegram again.
+
+    This adapter MUST NOT:
+    - call an LLM/provider directly;
+    - access persistence directly;
+    - modify Beta user state directly;
+    - bypass BetaAccessService;
+    - process group/channel messages through the AI path.
+    """
+
+    def __init__(
+        self,
+        *,
+        start_handler: Any,
+        private_chat_gate: BetaPrivateChatGate,
+        conversation_boundary: (
+            BetaTelegramConversationBoundary | None
+        ) = None,
+    ) -> None:
+        if start_handler is None:
+            raise ValueError(
+                "start_handler cannot be None."
+            )
+
+        if private_chat_gate is None:
+            raise ValueError(
+                "private_chat_gate cannot be None."
+            )
+
+        self._start_handler = start_handler
+        self._private_chat_gate = private_chat_gate
+        self._conversation_boundary = conversation_boundary
+
+    # =========================================================
+    # Telegram /start
+    # =========================================================
+
+    async def handle_start(
+        self,
+        update: Any,
+        context: Any,
+    ) -> None:
+        user = getattr(
+            update,
+            "effective_user",
+            None,
+        )
+
+        chat = getattr(
+            update,
+            "effective_chat",
+            None,
+        )
+
+        message = getattr(
+            update,
+            "effective_message",
+            None,
+        )
+
+        if user is None or chat is None:
+            return
+
+        telegram_user_id = getattr(
+            user,
+            "id",
+            None,
+        )
+
+        chat_id = getattr(
+            chat,
+            "id",
+            None,
+        )
+
+        chat_type = getattr(
+            chat,
+            "type",
+            None,
+        )
+
+        if (
+            telegram_user_id is None
+            or chat_id is None
+        ):
+            return
+
+        if chat_type != "private":
+            await self._reply(
+                message,
+                (
+                    "Please connect to the "
+                    "EasyChatBot Academy from a "
+                    "private Telegram chat."
+                ),
+            )
+            return
+
+        token = self._extract_start_token(
+            context,
+        )
+
+        async def reply(
+            text: str,
+            user_override: Any = None,
+        ) -> None:
+            await self._reply(
+                message,
+                text,
+            )
+
+        await self._start_handler.handle(
+            token=token,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            reply=reply,
+        )
+
+    # =========================================================
+    # Private classroom message flow
+    # =========================================================
+
+    async def handle_message(
+        self,
+        update: Any,
+        context: Any = None,
+    ) -> str | None:
+        """
+        Process one Telegram classroom message.
+
+        Response ownership is exclusively inside this adapter.
+
+        Successful flow:
+
+            transport validation
+                    |
+                    v
+            private-chat authorization
+                    |
+                    v
+            conversation boundary
+                    |
+                    v
+              application response
+                    |
+                    +----> Telegram reply_text()
+                    |
+                    v
+              return response
+
+        The response is delivered exactly once.
+
+        The caller may inspect the returned response but MUST NOT
+        send it to Telegram again.
+        """
+
+        if self._conversation_boundary is None:
+            raise RuntimeError(
+                "conversation_boundary is not configured."
+            )
+
+        user = getattr(
+            update,
+            "effective_user",
+            None,
+        )
+
+        chat = getattr(
+            update,
+            "effective_chat",
+            None,
+        )
+
+        message = getattr(
+            update,
+            "effective_message",
+            None,
+        )
+
+        if (
+            user is None
+            or chat is None
+            or message is None
+        ):
+            return None
+
+        telegram_user_id = getattr(
+            user,
+            "id",
+            None,
+        )
+
+        chat_type = getattr(
+            chat,
+            "type",
+            None,
+        )
+
+        if telegram_user_id is None:
+            return None
+
+        # =====================================================
+        # HARD TRANSPORT BOUNDARY
+        # =====================================================
+
+        if chat_type != "private":
+            return None
+
+        # =====================================================
+        # MESSAGE VALIDATION
+        # =====================================================
+
+        text = getattr(
+            message,
+            "text",
+            None,
+        )
+
+        if not isinstance(
+            text,
+            str,
+        ):
+            return None
+
+        text = text.strip()
+
+        if not text:
+            return None
+
+        # =====================================================
+        # BETA ACCESS AUTHORIZATION
+        # =====================================================
+
+        try:
+            authorized = await (
+                self._private_chat_gate.authorize(
+                    telegram_user_id=telegram_user_id,
+                    chat_type=chat_type,
+                )
+            )
+
+        except Exception:
+            logger.exception(
+                "Telegram private-chat authorization failed."
+            )
+
+            await self._reply(
+                message,
+                (
+                    "We could not verify your "
+                    "EasyChatBot Academy access. "
+                    "Please try again."
+                ),
+            )
+
+            return None
+
+        if not authorized:
+            await self._reply(
+                message,
+                (
+                    "Your EasyChatBot Academy Telegram "
+                    "access is not authorized and is not "
+                    "approved for Beta access."
+                ),
+            )
+
+            return None
+
+        # =====================================================
+        # CONVERSATION BOUNDARY
+        # =====================================================
+
+        try:
+            response = await (
+                self._conversation_boundary.handle_message(
+                    telegram_user_id=telegram_user_id,
+                    message=text,
+                )
+            )
+
+        except Exception:
+            logger.exception(
+                "Telegram classroom conversation processing failed."
+            )
+
+            await self._reply(
+                message,
+                (
+                    "Sorry, I could not process "
+                    "your classroom message. "
+                    "Please try again."
+                ),
+            )
+
+            return None
+
+        # =====================================================
+        # SINGLE RESPONSE DELIVERY POINT
+        # =====================================================
+
+        if (
+            isinstance(response, str)
+            and response.strip()
+        ):
+            await self._reply(
+                message,
+                response,
+            )
+
+            # Delivery has already happened exactly once.
+            #
+            # Return only for observability/testing.
+            #
+            # The runtime MUST ignore this value.
+            return response
+
+        return None
+
+    # =========================================================
+    # Helpers
+    # =========================================================
+
+    @staticmethod
+    def _extract_start_token(
+        context: Any,
+    ) -> str | None:
+        args = getattr(
+            context,
+            "args",
+            None,
+        )
+
+        if not args:
+            return None
+
+        if not isinstance(
+            args,
+            (list, tuple),
+        ):
+            return None
+
+        if not args[0]:
+            return None
+
+        return str(
+            args[0]
+        )
+
+    @staticmethod
+    async def _reply(
+        message: Any,
+        text: str,
+    ) -> None:
+        if message is None:
+            return
+
+        reply_text = getattr(
+            message,
+            "reply_text",
+            None,
+        )
+
+        if reply_text is None:
+            return
+
+        await reply_text(
+            text,
+        )
+
+
+__all__ = [
+    "BetaTelegramAdapter",
+]
+
+============================================================
+PATH: .\app\interfaces\telegram\private_chat_gate.py
+============================================================
+from __future__ import annotations
+
+from app.application.beta_access.beta_access_service import BetaAccessService
+
+
+class BetaPrivateChatGate:
+    """Authorization gate for all Beta classroom interactions."""
+
+    def __init__(self, *, beta_access_service: BetaAccessService) -> None:
+        self._access = beta_access_service
+
+    async def authorize(
+        self,
+        *,
+        telegram_user_id: int,
+        chat_type: str = "private",
+    ) -> bool:
+        if chat_type != "private":
+            return False
+
+        try:
+            await self._access.authorize_private_chat(
+                telegram_user_id,
+            )
+        except (ValueError, PermissionError):
+            return False
+
+        return True
+
+    async def require(
+        self,
+        *,
+        telegram_user_id: int,
+        chat_type: str = "private",
+    ):
+        if chat_type != "private":
+            raise PermissionError(
+                "Beta classroom access is only available in a private Telegram chat."
+            )
+
+        return await self._access.authorize_private_chat(
+            telegram_user_id,
+        )
+
+
+============================================================
+SEARCH: W19.1/W19.2/W19.3 METHOD USAGE
+============================================================
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:39: from app.application.world_telegram.community_access_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:40: WorldTelegramCommunityAccessService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:42: from app.application.world_telegram.membership_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:43: WorldTelegramMembershipService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:74: from app.infrastructure.persistence.postgresql_world_telegram_destination_repository import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:98: world_telegram_community_access_service: (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:99: WorldTelegramCommunityAccessService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:337: world_telegram_destination_repository = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:349: world_telegram_membership_service = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:350: WorldTelegramMembershipService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:352: destination_repository=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:353: world_telegram_destination_repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:358: world_telegram_community_access_service = (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:359: WorldTelegramCommunityAccessService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:362: destination_repository=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:363: world_telegram_destination_repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:365: membership_service=world_telegram_membership_service,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:455: world_telegram_community_access_service=(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\composition\beta_telegram_production.py:456: world_telegram_community_access_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:18: from .membership_service import WorldTelegramMembershipService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:38: class WorldTelegramCommunityAccessService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:51: WorldTelegramMembershipService.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:61: destination_repository: WorldTelegramDestinationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:62: membership_service: WorldTelegramMembershipService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:70: if destination_repository is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:71: raise ValueError("destination_repository is required.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:73: if membership_service is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:74: raise ValueError("membership_service is required.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:78: self._destination_repository = destination_repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:79: self._membership_service = membership_service
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:81: def ensure_membership(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:121: destinations = self._destination_repository.list_by_world(world_id)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:143: existing = self._membership_service.get_membership_for_user(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:149: return self._membership_service.register_membership(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:157: return self._membership_service.set_active(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\community_access_service.py:173: "WorldTelegramCommunityAccessService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\membership_service.py:17: class WorldTelegramMembershipService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\membership_service.py:24: destination_repository: WorldTelegramDestinationRepository,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\membership_service.py:28: if destination_repository is None:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\membership_service.py:29: raise ValueError("destination_repository cannot be None.")
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\membership_service.py:32: self._destination_repository = destination_repository
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\membership_service.py:47: destination = self._destination_repository.get_by_id(destination_id)
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\service.py:19: class WorldTelegramDestinationService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\service.py:82: def get_destination(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:3: from .community_access_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:5: WorldTelegramCommunityAccessService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:10: from .membership_service import WorldTelegramMembershipService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:12: from .service import WorldTelegramDestinationService
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:16: "WorldTelegramCommunityAccessService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:20: "WorldTelegramDestinationService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\world_telegram\__init__.py:22: "WorldTelegramMembershipService",

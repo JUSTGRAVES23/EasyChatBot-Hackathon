@@ -28,6 +28,12 @@ from app.infrastructure.persistence.memory_records import (
 from app.infrastructure.persistence.provider_usage_records import (
     ProviderUsageRecord,
 )
+from app.infrastructure.persistence.world_telegram_destination_models import (
+    WorldTelegramDestinationRecord,
+)
+from app.infrastructure.persistence.world_telegram_membership_models import (
+    WorldTelegramMembershipRecord,
+)
 
 __all__ = [
     "BetaConnectionTokenRecord",
@@ -39,4 +45,6 @@ __all__ = [
     "ConversationMemoryRecord",
     "ProviderUsageRecord",
     "LearningWorldModel",
+    "WorldTelegramDestinationRecord",
+    "WorldTelegramMembershipRecord",
 ]

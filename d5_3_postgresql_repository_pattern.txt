@@ -1,0 +1,1493 @@
+﻿===== D5.3 POSTGRESQL REPOSITORY PATTERN =====
+
+===== FILE: .\backend\app\infrastructure\persistence\database.py =====
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+
+class Base(DeclarativeBase):
+    """Canonical SQLAlchemy metadata registry for the platform."""
+
+    pass
+
+
+def database_url() -> str:
+    """Return the canonical PostgreSQL connection URL."""
+
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for PostgreSQL persistence."
+        )
+
+    return value
+
+
+def create_database_engine():
+    """Create the existing synchronous PostgreSQL engine.
+
+    This API is preserved for the existing Beta 1 persistence layer.
+    """
+
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(
+    engine,
+) -> sessionmaker[Session]:
+    """Create the existing synchronous session factory.
+
+    Preserved for existing Beta 1 repositories.
+    """
+
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
+def async_database_url() -> str:
+    """Return DATABASE_URL adapted for SQLAlchemy async PostgreSQL.
+
+    The environment remains the single source of truth. We only adapt the
+    driver at the infrastructure boundary when the configured URL uses the
+    standard PostgreSQL SQLAlchemy scheme.
+    """
+
+    value = database_url()
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    raise RuntimeError(
+        "DATABASE_URL must use a PostgreSQL URL compatible with "
+        "the synchronous or async PostgreSQL persistence boundary."
+    )
+
+
+def create_async_database_engine() -> AsyncEngine:
+    """Create the canonical asynchronous PostgreSQL engine.
+
+    This is used by durable WS-22 persistence while sharing the same
+    DATABASE_URL and canonical Base as the existing persistence layer.
+    """
+
+    return create_async_engine(
+        async_database_url(),
+        pool_pre_ping=True,
+    )
+
+
+def create_async_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    """Create the canonical asynchronous PostgreSQL session factory."""
+
+    return async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+===== FILE: .\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py =====
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import select
+
+from app.application.provider_management.functionality_operational_control_service import (
+    OperationalControlResult,
+)
+from app.infrastructure.persistence.functionality_control_records import (
+    FunctionalityControlAuditRecord,
+    FunctionalityControlStateRecord,
+)
+
+
+class PostgreSQLFunctionalityControlRepository:
+    """Durable functionality control state and audit repository."""
+
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+
+        self._session_factory = session_factory
+
+    def get_availability(
+        self,
+        *,
+        environment: str,
+        functionality_id: str,
+    ) -> str:
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(FunctionalityControlStateRecord).where(
+                    FunctionalityControlStateRecord.environment
+                    == environment,
+                    FunctionalityControlStateRecord.functionality_id
+                    == functionality_id,
+                )
+            )
+
+        if record is None:
+            return "enabled"
+
+        return record.availability
+
+    def get_last_action(
+        self,
+        *,
+        environment: str,
+        functionality_id: str,
+    ) -> OperationalControlResult | None:
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(FunctionalityControlStateRecord).where(
+                    FunctionalityControlStateRecord.environment
+                    == environment,
+                    FunctionalityControlStateRecord.functionality_id
+                    == functionality_id,
+                )
+            )
+
+        if record is None or record.changed_at is None:
+            return None
+
+        return OperationalControlResult(
+            functionality_id=record.functionality_id,
+            environment=record.environment,
+            availability=record.availability,
+            action=record.action or "unknown",
+            reason=record.reason,
+            changed_at=record.changed_at,
+            changed_by=record.changed_by or "unknown",
+        )
+
+    def record_transition(
+        self,
+        *,
+        functionality_id: str,
+        environment: str,
+        availability: str,
+        action: str,
+        reason: str | None,
+        changed_at: datetime,
+        changed_by: str,
+    ) -> OperationalControlResult:
+        with self._session_factory() as session:
+            state = session.scalar(
+                select(FunctionalityControlStateRecord).where(
+                    FunctionalityControlStateRecord.environment
+                    == environment,
+                    FunctionalityControlStateRecord.functionality_id
+                    == functionality_id,
+                )
+            )
+
+            if state is None:
+                state = FunctionalityControlStateRecord(
+                    functionality_id=functionality_id,
+                    environment=environment,
+                )
+                session.add(state)
+
+            state.availability = availability
+            state.action = action
+            state.reason = reason
+            state.changed_at = changed_at
+            state.changed_by = changed_by
+
+            session.add(
+                FunctionalityControlAuditRecord(
+                    functionality_id=functionality_id,
+                    environment=environment,
+                    action=action,
+                    availability=availability,
+                    changed_by=changed_by,
+                    reason=reason,
+                    changed_at=changed_at,
+                )
+            )
+
+            session.commit()
+
+        return OperationalControlResult(
+            functionality_id=functionality_id,
+            environment=environment,
+            availability=availability,
+            action=action,
+            reason=reason,
+            changed_at=changed_at,
+            changed_by=changed_by,
+        )
+
+===== FILE: .\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py =====
+from __future__ import annotations
+
+from src.ai_runtime.providers.usage.models import ProviderUsageEvent
+from src.ai_runtime.providers.usage.repository import ProviderUsageRepository
+
+from .provider_usage_records import ProviderUsageRecord
+
+
+class PostgreSQLProviderUsageRepository(ProviderUsageRepository):
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+
+        self._session_factory = session_factory
+
+    def save(self, event: ProviderUsageEvent) -> None:
+        if event is None:
+            raise ValueError("Provider usage event cannot be None.")
+
+        with self._session_factory() as session:
+            session.add(
+                ProviderUsageRecord(
+                    provider=event.provider,
+                    model=event.model,
+                    capability=event.capability,
+                    functionality=event.functionality,
+                    agent=event.agent,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    total_tokens=event.total_tokens,
+                    latency_ms=event.latency_ms,
+                    estimated_cost=event.estimated_cost,
+                    quality_score=event.quality_score,
+                    success=event.success,
+                    provider_request_id=event.provider_request_id,
+                    created_at=event.created_at,
+                )
+            )
+            session.commit()
+
+    def get_all(self) -> list[ProviderUsageEvent]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ProviderUsageRecord)
+                .order_by(
+                    ProviderUsageRecord.created_at.asc(),
+                    ProviderUsageRecord.id.asc(),
+                )
+                .all()
+            )
+
+        return [_event_from_record(row) for row in rows]
+
+    def clear(self) -> None:
+        with self._session_factory() as session:
+            session.query(ProviderUsageRecord).delete()
+            session.commit()
+
+
+def _event_from_record(row: ProviderUsageRecord) -> ProviderUsageEvent:
+    return ProviderUsageEvent(
+        provider=row.provider,
+        model=row.model,
+        capability=row.capability,
+        functionality=row.functionality,
+        agent=row.agent,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        total_tokens=row.total_tokens,
+        latency_ms=row.latency_ms,
+        estimated_cost=row.estimated_cost,
+        quality_score=float(row.quality_score),
+        success=row.success,
+        provider_request_id=row.provider_request_id,
+        created_at=row.created_at,
+    )
+
+===== FILE: .\backend\app\infrastructure\auth\postgresql_auth_repository.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
+import hashlib
+import secrets
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@dataclass(frozen=True, slots=True)
+class AuthUserRecord:
+    id: UUID
+    email: str
+    username: str
+    status: str
+    email_verified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AuthCredentialRecord:
+    user_id: UUID
+    password_hash: str
+    credential_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class PasswordResetContextRecord:
+    user_id: UUID
+    email: str
+    password_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthSessionRecord:
+    session_id: UUID
+    user_id: UUID
+    status: str
+    created_at: datetime
+    expires_at: datetime
+    last_activity_at: datetime
+    device_name: str | None
+    ip_address: str | None
+    is_revoked: bool
+    metadata_json: dict
+
+
+class PostgreSQLAuthenticationRepository:
+    """PostgreSQL adapter for the existing EasyChatBot auth tables.
+
+    The adapter intentionally uses SQLAlchemy Core statements rather than
+    importing speculative ORM models. This binds the application contract to
+    the inspected database schema while keeping persistence isolated.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+
+        self._session_factory = session_factory
+
+    async def email_exists(self, email: str) -> bool:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT 1 FROM users "
+                    "WHERE email = :email "
+                    "LIMIT 1"
+                ),
+                {"email": email},
+            )
+
+            return result.first() is not None
+
+    async def username_exists(self, username: str) -> bool:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT 1 FROM users "
+                    "WHERE username = :username "
+                    "LIMIT 1"
+                ),
+                {"username": username},
+            )
+
+            return result.first() is not None
+
+    async def create_user(
+        self,
+        *,
+        user_id: UUID,
+        email: str,
+        username: str,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO users
+                            (
+                                id,
+                                email,
+                                username,
+                                status,
+                                trial_status,
+                                created_at,
+                                email_verified
+                            )
+                        VALUES
+                            (
+                                :id,
+                                :email,
+                                :username,
+                                'active',
+                                'not_started',
+                                :created_at,
+                                FALSE
+                            )
+                        """
+                    ),
+                    {
+                        "id": user_id,
+                        "email": email,
+                        "username": username,
+                        "created_at": now,
+                    },
+                )
+
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO auth_user_roles (user_id, role)
+                        VALUES (:user_id, 'beta_user')
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {"user_id": user_id},
+                )
+
+    async def create_password_credential(
+        self,
+        *,
+        user_id: UUID,
+        password_hash: str,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO user_credentials
+                            (
+                                id,
+                                user_id,
+                                password_hash,
+                                credential_type,
+                                created_at,
+                                updated_at
+                            )
+                        VALUES
+                            (
+                                :id,
+                                :user_id,
+                                :password_hash,
+                                'PASSWORD',
+                                :created_at,
+                                :updated_at
+                            )
+                        """
+                    ),
+                    {
+                        "id": uuid4(),
+                        "user_id": user_id,
+                        "password_hash": password_hash,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+
+    async def create_email_verification(
+        self,
+        *,
+        user_id: UUID,
+        email: str,
+    ) -> str:
+        """Create a one-time verification token.
+
+        The raw token is returned to the application boundary. Only its
+        SHA-256 digest is persisted. Delivery is deliberately outside this
+        repository.
+        """
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(
+            raw_token.encode("utf-8")
+        ).hexdigest()
+
+        now = datetime.now(timezone.utc)
+        verification_id = uuid4()
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO auth_email_verification_tokens
+                            (
+                                id,
+                                user_id,
+                                email,
+                                token_hash,
+                                expires_at,
+                                created_at
+                            )
+                        VALUES
+                            (
+                                :id,
+                                :user_id,
+                                :email,
+                                :token_hash,
+                                :expires_at,
+                                :created_at
+                            )
+                        """
+                    ),
+                    {
+                        "id": verification_id,
+                        "user_id": user_id,
+                        "email": email,
+                        "token_hash": token_hash,
+                        "expires_at": now + timedelta(hours=24),
+                        "created_at": now,
+                    },
+                )
+
+        return raw_token
+
+    async def create_password_reset_token(
+        self,
+        *,
+        user_id: UUID,
+    ) -> str:
+        """Create a secure one-time password-reset token.
+
+        Only the SHA-256 digest is persisted. The raw token is returned
+        exclusively to the application layer for email delivery.
+        """
+        raw_token = secrets.token_urlsafe(32)
+
+        token_hash = hashlib.sha256(
+            raw_token.encode("utf-8")
+        ).hexdigest()
+
+        now = datetime.now(timezone.utc)
+        reset_id = uuid4()
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                # A newly issued reset link supersedes older unused links.
+                await session.execute(
+                    text(
+                        """
+                        UPDATE auth_password_reset_tokens
+                        SET used_at = :now
+                        WHERE user_id = :user_id
+                          AND used_at IS NULL
+                        """
+                    ),
+                    {
+                        "now": now,
+                        "user_id": user_id,
+                    },
+                )
+
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO auth_password_reset_tokens
+                            (
+                                id,
+                                user_id,
+                                token_hash,
+                                expires_at,
+                                created_at
+                            )
+                        VALUES
+                            (
+                                :id,
+                                :user_id,
+                                :token_hash,
+                                :expires_at,
+                                :created_at
+                            )
+                        """
+                    ),
+                    {
+                        "id": reset_id,
+                        "user_id": user_id,
+                        "token_hash": token_hash,
+                        "expires_at": now + timedelta(hours=1),
+                        "created_at": now,
+                    },
+                )
+
+        return raw_token
+
+    async def count_recent_password_reset_tokens(
+        self,
+        *,
+        user_id: UUID,
+        since: datetime,
+    ) -> int:
+        """Count password-reset requests in the supplied time window."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM auth_password_reset_tokens
+                    WHERE user_id = :user_id
+                      AND created_at >= :since
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "since": since,
+                },
+            )
+
+            return int(result.scalar_one())
+
+    async def get_password_reset_context(
+        self,
+        *,
+        token: str,
+    ) -> PasswordResetContextRecord | None:
+        """Resolve a valid reset token to non-sensitive account context.
+
+        The raw token is never persisted or returned. Only a valid, unused,
+        unexpired token can resolve its account email and current credential
+        hash. The credential hash is consumed only by the application service
+        for the previous-password check and is never exposed by the HTTP API.
+        """
+        token_hash = hashlib.sha256(
+            token.encode("utf-8")
+        ).hexdigest()
+
+        now = datetime.now(timezone.utc)
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        t.user_id,
+                        u.email,
+                        c.password_hash
+                    FROM auth_password_reset_tokens AS t
+                    INNER JOIN users AS u
+                        ON u.id = t.user_id
+                    INNER JOIN user_credentials AS c
+                        ON c.user_id = t.user_id
+                       AND c.credential_type = 'PASSWORD'
+                    WHERE t.token_hash = :token_hash
+                      AND t.used_at IS NULL
+                      AND t.expires_at > :now
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "token_hash": token_hash,
+                    "now": now,
+                },
+            )
+
+            row = result.mappings().first()
+
+            if row is None:
+                return None
+
+            return PasswordResetContextRecord(
+                user_id=row["user_id"],
+                email=row["email"],
+                password_hash=row["password_hash"],
+            )
+
+    async def get_password_reset_user(
+        self,
+        token: str,
+    ):
+        """Return the bound reset user for a valid, unused, unexpired token."""
+        context = await self.get_password_reset_context(
+            token=token,
+        )
+
+        if context is None:
+            return None
+
+        return context
+
+    async def reset_password(
+        self,
+        *,
+        token: str,
+        password_hash: str,
+        expected_password_hash: str | None = None,
+    ) -> bool:
+        """Atomically consume a reset token, update the password,
+        and revoke existing sessions.
+        """
+        token_hash = hashlib.sha256(
+            token.encode("utf-8")
+        ).hexdigest()
+
+        now = datetime.now(timezone.utc)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT id, user_id
+                        FROM auth_password_reset_tokens
+                        WHERE token_hash = :token_hash
+                          AND used_at IS NULL
+                          AND expires_at > :now
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "token_hash": token_hash,
+                        "now": now,
+                    },
+                )
+
+                row = result.mappings().first()
+
+                if row is None:
+                    return False
+
+                user_id = row["user_id"]
+
+                credential_result = await session.execute(
+                    text(
+                        """
+                        SELECT id
+                        FROM user_credentials
+                        WHERE user_id = :user_id
+                          AND credential_type = 'PASSWORD'
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                    },
+                )
+
+                credential = credential_result.mappings().first()
+
+                if credential is None:
+                    return False
+
+                update_result = await session.execute(
+                    text(
+                        """
+                        UPDATE user_credentials
+                        SET password_hash = :password_hash,
+                            updated_at = :updated_at
+                        WHERE id = :credential_id
+                          AND (
+                              CAST(:expected_password_hash AS TEXT) IS NULL
+                              OR password_hash = CAST(:expected_password_hash AS TEXT)
+                          )
+                        """
+                    ),
+                    {
+                        "password_hash": password_hash,
+                        "updated_at": now,
+                        "credential_id": credential["id"],
+                        "expected_password_hash": expected_password_hash,
+                    },
+                )
+
+                if update_result.rowcount != 1:
+                    return False
+
+                await session.execute(
+                    text(
+                        """
+                        UPDATE auth_password_reset_tokens
+                        SET used_at = :used_at
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "used_at": now,
+                        "id": row["id"],
+                    },
+                )
+
+                await session.execute(
+                    text(
+                        """
+                        UPDATE user_sessions
+                        SET is_revoked = TRUE,
+                            status = 'revoked'
+                        WHERE user_id = :user_id
+                          AND is_revoked = FALSE
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                    },
+                )
+
+                return True
+
+    async def verify_email(
+        self,
+        token: str,
+    ) -> bool:
+        token_hash = hashlib.sha256(
+            token.encode("utf-8")
+        ).hexdigest()
+
+        now = datetime.now(timezone.utc)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT id, user_id
+                        FROM auth_email_verification_tokens
+                        WHERE token_hash = :token_hash
+                          AND used_at IS NULL
+                          AND expires_at > :now
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "token_hash": token_hash,
+                        "now": now,
+                    },
+                )
+
+                row = result.mappings().first()
+
+                if row is None:
+                    return False
+
+                await session.execute(
+                    text(
+                        """
+                        UPDATE users
+                        SET email_verified = TRUE
+                        WHERE id = :user_id
+                        """
+                    ),
+                    {
+                        "user_id": row["user_id"],
+                    },
+                )
+
+                await session.execute(
+                    text(
+                        """
+                        UPDATE auth_email_verification_tokens
+                        SET used_at = :now
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "now": now,
+                        "id": row["id"],
+                    },
+                )
+
+                return True
+
+    async def get_user_by_email(
+        self,
+        email: str,
+    ) -> AuthUserRecord | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        email,
+                        username,
+                        status,
+                        email_verified
+                    FROM users
+                    WHERE email = :email
+                    LIMIT 1
+                    """
+                ),
+                {"email": email},
+            )
+
+            row = result.mappings().first()
+
+            return self._user(row) if row else None
+
+    async def get_password_credential(
+        self,
+        user_id: UUID,
+    ) -> AuthCredentialRecord | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        user_id,
+                        password_hash,
+                        credential_type
+                    FROM user_credentials
+                    WHERE user_id = :user_id
+                      AND credential_type = 'PASSWORD'
+                    LIMIT 1
+                    """
+                ),
+                {"user_id": user_id},
+            )
+
+            row = result.mappings().first()
+
+            if row is None:
+                return None
+
+            return AuthCredentialRecord(
+                user_id=row["user_id"],
+                password_hash=row["password_hash"],
+                credential_type=row["credential_type"],
+            )
+
+    async def create_session(
+        self,
+        *,
+        session_id: UUID,
+        user_id: UUID,
+        created_at: datetime,
+        expires_at: datetime,
+        device_name: str | None,
+        ip_address: str | None,
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO user_sessions
+                            (
+                                session_id,
+                                user_id,
+                                status,
+                                created_at,
+                                expires_at,
+                                last_activity_at,
+                                device_name,
+                                ip_address,
+                                is_revoked,
+                                metadata_json
+                            )
+                        VALUES
+                            (
+                                :session_id,
+                                :user_id,
+                                'active',
+                                :created_at,
+                                :expires_at,
+                                :last_activity_at,
+                                :device_name,
+                                :ip_address,
+                                FALSE,
+                                CAST(:metadata_json AS JSON)
+                            )
+                        """
+                    ),
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "created_at": created_at,
+                        "expires_at": expires_at,
+                        "last_activity_at": created_at,
+                        "device_name": device_name,
+                        "ip_address": ip_address,
+                        "metadata_json": "{}",
+                    },
+                )
+
+    async def get_session(
+        self,
+        session_id: str | UUID,
+    ) -> AuthSessionRecord | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        session_id,
+                        user_id,
+                        status,
+                        created_at,
+                        expires_at,
+                        last_activity_at,
+                        device_name,
+                        ip_address,
+                        is_revoked,
+                        metadata_json
+                    FROM user_sessions
+                    WHERE session_id = :session_id
+                    LIMIT 1
+                    """
+                ),
+                {"session_id": session_id},
+            )
+
+            row = result.mappings().first()
+
+            if row is None:
+                return None
+
+            return AuthSessionRecord(
+                session_id=row["session_id"],
+                user_id=row["user_id"],
+                status=row["status"],
+                created_at=row["created_at"],
+                expires_at=row["expires_at"],
+                last_activity_at=row["last_activity_at"],
+                device_name=row["device_name"],
+                ip_address=row["ip_address"],
+                is_revoked=bool(row["is_revoked"]),
+                metadata_json=row["metadata_json"] or {},
+            )
+
+    async def revoke_session(
+        self,
+        session_id: UUID,
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        UPDATE user_sessions
+                        SET is_revoked = TRUE,
+                            status = 'revoked'
+                        WHERE session_id = :session_id
+                        """
+                    ),
+                    {"session_id": session_id},
+                )
+
+    async def get_user_for_identity(
+        self,
+        user_id: UUID,
+    ) -> AuthUserRecord | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        email,
+                        username,
+                        status,
+                        email_verified
+                    FROM users
+                    WHERE id = :user_id
+                    LIMIT 1
+                    """
+                ),
+                {"user_id": user_id},
+            )
+
+            row = result.mappings().first()
+
+            if row is None:
+                return None
+
+            return self._user(row)
+
+    async def get_user_roles(
+        self,
+        user_id: UUID,
+    ) -> tuple[str, ...]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT role
+                    FROM auth_user_roles
+                    WHERE user_id = :user_id
+                    ORDER BY role
+                    """
+                ),
+                {"user_id": user_id},
+            )
+
+            return tuple(
+                row[0]
+                for row in result.all()
+            )
+
+    async def get_users_with_role(
+        self,
+        *,
+        role: str,
+    ) -> tuple[AuthUserRecord, ...]:
+        """Return users holding the supplied role."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        u.id,
+                        u.email,
+                        u.username,
+                        u.status,
+                        u.email_verified
+                    FROM users AS u
+                    INNER JOIN auth_user_roles AS r
+                        ON r.user_id = u.id
+                    WHERE r.role = :role
+                    ORDER BY u.email
+                    """
+                ),
+                {"role": role},
+            )
+
+            return tuple(
+                self._user(row)
+                for row in result.mappings().all()
+            )
+
+    async def add_user_role(
+        self,
+        *,
+        user_id: UUID,
+        role: str,
+    ) -> bool:
+        """Grant a role idempotently.
+
+        Returns True when a new assignment was created and False when the
+        assignment already existed.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    text(
+                        """
+                        INSERT INTO auth_user_roles (user_id, role)
+                        VALUES (:user_id, :role)
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "role": role,
+                    },
+                )
+
+                return result.rowcount == 1
+
+    async def remove_user_role(
+        self,
+        *,
+        user_id: UUID,
+        role: str,
+    ) -> bool:
+        """Remove a role assignment.
+
+        Returns True when an assignment was removed and False when it did
+        not exist.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    text(
+                        """
+                        DELETE FROM auth_user_roles
+                        WHERE user_id = :user_id
+                          AND role = :role
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "role": role,
+                    },
+                )
+
+                return result.rowcount == 1
+
+    async def count_users_with_role(
+        self,
+        *,
+        role: str,
+    ) -> int:
+        """Count users holding the supplied role."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM auth_user_roles
+                    WHERE role = :role
+                    """
+                ),
+                {"role": role},
+            )
+
+            return int(result.scalar_one())
+
+    @staticmethod
+    def _user(row) -> AuthUserRecord:
+        return AuthUserRecord(
+            id=row["id"],
+            email=row["email"],
+            username=row["username"],
+            status=row["status"],
+            email_verified=bool(row["email_verified"]),
+        )
+
+===== EXISTING SQLALCHEMY TABLE/MODEL DEFINITIONS =====
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authentication_reference.py; LineNumber=22; Line=class RegisterRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authentication_reference.py; LineNumber=28; Line=class RegisterResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authentication_reference.py; LineNumber=33; Line=class LoginRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api_authentication_reference.py; LineNumber=38; Line=class LoginResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_controls.py; LineNumber=19; Line=class AnnouncementPublishRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_controls.py; LineNumber=28; Line=class AnnouncementPublishResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_operations_approval.py; LineNumber=19; Line=class PublicationApprovalRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\announcement_operations_approval.py; LineNumber=23; Line=class PublicationApprovalResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=30; Line=class RegisterRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=42; Line=class RegisterResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=47; Line=class LoginRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=55; Line=class LoginResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=60; Line=class SessionResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=64; Line=class PasswordResetRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=68; Line=class PasswordResetRequestResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=72; Line=class PasswordResetConfirmRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=83; Line=class PasswordResetConfirmResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\authentication.py; LineNumber=87; Line=class PasswordResetContextResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\cybersecurity_delivery_controls.py; LineNumber=9; Line=class PauseRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\cybersecurity_intelligence.py; LineNumber=79; Line=class CybersecurityIntelligenceResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\learner_context.py; LineNumber=17; Line=class LearnerContextMemoryResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\learner_context.py; LineNumber=30; Line=class LearnerContextMessageResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\learner_context.py; LineNumber=43; Line=class LearnerContextResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\operations_center.py; LineNumber=23; Line=class FunctionalityStopRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\operations_center.py; LineNumber=28; Line=class FunctionalityResumeRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py; LineNumber=56; Line=class PrivacyGovernanceDecisionRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_governance.py; LineNumber=80; Line=class PrivacyGovernanceDemoCaseRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\privacy_screening.py; LineNumber=13; Line=class ScreeningRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\provider_management_controls.py; LineNumber=28; Line=class PauseRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py; LineNumber=59; Line=class VoiceCallRequestModel(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\voice_calls.py; LineNumber=72; Line=class VoiceCallResponseModel(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\developer_admin_transaction_contracts.py; LineNumber=9; Line=class DeveloperAdminCreateTransactionRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\developer_admin_transaction_contracts.py; LineNumber=15; Line=class DeveloperAdminExecuteTransactionRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\developer_admin_transaction_contracts.py; LineNumber=28; Line=class DeveloperAdminPendingTransactionResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\developer_admin_transaction_contracts.py; LineNumber=40; Line=class DeveloperAdminApprovalResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\developer_admin_transaction_contracts.py; LineNumber=49; Line=class DeveloperAdminExecuteTransactionResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\private_chat\schemas.py; LineNumber=8; Line=class CreatePrivateChatResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\private_chat\schemas.py; LineNumber=13; Line=class SendPrivateChatMessageRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\routes\private_chat\schemas.py; LineNumber=18; Line=class SendPrivateChatMessageResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\private_chat.py; LineNumber=9; Line=class CreatePrivateChatRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\private_chat.py; LineNumber=25; Line=class CreatePrivateChatResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\private_chat.py; LineNumber=30; Line=class PrivateChatMessageResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\private_chat.py; LineNumber=37; Line=class ActivePrivateChatConversationResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\private_chat.py; LineNumber=43; Line=class SendPrivateChatMessageRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\schemas\private_chat.py; LineNumber=60; Line=class SendPrivateChatMessageResponse(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\persistence_operations\models.py; LineNumber=33; Line=class DatabaseHealthSnapshot:}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\persistence_operations\persistence_diagnostics_service.py; LineNumber=380; Line=                    f"{schema['tables_with_drift']} table(s) differ from "}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_approval_email_service.py; LineNumber=237; Line=        if inspect.isawaitable(delivery):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py; LineNumber=525; Line=            table = Table(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_excel_sync.py; LineNumber=540; Line=            ws.add_table(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_gate.py; LineNumber=208; Line=        if inspect.isawaitable(delivery):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\provider_health_read_model.py; LineNumber=64; Line=class ProviderHealthReadModel:}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\provider_management\provider_health_read_model.py; LineNumber=98; Line=class ProviderHealthReadModelService:}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\domain\uai\voice\voice_call.py; LineNumber=167; Line=    def mark_reconnectable(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=12; Line=class PublicationApprovalAuditEventModel(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=15; Line=    __tablename__ = "announcement_publication_approval_audit_events"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=17; Line=    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=18; Line=    publication_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=21; Line=    event_type: Mapped[str] = mapped_column(String(64), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=22; Line=    actor: Mapped[str] = mapped_column(String(255), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=23; Line=    occurred_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_approval_audit.py; LineNumber=26; Line=    details: Mapped[str | None] = mapped_column(Text, nullable=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=12; Line=class PublicationAuditEventModel(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=15; Line=    __tablename__ = "announcement_publication_audit_events"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=17; Line=    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=18; Line=    publication_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=21; Line=    event_type: Mapped[str] = mapped_column(String(64), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=22; Line=    actor: Mapped[str] = mapped_column(String(255), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=23; Line=    correlation_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=26; Line=    provider_message_id: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=29; Line=    error_code: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=32; Line=    details: Mapped[str | None] = mapped_column(Text, nullable=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\publication_audit_repository.py; LineNumber=33; Line=    occurred_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=24; Line=class PublicationExecutionRecordModel(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=27; Line=    __tablename__ = "announcement_publication_executions"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=29; Line=    publication_id: Mapped[str] = mapped_column(String(36), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=30; Line=    idempotency_key: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=33; Line=    correlation_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=37; Line=    attempt: Mapped[int] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=42; Line=    status: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=46; Line=    provider_message_id: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=50; Line=    error_code: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=54; Line=    created_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_execution_repository.py; LineNumber=58; Line=    updated_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=20; Line=class PublicationModel(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=23; Line=    __tablename__ = "announcement_publications"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=25; Line=    publication_id: Mapped[str] = mapped_column(String(255), primary_key=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=26; Line=    template_id: Mapped[str] = mapped_column(String(255), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=27; Line=    template_version: Mapped[int] = mapped_column(Integer, nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=28; Line=    publication_type: Mapped[str] = mapped_column(String(64), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=29; Line=    title: Mapped[str] = mapped_column(String(120), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=30; Line=    content: Mapped[str] = mapped_column(Text, nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=31; Line=    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=32; Line=    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=33; Line=    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=34; Line=    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\announcements\sqlalchemy_publication_repository.py; LineNumber=35; Line=    failure_reason: Mapped[str | None] = mapped_column(Text)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=11; Line=class BetaUserRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=12; Line=    __tablename__ = "beta_users"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=14; Line=    id: Mapped[str] = mapped_column(String(128), primary_key=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=15; Line=    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=16; Line=    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=17; Line=    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=18; Line=    active_world_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=19; Line=    telegram_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=20; Line=    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=21; Line=    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=24; Line=class BetaConnectionTokenRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=25; Line=    __tablename__ = "beta_connection_tokens"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=27; Line=    id: Mapped[str] = mapped_column(String(128), primary_key=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=28; Line=    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=29; Line=    user_id: Mapped[str] = mapped_column(ForeignKey("beta_users.id", ondelete="CASCADE"), nullable=False, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=30; Line=    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=31; Line=    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=32; Line=    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=35; Line=class TelegramBindingRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=36; Line=    __tablename__ = "telegram_bindings"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=42; Line=    id: Mapped[str] = mapped_column(String(128), primary_key=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=43; Line=    user_id: Mapped[str] = mapped_column(ForeignKey("beta_users.id", ondelete="CASCADE"), nullable=False, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=44; Line=    telegram_user_id: Mapped[str] = mapped_column(String(128), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=45; Line=    chat_id: Mapped[str] = mapped_column(String(128), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_access_models.py; LineNumber=46; Line=    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=11; Line=class BetaConnectionTokenModel(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=12; Line=    __tablename__ = "beta_connection_tokens"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=14; Line=    id: Mapped[str] = mapped_column(String(128), primary_key=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=15; Line=    user_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=19; Line=    token_hash: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=22; Line=    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=23; Line=    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\beta_connection_token_models.py; LineNumber=24; Line=    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=22; Line=class ConversationEventRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=56; Line=    __tablename__ = "conversation_events"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=58; Line=    id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=63; Line=    conversation_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=69; Line=    telegram_user_hash: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=75; Line=    world_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=81; Line=    channel: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=86; Line=    role: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=91; Line=    content: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=96; Line=    metadata_json: Mapped[dict | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=101; Line=    privacy_hash_version: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=106; Line=    retention_policy_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\conversation_event_records.py; LineNumber=111; Line=    created_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\database.py; LineNumber=15; Line=class Base(DeclarativeBase):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=11; Line=class FunctionalityControlStateRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=14; Line=    __tablename__ = "functionality_control_state"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=16; Line=    id: Mapped[int] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=22; Line=    functionality_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=27; Line=    environment: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=32; Line=    availability: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=37; Line=    action: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=42; Line=    reason: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=47; Line=    changed_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=52; Line=    changed_by: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=66; Line=class FunctionalityControlAuditRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=69; Line=    __tablename__ = "functionality_control_audit"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=71; Line=    id: Mapped[int] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=77; Line=    functionality_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=83; Line=    environment: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=89; Line=    availability: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=94; Line=    action: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=99; Line=    reason: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=104; Line=    changed_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\functionality_control_records.py; LineNumber=110; Line=    changed_by: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=9; Line=class LearningWorldModel(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=10; Line=    __tablename__ = "learning_worlds"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=12; Line=    id: Mapped[UUID] = mapped_column(primary_key=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=13; Line=    identifier: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=14; Line=    name: Mapped[str] = mapped_column(String(150), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=15; Line=    description: Mapped[str] = mapped_column(String(500), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=16; Line=    language: Mapped[str] = mapped_column(String(100), nullable=False, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=17; Line=    version: Mapped[str] = mapped_column(String(50), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=18; Line=    status: Mapped[str] = mapped_column(String(50), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=19; Line=    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=20; Line=    world_type: Mapped[str] = mapped_column(String(50), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=21; Line=    learning_domain: Mapped[str] = mapped_column(String(100), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=22; Line=    runtime_world_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True, index=True)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\learning_world_models.py; LineNumber=23; Line=    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=21; Line=class ConversationMemoryRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=35; Line=    __tablename__ = "conversation_memory"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=38; Line=    id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=44; Line=    telegram_user_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=51; Line=    world_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=58; Line=    memory_key: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=64; Line=    memory_value: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\memory_records.py; LineNumber=70; Line=    created_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=13; Line=class PrivateChatConversationRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=16; Line=    __tablename__ = "private_chat_conversations"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=18; Line=    conversation_id: Mapped[UUID] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=24; Line=    user_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=30; Line=    world_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=36; Line=    created_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=42; Line=    updated_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=48; Line=    messages: Mapped[list["PrivateChatMessageRecord"]] = relationship(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=55; Line=    active_conversation: Mapped["PrivateChatActiveConversationRecord | None"] = (}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=72; Line=class PrivateChatMessageRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=75; Line=    __tablename__ = "private_chat_messages"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=77; Line=    id: Mapped[UUID] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=83; Line=    conversation_id: Mapped[UUID] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=92; Line=    user_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=98; Line=    world_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=104; Line=    role: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=109; Line=    content: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=114; Line=    created_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=120; Line=    conversation: Mapped[PrivateChatConversationRecord] = relationship(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=138; Line=class PrivateChatActiveConversationRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=146; Line=    __tablename__ = "private_chat_active_conversations"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=148; Line=    user_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=153; Line=    world_id: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=158; Line=    conversation_id: Mapped[UUID] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\private_chat_models.py; LineNumber=168; Line=    conversation: Mapped[PrivateChatConversationRecord] = relationship(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=12; Line=class ProviderUsageRecord(Base):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=13; Line=    __tablename__ = "provider_usage_events"}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=15; Line=    id: Mapped[int] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=21; Line=    provider: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=26; Line=    model: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=31; Line=    capability: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=36; Line=    functionality: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=41; Line=    agent: Mapped[str] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=46; Line=    input_tokens: Mapped[int | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=51; Line=    output_tokens: Mapped[int | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=56; Line=    total_tokens: Mapped[int | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=61; Line=    latency_ms: Mapped[int | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=66; Line=    estimated_cost: Mapped[Decimal] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=71; Line=    quality_score: Mapped[Decimal] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=76; Line=    success: Mapped[bool] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=81; Line=    provider_request_id: Mapped[str | None] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\provider_usage_records.py; LineNumber=86; Line=    created_at: Mapped[datetime] = mapped_column(}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\announcements\template_editor_router.py; LineNumber=15; Line=class PreviewRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\announcements\template_editor_router.py; LineNumber=21; Line=class CreateDraftRequest(BaseModel):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\interfaces\telegram\beta_start_handler.py; LineNumber=116; Line=        if inspect.isawaitable(result):}
+@{Path=C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\application\service.py; LineNumber=50; Line=    if inspect.isawaitable(value):}

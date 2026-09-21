@@ -20,6 +20,7 @@ from app.domain.identity.transaction_authorization import (
     CanonicalTransaction,
     TransactionAuthorization,
     TransactionAuthorizationDecision,
+    TrustedApprovalEvidence,
 )
 
 
@@ -31,9 +32,7 @@ class TrustedClock(Protocol):
 
 
 class DeveloperAdminTransactionService:
-    """
-    Application service protecting Developer Admin mutations with
-    transaction authorization.
+    """Application boundary for authorized Developer Admin mutations.
 
     Security flow:
 
@@ -45,9 +44,8 @@ class DeveloperAdminTransactionService:
             -> single-use consumption
             -> Developer Admin mutation
 
-    The target user is never taken from the execution request after the
-    transaction has been authorized. The execution target is extracted from
-    the exact canonical transaction that is being consumed.
+    The target is always extracted from the authorized canonical transaction.
+    No execution request is allowed to replace the authorized target.
     """
 
     AUDIENCE = "easychatbot.developer_admin"
@@ -56,7 +54,6 @@ class DeveloperAdminTransactionService:
     REVOKE_OPERATION = "developer_admin.revoke"
 
     REQUIRED_ASSURANCE_LEVEL = AuthenticationAssuranceLevel.A2
-
     DEFAULT_TRANSACTION_TTL = timedelta(minutes=5)
 
     def __init__(
@@ -93,17 +90,42 @@ class DeveloperAdminTransactionService:
         created_at: datetime | None = None,
         expires_at: datetime | None = None,
     ) -> TransactionAuthorization:
-        """
-        Create an exact Developer Admin grant authorization.
+        return self._create_transaction(
+            principal=principal,
+            target_user_id=target_user_id,
+            operation=self.GRANT_OPERATION,
+            risk_operation="grant",
+            created_at=created_at,
+            expires_at=expires_at,
+        )
 
-        The authorization ID is generated here and passed explicitly to the
-        transaction-authorization application service because that service
-        requires the authorization identifier as part of its contract.
+    def create_revoke_transaction(
+        self,
+        *,
+        principal: Principal,
+        target_user_id: UUID,
+        created_at: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> TransactionAuthorization:
+        return self._create_transaction(
+            principal=principal,
+            target_user_id=target_user_id,
+            operation=self.REVOKE_OPERATION,
+            risk_operation="revoke",
+            created_at=created_at,
+            expires_at=expires_at,
+        )
 
-        The target user ID is embedded into the canonical transaction and is
-        therefore part of the transaction binding.
-        """
-
+    def _create_transaction(
+        self,
+        *,
+        principal: Principal,
+        target_user_id: UUID,
+        operation: str,
+        risk_operation: str,
+        created_at: datetime | None,
+        expires_at: datetime | None,
+    ) -> TransactionAuthorization:
         self._require_valid_principal(principal)
 
         if not isinstance(target_user_id, UUID):
@@ -126,33 +148,64 @@ class DeveloperAdminTransactionService:
             expires_at=effective_expires_at,
         )
 
-        authorization_id = str(uuid4())
-
         transaction = CanonicalTransaction.from_mapping(
             transaction_id=str(uuid4()),
             principal_id=principal.user_id,
             amount="0.00",
             currency="N/A",
             merchant_or_service="easychatbot",
-            operation=self.GRANT_OPERATION,
+            operation=operation,
             timestamp=effective_created_at,
             nonce=str(uuid4()),
             risk_context={
                 "target_user_id": str(target_user_id),
-                "operation": "grant",
+                "operation": risk_operation,
                 "audience": self.AUDIENCE,
             },
         )
 
         return (
-            self._transaction_authorization_service
-            .create_pending_authorization(
+            self._transaction_authorization_service.create_pending_authorization(
                 principal=principal,
                 transaction=transaction,
-                authorization_id=authorization_id,
+                authorization_id=str(uuid4()),
                 created_at=effective_created_at,
                 expires_at=effective_expires_at,
             )
+        )
+
+    def get_authorization(
+        self,
+        *,
+        authorization_id: str,
+    ) -> TransactionAuthorization | None:
+        if not authorization_id:
+            return None
+
+        return self._transaction_authorization_service.registry.get(
+            authorization_id
+        )
+
+    def attach_trusted_approval(
+        self,
+        *,
+        principal: Principal,
+        approval: TrustedApprovalEvidence,
+    ) -> TransactionAuthorization:
+        authorization = self.get_authorization(
+            authorization_id=approval.authorization_id,
+        )
+
+        if authorization is None:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction authorization was not found."
+            )
+
+        return self._transaction_authorization_service.attach_user_approval(
+            principal=principal,
+            authorization=authorization,
+            approval=approval,
+            clock=self._clock,
         )
 
     async def execute_grant(
@@ -160,62 +213,28 @@ class DeveloperAdminTransactionService:
         *,
         principal: Principal,
         authorization_id: str,
-        transaction: CanonicalTransaction,
+        transaction: CanonicalTransaction | None = None,
         clock: TrustedClock | None = None,
     ) -> DeveloperAdminRecord:
-        """
-        Execute a previously authorized Developer Admin grant.
-
-        Execution requires:
-
-        - authenticated principal
-        - exact authorization ID
-        - exact canonical transaction binding
-        - A2 authentication assurance
-        - single-use authorization consumption
-
-        The target user is extracted exclusively from the authorized
-        transaction.
-        """
-
-        self._require_valid_principal(principal)
-
-        if not authorization_id:
-            raise TransactionAuthorizationApplicationError(
-                "Transaction authorization ID is required."
-            )
-
-        if not isinstance(transaction, CanonicalTransaction):
-            raise TransactionAuthorizationApplicationError(
-                "Canonical transaction is required."
-            )
-
-        execution_clock = (
-            clock
-            if clock is not None
-            else self._clock
+        authorization = self._resolve_execution_authorization(
+            authorization_id=authorization_id,
+            transaction=transaction,
+            expected_operation=self.GRANT_OPERATION,
         )
 
-        self._validate_expected_grant_transaction(transaction)
-
-        result = (
-            self._transaction_authorization_service
-            .consume_authorization(
-                principal=principal,
-                authorization_id=authorization_id,
-                expected_transaction=transaction,
-                clock=execution_clock,
-                required_assurance_level=(
-                    self.REQUIRED_ASSURANCE_LEVEL
-                ),
-            )
+        result = self._consume(
+            principal=principal,
+            authorization=authorization,
+            clock=clock,
         )
 
         if result.decision is not TransactionAuthorizationDecision.ALLOW:
             raise PermissionError("transaction authorization denied")
 
         target_user_id = self._target_user_id_from_transaction(
-            transaction
+            authorization.transaction,
+            expected_operation=self.GRANT_OPERATION,
+            expected_risk_operation="grant",
         )
 
         return await self._developer_admin_service.grant_developer_admin(
@@ -223,38 +242,159 @@ class DeveloperAdminTransactionService:
             user_id=target_user_id,
         )
 
+    async def execute_revoke(
+        self,
+        *,
+        principal: Principal,
+        authorization_id: str,
+        transaction: CanonicalTransaction | None = None,
+        clock: TrustedClock | None = None,
+    ) -> None:
+        authorization = self._resolve_execution_authorization(
+            authorization_id=authorization_id,
+            transaction=transaction,
+            expected_operation=self.REVOKE_OPERATION,
+        )
+
+        result = self._consume(
+            principal=principal,
+            authorization=authorization,
+            clock=clock,
+        )
+
+        if result.decision is not TransactionAuthorizationDecision.ALLOW:
+            raise PermissionError("transaction authorization denied")
+
+        target_user_id = self._target_user_id_from_transaction(
+            authorization.transaction,
+            expected_operation=self.REVOKE_OPERATION,
+            expected_risk_operation="revoke",
+        )
+
+        await self._developer_admin_service.revoke_developer_admin(
+            actor=principal,
+            user_id=target_user_id,
+        )
+
+    def _consume(
+        self,
+        *,
+        principal: Principal,
+        authorization: TransactionAuthorization,
+        clock: TrustedClock | None,
+    ):
+        self._require_valid_principal(principal)
+
+        return self._transaction_authorization_service.consume_authorization(
+            principal=principal,
+            authorization_id=authorization.authorization_id,
+            expected_transaction=authorization.transaction,
+            clock=clock if clock is not None else self._clock,
+            required_assurance_level=self.REQUIRED_ASSURANCE_LEVEL,
+        )
+
+    def _resolve_execution_authorization(
+        self,
+        *,
+        authorization_id: str,
+        transaction: CanonicalTransaction | None,
+        expected_operation: str,
+    ) -> TransactionAuthorization:
+        if not authorization_id:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction authorization ID is required."
+            )
+
+        authorization = self.get_authorization(
+            authorization_id=authorization_id,
+        )
+
+        if authorization is None:
+            raise TransactionAuthorizationApplicationError(
+                "Transaction authorization was not found."
+            )
+
+        if transaction is not None:
+            if not isinstance(transaction, CanonicalTransaction):
+                raise TransactionAuthorizationApplicationError(
+                    "Canonical transaction is required."
+                )
+
+            if (
+                transaction.canonical_representation()
+                != authorization.transaction.canonical_representation()
+            ):
+                raise TransactionAuthorizationApplicationError(
+                    "Canonical transaction binding mismatch."
+                )
+
+        self._target_user_id_from_transaction(
+            authorization.transaction,
+            expected_operation=expected_operation,
+            expected_risk_operation=(
+                "grant"
+                if expected_operation == self.GRANT_OPERATION
+                else "revoke"
+            ),
+        )
+
+        return authorization
+
     def _target_user_id_from_transaction(
         self,
         transaction: CanonicalTransaction,
+        *,
+        expected_operation: str | None = None,
+        expected_risk_operation: str | None = None,
     ) -> UUID:
+        """Extract and validate the target exclusively from the transaction.
+
+        When no expected operation is supplied, this helper defaults to the
+        grant operation because the target-extraction contract is defined
+        against the standard Developer Admin grant transaction.
+
+        Execution paths always supply the explicit expected operation and
+        risk operation, so grant and revoke cannot be substituted for one
+        another.
         """
-        Extract the target from an authorized Developer Admin grant
-        transaction.
-
-        This helper is intentionally strict.
-
-        It is a grant execution helper, therefore a revoke transaction,
-        even if otherwise structurally valid, must never be accepted here.
-        """
-
         if not isinstance(transaction, CanonicalTransaction):
-            raise PermissionError("transaction target is invalid")
+            raise PermissionError("transaction is invalid")
 
-        if transaction.operation != self.GRANT_OPERATION:
-            raise PermissionError("transaction operation is invalid")
+        operation = (
+            expected_operation
+            if expected_operation is not None
+            else self.GRANT_OPERATION
+        )
+
+        risk_operation = (
+            expected_risk_operation
+            if expected_risk_operation is not None
+            else "grant"
+        )
+
+        if transaction.operation != operation:
+            raise PermissionError(
+                "transaction operation is invalid"
+            )
 
         risk_context = dict(transaction.risk_context)
 
-        if risk_context.get("operation") != "grant":
-            raise PermissionError("transaction operation is invalid")
+        if risk_context.get("operation") != risk_operation:
+            raise PermissionError(
+                "transaction risk operation is invalid"
+            )
 
         if risk_context.get("audience") != self.AUDIENCE:
-            raise PermissionError("transaction audience is invalid")
+            raise PermissionError(
+                "transaction audience is invalid"
+            )
 
         target_value = risk_context.get("target_user_id")
 
         if not target_value:
-            raise PermissionError("transaction target is invalid")
+            raise PermissionError(
+                "transaction target is invalid"
+            )
 
         try:
             return UUID(str(target_value))
@@ -263,39 +403,10 @@ class DeveloperAdminTransactionService:
                 "transaction target is invalid"
             ) from exc
 
-    def _validate_expected_grant_transaction(
-        self,
-        transaction: CanonicalTransaction,
-    ) -> None:
-        """
-        Validate the structural contract of a Developer Admin grant
-        transaction before consuming its authorization.
-        """
-
-        if transaction.operation != self.GRANT_OPERATION:
-            raise PermissionError("transaction operation is invalid")
-
-        risk_context = dict(transaction.risk_context)
-
-        if risk_context.get("operation") != "grant":
-            raise PermissionError("transaction operation is invalid")
-
-        if risk_context.get("audience") != self.AUDIENCE:
-            raise PermissionError("transaction audience is invalid")
-
-        self._target_user_id_from_transaction(transaction)
-
     @staticmethod
     def _require_valid_principal(
         principal: Principal,
     ) -> None:
-        """
-        Require the normal authenticated-principal contract.
-
-        This does not derive authentication assurance and must not be used
-        as a substitute for W15.6 assurance evidence.
-        """
-
         if principal is None:
             raise PermissionError(
                 "authenticated principal is required"
@@ -350,6 +461,4 @@ class DeveloperAdminTransactionService:
             )
 
 
-__all__ = [
-    "DeveloperAdminTransactionService",
-]
+__all__ = ["DeveloperAdminTransactionService"]

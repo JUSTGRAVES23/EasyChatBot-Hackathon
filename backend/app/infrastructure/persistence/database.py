@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import Column, Table, create_engine
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -16,6 +17,22 @@ class Base(DeclarativeBase):
     """Canonical SQLAlchemy metadata registry for the platform."""
 
     pass
+
+
+# The authentication subsystem owns the physical ``users`` table and
+# persists it through its raw-SQL repository.  This metadata-only table
+# exists solely so SQLAlchemy can resolve foreign keys from ORM models
+# that reference users.id.  It is not an ORM-mapped User entity and does
+# not create or manage the physical table.
+users_table = Table(
+    "users",
+    Base.metadata,
+    Column(
+        "id",
+        PGUUID(as_uuid=True),
+        nullable=False,
+    ),
+)
 
 
 def database_url() -> str:

@@ -1,0 +1,1406 @@
+﻿===== W18.2 BETA WORLD ACCESS VERIFICATION =====
+
+===== FILE: .\backend\app\application\services\beta_world_access_service.py =====
+
+"""Beta policy for provisioning access to the complete World catalogue."""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+from uuid import UUID
+
+from app.domain.learning.learner_world_access import BETA, LearnerWorldAccess
+
+
+class BetaUserReadBoundary(Protocol):
+    async def get_beta_user(
+        self,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the controlled Beta-user DTO or None."""
+        ...
+
+
+class CanonicalUserIdentityReader(Protocol):
+    async def get_user_for_identity(
+        self,
+        user_id: UUID,
+    ):
+        """Return the canonical user record or None."""
+        ...
+
+
+class WorldCatalogueBoundary(Protocol):
+    def list_all(self):
+        """Return all configured catalogue Worlds."""
+        ...
+
+
+class WorldAccessBoundary(Protocol):
+    async def grant_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+        access_source: str = BETA,
+        allow_disabled_world: bool = False,
+    ) -> LearnerWorldAccess:
+        ...
+
+
+class BetaWorldAccessError(ValueError):
+    """Expected Beta World-access provisioning failure."""
+
+
+class BetaUserNotFoundError(BetaWorldAccessError):
+    """The requested Beta user does not exist."""
+
+
+class BetaUserNotEligibleError(BetaWorldAccessError):
+    """The Beta user is not verified and approved."""
+
+
+class CanonicalUserNotFoundError(BetaWorldAccessError):
+    """The Beta user cannot be resolved through canonical identity."""
+
+
+class BetaWorldAccessService:
+    """
+    Provision durable Beta access for every World in the authoritative catalogue.
+
+    Policy:
+        verified + Beta-approved learner
+            -> all catalogue Worlds
+
+    ``enabled`` is intentionally NOT filtered here. The service uses the
+    explicit WorldAccessService provisioning flag so disabled Worlds can
+    receive durable portfolio access. Runtime/Study Mode entry must still
+    enforce current World availability.
+    """
+
+    def __init__(
+        self,
+        *,
+        beta_user_reader: BetaUserReadBoundary,
+        user_identity_reader: CanonicalUserIdentityReader,
+        world_catalogue: WorldCatalogueBoundary,
+        world_access: WorldAccessBoundary,
+    ) -> None:
+        if beta_user_reader is None:
+            raise ValueError("beta_user_reader is required.")
+        if user_identity_reader is None:
+            raise ValueError("user_identity_reader is required.")
+        if world_catalogue is None:
+            raise ValueError("world_catalogue is required.")
+        if world_access is None:
+            raise ValueError("world_access is required.")
+
+        self._beta_user_reader = beta_user_reader
+        self._user_identity_reader = user_identity_reader
+        self._world_catalogue = world_catalogue
+        self._world_access = world_access
+
+    async def provision_all_worlds(
+        self,
+        *,
+        beta_user_id: str,
+    ) -> tuple[LearnerWorldAccess, ...]:
+        if not isinstance(beta_user_id, str) or not beta_user_id.strip():
+            raise ValueError("beta_user_id is required.")
+
+        beta_user = await self._beta_user_reader.get_beta_user(
+            beta_user_id.strip()
+        )
+
+        if beta_user is None:
+            raise BetaUserNotFoundError(
+                "Beta user does not exist."
+            )
+
+        if not bool(beta_user.get("email_verified")):
+            raise BetaUserNotEligibleError(
+                "Email must be verified before World access provisioning."
+            )
+
+        if not bool(beta_user.get("beta_approved")):
+            raise BetaUserNotEligibleError(
+                "User is not Beta approved."
+            )
+
+        canonical_user_id = self._canonical_uuid(
+            beta_user.get("user_id")
+        )
+
+        canonical_user = await self._user_identity_reader.get_user_for_identity(
+            canonical_user_id
+        )
+
+        if canonical_user is None:
+            raise CanonicalUserNotFoundError(
+                "Canonical user does not exist."
+            )
+
+        worlds = tuple(self._world_catalogue.list_all())
+
+        # The authoritative catalogue is the only source of World scope.
+        # There is deliberately no language/World allow-list here.
+        granted: list[LearnerWorldAccess] = []
+
+        for world in worlds:
+            identifier = getattr(world, "identifier", None)
+
+            if not isinstance(identifier, str) or not identifier.strip():
+                raise BetaWorldAccessError(
+                    "Authoritative World catalogue contains an invalid identifier."
+                )
+
+            access = await self._world_access.grant_access(
+                user_id=canonical_user_id,
+                world_identifier=identifier.strip(),
+                access_source=BETA,
+                allow_disabled_world=True,
+            )
+            granted.append(access)
+
+        return tuple(granted)
+
+    @staticmethod
+    def _canonical_uuid(value: Any) -> UUID:
+        if isinstance(value, UUID):
+            return value
+
+        if not isinstance(value, str) or not value.strip():
+            raise BetaWorldAccessError(
+                "Beta user must expose a canonical UUID user_id."
+            )
+
+        try:
+            return UUID(value.strip())
+        except ValueError as exc:
+            raise BetaWorldAccessError(
+                "Beta user user_id is not a valid canonical UUID."
+            ) from exc
+
+
+__all__ = [
+    "BetaUserNotEligibleError",
+    "BetaUserNotFoundError",
+    "BetaWorldAccessError",
+    "BetaWorldAccessService",
+    "CanonicalUserNotFoundError",
+]
+
+
+===== FILE: .\backend\tests\application\services\test_beta_world_access_service.py =====
+
+from __future__ import annotations
+
+import asyncio
+from uuid import UUID, uuid4
+
+import pytest
+
+from app.application.services.beta_world_access_service import (
+    BetaUserNotEligibleError,
+    BetaUserNotFoundError,
+    BetaWorldAccessError,
+    BetaWorldAccessService,
+    CanonicalUserNotFoundError,
+)
+from app.domain.learning.learner_world_access import (
+    ACTIVE,
+    BETA,
+    LearnerWorldAccess,
+)
+
+
+class FakeBetaUserReader:
+    def __init__(self, user: dict | None) -> None:
+        self.user = user
+
+    async def get_beta_user(self, user_id: str):
+        return self.user
+
+
+class FakeIdentityReader:
+    def __init__(self, user_exists: bool = True) -> None:
+        self.user_exists = user_exists
+        self.requested_ids: list[UUID] = []
+
+    async def get_user_for_identity(self, user_id: UUID):
+        self.requested_ids.append(user_id)
+        return object() if self.user_exists else None
+
+
+class FakeWorld:
+    def __init__(self, identifier: str, world_id: UUID | None = None, enabled: bool = True):
+        self.identifier = identifier
+        self.id = world_id or uuid4()
+        self.enabled = enabled
+
+
+class FakeCatalogue:
+    def __init__(self, worlds: tuple[FakeWorld, ...]) -> None:
+        self.worlds = worlds
+
+    def list_all(self):
+        return self.worlds
+
+
+class FakeWorldAccess:
+    def __init__(self) -> None:
+        self.grants: list[tuple[UUID, str, str]] = []
+        self.records: dict[str, LearnerWorldAccess] = {}
+
+    async def grant_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+        access_source: str = BETA,
+        allow_disabled_world: bool = False,
+    ) -> LearnerWorldAccess:
+        self.grants.append(
+            (user_id, world_identifier, access_source)
+        )
+
+        existing = self.records.get(world_identifier)
+        if existing is not None:
+            return existing
+
+        world_id = uuid4()
+        access = LearnerWorldAccess.grant(
+            user_id=user_id,
+            world_id=world_id,
+            access_source=access_source,
+        )
+        self.records[world_identifier] = access
+        return access
+
+
+def run(awaitable):
+    return asyncio.run(awaitable)
+
+
+def make_service(
+    *,
+    user_id: UUID | None = None,
+    email_verified: bool = True,
+    beta_approved: bool = True,
+    user_exists: bool = True,
+    worlds: tuple[FakeWorld, ...] = (),
+):
+    user_id = user_id or uuid4()
+
+    beta_reader = FakeBetaUserReader(
+        {
+            "user_id": str(user_id),
+            "email": "learner@example.test",
+            "email_verified": email_verified,
+            "beta_approved": beta_approved,
+            "telegram_id": None,
+            "active_world_id": None,
+        }
+    )
+
+    identity_reader = FakeIdentityReader(
+        user_exists=user_exists
+    )
+    catalogue = FakeCatalogue(worlds)
+    access = FakeWorldAccess()
+
+    service = BetaWorldAccessService(
+        beta_user_reader=beta_reader,
+        user_identity_reader=identity_reader,
+        world_catalogue=catalogue,
+        world_access=access,
+    )
+
+    return service, beta_reader, identity_reader, catalogue, access
+
+
+def test_provision_all_worlds_uses_complete_catalogue_without_hard_coded_ids():
+    user_id = uuid4()
+    worlds = (
+        FakeWorld("arabic"),
+        FakeWorld("french", enabled=True),
+        FakeWorld("technology", enabled=False),
+        FakeWorld("science", enabled=False),
+    )
+
+    service, _, identity_reader, _, access = make_service(
+        user_id=user_id,
+        worlds=worlds,
+    )
+
+    result = run(
+        service.provision_all_worlds(
+            beta_user_id="beta-user-1",
+        )
+    )
+
+    assert len(result) == 4
+    assert [item[1] for item in access.grants] == [
+        "arabic",
+        "french",
+        "technology",
+        "science",
+    ]
+    assert all(item[2] == BETA for item in access.grants)
+    assert identity_reader.requested_ids == [user_id]
+
+
+def test_disabled_worlds_are_included_in_beta_portfolio():
+    worlds = (
+        FakeWorld("french", enabled=True),
+        FakeWorld("german", enabled=False),
+    )
+
+    service, _, _, _, access = make_service(worlds=worlds)
+
+    result = run(
+        service.provision_all_worlds(
+            beta_user_id="beta-user-1",
+        )
+    )
+
+    assert len(result) == 2
+    assert [grant[1] for grant in access.grants] == [
+        "french",
+        "german",
+    ]
+
+
+def test_provisioning_is_idempotent_at_world_access_boundary():
+    worlds = (
+        FakeWorld("french"),
+        FakeWorld("spanish"),
+    )
+
+    service, _, _, _, access = make_service(worlds=worlds)
+
+    first = run(
+        service.provision_all_worlds(
+            beta_user_id="beta-user-1",
+        )
+    )
+    second = run(
+        service.provision_all_worlds(
+            beta_user_id="beta-user-1",
+        )
+    )
+
+    assert len(first) == 2
+    assert len(second) == 2
+    assert len(access.records) == 2
+
+
+def test_unverified_beta_user_is_rejected():
+    service, beta_reader, _, _, _ = make_service(
+        email_verified=False,
+    )
+
+    with pytest.raises(
+        BetaUserNotEligibleError,
+        match="Email must be verified",
+    ):
+        run(
+            service.provision_all_worlds(
+                beta_user_id="beta-user-1",
+            )
+        )
+
+
+def test_unapproved_beta_user_is_rejected():
+    service, _, _, _, _ = make_service(
+        beta_approved=False,
+    )
+
+    with pytest.raises(
+        BetaUserNotEligibleError,
+        match="not Beta approved",
+    ):
+        run(
+            service.provision_all_worlds(
+                beta_user_id="beta-user-1",
+            )
+        )
+
+
+def test_missing_beta_user_is_rejected():
+    class MissingBetaUserReader(FakeBetaUserReader):
+        async def get_beta_user(self, user_id: str):
+            return None
+
+    service, _, identity_reader, catalogue, access = make_service()
+
+    service = BetaWorldAccessService(
+        beta_user_reader=MissingBetaUserReader(None),
+        user_identity_reader=identity_reader,
+        world_catalogue=catalogue,
+        world_access=access,
+    )
+
+    with pytest.raises(
+        BetaUserNotFoundError,
+        match="Beta user does not exist",
+    ):
+        run(
+            service.provision_all_worlds(
+                beta_user_id="beta-user-1",
+            )
+        )
+
+
+def test_canonical_identity_is_required():
+    service, _, _, _, _ = make_service(
+        user_exists=False,
+    )
+
+    with pytest.raises(
+        CanonicalUserNotFoundError,
+        match="Canonical user does not exist",
+    ):
+        run(
+            service.provision_all_worlds(
+                beta_user_id="beta-user-1",
+            )
+        )
+
+
+def test_invalid_beta_user_uuid_is_rejected():
+    class InvalidUuidReader(FakeBetaUserReader):
+        async def get_beta_user(self, user_id: str):
+            return {
+                "user_id": "not-a-uuid",
+                "email_verified": True,
+                "beta_approved": True,
+            }
+
+    service, _, identity_reader, catalogue, access = make_service()
+
+    service = BetaWorldAccessService(
+        beta_user_reader=InvalidUuidReader(None),
+        user_identity_reader=identity_reader,
+        world_catalogue=catalogue,
+        world_access=access,
+    )
+
+    with pytest.raises(
+        BetaWorldAccessError,
+        match="valid canonical UUID",
+    ):
+        run(
+            service.provision_all_worlds(
+                beta_user_id="beta-user-1",
+            )
+        )
+
+
+def test_empty_catalogue_returns_empty_portfolio():
+    service, _, _, _, access = make_service(worlds=())
+
+    result = run(
+        service.provision_all_worlds(
+            beta_user_id="beta-user-1",
+        )
+    )
+
+    assert result == ()
+    assert access.grants == []
+
+
+===== FILE: .\backend\app\application\composition\beta_telegram_composition.py =====
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Callable
+
+from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from app.application.beta_access.beta_access_service import BetaAccessService
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from app.application.beta_access.policies import (
+    InMemoryTelegramAbuseProtector,
+    InMemoryTelegramRateLimiter,
+    LoggingTelegramObservability,
+)
+from app.application.beta_access.telegram_conversation_service import (
+    TelegramConversationService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.providers.provider_usage_capture import (
+    ProviderUsageCapture,
+    ProviderUsageContext,
+)
+from app.application.uai.language.language_detector import LanguageDetector
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.interfaces.telegram.beta_private_chat_gate import BetaPrivateChatGate
+from app.interfaces.telegram.beta_start_handler import BetaTelegramStartHandler
+from app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
+from app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from app.infrastructure.worlds.yaml_world_repository import YamlWorldRepository
+from app.providers.llm.llm_provider_factory import LLMProviderFactory
+from src.ai_runtime.providers.usage.repository import (
+    InMemoryProviderUsageRepository,
+    ProviderUsageRepository,
+)
+from src.ai_runtime.providers.usage.service import ProviderUsageService
+
+
+@dataclass(frozen=True)
+class BetaTelegramComposition:
+    beta_access_service: BetaAccessService
+    conversation_runtime: ConversationRuntime
+    conversation_service: TelegramConversationService
+    conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_gate: BetaPrivateChatGate
+    start_handler: BetaTelegramStartHandler
+    adapter: BetaTelegramAdapter
+    runtime: TelegramBotRuntime
+    rate_limiter: Any | None = None
+    abuse_protector: Any | None = None
+    observability: Any | None = None
+    provider_usage_repository: ProviderUsageRepository | None = None
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer."
+        )
+
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default
+
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive number."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive number."
+        )
+
+    return value
+
+
+def create_beta_telegram_composition(
+    *,
+    user_repository: Any,
+    token_repository: Any,
+    binding_repository: Any,
+    conversation_event_repository: Any,
+    privacy_identifier_service: Any,
+    conversation_event_validator: Any,
+    expiration_minutes: int = 1440,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: Callable[[], ConversationRuntime] | None = None,
+    rate_limiter: Any | None = None,
+    abuse_protector: Any | None = None,
+    observability: Any | None = None,
+    provider_usage_capture: ProviderUsageCapture | None = None,
+    provider_usage_repository: ProviderUsageRepository | None = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+    world_resolver: WorldResolver | None = None,
+    language_response_policy: LanguageResponsePolicy | None = None,
+    language_detector: LanguageDetector | None = None,
+) -> BetaTelegramComposition:
+    """Create the Beta Telegram application composition.
+
+    ``functionality_control_service`` is optional at this lower-level
+    composition boundary so isolated application/unit compositions can
+    continue to construct Telegram without requiring infrastructure.
+
+    Production composition is responsible for requiring and supplying
+    the authoritative functionality-control service.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    # Application configuration root:
+    #
+    # backend/app
+    #
+    app_root = (
+        Path(__file__)
+        .resolve()
+        .parents[2]
+    )
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+    if world_resolver is None:
+        world_resolver = WorldResolver(
+            world_repository=world_repository,
+        )
+
+    beta_access_service = BetaAccessService(
+        user_repository=user_repository,
+        token_repository=token_repository,
+        binding_repository=binding_repository,
+        world_resolver=world_resolver,
+        expiration_minutes=expiration_minutes,
+    )
+
+    resolved_usage_repository = provider_usage_repository
+
+    if conversation_runtime is not None:
+        resolved_conversation_runtime = conversation_runtime
+
+    elif conversation_runtime_factory is not None:
+        resolved_conversation_runtime = conversation_runtime_factory()
+
+        # P1.6.1: when production supplies a durable usage repository,
+        # attach usage capture to the factory-created ConversationRuntime.
+        # Keep the existing factory API and explicit runtime injection seam.
+        if (
+            provider_usage_repository is not None
+            and provider_usage_capture is None
+            and isinstance(
+                resolved_conversation_runtime,
+                ConversationRuntime,
+            )
+            and resolved_conversation_runtime.usage_capture is None
+        ):
+            provider_usage_service = ProviderUsageService(
+                provider_usage_repository
+            )
+
+            provider_usage_capture = ProviderUsageCapture(
+                provider_usage_service
+            )
+
+            resolved_conversation_runtime = replace(
+                resolved_conversation_runtime,
+                usage_capture=provider_usage_capture,
+                usage_context=ProviderUsageContext(
+                    capability="conversation",
+                    functionality="chat",
+                    agent="conversation_agent",
+                ),
+            )
+
+    else:
+        if provider_usage_capture is None:
+            if resolved_usage_repository is None:
+                resolved_usage_repository = (
+                    InMemoryProviderUsageRepository()
+                )
+
+            provider_usage_service = ProviderUsageService(
+                resolved_usage_repository
+            )
+
+            provider_usage_capture = ProviderUsageCapture(
+                provider_usage_service
+            )
+
+        resolved_conversation_runtime = ConversationRuntime(
+            llm_provider=LLMProviderFactory.create(),
+            usage_capture=provider_usage_capture,
+            usage_context=ProviderUsageContext(
+                capability="conversation",
+                functionality="chat",
+                agent="conversation_agent",
+            ),
+        )
+
+    resolved_language_response_policy = (
+        language_response_policy or LanguageResponsePolicy()
+    )
+
+    if language_detector is None:
+        raise ValueError(
+            "language_detector is required for Beta Telegram composition."
+        )
+
+    conversation_service = TelegramConversationService(
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_event_repository=conversation_event_repository,
+        privacy_identifier_service=privacy_identifier_service,
+        conversation_event_validator=conversation_event_validator,
+        language_response_policy=resolved_language_response_policy,
+        language_detector=language_detector,
+        world_resolver=world_resolver,
+    )
+
+    resolved_rate_limiter = (
+        rate_limiter
+        or InMemoryTelegramRateLimiter(
+            max_messages=_env_positive_int(
+                "TELEGRAM_RATE_LIMIT_MAX_MESSAGES",
+                100,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_RATE_LIMIT_WINDOW_SECONDS",
+                86400.0,
+            ),
+        )
+    )
+
+    resolved_abuse_protector = (
+        abuse_protector
+        or InMemoryTelegramAbuseProtector(
+            max_messages=_env_positive_int(
+                "TELEGRAM_ABUSE_MAX_MESSAGES",
+                10,
+            ),
+            window_seconds=_env_positive_float(
+                "TELEGRAM_ABUSE_WINDOW_SECONDS",
+                60.0,
+            ),
+        )
+    )
+
+    resolved_observability = (
+        observability
+        or LoggingTelegramObservability(
+            privacy_identifier_service=privacy_identifier_service,
+        )
+    )
+
+    conversation_boundary = BetaTelegramConversationBoundary(
+        conversation_service=conversation_service,
+        beta_access_service=beta_access_service,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        functionality_control_service=functionality_control_service,
+    )
+
+    private_chat_gate = BetaPrivateChatGate(
+        beta_access_service=beta_access_service
+    )
+
+    start_handler = BetaTelegramStartHandler(
+        beta_access_service=beta_access_service
+    )
+
+    adapter = BetaTelegramAdapter(
+        start_handler=start_handler,
+        private_chat_gate=private_chat_gate,
+        conversation_boundary=conversation_boundary,
+    )
+
+    runtime = TelegramBotRuntime(
+        adapter=adapter,
+        conversation_boundary=conversation_boundary,
+    )
+
+    return BetaTelegramComposition(
+        beta_access_service=beta_access_service,
+        conversation_runtime=resolved_conversation_runtime,
+        conversation_service=conversation_service,
+        conversation_boundary=conversation_boundary,
+        private_chat_gate=private_chat_gate,
+        start_handler=start_handler,
+        adapter=adapter,
+        runtime=runtime,
+        rate_limiter=resolved_rate_limiter,
+        abuse_protector=resolved_abuse_protector,
+        observability=resolved_observability,
+        provider_usage_repository=resolved_usage_repository,
+    )
+
+
+__all__ = [
+    "BetaTelegramComposition",
+    "create_beta_telegram_composition",
+]
+
+
+===== FILE: .\backend\app\application\beta_access\beta_access_service.py =====
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import secrets
+
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+from typing import Iterator
+
+from app.application.uai.world.world_resolver import WorldResolver
+
+from .models import (
+    BetaConnectionToken,
+    BetaUserState,
+    TelegramBinding,
+)
+
+from .repositories import (
+    BetaTokenRepository,
+    BetaUserRepository,
+    TelegramBindingRepository,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BetaConnectionTokenResult:
+    token: str
+    connection: BetaConnectionToken
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.token
+        yield self.connection
+
+
+@dataclass(frozen=True)
+class BetaConversationContext:
+    user_id: str
+    telegram_user_id: int
+    email: str
+    world_id: str
+    language_code: str | None
+    character: str
+    level: str
+
+
+class BetaAccessService:
+    """
+    Application boundary for Beta eligibility,
+    Telegram binding and authorization.
+
+    Telegram identity invariant:
+
+        One Telegram identity
+        -> one Beta account
+
+    A Telegram identity that is already connected cannot
+    be rebound to another Beta account through a new
+    connection token.
+
+    World assignment invariant:
+
+        A world must be resolved through the authoritative
+        WorldResolver before its ID can be persisted as the
+        user's active world.
+
+    World conversation invariant:
+
+        A conversation context must be derived from the
+        user's persisted active World through WorldResolver.
+
+        Missing or invalid World configuration fails closed.
+        The service never silently substitutes a default World.
+
+    World compatibility:
+
+        Legacy Beta/Telegram world identifier:
+            world-fr
+
+        Canonical World identifier:
+            french_world
+
+    Legacy identifiers are accepted only at this application
+    compatibility boundary. New persisted assignments always
+    use the canonical identifier returned by WorldResolver.
+    """
+
+    LEGACY_WORLD_ALIASES = {
+        "world-fr": "french_world",
+    }
+
+    def __init__(
+        self,
+        *,
+        user_repository: BetaUserRepository,
+        token_repository: BetaTokenRepository,
+        binding_repository: TelegramBindingRepository,
+        world_resolver: WorldResolver,
+        expiration_minutes: int = 1440,
+    ) -> None:
+        if expiration_minutes <= 0:
+            raise ValueError(
+                "expiration_minutes must be positive."
+            )
+
+        self._users = user_repository
+        self._tokens = token_repository
+        self._bindings = binding_repository
+        self._world_resolver = world_resolver
+        self._expiration_minutes = expiration_minutes
+
+    async def approve_beta(
+        self,
+        user_id: str,
+    ) -> BetaUserState:
+        user = await self._require_user(user_id)
+
+        if not user.email_verified:
+            raise ValueError(
+                "Email must be verified before Beta approval."
+            )
+
+        return await self._users.save(
+            replace(
+                user,
+                beta_approved=True,
+            )
+        )
+
+    async def assign_world(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> BetaUserState:
+        if not world_id:
+            raise ValueError(
+                "world_id is required."
+            )
+
+        user = await self._require_user(user_id)
+
+        if not user.email_verified:
+            raise ValueError(
+                "Email must be verified before World assignment."
+            )
+
+        if not user.beta_approved:
+            raise ValueError(
+                "User is not Beta approved."
+            )
+
+        # Resolve legacy application identifiers to the canonical
+        # World identifier before crossing the authoritative
+        # WorldResolver boundary.
+        canonical_world_id = self.LEGACY_WORLD_ALIASES.get(
+            world_id,
+            world_id,
+        )
+
+        # Resolve the requested World before persistence.
+        #
+        # This is the authoritative World catalogue boundary.
+        # If the World does not exist or is invalid, WorldResolver
+        # raises and active_world_id is not modified.
+        world = self._world_resolver.resolve(
+            canonical_world_id,
+        )
+
+        return await self._users.save(
+            replace(
+                user,
+                active_world_id=world.world_id,
+            )
+        )
+
+    async def create_connection_token(
+        self,
+        user_id: str,
+    ) -> BetaConnectionTokenResult:
+        user = await self._require_user(user_id)
+
+        if not user.email_verified:
+            raise ValueError(
+                "Email is not verified."
+            )
+
+        if not user.beta_approved:
+            raise ValueError(
+                "User is not Beta approved."
+            )
+
+        if not user.active_world_id:
+            raise ValueError(
+                "User must have a Learning World before Telegram access."
+            )
+
+        raw_token = secrets.token_urlsafe(32)
+
+        token = BetaConnectionToken(
+            token_id=secrets.token_hex(16),
+            user_id=user.user_id,
+            token_hash=self.hash_token(
+                raw_token
+            ),
+            expires_at=(
+                datetime.now(timezone.utc)
+                + timedelta(
+                    minutes=self._expiration_minutes
+                )
+            ),
+        )
+
+        await self._tokens.save(token)
+
+        return BetaConnectionTokenResult(
+            token=raw_token,
+            connection=token,
+        )
+
+    async def validate_and_bind(
+        self,
+        *,
+        token: str,
+        telegram_id: int,
+        chat_id: int,
+    ) -> BetaUserState:
+        record = await self._tokens.get_by_hash(
+            self.hash_token(token)
+        )
+
+        if record is None:
+            raise ValueError(
+                "Invalid connection token."
+            )
+
+        if record.used:
+            raise ValueError(
+                "Connection token already used."
+            )
+
+        expires_at = record.expires_at
+
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(
+                tzinfo=timezone.utc
+            )
+
+        if expires_at <= datetime.now(timezone.utc):
+            raise ValueError(
+                "Connection token expired."
+            )
+
+        user = await self._require_user(
+            record.user_id
+        )
+
+        if not user.eligible:
+            raise ValueError(
+                "User is not eligible."
+            )
+
+        # -------------------------------------------------
+        # Telegram identity ownership invariant
+        #
+        # A Telegram identity may belong to only one
+        # Beta account. Never silently transfer ownership.
+        # -------------------------------------------------
+
+        existing_binding = (
+            await self._bindings.get_by_telegram_user_id(
+                str(telegram_id)
+            )
+        )
+
+        if existing_binding is not None:
+            raise ValueError(
+                "Telegram identity is already connected."
+            )
+
+        await self._bindings.save(
+            TelegramBinding(
+                binding_id=secrets.token_hex(16),
+                user_id=user.user_id,
+                telegram_user_id=str(
+                    telegram_id
+                ),
+                chat_id=str(
+                    chat_id
+                ),
+                connected_at=datetime.now(
+                    timezone.utc
+                ),
+            )
+        )
+
+        await self._tokens.mark_used(
+            replace(
+                record,
+                used_at=datetime.now(
+                    timezone.utc
+                ),
+            )
+        )
+
+        return await self._users.save(
+            replace(
+                user,
+                telegram_id=telegram_id,
+            )
+        )
+
+    async def authorize_private_chat(
+        self,
+        telegram_id: int,
+    ) -> BetaUserState:
+        user = await self._users.get_by_telegram_id(
+            telegram_id
+        )
+
+        if user is None:
+            raise PermissionError(
+                "Telegram account is not connected."
+            )
+
+        if not user.active:
+            raise PermissionError(
+                "User is not active."
+            )
+
+        return user
+
+    async def get_conversation_context(
+        self,
+        telegram_user_id: int,
+    ) -> BetaConversationContext:
+        """
+        Resolve the authoritative conversation context for
+        an authorized Telegram learner.
+
+        The persisted active_world_id is treated only as the
+        World identifier. The authoritative World configuration,
+        including its language code, is always obtained through
+        WorldResolver.
+
+        This method deliberately fails closed when no active World
+        is assigned or when the assigned World cannot be resolved.
+        """
+
+        user = await self.authorize_private_chat(
+            telegram_user_id
+        )
+
+        if not user.active_world_id:
+            raise ValueError(
+                "Active learning World is required."
+            )
+
+        canonical_world_id = self._canonical_world_id(
+            user.active_world_id
+        )
+
+        # WorldResolver is the authoritative runtime World boundary.
+        # No language or World defaults are inferred here.
+        world = self._world_resolver.resolve(
+            canonical_world_id
+        )
+
+        return BetaConversationContext(
+            user_id=user.user_id,
+            telegram_user_id=telegram_user_id,
+            email=user.email,
+            world_id=world.world_id,
+            language_code=world.language_code,
+            character="Alix",
+            level="B1",
+        )
+
+    @classmethod
+    def _canonical_world_id(
+        cls,
+        world_id: str | None,
+    ) -> str:
+        """
+        Convert an accepted legacy application identifier to the
+        canonical World identifier.
+
+        A missing identifier is intentionally not replaced with a
+        default World. Callers must fail closed instead.
+        """
+
+        if not world_id:
+            raise ValueError(
+                "Active learning World is required."
+            )
+
+        return cls.LEGACY_WORLD_ALIASES.get(
+            world_id,
+            world_id,
+        )
+
+    @staticmethod
+    def hash_token(
+        token: str,
+    ) -> str:
+        return hashlib.sha256(
+            token.encode("utf-8")
+        ).hexdigest()
+
+    async def _require_user(
+        self,
+        user_id: str,
+    ) -> BetaUserState:
+        user = await self._users.get(
+            user_id
+        )
+
+        if user is None:
+            raise ValueError(
+                "Academy user does not exist."
+            )
+
+        return user
+
+
+__all__ = [
+    "BetaAccessService",
+    "BetaConnectionTokenResult",
+    "BetaConversationContext",
+]
+
+===== ALL CONSUMERS OF BetaWorldAccessService =====
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:1: """Beta policy for provisioning access to the complete World catalogue."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:48: """Expected Beta World-access provisioning failure."""
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:63: class BetaWorldAccessService:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:65: Provision durable Beta access for every World in the authoritative catalogue.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:72: explicit WorldAccessService provisioning flag so disabled Worlds can
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:99: async def provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:118: "Email must be verified before World access provisioning."
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\beta_world_access_service.py:185: "BetaWorldAccessService",
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\services\world_access_service.py:48: higher-level provisioning policy such as Beta portfolio provisioning.
+
+===== ALL TEST REFERENCES =====
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api.py:124: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\test_project_control_center_api_authorization.py:139: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_postgresql_durable_delivery.py:34: created_at, email_verified)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_postgresql_durable_delivery.py:156: SELECT id, email, username, created_at, email_verified,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_postgresql_durable_delivery.py:164: assert row["email_verified"] is True
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_developer_admin_routes.py:33: "email_verified": True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_developer_admin_routes.py:223: email_verified=item["email_verified"],
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_developer_admin_routes.py:231: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_developer_admin_routes.py:294: assert body["administrators"][0]["email_verified"] is True
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_developer_admin_transaction_authorization_integration.py:60: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_developer_admin_transaction_authorization_integration.py:114: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_learner_context.py:58: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_private_chat.py:116: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_study_material.py:27: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_atomicity.py:32: email_verified=verified,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_atomicity.py:157: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_service.py:114: email_verified: bool = True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_service.py:121: email_verified=email_verified,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_service.py:162: email_verified=admin.email_verified,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_service.py:185: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_service.py:204: email_verified=False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_transaction_service.py:62: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_transaction_service.py:88: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_transaction_service.py:242: email_verified=False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_transaction_service.py:651: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_uow_lifecycle.py:29: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\developer_admin\test_developer_admin_uow_lifecycle.py:37: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\provider_management\test_functionality_control_authorizer.py:15: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:8: from app.application.services.beta_world_access_service import (
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:12: BetaWorldAccessService,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:66: allow_disabled_world: bool = False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:93: email_verified: bool = True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:94: beta_approved: bool = True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:104: "email_verified": email_verified,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:105: "beta_approved": beta_approved,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:117: service = BetaWorldAccessService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:127: def test_provision_all_worlds_uses_complete_catalogue_without_hard_coded_ids():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:142: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:167: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:179: def test_provisioning_is_idempotent_at_world_access_boundary():
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:188: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:193: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:205: email_verified=False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:213: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:221: beta_approved=False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:229: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:242: service = BetaWorldAccessService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:254: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:270: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:281: "email_verified": True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:282: "beta_approved": True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:287: service = BetaWorldAccessService(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:299: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\services\test_beta_world_access_service.py:309: service.provision_all_worlds(
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_security.py:57: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_security.py:58: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:60: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:61: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:89: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:90: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:118: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:119: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:144: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_beta_access_world_assignment.py:145: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_phase_b1_telegram_transport.py:95: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_phase_b1_telegram_transport.py:96: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_private_chat_gate.py:95: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_private_chat_gate.py:96: beta_approved=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:127: beta_approved: bool = True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:131: access = FakeBetaAccessService(approved=beta_approved)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws16_beta_telegram_production_smoke.py:129: beta_approved: bool = True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\beta_access\test_ws16_beta_telegram_production_smoke.py:137: access = FakeBetaAccessService(beta_approved)
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\operations_center\test_email_workflows_api_authorization.py:70: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\operations_center\test_functionality_control_api.py:96: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\operations_center\test_m2_1_functionality_control_api.py:68: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\project_control_center\test_project_discovery_api.py:59: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\project_control_center\test_project_registry_api.py:33: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\project_control_center\test_project_registry_api.py:49: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\project_control_center\test_project_registry_excel_api.py:72: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authorization_service.py:17: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authorization_service.py:27: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_authorization_service.py:37: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_principal.py:11: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_principal.py:22: email_verified=False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_transaction_authorization_application.py:52: email_verified=True,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\security\test_transaction_authorization_application.py:145: email_verified=False,
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_service.py:30: self.email_verified = False
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_service.py:217: assert repository.email_verified is False
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_service.py:254: assert repository.email_verified is False
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_service.py:289: assert repository.email_verified is False
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_service.py:315: assert repository.email_verified is False
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\application\identity\test_authentication_service.py:344: assert repository.email_verified is False
+
+===== END W18.2 BETA WORLD ACCESS VERIFICATION =====

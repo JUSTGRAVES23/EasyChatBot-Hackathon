@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿
+from __future__ import annotations
 
 from unittest.mock import MagicMock
 
@@ -40,6 +41,7 @@ def test_composition_injects_durable_usage_repository_into_capture() -> None:
         privacy_identifier_service=MagicMock(),
         conversation_event_validator=MagicMock(),
         conversation_runtime=runtime,
+        beta_world_access_service=MagicMock(),
         provider_usage_repository=repository,
         language_detector=DeterministicLanguageDetector(),
     )
@@ -59,6 +61,7 @@ def test_default_composition_retains_in_memory_usage_repository() -> None:
         privacy_identifier_service=MagicMock(),
         conversation_event_validator=MagicMock(),
         conversation_runtime=runtime,
+        beta_world_access_service=MagicMock(),
         language_detector=DeterministicLanguageDetector(),
     )
 
@@ -80,6 +83,7 @@ def test_provider_usage_repository_is_not_required_for_injected_capture() -> Non
         privacy_identifier_service=MagicMock(),
         conversation_event_validator=MagicMock(),
         conversation_runtime=runtime,
+        beta_world_access_service=MagicMock(),
         provider_usage_capture=capture,
         language_detector=DeterministicLanguageDetector(),
     )

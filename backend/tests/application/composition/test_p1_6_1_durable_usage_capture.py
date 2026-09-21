@@ -1,6 +1,7 @@
-﻿"""P1.6.1 regression: production composition attaches durable usage capture."""
+"""P1.6.1 regression: production composition attaches durable usage capture."""
 
 import asyncio
+from unittest.mock import MagicMock
 
 from app.application.composition.beta_telegram_composition import (
     create_beta_telegram_composition,
@@ -81,6 +82,7 @@ def test_factory_runtime_gets_durable_usage_capture():
         privacy_identifier_service=FakePrivacyIdentifierService(),
         conversation_event_validator=FakeConversationEventValidator(),
         conversation_runtime_factory=lambda: runtime,
+        beta_world_access_service=MagicMock(),
         provider_usage_repository=repo,
         language_detector=DeterministicLanguageDetector(),
     )
@@ -168,6 +170,7 @@ def test_factory_runtime_captures_failure_before_runtime_raises():
         privacy_identifier_service=FakePrivacyIdentifierService(),
         conversation_event_validator=FakeConversationEventValidator(),
         conversation_runtime_factory=lambda: runtime,
+        beta_world_access_service=MagicMock(),
         provider_usage_repository=repo,
         language_detector=DeterministicLanguageDetector(),
     )
@@ -192,4 +195,3 @@ def test_factory_runtime_captures_failure_before_runtime_raises():
     assert repo.event is not None
     assert repo.event.provider == "p1_6_1_failure"
     assert repo.event.success is False
-

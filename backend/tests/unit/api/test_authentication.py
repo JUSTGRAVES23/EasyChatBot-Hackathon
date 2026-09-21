@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -84,6 +85,7 @@ async def test_register_delegates_to_composed_authentication_service() -> None:
     assert result.detail == (
         "Registration successful. Email verification is required."
     )
+
     service.register.assert_awaited_once_with(
         email="USER@example.com",
         username="testuser",
@@ -114,10 +116,20 @@ async def test_register_maps_authentication_error_to_bad_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_creates_secure_session_cookie_and_returns_expiry() -> None:
+async def test_login_creates_secure_session_cookie_and_returns_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This test verifies the production-safe default independently
+    # of any developer-machine .env override.
+    monkeypatch.delenv(
+        "EASYCHATBOT_SESSION_COOKIE_SECURE",
+        raising=False,
+    )
+
     service = AsyncMock()
     session_id = uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
     service.authenticate.return_value = SimpleNamespace(
         session_id=session_id,
         expires_at=expires_at,
@@ -155,6 +167,119 @@ async def test_login_creates_secure_session_cookie_and_returns_expiry() -> None:
     assert "Secure" in cookie
     assert "SameSite=lax" in cookie
     assert "Path=/" in cookie
+
+
+@pytest.mark.asyncio
+async def test_login_allows_explicit_local_http_cookie_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "EASYCHATBOT_SESSION_COOKIE_SECURE",
+        "false",
+    )
+
+    service = AsyncMock()
+    session_id = uuid4()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    service.authenticate.return_value = SimpleNamespace(
+        session_id=session_id,
+        expires_at=expires_at,
+    )
+
+    http_request = build_request(service)
+    response = Response()
+
+    await login(
+        LoginRequest(
+            email="user@example.com",
+            password="Strong-password-123!",
+        ),
+        http_request,
+        response,
+    )
+
+    cookie = response.headers["set-cookie"]
+
+    assert f"easychatbot_session={session_id}" in cookie
+    assert "HttpOnly" in cookie
+    assert "Secure" not in cookie
+    assert "SameSite=lax" in cookie
+    assert "Path=/" in cookie
+
+
+@pytest.mark.asyncio
+async def test_login_defaults_session_cookie_to_secure_when_configuration_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(
+        "EASYCHATBOT_SESSION_COOKIE_SECURE",
+        raising=False,
+    )
+
+    service = AsyncMock()
+    session_id = uuid4()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    service.authenticate.return_value = SimpleNamespace(
+        session_id=session_id,
+        expires_at=expires_at,
+    )
+
+    http_request = build_request(service)
+    response = Response()
+
+    await login(
+        LoginRequest(
+            email="user@example.com",
+            password="Strong-password-123!",
+        ),
+        http_request,
+        response,
+    )
+
+    cookie = response.headers["set-cookie"]
+
+    assert f"easychatbot_session={session_id}" in cookie
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=lax" in cookie
+    assert "Path=/" in cookie
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_invalid_session_cookie_secure_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "EASYCHATBOT_SESSION_COOKIE_SECURE",
+        "not-a-boolean",
+    )
+
+    service = AsyncMock()
+    session_id = uuid4()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    service.authenticate.return_value = SimpleNamespace(
+        session_id=session_id,
+        expires_at=expires_at,
+    )
+
+    http_request = build_request(service)
+    response = Response()
+
+    with pytest.raises(
+        RuntimeError,
+        match="EASYCHATBOT_SESSION_COOKIE_SECURE must be a boolean value",
+    ):
+        await login(
+            LoginRequest(
+                email="user@example.com",
+                password="Strong-password-123!",
+            ),
+            http_request,
+            response,
+        )
 
 
 @pytest.mark.asyncio
