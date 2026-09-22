@@ -13,6 +13,9 @@ from app.application.beta_access.policies.telegram_policy_messages import (
 from app.application.provider_management.functionality_operational_control_service import (
     FunctionalityOperationalControlService,
 )
+from app.application.private_chat.telegram_private_chat_bridge import (
+    TelegramPrivateChatBridge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,7 @@ class BetaTelegramConversationBoundary:
         functionality_control_service: (
             FunctionalityOperationalControlService | None
         ) = None,
+        private_chat_bridge: TelegramPrivateChatBridge | None = None,
     ) -> None:
         if conversation_service is None:
             raise ValueError(
@@ -96,6 +100,7 @@ class BetaTelegramConversationBoundary:
         self._functionality_control_service = (
             functionality_control_service
         )
+        self._private_chat_bridge = private_chat_bridge
 
     async def _record(
         self,
@@ -355,27 +360,43 @@ class BetaTelegramConversationBoundary:
         # Conversation / AI Runtime
         # ---------------------------------------------------------------
         try:
-            context_handler = getattr(
-                self._conversation_service,
-                "handle_telegram_message_with_context",
-                None,
-            )
+            if self._private_chat_bridge is not None:
+                user = getattr(context, "user", None)
+                user_id = getattr(user, "id", None)
 
-            if context_handler is not None:
-                response = await context_handler(
-                    telegram_user_id=telegram_user_id,
+                if user_id is None:
+                    raise RuntimeError(
+                        "Telegram conversation context has no authenticated user id."
+                    )
+
+                response = await self._private_chat_bridge.handle_message(
+                    user_id=str(user_id),
+                    world_id=context.world_id,
                     message=clean_message,
-                    context=context,
                 )
 
             else:
-                response = await (
-                    self._conversation_service
-                    .handle_telegram_message(
+                context_handler = getattr(
+                    self._conversation_service,
+                    "handle_telegram_message_with_context",
+                    None,
+                )
+
+                if context_handler is not None:
+                    response = await context_handler(
                         telegram_user_id=telegram_user_id,
                         message=clean_message,
+                        context=context,
                     )
-                )
+
+                else:
+                    response = await (
+                        self._conversation_service
+                        .handle_telegram_message(
+                            telegram_user_id=telegram_user_id,
+                            message=clean_message,
+                        )
+                    )
 
         except Exception as exc:
             await self._record(

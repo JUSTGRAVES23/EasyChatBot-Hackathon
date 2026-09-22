@@ -10,6 +10,9 @@ from app.application.operations_center.dashboard_composition import (
     OperationsCenterComposition,
     create_operations_center_composition,
 )
+from app.application.operations_center.platform_intelligence_review_api import (
+    PlatformIntelligenceReviewNotConfigured,
+)
 from app.application.provider_management.environment import (
     OperationsEnvironment,
 )
@@ -63,6 +66,9 @@ def create_operations_center_router(
     event_service = resolved_composition.event_service
     provider_usage_dashboard_service = (
         resolved_composition.provider_usage_dashboard_service
+    )
+    platform_intelligence_review_api = (
+        resolved_composition.platform_intelligence_review_api
     )
 
     router = APIRouter(
@@ -163,6 +169,60 @@ def create_operations_center_router(
 
         return _result_as_dict(result)
 
+
+
+    @router.get(
+        "/platform-intelligence/reviews",
+        dependencies=[Depends(require_permission(Permission.INTERNAL_DATA_READ))],
+    )
+    def get_platform_intelligence_reviews() -> dict[str, Any]:
+        try:
+            return platform_intelligence_review_api.list_reviews()
+        except PlatformIntelligenceReviewNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from None
+
+    @router.get(
+        "/platform-intelligence/reviews/{review_item_id}",
+        dependencies=[Depends(require_permission(Permission.INTERNAL_DATA_READ))],
+    )
+    def get_platform_intelligence_review(
+        review_item_id: str,
+    ) -> dict[str, Any]:
+        try:
+            result = platform_intelligence_review_api.get_review(review_item_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from None
+        except PlatformIntelligenceReviewNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from None
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Platform Intelligence review item not found.",
+            )
+        return result
+
+    @router.get(
+        "/platform-intelligence/escalations",
+        dependencies=[Depends(require_permission(Permission.INTERNAL_DATA_READ))],
+    )
+    def get_platform_intelligence_escalations() -> dict[str, Any]:
+        try:
+            return platform_intelligence_review_api.list_escalations()
+        except PlatformIntelligenceReviewNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from None
+
     @router.get("/operational-events")
     def get_operational_events() -> list[dict[str, Any]]:
         incidents = event_service.list_incidents()
@@ -187,4 +247,5 @@ def create_operations_center_router(
 router = create_operations_center_router()
 
 __all__ = ["router", "create_operations_center_router"]
+
 

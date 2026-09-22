@@ -6,6 +6,9 @@ from typing import Any
 from app.application.beta_access.beta_telegram_conversation_boundary import (
     BetaTelegramConversationBoundary,
 )
+from app.application.world_telegram.world_telegram_start_router import (
+    WorldTelegramStartRouter,
+)
 from app.interfaces.telegram.private_chat_gate import (
     BetaPrivateChatGate,
 )
@@ -66,6 +69,7 @@ class BetaTelegramAdapter:
         conversation_boundary: (
             BetaTelegramConversationBoundary | None
         ) = None,
+        world_start_router: WorldTelegramStartRouter | None = None,
     ) -> None:
         if start_handler is None:
             raise ValueError(
@@ -80,6 +84,7 @@ class BetaTelegramAdapter:
         self._start_handler = start_handler
         self._private_chat_gate = private_chat_gate
         self._conversation_boundary = conversation_boundary
+        self._world_start_router = world_start_router
 
     # =========================================================
     # Telegram /start
@@ -158,6 +163,29 @@ class BetaTelegramAdapter:
                 message,
                 text,
             )
+
+        if self._world_start_router is not None:
+            try:
+                world_route = self._world_start_router.resolve(token)
+            except ValueError as exc:
+                await reply(str(exc))
+                return
+            except Exception:
+                logger.exception(
+                    "Telegram World start routing failed."
+                )
+                await reply(
+                    "We could not resolve that Learning World. "
+                    "Please try again."
+                )
+                return
+
+            if world_route is not None:
+                await reply(
+                    "🌍 Learning World route resolved: "
+                    f"{world_route.world_identifier}"
+                )
+                return
 
         await self._start_handler.handle(
             token=token,

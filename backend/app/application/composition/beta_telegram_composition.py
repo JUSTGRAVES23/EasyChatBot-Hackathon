@@ -25,6 +25,9 @@ from app.application.beta_access.telegram_conversation_service import (
 from app.application.provider_management.functionality_operational_control_service import (
     FunctionalityOperationalControlService,
 )
+from app.application.private_chat.telegram_private_chat_bridge import (
+    TelegramPrivateChatBridge,
+)
 from app.application.providers.provider_usage_capture import (
     ProviderUsageCapture,
     ProviderUsageContext,
@@ -39,6 +42,9 @@ from app.application.uai.language.language_response_policy import (
     LanguageResponsePolicy,
 )
 from app.application.uai.world.world_resolver import WorldResolver
+from app.application.world_telegram.world_telegram_start_router import (
+    WorldTelegramStartRouter,
+)
 from app.interfaces.telegram.beta_private_chat_gate import (
     BetaPrivateChatGate,
 )
@@ -69,6 +75,7 @@ class BetaTelegramComposition:
     conversation_runtime: ConversationRuntime
     conversation_service: TelegramConversationService
     conversation_boundary: BetaTelegramConversationBoundary
+    private_chat_bridge: TelegramPrivateChatBridge | None
     private_chat_gate: BetaPrivateChatGate
     start_handler: BetaTelegramStartHandler
     adapter: BetaTelegramAdapter
@@ -146,6 +153,8 @@ def create_beta_telegram_composition(
     world_resolver: WorldResolver | None = None,
     language_response_policy: LanguageResponsePolicy | None = None,
     language_detector: LanguageDetector | None = None,
+    private_chat_service_factory: Callable[[], Any] | None = None,
+    world_start_router: WorldTelegramStartRouter | None = None,
 ) -> BetaTelegramComposition:
     """Create the Beta Telegram application composition.
 
@@ -326,6 +335,13 @@ def create_beta_telegram_composition(
         )
     )
 
+    private_chat_bridge = None
+
+    if private_chat_service_factory is not None:
+        private_chat_bridge = TelegramPrivateChatBridge(
+            private_chat_service_factory=private_chat_service_factory,
+        )
+
     conversation_boundary = BetaTelegramConversationBoundary(
         conversation_service=conversation_service,
         beta_access_service=beta_access_service,
@@ -333,6 +349,7 @@ def create_beta_telegram_composition(
         abuse_protector=resolved_abuse_protector,
         observability=resolved_observability,
         functionality_control_service=functionality_control_service,
+        private_chat_bridge=private_chat_bridge,
     )
 
     private_chat_gate = BetaPrivateChatGate(
@@ -349,6 +366,7 @@ def create_beta_telegram_composition(
         start_handler=start_handler,
         private_chat_gate=private_chat_gate,
         conversation_boundary=conversation_boundary,
+        world_start_router=world_start_router,
     )
 
     runtime = TelegramBotRuntime(
@@ -362,6 +380,7 @@ def create_beta_telegram_composition(
         conversation_runtime=resolved_conversation_runtime,
         conversation_service=conversation_service,
         conversation_boundary=conversation_boundary,
+        private_chat_bridge=private_chat_bridge,
         private_chat_gate=private_chat_gate,
         start_handler=start_handler,
         adapter=adapter,
@@ -377,3 +396,5 @@ __all__ = [
     "BetaTelegramComposition",
     "create_beta_telegram_composition",
 ]
+
+

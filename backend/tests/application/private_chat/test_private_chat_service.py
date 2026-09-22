@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.ai_runtime.conversation.conversation_runtime import ConversationRuntimeContext
 from app.application.private_chat.models import (
     PrivateChatActiveConversation,
     PrivateChatConversation,
@@ -21,8 +22,20 @@ def run_async(coro):
 
 @dataclass
 class FakeWorld:
-    id: str
+    # Mirrors the runtime-facing WorldContext contract used by
+    # PrivateChatService when constructing ConversationRuntimeContext.
+    world_id: str
+    name: str
     language_code: str | None = None
+    world_type: str = "language"
+    learning_domain: str = "language_learning"
+    language_policy: object | None = None
+
+    @property
+    def id(self) -> str:
+        # Preserve the existing test contract used by the language-policy
+        # assertions while keeping world_id authoritative for runtime context.
+        return self.world_id
 
 
 class FakeWorldResolver:
@@ -32,8 +45,16 @@ class FakeWorldResolver:
     def resolve(self, world_id: str) -> FakeWorld:
         self.calls.append(world_id)
         worlds = {
-            "polish_world": FakeWorld("polish_world", "pl"),
-            "french_world": FakeWorld("french_world", "fr"),
+            "polish_world": FakeWorld(
+                world_id="polish_world",
+                name="Polish World",
+                language_code="pl",
+            ),
+            "french_world": FakeWorld(
+                world_id="french_world",
+                name="French World",
+                language_code="fr",
+            ),
         }
         world = worlds.get(world_id)
         if world is None:
@@ -65,17 +86,20 @@ class FakeLanguageResponsePolicy:
 
 
 class FakeConversationRuntime:
-    def __init__(self, response: str = "DzieÅ„ dobry!") -> None:
+    def __init__(self, response: str = "Dzień dobry!") -> None:
         self.response = response
         self.calls: list[tuple[str, str]] = []
+        self.context: ConversationRuntimeContext | None = None
 
     async def respond(
         self,
         *,
         character_instruction: str,
         learner_message: str,
+        context: ConversationRuntimeContext | None = None,
     ) -> str:
         self.calls.append((character_instruction, learner_message))
+        self.context = context
         return self.response
 
 
@@ -390,7 +414,7 @@ def test_active_lookup_returns_existing_history(
         service.send_message(
             user_id="user-1",
             conversation_id=conversation.conversation.conversation_id,
-            message="CzeÅ›Ä‡!",
+            message="Cześć!",
         )
     )
 
@@ -408,7 +432,7 @@ def test_active_lookup_returns_existing_history(
         "assistant",
     ]
 
-    assert resumed.messages[0].content == "CzeÅ›Ä‡!"
+    assert resumed.messages[0].content == "Cześć!"
 
 
 def test_restart_creates_new_active_conversation_and_preserves_old_one(
@@ -426,7 +450,7 @@ def test_restart_creates_new_active_conversation_and_preserves_old_one(
         service.send_message(
             user_id="user-1",
             conversation_id=first_id,
-            message="CzeÅ›Ä‡!",
+            message="Cześć!",
         )
     )
 
@@ -487,7 +511,7 @@ def test_send_message_does_not_change_active_conversation(
         service.send_message(
             user_id="user-1",
             conversation_id=conversation_id,
-            message="DzieÅ„ dobry!",
+            message="Dzień dobry!",
         )
     )
 
@@ -511,7 +535,7 @@ def test_polish_world_produces_pl(
         service.send_message(
             user_id="user-1",
             conversation_id=conversation.conversation_id,
-            message="DzieÅ„ dobry!",
+            message="Dzień dobry!",
         )
     )
 
@@ -539,7 +563,7 @@ def test_world_is_derived_from_persisted_conversation(
         service.send_message(
             user_id="user-1",
             conversation_id=conversation.conversation_id,
-            message="CzeÅ›Ä‡!",
+            message="Cześć!",
         )
     )
 
@@ -557,7 +581,7 @@ def test_another_user_cannot_access_conversation(service):
             service.send_message(
                 user_id="user-2",
                 conversation_id=conversation.conversation_id,
-                message="CzeÅ›Ä‡!",
+                message="Cześć!",
             )
         )
 
@@ -638,13 +662,17 @@ def test_runtime_uses_server_controlled_character_instruction(
         service.send_message(
             user_id="user-1",
             conversation_id=conversation.conversation_id,
-            message="DzieÅ„ dobry!",
+            message="Dzień dobry!",
         )
     )
 
     assert runtime.calls == [
-        ("You are Yeti.", "DzieÅ„ dobry!")
+        ("You are Yeti.", "Dzień dobry!")
     ]
+    assert runtime.context is not None
+    assert runtime.context.world_id == "polish_world"
+    assert runtime.context.response_language == "pl"
+    assert runtime.context.history == ()
 
 
 def test_runtime_failure_does_not_persist_messages(
@@ -657,6 +685,7 @@ def test_runtime_failure_does_not_persist_messages(
             *,
             character_instruction,
             learner_message,
+            context=None,
         ):
             raise RuntimeError("provider failure")
 
@@ -682,7 +711,7 @@ def test_runtime_failure_does_not_persist_messages(
             service.send_message(
                 user_id="user-1",
                 conversation_id=conversation.conversation_id,
-                message="CzeÅ›Ä‡!",
+                message="Cześć!",
             )
         )
 
@@ -696,3 +725,36 @@ def test_service_closes_request_scoped_repository(
     service.close()
 
     assert repository.close_count == 1
+
+def test_runtime_receives_persisted_conversation_history(
+    service,
+    runtime,
+):
+    conversation = service.create_conversation(
+        user_id="user-1",
+        world_id="polish_world",
+    )
+
+    run_async(
+        service.send_message(
+            user_id="user-1",
+            conversation_id=conversation.conversation_id,
+            message="Pierwsza wiadomość",
+        )
+    )
+
+    run_async(
+        service.send_message(
+            user_id="user-1",
+            conversation_id=conversation.conversation_id,
+            message="Druga wiadomość",
+        )
+    )
+
+    assert runtime.context is not None
+    assert [(turn.role, turn.content) for turn in runtime.context.history] == [
+        ("user", "Pierwsza wiadomość"),
+        ("assistant", "Dzień dobry!"),
+    ]
+    assert runtime.context.world_id == "polish_world"
+    assert runtime.context.response_language == "pl"

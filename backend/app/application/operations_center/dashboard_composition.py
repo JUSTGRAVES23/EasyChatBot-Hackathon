@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from app.application.health.operational_dashboard_service import (
     OperationalDashboardService,
@@ -14,6 +14,9 @@ from app.application.health.production_health_configuration import (
 )
 from app.application.health.production_readiness_service import (
     ProductionReadinessService,
+)
+from app.application.operations_center.platform_intelligence_review_api import (
+    create_platform_intelligence_review_api,
 )
 from app.application.operations_center.announcement_group_operations_api import (
     AnnouncementGroupOperationsAPI,
@@ -56,6 +59,8 @@ class OperationsCenterComposition:
         functionality_control_service: (
             FunctionalityOperationalControlService | None
         ) = None,
+        platform_intelligence_review_source: PlatformIntelligenceReviewSource | None = None,
+        platform_intelligence_review_api: PlatformIntelligenceReviewAPI | None = None,
     ) -> None:
         configuration = ProductionHealthConfiguration()
 
@@ -101,6 +106,13 @@ class OperationsCenterComposition:
             functionality_control_service=functionality_control_service,
         )
 
+        self._platform_intelligence_review_api = (
+            platform_intelligence_review_api
+            if platform_intelligence_review_api is not None
+            else create_platform_intelligence_review_api(
+                source=platform_intelligence_review_source
+            )
+        )
         self._event_service = event_service
         self._dashboard_service = dashboard_service
         self._dashboard_api = dashboard_api
@@ -148,6 +160,10 @@ class OperationsCenterComposition:
         return self._functionality_control_service
 
     @property
+    def platform_intelligence_review_api(self) -> PlatformIntelligenceReviewAPI:
+        return self._platform_intelligence_review_api
+
+    @property
     def provider_usage_dashboard_service(
         self,
     ) -> ProviderUsageDashboardService | None:
@@ -162,10 +178,14 @@ def create_operations_center_composition(
     functionality_control_service: (
         FunctionalityOperationalControlService | None
     ) = None,
+    platform_intelligence_review_source: PlatformIntelligenceReviewSource | None = None,
+    platform_intelligence_review_api: PlatformIntelligenceReviewAPI | None = None,
 ) -> OperationsCenterComposition:
     return OperationsCenterComposition(
         provider_usage_dashboard_service=provider_usage_dashboard_service,
         functionality_control_service=functionality_control_service,
+        platform_intelligence_review_source=platform_intelligence_review_source,
+        platform_intelligence_review_api=platform_intelligence_review_api,
     )
 
 
@@ -193,6 +213,8 @@ __all__ = [
     "create_private_classroom_operations_api",
     "create_announcement_group_operations_api",
 ]
+
+
 
 
 

@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+    ConversationRuntimeContext,
+    ConversationTurn,
+)
 from app.application.private_chat.models import (
     PrivateChatActiveConversation,
     PrivateChatConversation,
@@ -16,6 +20,7 @@ from app.application.uai.language.language_response_policy import (
     LanguageResponsePolicy,
 )
 from app.application.uai.world.world_resolver import WorldResolver
+
 
 MAX_PRIVATE_CHAT_MESSAGE_LENGTH = 10_000
 MAX_ACTIVE_PRIVATE_CHAT_MESSAGES = 20
@@ -201,10 +206,34 @@ class PrivateChatService:
             )
         )
 
+        history = self._repository.get_recent_messages(
+            conversation_id=conversation_id,
+            user_id=normalized_user_id,
+            world_id=conversation.world_id,
+            limit=MAX_ACTIVE_PRIVATE_CHAT_MESSAGES,
+        )
+
+        runtime_context = ConversationRuntimeContext(
+            world_id=world.world_id,
+            world_name=world.name,
+            language_code=world.language_code,
+            world_type=world.world_type,
+            learning_domain=world.learning_domain,
+            response_language=response_language,
+            history=tuple(
+                ConversationTurn(
+                    role=message.role,
+                    content=message.content,
+                )
+                for message in history
+            ),
+        )
+
         # Runtime/provider execution happens before persistence.
         response = await self._conversation_runtime.respond(
             character_instruction=self._character_instruction,
             learner_message=normalized_message,
+            context=runtime_context,
         )
 
         now = datetime.now(timezone.utc)
