@@ -1,0 +1,282 @@
+
+===== FILE: .\app\domain\payment\models.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+
+class BillingInterval(str, Enum):
+    MONTH = "month"
+    YEAR = "year"
+
+
+class CheckoutMode(str, Enum):
+    PAYMENT = "payment"
+    SUBSCRIPTION = "subscription"
+
+
+class SubscriptionStatus(str, Enum):
+    INCOMPLETE = "incomplete"
+    TRIALING = "trialing"
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELED = "canceled"
+    UNPAID = "unpaid"
+    PAUSED = "paused"
+
+
+@dataclass(frozen=True)
+class PaymentPlan:
+    key: str
+    display_name: str
+    stripe_price_id: str | None
+    mode: CheckoutMode
+    interval: BillingInterval | None = None
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class CheckoutRequest:
+    user_id: str
+    price_id: str
+    mode: CheckoutMode
+    success_url: str
+    cancel_url: str
+
+
+@dataclass(frozen=True)
+class CheckoutSession:
+    provider_session_id: str
+    checkout_url: str
+
+
+@dataclass(frozen=True)
+class BillingPortalSession:
+    provider_session_id: str
+    portal_url: str
+
+
+@dataclass(frozen=True)
+class PaymentEvent:
+    event_id: str
+    event_type: str
+    payload: dict[str, Any]
+
+===== FILE: .\app\application\payment\ports.py =====
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from app.domain.payment.models import (
+    BillingPortalSession,
+    CheckoutRequest,
+    CheckoutSession,
+    PaymentEvent,
+)
+
+
+class PaymentProvider(ABC):
+    @abstractmethod
+    def create_customer(self, *, user_id: str, email: str, name: str | None = None) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_checkout_session(self, request: CheckoutRequest, *, customer_id: str | None) -> CheckoutSession:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_billing_portal_session(self, *, customer_id: str, return_url: str) -> BillingPortalSession:
+        raise NotImplementedError
+
+    @abstractmethod
+    def construct_webhook_event(self, payload: bytes, signature: str) -> PaymentEvent:
+        raise NotImplementedError
+
+
+class PaymentEventRepository(ABC):
+    @abstractmethod
+    def has_processed(self, event_id: str) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_received(self, event: PaymentEvent) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_processed(self, event_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_failed(self, event_id: str, error: str) -> None:
+        raise NotImplementedError
+
+
+class EntitlementService(ABC):
+    @abstractmethod
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        raise NotImplementedError
+
+===== FILE: .\app\application\payment\services.py =====
+
+from __future__ import annotations
+
+from app.application.payment.ports import EntitlementService, PaymentEventRepository, PaymentProvider
+from app.domain.payment.models import CheckoutRequest
+
+
+class CreateCheckoutSession:
+    def __init__(self, provider: PaymentProvider):
+        self.provider = provider
+
+    def execute(self, request: CheckoutRequest, *, stripe_customer_id: str | None):
+        return self.provider.create_checkout_session(request, customer_id=stripe_customer_id)
+
+
+class CreateBillingPortalSession:
+    def __init__(self, provider: PaymentProvider):
+        self.provider = provider
+
+    def execute(self, *, stripe_customer_id: str, return_url: str):
+        return self.provider.create_billing_portal_session(
+            customer_id=stripe_customer_id,
+            return_url=return_url,
+        )
+
+
+class ProcessStripeWebhook:
+    def __init__(self, provider: PaymentProvider, events: PaymentEventRepository, entitlements: EntitlementService):
+        self.provider = provider
+        self.events = events
+        self.entitlements = entitlements
+
+    def execute(self, *, payload: bytes, signature: str):
+        event = self.provider.construct_webhook_event(payload, signature)
+        if self.events.has_processed(event.event_id):
+            return {"status": "already_processed", "event_id": event.event_id}
+
+        self.events.record_received(event)
+        try:
+            self.entitlements.handle_payment_event(event)
+            self.events.mark_processed(event.event_id)
+            return {"status": "processed", "event_id": event.event_id}
+        except Exception as exc:
+            self.events.mark_failed(event.event_id, str(exc))
+            raise
+
+===== FILE: .\app\infrastructure\payment\stripe_provider.py =====
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import stripe
+
+from app.application.payment.ports import PaymentProvider
+from app.domain.payment.models import BillingPortalSession, CheckoutRequest, CheckoutSession, PaymentEvent
+
+
+class StripePaymentProvider(PaymentProvider):
+    """Stripe infrastructure adapter. Keep Stripe-specific SDK usage here."""
+
+    def __init__(self, secret_key: str | None = None, webhook_secret: str | None = None):
+        self.secret_key = secret_key or os.environ["STRIPE_SECRET_KEY"]
+        self.webhook_secret = webhook_secret or os.environ["STRIPE_WEBHOOK_SECRET"]
+        stripe.api_key = self.secret_key
+
+    def create_customer(self, *, user_id: str, email: str, name: str | None = None) -> str:
+        customer = stripe.Customer.create(
+            email=email,
+            name=name,
+            metadata={"easyworld_user_id": user_id},
+        )
+        return customer.id
+
+    def create_checkout_session(self, request: CheckoutRequest, *, customer_id: str | None) -> CheckoutSession:
+        params: dict[str, Any] = {
+            "mode": request.mode.value,
+            "line_items": [{"price": request.price_id, "quantity": 1}],
+            "success_url": request.success_url,
+            "cancel_url": request.cancel_url,
+            "metadata": {
+                "easyworld_user_id": request.user_id,
+                "easyworld_price_id": request.price_id,
+            },
+        }
+        if customer_id:
+            params["customer"] = customer_id
+
+        session = stripe.checkout.Session.create(**params)
+        return CheckoutSession(
+            provider_session_id=session.id,
+            checkout_url=session.url,
+        )
+
+    def create_billing_portal_session(self, *, customer_id: str, return_url: str) -> BillingPortalSession:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=return_url,
+        )
+        return BillingPortalSession(
+            provider_session_id=session.id,
+            portal_url=session.url,
+        )
+
+    def construct_webhook_event(self, payload: bytes, signature: str) -> PaymentEvent:
+        event = stripe.Webhook.construct_event(payload, signature, self.webhook_secret)
+        return PaymentEvent(
+            event_id=event["id"],
+            event_type=event["type"],
+            payload=event.to_dict_recursive(),
+        )
+
+===== FILE: .\app\infrastructure\payment\in_memory_repositories.py =====
+
+from __future__ import annotations
+
+from app.domain.payment.models import PaymentEvent
+
+
+class InMemoryPaymentEventRepository:
+    """Development/test implementation. Replace with the canonical EASYWORLD DB repository."""
+
+    def __init__(self):
+        self.events: dict[str, PaymentEvent] = {}
+        self.status: dict[str, str] = {}
+        self.errors: dict[str, str] = {}
+
+    def has_processed(self, event_id: str) -> bool:
+        return self.status.get(event_id) == "processed"
+
+    def record_received(self, event: PaymentEvent) -> None:
+        self.events.setdefault(event.event_id, event)
+        self.status.setdefault(event.event_id, "received")
+
+    def mark_processed(self, event_id: str) -> None:
+        self.status[event_id] = "processed"
+
+    def mark_failed(self, event_id: str, error: str) -> None:
+        self.status[event_id] = "failed"
+        self.errors[event_id] = error
+
+===== FILE: .\app\infrastructure\payment\noop_entitlements.py =====
+
+from __future__ import annotations
+
+from app.domain.payment.models import PaymentEvent
+
+
+class NoOpEntitlementService:
+    """Safe P1–P4 placeholder while EASYWORLD remains free.
+
+    Webhooks can be verified and recorded in tests without granting paid access.
+    Replace with the real EASYWORLD entitlement service in the paid-readiness milestone.
+    """
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        return None

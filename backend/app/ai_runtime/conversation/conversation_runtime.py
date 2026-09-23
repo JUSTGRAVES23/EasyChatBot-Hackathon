@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -91,7 +91,9 @@ class ConversationRuntime:
                 )
 
             if not result.success:
-                raise RuntimeError(result.error or "Provider request failed.")
+                from app.application.failures.provider_failure import ProviderFailure
+
+                raise ProviderFailure.from_result(result)
             return result.content
 
         if isinstance(result, str):
@@ -150,3 +152,4 @@ class ConversationRuntime:
             "[Current learner message]\n"
             f"{learner_message}"
         )
+

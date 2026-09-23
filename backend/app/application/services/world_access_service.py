@@ -1,4 +1,4 @@
-"""Application service for learner-to-learning-world authorization."""
+﻿"""Application service for learner-to-learning-world authorization."""
 
 from __future__ import annotations
 
@@ -130,6 +130,66 @@ class WorldAccessService:
             access,
         )
 
+    async def revoke_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+        access_source: str | None = None,
+    ) -> LearnerWorldAccess | None:
+        """Revoke durable World access without deleting its history.
+
+        When ``access_source`` is supplied, only access originating from
+        that source is revoked.
+
+        This prevents subscription lifecycle changes from accidentally
+        revoking independent Beta or Admin access.
+
+        The operation is idempotent:
+        - no record -> None;
+        - already revoked -> existing record;
+        - active matching record -> revoked record;
+        - source mismatch -> existing record unchanged.
+        """
+        self._validate_user_id(user_id)
+        identifier = self._normalize_world_identifier(world_identifier)
+
+        world = await asyncio.to_thread(
+            self._learning_world_repository.get_by_identifier,
+            identifier,
+        )
+
+        if world is None:
+            raise LearningWorldNotFoundError(
+                f"Learning World does not exist: {identifier}"
+            )
+
+        world_id = self._world_id(world)
+
+        existing = await asyncio.to_thread(
+            self._access_repository.get_by_user_and_world,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        if existing is None:
+            return None
+
+        if (
+            access_source is not None
+            and existing.access_source != access_source
+        ):
+            return existing
+
+        if not existing.is_active():
+            return existing
+
+        revoked = existing.revoke()
+
+        return await asyncio.to_thread(
+            self._access_repository.save,
+            revoked,
+        )
     async def has_access(
         self,
         *,
@@ -236,3 +296,4 @@ __all__ = [
     "WorldAccessError",
     "WorldAccessService",
 ]
+

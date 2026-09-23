@@ -1,0 +1,1456 @@
+============================================================
+PI-5A.6 FINAL CONCRETE COMPOSITION SOURCES
+Generated: 2026-09-23 18:09:02
+============================================================
+
+============================================================
+1. DELIVERY REPOSITORY
+============================================================
+"""PostgreSQL persistence adapter for PI escalation delivery."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryRecord,
+    PlatformIntelligenceEscalationDeliveryRepository,
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_delivery_audit import (
+    PlatformIntelligenceEscalationDeliveryAuditRecord,
+    PlatformIntelligenceEscalationDeliveryAuditStatus,
+)
+from app.infrastructure.operations_center.sqlalchemy_platform_intelligence_escalation_delivery_audit_repository import (
+    SqlAlchemyPlatformIntelligenceEscalationDeliveryAuditRepository,
+)
+
+
+class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
+    PlatformIntelligenceEscalationDeliveryRepository
+):
+    _TABLE = "platform_intelligence_escalation_deliveries"
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def get_by_notification_key(self, notification_key: str):
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT notification_key, recommendation_id,
+                           risk_decision_id, review_item_id, correlation_id,
+                           attempt, status, provider_message_id, error_code,
+                           created_at, updated_at
+                    FROM {self._TABLE}
+                    WHERE notification_key = :notification_key
+                    """
+                ),
+                {"notification_key": notification_key},
+            )
+            row = result.mappings().first()
+            return None if row is None else self._to_record(row)
+
+    async def list_retry_candidates(self, *, limit: int):
+        if limit < 1:
+            raise ValueError("limit must be at least 1.")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT notification_key, recommendation_id,
+                           risk_decision_id, review_item_id, correlation_id,
+                           attempt, status, provider_message_id, error_code,
+                           created_at, updated_at
+                    FROM {self._TABLE}
+                    WHERE status IN (:failed, :started)
+                    ORDER BY updated_at ASC NULLS FIRST, notification_key ASC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                    "limit": limit,
+                },
+            )
+            return tuple(self._to_record(row) for row in result.mappings().all())
+
+    async def claim_retry_candidate(
+        self, *, notification_key: str, claim_token: str,
+        claimed_at: datetime, lease_expires_at: datetime,
+    ) -> bool:
+        if not notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not claim_token.strip():
+            raise ValueError("claim_token must be nonblank.")
+        if claimed_at.tzinfo is None or claimed_at.utcoffset() is None:
+            raise ValueError("claimed_at must be timezone-aware.")
+        if lease_expires_at.tzinfo is None or lease_expires_at.utcoffset() is None:
+            raise ValueError("lease_expires_at must be timezone-aware.")
+        if lease_expires_at <= claimed_at:
+            raise ValueError("lease_expires_at must be after claimed_at.")
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET claim_token = :claim_token,
+                        claimed_at = :claimed_at,
+                        lease_expires_at = :lease_expires_at
+                    WHERE notification_key = :notification_key
+                      AND status IN (:failed, :started)
+                      AND (
+                          lease_expires_at IS NULL
+                          OR lease_expires_at <= :claimed_at
+                      )
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "claim_token": claim_token,
+                    "claimed_at": claimed_at,
+                    "lease_expires_at": lease_expires_at,
+                    "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                },
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def create_started(
+        self, *, notification_key: str, recommendation_id: str,
+        risk_decision_id: str, review_item_id: str, correlation_id: str,
+    ):
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            await session.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._TABLE} (
+                        notification_key, recommendation_id, risk_decision_id,
+                        review_item_id, correlation_id, attempt, status,
+                        provider_message_id, error_code, created_at, updated_at,
+                        claim_token, claimed_at, lease_expires_at
+                    )
+                    VALUES (
+                        :notification_key, :recommendation_id, :risk_decision_id,
+                        :review_item_id, :correlation_id, 1, :status,
+                        NULL, NULL, :created_at, :updated_at,
+                        NULL, NULL, NULL
+                    )
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "recommendation_id": recommendation_id,
+                    "risk_decision_id": risk_decision_id,
+                    "review_item_id": review_item_id,
+                    "correlation_id": correlation_id,
+                    "status": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await self._insert_audit(
+                session,
+                notification_key=notification_key,
+                recommendation_id=recommendation_id,
+                risk_decision_id=risk_decision_id,
+                review_item_id=review_item_id,
+                correlation_id=correlation_id,
+                attempt=1,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.STARTED,
+                occurred_at=now,
+            )
+            await session.commit()
+
+        record = await self.get_by_notification_key(notification_key)
+        if record is None:
+            raise RuntimeError("Created PI escalation delivery could not be reloaded.")
+        return record
+
+    async def mark_succeeded(
+        self, *, notification_key: str, provider_message_id: str | None,
+    ):
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET status = :status,
+                        provider_message_id = :provider_message_id,
+                        error_code = NULL,
+                        updated_at = :updated_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL
+                    WHERE notification_key = :notification_key
+                    RETURNING notification_key, recommendation_id,
+                              risk_decision_id, review_item_id, correlation_id,
+                              attempt, status, provider_message_id,
+                              error_code, created_at, updated_at
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "status": PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED.value,
+                    "provider_message_id": provider_message_id,
+                    "updated_at": now,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await session.rollback()
+                raise KeyError(f"Unknown PI escalation notification key: {notification_key}")
+
+            record = self._to_record(row)
+            if not provider_message_id:
+                await session.rollback()
+                raise ValueError("Successful PI delivery requires provider_message_id.")
+
+            await self._insert_audit(
+                session,
+                notification_key=record.notification_key,
+                recommendation_id=record.recommendation_id,
+                risk_decision_id=record.risk_decision_id,
+                review_item_id=record.review_item_id,
+                correlation_id=record.correlation_id,
+                attempt=record.attempt,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.SUCCEEDED,
+                provider_message_id=provider_message_id,
+                occurred_at=now,
+            )
+            await session.commit()
+            return record
+
+    async def mark_failed(self, *, notification_key: str, error_code: str):
+        if not error_code.strip():
+            raise ValueError("error_code must be nonblank.")
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET status = :status,
+                        provider_message_id = NULL,
+                        error_code = :error_code,
+                        updated_at = :updated_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL
+                    WHERE notification_key = :notification_key
+                    RETURNING notification_key, recommendation_id,
+                              risk_decision_id, review_item_id, correlation_id,
+                              attempt, status, provider_message_id,
+                              error_code, created_at, updated_at
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "status": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "error_code": error_code,
+                    "updated_at": now,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await session.rollback()
+                raise KeyError(f"Unknown PI escalation notification key: {notification_key}")
+
+            record = self._to_record(row)
+            await self._insert_audit(
+                session,
+                notification_key=record.notification_key,
+                recommendation_id=record.recommendation_id,
+                risk_decision_id=record.risk_decision_id,
+                review_item_id=record.review_item_id,
+                correlation_id=record.correlation_id,
+                attempt=record.attempt,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.FAILED,
+                error_code=error_code,
+                occurred_at=now,
+            )
+            await session.commit()
+            return record
+
+    async def start_retry(self, *, notification_key: str):
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET attempt = attempt + 1,
+                        status = :started,
+                        provider_message_id = NULL,
+                        error_code = NULL,
+                        updated_at = :updated_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL
+                    WHERE notification_key = :notification_key
+                      AND status = :failed
+                    RETURNING notification_key, recommendation_id,
+                              risk_decision_id, review_item_id, correlation_id,
+                              attempt, status, provider_message_id,
+                              error_code, created_at, updated_at
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                    "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "updated_at": now,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await session.rollback()
+                raise RuntimeError(
+                    "PI escalation delivery can only be retried from FAILED."
+                )
+
+            record = self._to_record(row)
+            await self._insert_audit(
+                session,
+                notification_key=record.notification_key,
+                recommendation_id=record.recommendation_id,
+                risk_decision_id=record.risk_decision_id,
+                review_item_id=record.review_item_id,
+                correlation_id=record.correlation_id,
+                attempt=record.attempt,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.STARTED,
+                occurred_at=now,
+            )
+            await session.commit()
+            return record
+
+    @staticmethod
+    async def _insert_audit(
+        session: AsyncSession,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+        risk_decision_id: str,
+        review_item_id: str,
+        correlation_id: str,
+        attempt: int,
+        status: PlatformIntelligenceEscalationDeliveryAuditStatus,
+        occurred_at: datetime,
+        provider_message_id: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        record = PlatformIntelligenceEscalationDeliveryAuditRecord(
+            audit_id=uuid4(),
+            notification_key=notification_key,
+            recommendation_id=recommendation_id,
+            risk_decision_id=risk_decision_id,
+            review_item_id=review_item_id,
+            correlation_id=correlation_id,
+            attempt=attempt,
+            status=status,
+            provider_message_id=provider_message_id,
+            error_code=error_code,
+            occurred_at=occurred_at,
+        )
+        await SqlAlchemyPlatformIntelligenceEscalationDeliveryAuditRepository.insert_with_session(
+            session, record
+        )
+
+    @staticmethod
+    def _to_record(row: Mapping[str, Any]):
+        return PlatformIntelligenceEscalationDeliveryRecord(
+            notification_key=str(row["notification_key"]),
+            recommendation_id=str(row["recommendation_id"]),
+            risk_decision_id=str(row["risk_decision_id"]),
+            review_item_id=str(row["review_item_id"]),
+            correlation_id=str(row["correlation_id"]),
+            attempt=int(row["attempt"]),
+            status=PlatformIntelligenceEscalationDeliveryStatus(str(row["status"])),
+            provider_message_id=row["provider_message_id"],
+            error_code=row["error_code"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+============================================================
+2. DELIVERY AUDIT REPOSITORY
+============================================================
+"""PostgreSQL read/append adapter for PI delivery audit history."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.application.operations_center.platform_intelligence_escalation_delivery_audit import (
+    PlatformIntelligenceEscalationDeliveryAuditRecord,
+    PlatformIntelligenceEscalationDeliveryAuditRepository,
+    PlatformIntelligenceEscalationDeliveryAuditStatus,
+)
+
+
+class SqlAlchemyPlatformIntelligenceEscalationDeliveryAuditRepository(
+    PlatformIntelligenceEscalationDeliveryAuditRepository
+):
+    _TABLE = "platform_intelligence_escalation_delivery_audit"
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def append(self, record: PlatformIntelligenceEscalationDeliveryAuditRecord) -> None:
+        if record.occurred_at is None:
+            raise ValueError("occurred_at is required for durable audit persistence.")
+        async with self._session_factory() as session:
+            await self._insert(session, record)
+            await session.commit()
+
+    async def list_by_notification_key(self, notification_key: str):
+        if not notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT audit_id, notification_key, recommendation_id,
+                           risk_decision_id, review_item_id, correlation_id,
+                           attempt, status, provider_message_id, error_code,
+                           occurred_at
+                    FROM {self._TABLE}
+                    WHERE notification_key = :notification_key
+                    ORDER BY occurred_at ASC, audit_id ASC
+                    """
+                ),
+                {"notification_key": notification_key},
+            )
+            return tuple(self._to_record(row) for row in result.mappings().all())
+
+    @classmethod
+    async def insert_with_session(
+        cls,
+        session: AsyncSession,
+        record: PlatformIntelligenceEscalationDeliveryAuditRecord,
+    ) -> None:
+        if record.occurred_at is None:
+            raise ValueError("occurred_at is required for durable audit persistence.")
+        await cls._insert(session, record)
+
+    @classmethod
+    async def _insert(
+        cls,
+        session: AsyncSession,
+        record: PlatformIntelligenceEscalationDeliveryAuditRecord,
+    ) -> None:
+        await session.execute(
+            text(
+                f"""
+                INSERT INTO {cls._TABLE} (
+                    audit_id, notification_key, recommendation_id,
+                    risk_decision_id, review_item_id, correlation_id,
+                    attempt, status, provider_message_id, error_code,
+                    occurred_at
+                )
+                VALUES (
+                    :audit_id, :notification_key, :recommendation_id,
+                    :risk_decision_id, :review_item_id, :correlation_id,
+                    :attempt, :status, :provider_message_id, :error_code,
+                    :occurred_at
+                )
+                """
+            ),
+            {
+                "audit_id": record.audit_id,
+                "notification_key": record.notification_key,
+                "recommendation_id": record.recommendation_id,
+                "risk_decision_id": record.risk_decision_id,
+                "review_item_id": record.review_item_id,
+                "correlation_id": record.correlation_id,
+                "attempt": record.attempt,
+                "status": record.status.value,
+                "provider_message_id": record.provider_message_id,
+                "error_code": record.error_code,
+                "occurred_at": record.occurred_at,
+            },
+        )
+
+    @staticmethod
+    def _to_record(row: Mapping[str, Any]) -> PlatformIntelligenceEscalationDeliveryAuditRecord:
+        return PlatformIntelligenceEscalationDeliveryAuditRecord(
+            audit_id=UUID(str(row["audit_id"])),
+            notification_key=str(row["notification_key"]),
+            recommendation_id=str(row["recommendation_id"]),
+            risk_decision_id=str(row["risk_decision_id"]),
+            review_item_id=str(row["review_item_id"]),
+            correlation_id=str(row["correlation_id"]),
+            attempt=int(row["attempt"]),
+            status=PlatformIntelligenceEscalationDeliveryAuditStatus(str(row["status"])),
+            provider_message_id=row["provider_message_id"],
+            error_code=row["error_code"],
+            occurred_at=row["occurred_at"],
+        )
+
+
+============================================================
+3. DISPATCH SERVICE
+============================================================
+from __future__ import annotations
+
+import inspect
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+
+
+def _build_notification_key(recommendation_id: str) -> str:
+    """Build the canonical notification key for one recommendation."""
+    recommendation_id = recommendation_id.strip()
+
+    if not recommendation_id:
+        raise ValueError(
+            "recommendation_id cannot be blank."
+        )
+
+    return (
+        "platform_intelligence_escalation:"
+        f"{recommendation_id}"
+    )
+
+
+class PlatformIntelligenceEscalationDispatchStatus(StrEnum):
+    SENT = "SENT"
+    IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationDispatchRequest:
+    """Authoritative state required before an escalation can be dispatched."""
+
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    risk_level: str
+    risk_score: float
+    quality_gate_status: str
+    review_status: str
+    decision_status: str
+    notification_key: str
+    correlation_id: str
+    route: str
+    reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        required = (
+            self.recommendation_id,
+            self.risk_decision_id,
+            self.review_item_id,
+            self.notification_key,
+            self.correlation_id,
+            self.route,
+            self.risk_level,
+            self.quality_gate_status,
+            self.review_status,
+            self.decision_status,
+        )
+
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in required
+        ):
+            raise ValueError(
+                "Required Platform Intelligence dispatch fields "
+                "cannot be blank."
+            )
+
+        if not 0.0 <= self.risk_score <= 1.0:
+            raise ValueError(
+                "risk_score must be between 0 and 1."
+            )
+
+        if any(
+            not isinstance(reason, str) or not reason.strip()
+            for reason in self.reasons
+        ):
+            raise ValueError(
+                "Dispatch reasons cannot contain blank values."
+            )
+
+        expected_notification_key = _build_notification_key(
+            self.recommendation_id
+        )
+
+        if self.notification_key != expected_notification_key:
+            raise ValueError(
+                "notification_key must match recommendation_id."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationDispatchResult:
+    status: PlatformIntelligenceEscalationDispatchStatus
+    notification_key: str
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    attempt: int | None = None
+
+
+class PlatformIntelligenceEscalationDispatchService:
+    """Revalidate, deduplicate and dispatch one governed escalation."""
+
+    def __init__(
+        self,
+        *,
+        delivery_repository: Any,
+        email_workflow: Any,
+    ) -> None:
+        if delivery_repository is None:
+            raise ValueError(
+                "delivery_repository cannot be None."
+            )
+
+        if email_workflow is None:
+            raise ValueError(
+                "email_workflow cannot be None."
+            )
+
+        self._repository = delivery_repository
+        self._email_workflow = email_workflow
+
+    @staticmethod
+    def build_notification_key(
+        recommendation_id: str,
+    ) -> str:
+        """Return the canonical recommendation-scoped notification key."""
+        return _build_notification_key(recommendation_id)
+
+    async def dispatch(
+        self,
+        *,
+        request: PlatformIntelligenceEscalationDispatchRequest,
+        email_request: Any,
+    ) -> PlatformIntelligenceEscalationDispatchResult:
+        self._revalidate(request)
+
+        existing = await self._repository.get_by_notification_key(
+            request.notification_key
+        )
+
+        if (
+            existing is not None
+            and existing.status
+            is PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED
+        ):
+            return PlatformIntelligenceEscalationDispatchResult(
+                status=(
+                    PlatformIntelligenceEscalationDispatchStatus
+                    .IDEMPOTENT_REPLAY
+                ),
+                notification_key=existing.notification_key,
+                provider_message_id=(
+                    existing.provider_message_id
+                ),
+                attempt=existing.attempt,
+            )
+
+        if existing is None:
+            try:
+                await self._repository.create_started(
+                    notification_key=request.notification_key,
+                    recommendation_id=request.recommendation_id,
+                    risk_decision_id=request.risk_decision_id,
+                    review_item_id=request.review_item_id,
+                    correlation_id=request.correlation_id,
+                )
+            except Exception:
+                # The durable repository owns the unique-key race.
+                # If another worker created the record first, honour
+                # the persisted state.
+                existing = (
+                    await self._repository
+                    .get_by_notification_key(
+                        request.notification_key
+                    )
+                )
+
+                if existing is None:
+                    raise
+
+        elif (
+            existing.status
+            is PlatformIntelligenceEscalationDeliveryStatus.FAILED
+        ):
+            await self._repository.start_retry(
+                notification_key=request.notification_key
+            )
+
+        elif (
+            existing.status
+            is PlatformIntelligenceEscalationDeliveryStatus.STARTED
+        ):
+            # An interrupted attempt is retryable, following the
+            # established durable execution convention.
+            pass
+
+        try:
+            workflow_result = self._email_workflow.send(
+                email_request
+            )
+
+            if inspect.isawaitable(workflow_result):
+                workflow_result = await workflow_result
+
+            # The current PI email workflow may return its request
+            # containing an awaitable `delivery` result.
+            #
+            # Resolve it before marking the durable delivery as
+            # successful so that invocation of the workflow itself
+            # cannot be mistaken for successful provider delivery.
+            delivery = getattr(
+                workflow_result,
+                "delivery",
+                None,
+            )
+
+            if inspect.isawaitable(delivery):
+                delivery = await delivery
+
+            provider_message_id = (
+                self._extract_provider_message_id(
+                    delivery
+                    if delivery is not None
+                    else workflow_result
+                )
+            )
+
+        except Exception as exc:
+            error_code = self._error_code(exc)
+
+            await self._repository.mark_failed(
+                notification_key=request.notification_key,
+                error_code=error_code,
+            )
+
+            return PlatformIntelligenceEscalationDispatchResult(
+                status=(
+                    PlatformIntelligenceEscalationDispatchStatus
+                    .FAILED
+                ),
+                notification_key=request.notification_key,
+                error_code=error_code,
+            )
+
+        await self._repository.mark_succeeded(
+            notification_key=request.notification_key,
+            provider_message_id=provider_message_id,
+        )
+
+        record = (
+            await self._repository.get_by_notification_key(
+                request.notification_key
+            )
+        )
+
+        return PlatformIntelligenceEscalationDispatchResult(
+            status=(
+                PlatformIntelligenceEscalationDispatchStatus
+                .SENT
+            ),
+            notification_key=request.notification_key,
+            provider_message_id=provider_message_id,
+            attempt=(
+                record.attempt
+                if record is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _revalidate(
+        request: PlatformIntelligenceEscalationDispatchRequest,
+    ) -> None:
+        if request.quality_gate_status != "PASSED":
+            raise ValueError(
+                "Dispatch blocked: quality gate is not PASSED."
+            )
+
+        if request.review_status != "IN_REVIEW":
+            raise ValueError(
+                "Dispatch blocked: review is not IN_REVIEW."
+            )
+
+        if request.decision_status != "PENDING_HUMAN_REVIEW":
+            raise ValueError(
+                "Dispatch blocked: decision is not "
+                "PENDING_HUMAN_REVIEW."
+            )
+
+        expected_key = _build_notification_key(
+            request.recommendation_id
+        )
+
+        if request.notification_key != expected_key:
+            raise ValueError(
+                "notification_key does not match "
+                "recommendation_id."
+            )
+
+    @staticmethod
+    def _extract_provider_message_id(
+        result: object,
+    ) -> str | None:
+        if isinstance(result, dict):
+            value = (
+                result.get("provider_message_id")
+                or result.get("id")
+                or result.get("message_id")
+            )
+
+            return (
+                str(value)
+                if value is not None
+                else None
+            )
+
+        return None
+
+    @staticmethod
+    def _error_code(
+        exc: Exception,
+    ) -> str:
+        explicit = getattr(
+            exc,
+            "error_code",
+            None,
+        )
+
+        if (
+            isinstance(explicit, str)
+            and explicit.strip()
+        ):
+            return explicit.strip()[:100]
+
+        return type(exc).__name__.upper()[:100]
+
+============================================================
+4. RETRY POLICY
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import FrozenSet
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryRecord,
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+
+
+class PlatformIntelligenceEscalationRetryPolicyStatus(StrEnum):
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+
+
+class PlatformIntelligenceEscalationRetryDecision(StrEnum):
+    ELIGIBLE = "ELIGIBLE"
+    NOT_ELIGIBLE = "NOT_ELIGIBLE"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationRetryPolicy:
+    """Versioned, explicitly approved retry policy for PI escalation delivery."""
+
+    policy_id: str
+    policy_version: str
+    status: PlatformIntelligenceEscalationRetryPolicyStatus
+    max_attempts: int
+    base_backoff_seconds: int
+    max_backoff_seconds: int
+    retryable_error_codes: FrozenSet[str]
+    retry_interrupted_started: bool = True
+
+    def __post_init__(self) -> None:
+        required = (self.policy_id, self.policy_version)
+
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in required
+        ):
+            raise ValueError(
+                "policy_id and policy_version cannot be blank."
+            )
+
+        if self.max_attempts < 1:
+            raise ValueError(
+                "max_attempts must be at least 1."
+            )
+
+        if self.base_backoff_seconds < 0:
+            raise ValueError(
+                "base_backoff_seconds cannot be negative."
+            )
+
+        if self.max_backoff_seconds < self.base_backoff_seconds:
+            raise ValueError(
+                "max_backoff_seconds cannot be lower than "
+                "base_backoff_seconds."
+            )
+
+        if any(
+            not isinstance(code, str) or not code.strip()
+            for code in self.retryable_error_codes
+        ):
+            raise ValueError(
+                "retryable_error_codes cannot contain blank values."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationRetryResult:
+    """Deterministic retry eligibility decision and policy-derived timing."""
+
+    decision: PlatformIntelligenceEscalationRetryDecision
+    notification_key: str
+    attempt: int
+    policy_id: str
+    policy_version: str
+    reason: str
+    next_eligible_at: datetime | None = None
+    backoff_seconds: int | None = None
+
+
+class PlatformIntelligenceEscalationRetryPolicyService:
+    """Evaluate whether a durable PI delivery record may be retried.
+
+    This service is side-effect free.
+
+    It does not:
+    - mutate delivery state;
+    - call an email provider;
+    - schedule work;
+    - read the wall clock.
+
+    The caller supplies the reference time used for the eligibility decision.
+    The delivery record supplies the authoritative timestamp from which the
+    retry backoff is calculated.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: PlatformIntelligenceEscalationRetryPolicy,
+    ) -> None:
+        if policy is None:
+            raise ValueError("policy cannot be None.")
+
+        self._policy = policy
+
+    @property
+    def policy(self) -> PlatformIntelligenceEscalationRetryPolicy:
+        return self._policy
+
+    def evaluate(
+        self,
+        *,
+        record: PlatformIntelligenceEscalationDeliveryRecord,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryResult:
+        self._validate_reference_time(reference_at)
+
+        if not record.notification_key.strip():
+            raise ValueError(
+                "notification_key cannot be blank."
+            )
+
+        if record.attempt < 1:
+            raise ValueError(
+                "delivery attempt must be at least 1."
+            )
+
+        if (
+            self._policy.status
+            is not PlatformIntelligenceEscalationRetryPolicyStatus.APPROVED
+        ):
+            return self._result(
+                record=record,
+                decision=(
+                    PlatformIntelligenceEscalationRetryDecision
+                    .NOT_ELIGIBLE
+                ),
+                reason="Retry policy is not APPROVED.",
+            )
+
+        if (
+            record.status
+            is PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED
+        ):
+            return self._result(
+                record=record,
+                decision=(
+                    PlatformIntelligenceEscalationRetryDecision
+                    .NOT_ELIGIBLE
+                ),
+                reason="Delivery already SUCCEEDED.",
+            )
+
+        if record.attempt >= self._policy.max_attempts:
+            return self._result(
+                record=record,
+                decision=(
+                    PlatformIntelligenceEscalationRetryDecision
+                    .NOT_ELIGIBLE
+                ),
+                reason="Maximum delivery attempts reached.",
+            )
+
+        if (
+            record.status
+            is PlatformIntelligenceEscalationDeliveryStatus.FAILED
+        ):
+            if not record.error_code:
+                return self._result(
+                    record=record,
+                    decision=(
+                        PlatformIntelligenceEscalationRetryDecision
+                        .NOT_ELIGIBLE
+                    ),
+                    reason=(
+                        "FAILED delivery has no error code for retry "
+                        "classification."
+                    ),
+                )
+
+            if (
+                record.error_code
+                not in self._policy.retryable_error_codes
+            ):
+                return self._result(
+                    record=record,
+                    decision=(
+                        PlatformIntelligenceEscalationRetryDecision
+                        .NOT_ELIGIBLE
+                    ),
+                    reason=(
+                        f"Error code {record.error_code!r} "
+                        "is not retryable."
+                    ),
+                )
+
+            return self._eligible_result(
+                record=record,
+                reference_at=reference_at,
+            )
+
+        if (
+            record.status
+            is PlatformIntelligenceEscalationDeliveryStatus.STARTED
+        ):
+            if not self._policy.retry_interrupted_started:
+                return self._result(
+                    record=record,
+                    decision=(
+                        PlatformIntelligenceEscalationRetryDecision
+                        .NOT_ELIGIBLE
+                    ),
+                    reason=(
+                        "Interrupted STARTED deliveries are not "
+                        "retryable by policy."
+                    ),
+                )
+
+            # STARTED represents recovery of an interrupted attempt.
+            # Recovery does NOT increment the attempt, but it remains
+            # subject to the same policy-controlled backoff.
+            return self._eligible_result(
+                record=record,
+                reference_at=reference_at,
+            )
+
+        return self._result(
+            record=record,
+            decision=(
+                PlatformIntelligenceEscalationRetryDecision
+                .NOT_ELIGIBLE
+            ),
+            reason=(
+                f"Delivery status {record.status.value!r} "
+                "is not retryable."
+            ),
+        )
+
+    def backoff_seconds(self, *, attempt: int) -> int:
+        """Return deterministic exponential backoff for the retry.
+
+        Attempt 1:
+            base_backoff_seconds
+
+        Attempt 2:
+            base_backoff_seconds * 2
+
+        Attempt 3:
+            base_backoff_seconds * 4
+
+        The result is capped at max_backoff_seconds.
+        """
+        if attempt < 1:
+            raise ValueError(
+                "attempt must be at least 1."
+            )
+
+        multiplier = 2 ** (attempt - 1)
+
+        return min(
+            self._policy.base_backoff_seconds * multiplier,
+            self._policy.max_backoff_seconds,
+        )
+
+    def _eligible_result(
+        self,
+        *,
+        record: PlatformIntelligenceEscalationDeliveryRecord,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryResult:
+        delay = self.backoff_seconds(
+            attempt=record.attempt
+        )
+
+        # The backoff is calculated from the persisted delivery timestamp,
+        # not from the caller's current reference time.
+        #
+        # This is essential for deterministic due/not-due evaluation.
+        if record.updated_at is None:
+            return self._result(
+                record=record,
+                decision=(
+                    PlatformIntelligenceEscalationRetryDecision
+                    .NOT_ELIGIBLE
+                ),
+                reason=(
+                    "Delivery record has no updated_at timestamp "
+                    "from which retry timing can be established."
+                ),
+            )
+
+        self._validate_timestamp(
+            record.updated_at,
+            field_name="record.updated_at",
+        )
+
+        next_eligible_at = (
+            record.updated_at
+            + timedelta(seconds=delay)
+        )
+
+        if reference_at < next_eligible_at:
+            return self._result(
+                record=record,
+                decision=(
+                    PlatformIntelligenceEscalationRetryDecision
+                    .ELIGIBLE
+                ),
+                reason=(
+                    "Delivery is eligible but the policy-derived "
+                    "backoff window has not elapsed."
+                ),
+                next_eligible_at=next_eligible_at,
+                backoff_seconds=delay,
+            )
+
+        return self._result(
+            record=record,
+            decision=(
+                PlatformIntelligenceEscalationRetryDecision
+                .ELIGIBLE
+            ),
+            reason=(
+                "Delivery is eligible for a policy-controlled retry."
+            ),
+            next_eligible_at=next_eligible_at,
+            backoff_seconds=delay,
+        )
+
+    def _result(
+        self,
+        *,
+        record: PlatformIntelligenceEscalationDeliveryRecord,
+        decision: PlatformIntelligenceEscalationRetryDecision,
+        reason: str,
+        next_eligible_at: datetime | None = None,
+        backoff_seconds: int | None = None,
+    ) -> PlatformIntelligenceEscalationRetryResult:
+        return PlatformIntelligenceEscalationRetryResult(
+            decision=decision,
+            notification_key=record.notification_key,
+            attempt=record.attempt,
+            policy_id=self._policy.policy_id,
+            policy_version=self._policy.policy_version,
+            reason=reason,
+            next_eligible_at=next_eligible_at,
+            backoff_seconds=backoff_seconds,
+        )
+
+    @staticmethod
+    def _validate_reference_time(
+        reference_at: datetime,
+    ) -> None:
+        if (
+            reference_at.tzinfo is None
+            or reference_at.utcoffset() is None
+        ):
+            raise ValueError(
+                "reference_at must be timezone-aware."
+            )
+
+    @staticmethod
+    def _validate_timestamp(
+        value: datetime,
+        *,
+        field_name: str,
+    ) -> None:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                f"{field_name} must be timezone-aware."
+            )
+
+============================================================
+5. RETRY CANDIDATES / REPOSITORY CONTRACT
+============================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Protocol, Sequence
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryRecord,
+)
+
+
+class PlatformIntelligenceEscalationRetryCandidateRepository(Protocol):
+    """Read-only application boundary for retry candidate discovery."""
+
+    async def list_retry_candidates(
+        self,
+        *,
+        limit: int,
+    ) -> Sequence[PlatformIntelligenceEscalationDeliveryRecord]:
+        """Return durable FAILED/STARTED delivery records for policy evaluation."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationRetryCandidate:
+    """Durable delivery state selected for policy evaluation."""
+
+    notification_key: str
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    correlation_id: str
+    attempt: int
+    status: str
+    error_code: str | None
+    updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationRetryCandidateBatch:
+    """Deterministic discovery result; no retry is executed here."""
+
+    candidates: tuple[PlatformIntelligenceEscalationRetryCandidate, ...]
+    limit: int
+
+
+============================================================
+6. RETRY CLAIM IMPLEMENTATION
+============================================================
+"""Application service for controlled retry candidate claiming."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Protocol
+from uuid import uuid4
+
+from app.application.operations_center.platform_intelligence_escalation_retry_claims import (
+    PlatformIntelligenceEscalationRetryClaim,
+    RetryCandidateClaimStatus,
+)
+
+
+class PlatformIntelligenceEscalationRetryClaimRepository(Protocol):
+    async def claim_retry_candidate(
+        self,
+        *,
+        notification_key: str,
+        claim_token: str,
+        claimed_at: datetime,
+        lease_expires_at: datetime,
+    ) -> bool: ...
+
+
+class PlatformIntelligenceEscalationRetryClaimService:
+    """Claims a candidate for one bounded execution attempt.
+
+    Claiming is coordination only. It does not evaluate retry policy, send
+    email, mutate the delivery lifecycle beyond the lease, or authorize the
+    escalation itself.
+    """
+
+    def __init__(
+        self,
+        repository: PlatformIntelligenceEscalationRetryClaimRepository,
+        *,
+        lease_seconds: int = 300,
+    ) -> None:
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be at least 1.")
+        self._repository = repository
+        self._lease_seconds = lease_seconds
+
+    async def claim(
+        self,
+        *,
+        notification_key: str,
+        claimed_at: datetime | None = None,
+    ) -> PlatformIntelligenceEscalationRetryClaim | None:
+        if not isinstance(notification_key, str) or not notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+
+        reference_at = claimed_at or datetime.now(timezone.utc)
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("claimed_at must be timezone-aware.")
+
+        claim_token = str(uuid4())
+        lease_expires_at = reference_at + timedelta(seconds=self._lease_seconds)
+
+        claimed = await self._repository.claim_retry_candidate(
+            notification_key=notification_key,
+            claim_token=claim_token,
+            claimed_at=reference_at,
+            lease_expires_at=lease_expires_at,
+        )
+
+        if not claimed:
+            return None
+
+        return PlatformIntelligenceEscalationRetryClaim(
+            notification_key=notification_key,
+            claim_token=claim_token,
+            claimed_at=reference_at,
+            lease_expires_at=lease_expires_at,
+            status=RetryCandidateClaimStatus.CLAIMED,
+        )
+
+
+============================================================
+7. RETRY DISCOVERY
+============================================================
+from __future__ import annotations
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+    PlatformIntelligenceEscalationRetryCandidateBatch,
+    PlatformIntelligenceEscalationRetryCandidateRepository,
+)
+
+
+class PlatformIntelligenceEscalationRetryCandidateDiscoveryService:
+    """Discover durable retry work without executing it.
+
+    This boundary deliberately does not:
+    - call the retry policy;
+    - mutate delivery state;
+    - send email;
+    - schedule work;
+    - claim/lock candidates.
+
+    Policy eligibility and execution remain separate steps.
+    """
+
+    def __init__(
+        self,
+        *,
+        repository: PlatformIntelligenceEscalationRetryCandidateRepository,
+    ) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+
+        self._repository = repository
+
+    async def discover(
+        self,
+        *,
+        limit: int = 100,
+    ) -> PlatformIntelligenceEscalationRetryCandidateBatch:
+        if limit < 1:
+            raise ValueError("limit must be at least 1.")
+
+        records = await self._repository.list_retry_candidates(
+            limit=limit,
+        )
+
+        candidates: list[PlatformIntelligenceEscalationRetryCandidate] = []
+
+        for record in records:
+            if record.status not in (
+                PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+                PlatformIntelligenceEscalationDeliveryStatus.STARTED,
+            ):
+                continue
+
+            candidates.append(
+                PlatformIntelligenceEscalationRetryCandidate(
+                    notification_key=record.notification_key,
+                    recommendation_id=record.recommendation_id,
+                    risk_decision_id=record.risk_decision_id,
+                    review_item_id=record.review_item_id,
+                    correlation_id=record.correlation_id,
+                    attempt=record.attempt,
+                    status=record.status.value,
+                    error_code=record.error_code,
+                    updated_at=record.updated_at,
+                )
+            )
+
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.updated_at is None,
+                candidate.updated_at,
+                candidate.notification_key,
+            )
+        )
+
+        return PlatformIntelligenceEscalationRetryCandidateBatch(
+            candidates=tuple(candidates),
+            limit=limit,
+        )
+

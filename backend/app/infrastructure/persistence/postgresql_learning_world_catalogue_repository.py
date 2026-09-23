@@ -11,6 +11,7 @@ from app.application.world_catalogue.models import LearningWorldCatalogueEntry
 from app.application.world_catalogue.repositories import (
     LearningWorldCatalogueRepository,
 )
+from app.domain.learning.world_access_tier import WorldAccessTier
 
 from .learning_world_models import LearningWorldModel
 
@@ -91,4 +92,8 @@ class PostgreSQLLearningWorldCatalogueRepository(
             world_type=row.world_type,
             learning_domain=row.learning_domain,
             runtime_world_id=row.runtime_world_id,
+            access_tier=WorldAccessTier.from_value(row.access_tier),
         )
+
+
+__all__ = ["PostgreSQLLearningWorldCatalogueRepository"]

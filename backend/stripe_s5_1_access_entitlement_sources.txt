@@ -1,0 +1,1905 @@
+================================================================================
+STRIPE S5.1 - ACCESS / ENTITLEMENT SOURCE INSPECTION
+Generated: 2026-09-23 12:39:19
+================================================================================
+
+
+================================================================================
+FILE: app\application\payment\subscription_entitlement_service.py
+================================================================================
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from app.domain.payment.models import PaymentEvent
+
+
+class SubscriptionEntitlementService:
+    """Apply verified Stripe subscription events to EASYWORLD persistence.
+
+    Stripe is the payment system of record.
+    EASYWORLD subscription and entitlement persistence is the access system
+    of record.
+
+    This service deliberately contains no Stripe SDK calls.
+    """
+
+    SUBSCRIPTION_EVENTS = {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    }
+
+    def __init__(
+        self,
+        subscription_repository,
+        entitlement_repository,
+    ) -> None:
+        if subscription_repository is None:
+            raise ValueError("subscription_repository cannot be None.")
+
+        if entitlement_repository is None:
+            raise ValueError("entitlement_repository cannot be None.")
+
+        self.subscription_repository = subscription_repository
+        self.entitlement_repository = entitlement_repository
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        if not isinstance(event, PaymentEvent):
+            raise TypeError("event must be a PaymentEvent.")
+
+        if event.event_type not in self.SUBSCRIPTION_EVENTS:
+            return
+
+        subscription = self._extract_subscription(event)
+
+        beneficiary_user_id = self._metadata_value(
+            subscription,
+            "easyworld_user_id",
+        )
+
+        if not beneficiary_user_id:
+            raise ValueError(
+                "Stripe subscription is missing easyworld_user_id metadata."
+            )
+
+        payer_user_id = self._metadata_value(
+            subscription,
+            "easyworld_payer_user_id",
+        ) or beneficiary_user_id
+
+        plan_code = self._metadata_value(
+            subscription,
+            "easyworld_plan_code",
+        )
+
+        if not plan_code:
+            raise ValueError(
+                "Stripe subscription is missing easyworld_plan_code metadata."
+            )
+
+        stripe_subscription_id = subscription.get("id")
+        stripe_customer_id = self._customer_id(subscription.get("customer"))
+        stripe_price_id = self._price_id(subscription)
+
+        if not stripe_subscription_id:
+            raise ValueError("Stripe subscription is missing id.")
+
+        if not stripe_customer_id:
+            raise ValueError("Stripe subscription is missing customer.")
+
+        if not stripe_price_id:
+            raise ValueError("Stripe subscription is missing price.")
+
+        status = str(subscription.get("status") or "unknown")
+
+        current_period_start = self._timestamp(
+            subscription.get("current_period_start")
+        )
+        current_period_end = self._timestamp(
+            subscription.get("current_period_end")
+        )
+
+        cancel_at_period_end = bool(
+            subscription.get("cancel_at_period_end", False)
+        )
+
+        self.subscription_repository.upsert(
+            beneficiary_user_id=beneficiary_user_id,
+            payer_user_id=payer_user_id,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=stripe_price_id,
+            plan_code=plan_code,
+            status=status,
+            current_period_start=current_period_start,
+            current_period_end=current_period_end,
+            cancel_at_period_end=cancel_at_period_end,
+        )
+
+        active = status in {
+            "trialing",
+            "active",
+        }
+
+        self.entitlement_repository.upsert(
+            user_id=beneficiary_user_id,
+            plan_code=plan_code,
+            active=active,
+        )
+
+    @staticmethod
+    def _extract_subscription(event: PaymentEvent) -> dict[str, Any]:
+        data = event.payload.get("data")
+
+        if not isinstance(data, dict):
+            raise ValueError("Stripe event is missing data.")
+
+        obj = data.get("object")
+
+        if not isinstance(obj, dict):
+            raise ValueError("Stripe event is missing subscription object.")
+
+        return obj
+
+    @staticmethod
+    def _metadata_value(
+        subscription: dict[str, Any],
+        key: str,
+    ) -> str | None:
+        metadata = subscription.get("metadata")
+
+        if not isinstance(metadata, dict):
+            return None
+
+        value = metadata.get(key)
+
+        if value is None:
+            return None
+
+        value = str(value).strip()
+
+        return value or None
+
+    @staticmethod
+    def _customer_id(customer: Any) -> str | None:
+        if isinstance(customer, str):
+            return customer
+
+        if isinstance(customer, dict):
+            value = customer.get("id")
+            return str(value) if value else None
+
+        return None
+
+    @staticmethod
+    def _price_id(subscription: dict[str, Any]) -> str | None:
+        items = subscription.get("items")
+
+        if not isinstance(items, dict):
+            return None
+
+        data = items.get("data")
+
+        if not isinstance(data, list) or not data:
+            return None
+
+        first_item = data[0]
+
+        if not isinstance(first_item, dict):
+            return None
+
+        price = first_item.get("price")
+
+        if isinstance(price, str):
+            return price
+
+        if isinstance(price, dict):
+            value = price.get("id")
+            return str(value) if value else None
+
+        return None
+
+    @staticmethod
+    def _timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (TypeError, ValueError, OSError):
+            raise ValueError(
+                f"Invalid Stripe timestamp: {value!r}."
+            )
+
+
+__all__ = ["SubscriptionEntitlementService"]
+
+
+
+================================================================================
+FILE: app\application\payment\payment_event_router.py
+================================================================================
+from __future__ import annotations
+
+from app.application.payment.ports import EntitlementService
+from app.domain.payment.models import PaymentEvent
+
+
+class PaymentEventRouter(EntitlementService):
+    """Route verified payment events to the appropriate application handler.
+
+    This class does not:
+    - verify Stripe signatures;
+    - call the Stripe SDK;
+    - persist webhook events;
+    - decide whether Checkout succeeded.
+
+    Those responsibilities remain in their existing layers.
+    """
+
+    def __init__(
+        self,
+        subscription_entitlement_service,
+    ) -> None:
+        if subscription_entitlement_service is None:
+            raise ValueError(
+                "subscription_entitlement_service cannot be None."
+            )
+
+        self.subscription_entitlement_service = (
+            subscription_entitlement_service
+        )
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        if not isinstance(event, PaymentEvent):
+            raise TypeError("event must be a PaymentEvent.")
+
+        self.subscription_entitlement_service.handle_payment_event(event)
+
+
+__all__ = ["PaymentEventRouter"]
+
+
+
+================================================================================
+FILE: app\application\payment\ports.py
+================================================================================
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from app.domain.payment.models import (
+    BillingPortalSession,
+    CheckoutRequest,
+    CheckoutSession,
+    PaymentEvent,
+)
+
+
+class PaymentProvider(ABC):
+    @abstractmethod
+    def create_customer(self, *, user_id: str, email: str, name: str | None = None) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_checkout_session(self, request: CheckoutRequest, *, customer_id: str | None) -> CheckoutSession:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_billing_portal_session(self, *, customer_id: str, return_url: str) -> BillingPortalSession:
+        raise NotImplementedError
+
+    @abstractmethod
+    def construct_webhook_event(self, payload: bytes, signature: str) -> PaymentEvent:
+        raise NotImplementedError
+
+
+class PaymentEventRepository(ABC):
+    @abstractmethod
+    def has_processed(self, event_id: str) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_received(self, event: PaymentEvent) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_processed(self, event_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_failed(self, event_id: str, error: str) -> None:
+        raise NotImplementedError
+
+
+class EntitlementService(ABC):
+    @abstractmethod
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        raise NotImplementedError
+
+
+
+================================================================================
+FILE: app\application\services\world_access_service.py
+================================================================================
+"""Application service for learner-to-learning-world authorization."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Protocol
+from uuid import UUID
+
+from app.domain.learning.learner_world_access import BETA, LearnerWorldAccess
+from app.domain.learning.learner_world_access_repository import (
+    LearnerWorldAccessRepository,
+)
+
+
+class CanonicalUserIdentityReader(Protocol):
+    """Minimal provider-neutral read boundary over canonical user identity."""
+
+    async def get_user_for_identity(self, user_id: UUID):
+        """Return the canonical user record or None."""
+        ...
+
+
+class WorldAccessError(ValueError):
+    """Expected World access validation failure."""
+
+
+class UserNotFoundError(WorldAccessError):
+    """The requested canonical user does not exist."""
+
+
+class LearningWorldNotFoundError(WorldAccessError):
+    """The requested Learning World does not exist."""
+
+
+class LearningWorldDisabledError(WorldAccessError):
+    """The requested Learning World is disabled for ordinary new grants."""
+
+
+class WorldAccessService:
+    """
+    Authorize learners for one or more Learning Worlds.
+
+    Important boundary:
+    - World access is durable authorization/membership.
+    - World ``enabled`` remains runtime availability.
+    - Ordinary direct grants still reject disabled Worlds.
+    - The explicit ``allow_disabled_world`` flag is reserved for a
+      higher-level provisioning policy such as Beta portfolio provisioning.
+    """
+
+    def __init__(
+        self,
+        *,
+        access_repository: LearnerWorldAccessRepository,
+        user_identity_reader: CanonicalUserIdentityReader,
+        learning_world_repository,
+    ) -> None:
+        if access_repository is None:
+            raise ValueError("access_repository is required.")
+        if user_identity_reader is None:
+            raise ValueError("user_identity_reader is required.")
+        if learning_world_repository is None:
+            raise ValueError("learning_world_repository is required.")
+
+        self._access_repository = access_repository
+        self._user_identity_reader = user_identity_reader
+        self._learning_world_repository = learning_world_repository
+
+    async def grant_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+        access_source: str = BETA,
+        allow_disabled_world: bool = False,
+    ) -> LearnerWorldAccess:
+        self._validate_user_id(user_id)
+        identifier = self._normalize_world_identifier(world_identifier)
+
+        user = await self._user_identity_reader.get_user_for_identity(user_id)
+        if user is None:
+            raise UserNotFoundError("Canonical user does not exist.")
+
+        world = await asyncio.to_thread(
+            self._learning_world_repository.get_by_identifier,
+            identifier,
+        )
+
+        if world is None:
+            raise LearningWorldNotFoundError(
+                f"Learning World does not exist: {identifier}"
+            )
+
+        if not world.enabled and not allow_disabled_world:
+            raise LearningWorldDisabledError(
+                f"Learning World is disabled: {identifier}"
+            )
+
+        world_id = self._world_id(world)
+
+        existing = await asyncio.to_thread(
+            self._access_repository.get_by_user_and_world,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        if existing is not None:
+            if existing.is_active():
+                return existing
+
+            revived = LearnerWorldAccess.grant(
+                user_id=user_id,
+                world_id=world_id,
+                access_source=access_source,
+                access_id=existing.access_id,
+            )
+            return await asyncio.to_thread(
+                self._access_repository.save,
+                revived,
+            )
+
+        access = LearnerWorldAccess.grant(
+            user_id=user_id,
+            world_id=world_id,
+            access_source=access_source,
+        )
+
+        return await asyncio.to_thread(
+            self._access_repository.save,
+            access,
+        )
+
+    async def has_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> bool:
+        access = await self.get_access(
+            user_id=user_id,
+            world_identifier=world_identifier,
+        )
+        return access is not None and access.is_active()
+
+    async def require_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> LearnerWorldAccess:
+        access = await self.get_access(
+            user_id=user_id,
+            world_identifier=world_identifier,
+        )
+
+        if access is None or not access.is_active():
+            raise PermissionError(
+                "Learner does not have active access to this Learning World."
+            )
+
+        return access
+
+    async def get_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> LearnerWorldAccess | None:
+        self._validate_user_id(user_id)
+        identifier = self._normalize_world_identifier(world_identifier)
+
+        world = await asyncio.to_thread(
+            self._learning_world_repository.get_by_identifier,
+            identifier,
+        )
+
+        if world is None:
+            return None
+
+        world_id = self._world_id(world)
+
+        return await asyncio.to_thread(
+            self._access_repository.get_by_user_and_world,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+    async def list_world_access(
+        self,
+        *,
+        user_id: UUID,
+    ) -> tuple[LearnerWorldAccess, ...]:
+        self._validate_user_id(user_id)
+
+        return await asyncio.to_thread(
+            self._access_repository.list_by_user,
+            user_id=user_id,
+        )
+
+    @staticmethod
+    def _world_id(world) -> UUID:
+        world_id = getattr(world, "id", None)
+        if not isinstance(world_id, UUID):
+            raise WorldAccessError(
+                "Learning World catalogue entry must expose the "
+                "authoritative World UUID as 'id'."
+            )
+        return world_id
+
+    @staticmethod
+    def _validate_user_id(user_id: UUID) -> None:
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+    @staticmethod
+    def _normalize_world_identifier(world_identifier: str) -> str:
+        if not isinstance(world_identifier, str):
+            raise ValueError("world_identifier must be a string.")
+
+        identifier = world_identifier.strip()
+
+        if not identifier:
+            raise ValueError("world_identifier is required.")
+
+        if len(identifier) > 100:
+            raise ValueError("world_identifier is too long.")
+
+        return identifier
+
+
+__all__ = [
+    "CanonicalUserIdentityReader",
+    "LearningWorldDisabledError",
+    "LearningWorldNotFoundError",
+    "UserNotFoundError",
+    "WorldAccessError",
+    "WorldAccessService",
+]
+
+
+
+================================================================================
+FILE: app\domain\learning\learner_world_access.py
+================================================================================
+"""Domain model for durable learner-to-learning-world access."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
+
+ACTIVE = "active"
+REVOKED = "revoked"
+
+BETA = "beta"
+SUBSCRIPTION = "subscription"
+ADMIN = "admin"
+TRIAL = "trial"
+
+_VALID_STATUSES = frozenset({ACTIVE, REVOKED})
+_VALID_SOURCES = frozenset({BETA, SUBSCRIPTION, ADMIN, TRIAL})
+
+
+@dataclass(frozen=True, slots=True)
+class LearnerWorldAccess:
+    """Durable authorization record for one learner and one World."""
+
+    access_id: UUID
+    user_id: UUID
+    world_id: UUID
+    status: str
+    access_source: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def grant(
+        cls,
+        *,
+        user_id: UUID,
+        world_id: UUID,
+        access_source: str,
+        access_id: UUID | None = None,
+        now: datetime | None = None,
+    ) -> "LearnerWorldAccess":
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+        if not isinstance(world_id, UUID):
+            raise ValueError("world_id must be a UUID.")
+        if access_source not in _VALID_SOURCES:
+            raise ValueError(f"Unsupported access source: {access_source!r}.")
+
+        timestamp = now or datetime.now(timezone.utc)
+
+        return cls(
+            access_id=access_id or uuid4(),
+            user_id=user_id,
+            world_id=world_id,
+            status=ACTIVE,
+            access_source=access_source,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    def is_active(self) -> bool:
+        return self.status == ACTIVE
+
+    def revoke(self, *, now: datetime | None = None) -> "LearnerWorldAccess":
+        if self.status == REVOKED:
+            return self
+
+        if self.status not in _VALID_STATUSES:
+            raise ValueError(f"Unsupported access status: {self.status!r}.")
+
+        timestamp = now or datetime.now(timezone.utc)
+        return replace(self, status=REVOKED, updated_at=timestamp)
+
+
+
+================================================================================
+FILE: app\domain\learning\learner_world_access_repository.py
+================================================================================
+"""Domain persistence contract for learner World access."""
+
+from __future__ import annotations
+
+from typing import Protocol
+from uuid import UUID
+
+from app.domain.learning.learner_world_access import LearnerWorldAccess
+
+
+class LearnerWorldAccessRepository(Protocol):
+    """Persistence boundary for learner-to-World authorization."""
+
+    def save(self, access: LearnerWorldAccess) -> LearnerWorldAccess:
+        ...
+
+    def get_by_id(self, access_id: UUID) -> LearnerWorldAccess | None:
+        ...
+
+    def get_by_user_and_world(
+        self,
+        *,
+        user_id: UUID,
+        world_id: UUID,
+    ) -> LearnerWorldAccess | None:
+        ...
+
+    def list_by_user(self, *, user_id: UUID) -> tuple[LearnerWorldAccess, ...]:
+        ...
+
+
+
+================================================================================
+FILE: app\domain\payment\models.py
+================================================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+
+class BillingInterval(str, Enum):
+    MONTH = "month"
+    YEAR = "year"
+
+
+class CheckoutMode(str, Enum):
+    PAYMENT = "payment"
+    SUBSCRIPTION = "subscription"
+
+
+class SubscriptionStatus(str, Enum):
+    INCOMPLETE = "incomplete"
+    TRIALING = "trialing"
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELED = "canceled"
+    UNPAID = "unpaid"
+    PAUSED = "paused"
+
+
+@dataclass(frozen=True)
+class PaymentPlan:
+    key: str
+    display_name: str
+    stripe_price_id: str | None
+    mode: CheckoutMode
+    interval: BillingInterval | None = None
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class CheckoutRequest:
+    user_id: str
+    price_id: str
+    mode: CheckoutMode
+    success_url: str
+    cancel_url: str
+    payer_user_id: str | None = None
+    plan_code: str | None = None
+
+
+@dataclass(frozen=True)
+class CheckoutSession:
+    provider_session_id: str
+    checkout_url: str
+
+
+@dataclass(frozen=True)
+class BillingPortalSession:
+    provider_session_id: str
+    portal_url: str
+
+
+@dataclass(frozen=True)
+class PaymentEvent:
+    event_id: str
+    event_type: str
+    payload: dict[str, Any]
+
+
+
+================================================================================
+FILE: app\infrastructure\persistence\billing_models.py
+================================================================================
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.infrastructure.persistence.database import Base
+
+
+class BillingPlanRecord(Base):
+    __tablename__ = "billing_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    audience: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    family_capable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    stripe_product_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class BillingPriceRecord(Base):
+    __tablename__ = "billing_prices"
+    __table_args__ = (UniqueConstraint("plan_id", "billing_interval", name="uq_billing_prices_plan_interval"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("billing_plans.id", ondelete="CASCADE"), nullable=False
+    )
+    price_code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    amount_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ParentChildRelationshipRecord(Base):
+    __tablename__ = "parent_child_relationships"
+    __table_args__ = (
+        UniqueConstraint("parent_user_id", "child_user_id", name="uq_parent_child_relationship"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(String(50), nullable=False, default="GUARDIAN")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ParentalConsentRecord(Base):
+    __tablename__ = "parental_consents"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    consent_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PaymentApprovalRequestRecord(Base):
+    __tablename__ = "payment_approval_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SubscriptionRecord(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    beneficiary_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    payer_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    stripe_customer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    stripe_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    current_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EntitlementRecord(Base):
+    __tablename__ = "entitlements"
+    __table_args__ = (UniqueConstraint("user_id", "plan_code", name="uq_entitlements_user_plan"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    ai_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    agent_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    premium_models: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    priority_processing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StripeWebhookEventRecord(Base):
+    __tablename__ = "stripe_webhook_events"
+
+    stripe_event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+
+================================================================================
+FILE: app\infrastructure\persistence\postgresql_entitlement_repository.py
+================================================================================
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.infrastructure.persistence.billing_models import EntitlementRecord
+
+
+class PostgreSQLEntitlementRepository:
+    """Durable PostgreSQL repository for EASYWORLD entitlements."""
+
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+
+        self._session_factory = session_factory
+
+    def get(
+        self,
+        *,
+        user_id: str,
+        plan_code: str,
+    ) -> EntitlementRecord | None:
+        if not user_id:
+            raise ValueError("user_id cannot be empty.")
+
+        if not plan_code:
+            raise ValueError("plan_code cannot be empty.")
+
+        with self._session_factory() as session:
+            return session.scalar(
+                select(EntitlementRecord).where(
+                    EntitlementRecord.user_id == user_id,
+                    EntitlementRecord.plan_code == plan_code,
+                )
+            )
+
+    def get_for_user(
+        self,
+        user_id: str,
+    ) -> list[EntitlementRecord]:
+        if not user_id:
+            raise ValueError("user_id cannot be empty.")
+
+        with self._session_factory() as session:
+            return list(
+                session.scalars(
+                    select(EntitlementRecord)
+                    .where(EntitlementRecord.user_id == user_id)
+                    .order_by(EntitlementRecord.created_at.desc())
+                ).all()
+            )
+
+    def upsert(
+        self,
+        *,
+        user_id: str,
+        plan_code: str,
+        ai_credits: int = 0,
+        agent_access: bool = False,
+        premium_models: bool = False,
+        priority_processing: bool = False,
+        active: bool = True,
+    ) -> EntitlementRecord:
+        if not user_id:
+            raise ValueError("user_id cannot be empty.")
+
+        if not plan_code:
+            raise ValueError("plan_code cannot be empty.")
+
+        if ai_credits < 0:
+            raise ValueError("ai_credits cannot be negative.")
+
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(EntitlementRecord).where(
+                    EntitlementRecord.user_id == user_id,
+                    EntitlementRecord.plan_code == plan_code,
+                )
+            )
+
+            if record is None:
+                record = EntitlementRecord(
+                    user_id=user_id,
+                    plan_code=plan_code,
+                    ai_credits=ai_credits,
+                    agent_access=agent_access,
+                    premium_models=premium_models,
+                    priority_processing=priority_processing,
+                    active=active,
+                )
+                session.add(record)
+            else:
+                record.ai_credits = ai_credits
+                record.agent_access = agent_access
+                record.premium_models = premium_models
+                record.priority_processing = priority_processing
+                record.active = active
+
+            session.commit()
+            session.refresh(record)
+
+            return record
+
+
+__all__ = ["PostgreSQLEntitlementRepository"]
+
+
+
+================================================================================
+FILE: app\infrastructure\persistence\postgresql_subscription_repository.py
+================================================================================
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.infrastructure.persistence.billing_models import SubscriptionRecord
+
+
+class PostgreSQLSubscriptionRepository:
+    """Durable PostgreSQL repository for EASYWORLD subscriptions."""
+
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+
+        self._session_factory = session_factory
+
+    def get_by_stripe_subscription_id(
+        self,
+        stripe_subscription_id: str,
+    ) -> SubscriptionRecord | None:
+        if not stripe_subscription_id:
+            raise ValueError("stripe_subscription_id cannot be empty.")
+
+        with self._session_factory() as session:
+            return session.scalar(
+                select(SubscriptionRecord).where(
+                    SubscriptionRecord.stripe_subscription_id
+                    == stripe_subscription_id
+                )
+            )
+
+    def get_by_beneficiary_user_id(
+        self,
+        beneficiary_user_id: str,
+    ) -> list[SubscriptionRecord]:
+        if not beneficiary_user_id:
+            raise ValueError("beneficiary_user_id cannot be empty.")
+
+        with self._session_factory() as session:
+            return list(
+                session.scalars(
+                    select(SubscriptionRecord)
+                    .where(
+                        SubscriptionRecord.beneficiary_user_id
+                        == beneficiary_user_id
+                    )
+                    .order_by(SubscriptionRecord.created_at.desc())
+                ).all()
+            )
+
+    def upsert(
+        self,
+        *,
+        beneficiary_user_id: str,
+        payer_user_id: str,
+        stripe_customer_id: str,
+        stripe_subscription_id: str,
+        stripe_price_id: str,
+        plan_code: str,
+        status: str,
+        current_period_start: datetime | None = None,
+        current_period_end: datetime | None = None,
+        cancel_at_period_end: bool = False,
+    ) -> SubscriptionRecord:
+        required_values = {
+            "beneficiary_user_id": beneficiary_user_id,
+            "payer_user_id": payer_user_id,
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+            "stripe_price_id": stripe_price_id,
+            "plan_code": plan_code,
+            "status": status,
+        }
+
+        for field, value in required_values.items():
+            if not value:
+                raise ValueError(f"{field} cannot be empty.")
+
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(SubscriptionRecord).where(
+                    SubscriptionRecord.stripe_subscription_id
+                    == stripe_subscription_id
+                )
+            )
+
+            if record is None:
+                record = SubscriptionRecord(
+                    beneficiary_user_id=beneficiary_user_id,
+                    payer_user_id=payer_user_id,
+                    stripe_customer_id=stripe_customer_id,
+                    stripe_subscription_id=stripe_subscription_id,
+                    stripe_price_id=stripe_price_id,
+                    plan_code=plan_code,
+                    status=status,
+                    current_period_start=current_period_start,
+                    current_period_end=current_period_end,
+                    cancel_at_period_end=cancel_at_period_end,
+                )
+                session.add(record)
+            else:
+                record.beneficiary_user_id = beneficiary_user_id
+                record.payer_user_id = payer_user_id
+                record.stripe_customer_id = stripe_customer_id
+                record.stripe_price_id = stripe_price_id
+                record.plan_code = plan_code
+                record.status = status
+                record.current_period_start = current_period_start
+                record.current_period_end = current_period_end
+                record.cancel_at_period_end = cancel_at_period_end
+
+            session.commit()
+            session.refresh(record)
+
+            return record
+
+    def delete_by_stripe_subscription_id(
+        self,
+        stripe_subscription_id: str,
+    ) -> None:
+        if not stripe_subscription_id:
+            raise ValueError("stripe_subscription_id cannot be empty.")
+
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(SubscriptionRecord).where(
+                    SubscriptionRecord.stripe_subscription_id
+                    == stripe_subscription_id
+                )
+            )
+
+            if record is not None:
+                session.delete(record)
+                session.commit()
+
+
+__all__ = ["PostgreSQLSubscriptionRepository"]
+
+
+
+================================================================================
+FILE: app\infrastructure\persistence\learner_world_access_model.py
+================================================================================
+"""SQLAlchemy model for learner-to-learning-world access."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.infrastructure.persistence.database import Base
+
+
+class LearnerWorldAccessRecord(Base):
+    """Durable learner World authorization record."""
+
+    __tablename__ = "learner_world_access"
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    world_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("learning_worlds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    access_source: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "world_id",
+            name="uq_learner_world_access_user_world",
+        ),
+        Index("ix_learner_world_access_user_id", "user_id"),
+        Index("ix_learner_world_access_world_id", "world_id"),
+        Index("ix_learner_world_access_status", "status"),
+        Index("ix_learner_world_access_source", "access_source"),
+    )
+
+
+
+================================================================================
+FILE: app\infrastructure\persistence\postgresql_learner_world_access_repository.py
+================================================================================
+"""PostgreSQL adapter for learner-to-World access."""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.learning.learner_world_access import LearnerWorldAccess
+from app.domain.learning.learner_world_access_repository import (
+    LearnerWorldAccessRepository,
+)
+from app.infrastructure.persistence.learner_world_access_model import (
+    LearnerWorldAccessRecord,
+)
+
+
+class PostgreSQLLearnerWorldAccessRepository(LearnerWorldAccessRepository):
+    """Synchronous repository; application async callers execute it off-loop."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+        self._session_factory = session_factory
+
+    def save(self, access: LearnerWorldAccess) -> LearnerWorldAccess:
+        with self._session_factory() as session:
+            record = session.get(LearnerWorldAccessRecord, access.access_id)
+
+            if record is None:
+                record = LearnerWorldAccessRecord(
+                    id=access.access_id,
+                    user_id=access.user_id,
+                    world_id=access.world_id,
+                    status=access.status,
+                    access_source=access.access_source,
+                    created_at=access.created_at,
+                    updated_at=access.updated_at,
+                )
+                session.add(record)
+            else:
+                record.status = access.status
+                record.access_source = access.access_source
+                record.updated_at = access.updated_at
+
+            session.commit()
+            session.refresh(record)
+
+            return self._to_domain(record)
+
+    def get_by_id(self, access_id):
+        with self._session_factory() as session:
+            record = session.get(LearnerWorldAccessRecord, access_id)
+            return self._to_domain(record) if record is not None else None
+
+    def get_by_user_and_world(self, *, user_id, world_id):
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(LearnerWorldAccessRecord).where(
+                    LearnerWorldAccessRecord.user_id == user_id,
+                    LearnerWorldAccessRecord.world_id == world_id,
+                )
+            )
+            return self._to_domain(record) if record is not None else None
+
+    def list_by_user(self, *, user_id):
+        with self._session_factory() as session:
+            records = session.scalars(
+                select(LearnerWorldAccessRecord)
+                .where(LearnerWorldAccessRecord.user_id == user_id)
+                .order_by(LearnerWorldAccessRecord.created_at)
+            ).all()
+
+            return tuple(self._to_domain(record) for record in records)
+
+    @staticmethod
+    def _to_domain(record: LearnerWorldAccessRecord) -> LearnerWorldAccess:
+        return LearnerWorldAccess(
+            access_id=record.id,
+            user_id=record.user_id,
+            world_id=record.world_id,
+            status=record.status,
+            access_source=record.access_source,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+
+
+================================================================================
+FILE: app\application\composition\beta_telegram_production.py
+================================================================================
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from app.ai_runtime.conversation.conversation_runtime import (
+    ConversationRuntime,
+)
+from app.application.composition.beta_telegram_composition import (
+    BetaTelegramComposition,
+    create_beta_telegram_composition,
+)
+from app.application.composition.private_chat_composition import (
+    build_private_chat_service_factory,
+)
+from app.application.conversation_quality.conversation_event_validator import (
+    ConversationEventValidator,
+)
+from app.application.privacy.privacy_identifier_service import (
+    PrivacyIdentifierService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.services.beta_world_access_service import (
+    BetaWorldAccessService,
+)
+from app.application.services.world_access_service import (
+    WorldAccessService,
+)
+from app.application.study_material.service import StudyMaterialService
+from app.application.uai.language.language_detector import LanguageDetector
+from app.application.uai.language.language_response_policy import (
+    LanguageResponsePolicy,
+)
+from app.application.uai.world.world_resolver import WorldResolver
+from app.application.world_catalogue.service import (
+    LearningWorldCatalogueService,
+)
+from app.application.world_telegram.world_telegram_start_router import (
+    WorldTelegramStartRouter,
+)
+from app.application.world_telegram.community_access_service import (
+    WorldTelegramCommunityAccessService,
+)
+from app.application.world_telegram.community_conversation_boundary import (
+    WorldTelegramCommunityConversationBoundary,
+)
+from app.application.world_telegram.membership_service import (
+    WorldTelegramMembershipService,
+)
+from app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from app.infrastructure.persistence.postgresql_beta_access_repository import (
+    PostgreSQLBetaTokenRepository,
+    PostgreSQLBetaUserRepository,
+    PostgreSQLTelegramBindingRepository,
+)
+from app.infrastructure.persistence.postgresql_conversation_event_repository import (
+    PostgreSQLConversationEventRepository,
+)
+from app.infrastructure.persistence.postgresql_learner_world_access_repository import (
+    PostgreSQLLearnerWorldAccessRepository,
+)
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_study_material_repository import (
+    PostgreSQLStudyMaterialRepository,
+)
+from app.infrastructure.persistence.postgresql_world_telegram_destination_repository import (
+    PostgreSQLWorldTelegramDestinationRepository,
+)
+from app.infrastructure.persistence.postgresql_world_telegram_membership_repository import (
+    PostgreSQLWorldTelegramMembershipRepository,
+)
+from app.infrastructure.telegram.telegram_bot_runtime import TelegramBotRuntime
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BetaTelegramProductionComposition:
+    beta_telegram: BetaTelegramComposition
+    database_engine: Any
+    session_factory: Any
+    async_database_engine: Any
+    async_session_factory: Any
+    catalogue_service: LearningWorldCatalogueService
+    study_material_service: StudyMaterialService
+    world_telegram_community_access_service: (
+        WorldTelegramCommunityAccessService
+    )
+    world_telegram_community_conversation_boundary: (
+        WorldTelegramCommunityConversationBoundary
+    )
+
+    @property
+    def runtime(self) -> Any:
+        return self.beta_telegram.runtime
+
+    @property
+    def adapter(self) -> Any:
+        return self.beta_telegram.adapter
+
+    @property
+    def beta_access_service(self) -> Any:
+        return self.beta_telegram.beta_access_service
+
+    @property
+    def beta_world_access_service(
+        self,
+    ) -> BetaWorldAccessService:
+        return self.beta_telegram.beta_world_access_service
+
+    @property
+    def conversation_runtime(self) -> Any:
+        return self.beta_telegram.conversation_runtime
+
+    @property
+    def conversation_service(self) -> Any:
+        return self.beta_telegram.conversation_service
+
+    @property
+    def conversation_boundary(self) -> Any:
+        return self.beta_telegram.conversation_boundary
+
+    @property
+    def private_chat_gate(self) -> Any:
+        return self.beta_telegram.private_chat_gate
+
+    @property
+    def start_handler(self) -> Any:
+        return self.beta_telegram.start_handler
+
+    @property
+    def community_conversation_boundary(
+        self,
+    ) -> WorldTelegramCommunityConversationBoundary:
+        return self.world_telegram_community_conversation_boundary
+
+
+def create_production_beta_telegram_composition(
+    *,
+    expiration_minutes: int = 1440,
+    database_engine: Any | None = None,
+    session_factory: Any | None = None,
+    database_engine_factory: Callable[[], Any] | None = None,
+    session_factory_factory: Callable[[Any], Any] | None = None,
+    async_database_engine: Any | None = None,
+    async_session_factory: Any | None = None,
+    conversation_runtime: ConversationRuntime | None = None,
+    conversation_runtime_factory: (
+        Callable[[], ConversationRuntime] | None
+    ) = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+    language_detector: LanguageDetector | None = None,
+) -> BetaTelegramProductionComposition:
+    """
+    Create the production Beta Telegram composition.
+
+    W18.3 production provisioning is wired here.
+
+    W19.3 controlled World Telegram community access and W19.4
+    community conversation boundary are composed here, but remain
+    outside the private Telegram transport/runtime boundary.
+
+    Responsibilities:
+    - Build the existing synchronous Beta Telegram persistence boundary.
+    - Build the canonical asynchronous authentication boundary.
+    - Reuse the existing learner/world access repository.
+    - Build WorldAccessService from the canonical repositories.
+    - Build BetaWorldAccessService from the canonical Beta user,
+      World catalogue and World access services.
+    - Build the W19.3 World Telegram destination and membership
+      persistence boundaries.
+    - Build the W19.3 controlled community access application service.
+    - Build the W19.4 community conversation boundary.
+    - Inject BetaWorldAccessService into the canonical Telegram
+      composition.
+
+    Telegram remains responsible only for onboarding/binding and
+    existing private-chat conversation handling.
+
+    W19.3 does not register Telegram group handlers, call the
+    Telegram API, grant World access, or invoke the AI runtime.
+
+    W19.4 only authorizes registered community conversation context;
+    it does not register Telegram handlers, call the Telegram API,
+    create membership, grant World access, or invoke the AI runtime.
+    """
+
+    if expiration_minutes <= 0:
+        raise ValueError(
+            "expiration_minutes must be greater than zero."
+        )
+
+    if functionality_control_service is None:
+        raise ValueError(
+            "functionality_control_service is required "
+            "for production Telegram composition."
+        )
+
+    if language_detector is None:
+        raise ValueError(
+            "language_detector is required "
+            "for production Telegram composition."
+        )
+
+    if (
+        database_engine is not None
+        and database_engine_factory is not None
+    ):
+        raise ValueError(
+            "Provide either database_engine or "
+            "database_engine_factory, not both."
+        )
+
+    if (
+        session_factory is not None
+        and session_factory_factory is not None
+    ):
+        raise ValueError(
+            "Provide either session_factory or "
+            "session_factory_factory, not both."
+        )
+
+    if (
+        conversation_runtime is not None
+        and conversation_runtime_factory is not None
+    ):
+        raise ValueError(
+            "Provide either conversation_runtime or "
+            "conversation_runtime_factory, not both."
+        )
+
+    if database_engine is None:
+        database_engine = (
+            database_engine_factory
+            or create_database_engine
+        )()
+
+    if session_factory is None:
+        session_factory = (
+            session_factory_factory
+            or create_session_factory
+        )(database_engine)
+
+    if async_database_engine is None:
+        async_database_engine = create_async_database_engine()
+
+    if async_session_factory is None:
+        async_session_factory = create_async_session_factory(
+            async_database_engine
+        )
+
+    # ------------------------------------------------------------------
+    # Existing Beta Telegram persistence
+    # ------------------------------------------------------------------
+
+    beta_user_repository = PostgreSQLBetaUserRepository(
+        session_factory,
+    )
+
+    beta_token_repository = PostgreSQLBetaTokenRepository(
+        session_factory,
+    )
+
+    telegram_binding_repository = (
+        PostgreSQLTelegramBindingRepository(
+            session_factory,
+        )
+    )
+
+    conversation_event_repository = (
+        PostgreSQLConversationEventRepository(
+            session_factory,
+        )
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            session_factory,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Canonical World infrastructure
+    # ------------------------------------------------------------------
+
+    app_root = Path(__file__).resolve().parents[2]
+
+    world_repository = YamlWorldRepository(
+        worlds_path=(
+            app_root
+            / "configuration"
+            / "worlds"
+        )
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = (
+        PostgreSQLLearningWorldCatalogueRepository(
+            session_factory,
+        )
+    )
+
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
+
+    # ------------------------------------------------------------------
+    # W18.3 World authorization/provisioning
+    # ------------------------------------------------------------------
+
+    authentication_repository = (
+        PostgreSQLAuthenticationRepository(
+            async_session_factory,
+        )
+    )
+
+    learner_world_access_repository = (
+        PostgreSQLLearnerWorldAccessRepository(
+            session_factory,
+        )
+    )
+
+    world_access_service = WorldAccessService(
+        access_repository=learner_world_access_repository,
+        user_identity_reader=authentication_repository,
+        learning_world_repository=catalogue_repository,
+    )
+
+    # ------------------------------------------------------------------
+    # W19.3 Controlled World Telegram community access
+    # ------------------------------------------------------------------
+
+    world_telegram_destination_repository = (
+        PostgreSQLWorldTelegramDestinationRepository(
+            session_factory,
+        )
+    )
+
+    world_telegram_membership_repository = (
+        PostgreSQLWorldTelegramMembershipRepository(
+            session_factory,
+        )
+    )
+
+    world_telegram_membership_service = (
+        WorldTelegramMembershipService(
+            repository=world_telegram_membership_repository,
+            destination_repository=(
+                world_telegram_destination_repository
+            ),
+        )
+    )
+
+    world_telegram_community_access_service = (
+        WorldTelegramCommunityAccessService(
+            world_access_service=world_access_service,
+            world_catalogue_repository=catalogue_repository,
+            destination_repository=(
+                world_telegram_destination_repository
+            ),
+            membership_service=world_telegram_membership_service,
+        )
+    )
+
+    world_telegram_community_conversation_boundary = (
+        WorldTelegramCommunityConversationBoundary(
+            world_access_service=world_access_service,
+            world_catalogue_repository=catalogue_repository,
+            destination_repository=world_telegram_destination_repository,
+            membership_service=world_telegram_membership_service,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Beta World authorization/provisioning
+    # ------------------------------------------------------------------
+
+    beta_world_access_service = BetaWorldAccessService(
+        beta_user_reader=beta_user_repository,
+        user_identity_reader=authentication_repository,
+        world_catalogue=catalogue_repository,
+        world_access=world_access_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Study Materials
+    # ------------------------------------------------------------------
+
+    privacy_identifier_service = PrivacyIdentifierService()
+
+    conversation_event_validator = (
+        ConversationEventValidator()
+    )
+
+    study_material_repository = (
+        PostgreSQLStudyMaterialRepository(
+            session_factory,
+        )
+    )
+
+    study_material_service = StudyMaterialService(
+        repository=study_material_repository,
+        world_catalogue_service=catalogue_service,
+    )
+
+    # ------------------------------------------------------------------
+    # W19.5 Private Telegram chat
+    # ------------------------------------------------------------------
+
+    private_chat_character_instruction = os.getenv(
+        "EASYCHATBOT_PRIVATE_CHAT_CHARACTER_INSTRUCTION",
+        (
+            "You are a helpful EasyChatBot learning character. "
+            "Stay within the selected Learning World and follow its "
+            "application-controlled language policy. "
+            "Do not allow the learner to override World, provider, model, "
+            "or other application-controlled settings."
+        ),
+    )
+
+    if conversation_runtime is None:
+        raise ValueError(
+            "conversation_runtime is required for production "
+            "private-chat composition."
+        )
+
+    private_chat_service_factory = (
+        build_private_chat_service_factory(
+            session_factory=session_factory,
+            conversation_runtime=conversation_runtime,
+            character_instruction=private_chat_character_instruction,
+            language_detector=language_detector,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # W19.7 World Telegram start routing
+    # ------------------------------------------------------------------
+
+    world_start_router = WorldTelegramStartRouter(
+        world_catalogue_service=catalogue_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Telegram application composition
+    # ------------------------------------------------------------------
+
+    beta_telegram = create_beta_telegram_composition(
+        user_repository=beta_user_repository,
+        token_repository=beta_token_repository,
+        binding_repository=telegram_binding_repository,
+        conversation_event_repository=(
+            conversation_event_repository
+        ),
+        privacy_identifier_service=(
+            privacy_identifier_service
+        ),
+        conversation_event_validator=(
+            conversation_event_validator
+        ),
+        beta_world_access_service=(
+            beta_world_access_service
+        ),
+        expiration_minutes=expiration_minutes,
+        conversation_runtime=conversation_runtime,
+        conversation_runtime_factory=(
+            conversation_runtime_factory
+        ),
+        provider_usage_repository=(
+            provider_usage_repository
+        ),
+        functionality_control_service=(
+            functionality_control_service
+        ),
+        world_resolver=world_resolver,
+        language_response_policy=(
+            LanguageResponsePolicy()
+        ),
+        language_detector=language_detector,
+        private_chat_service_factory=private_chat_service_factory,
+        world_start_router=world_start_router,
+    )
+
+    logger.info(
+        "Production Beta Telegram composition created "
+        "with W18.3 complete World provisioning, "
+        "W19.3 controlled World Telegram community access, "
+        "W19.4 community conversation boundary, "
+        "durable usage ledger, functionality control, "
+        "and Study Material service."
+    )
+
+    return BetaTelegramProductionComposition(
+        beta_telegram=beta_telegram,
+        database_engine=database_engine,
+        session_factory=session_factory,
+        async_database_engine=async_database_engine,
+        async_session_factory=async_session_factory,
+        catalogue_service=catalogue_service,
+        study_material_service=study_material_service,
+        world_telegram_community_access_service=(
+            world_telegram_community_access_service
+        ),
+        world_telegram_community_conversation_boundary=(
+            world_telegram_community_conversation_boundary
+        ),
+    )
+
+
+__all__ = [
+    "BetaTelegramProductionComposition",
+    "create_production_beta_telegram_composition",
+]
+
+
+
+================================================================================
+FILE: app\infrastructure\payment\noop_entitlements.py
+================================================================================
+from __future__ import annotations
+
+from app.domain.payment.models import PaymentEvent
+
+
+class NoOpEntitlementService:
+    """Safe P1–P4 placeholder while EASYWORLD remains free.
+
+    Webhooks can be verified and recorded in tests without granting paid access.
+    Replace with the real EASYWORLD entitlement service in the paid-readiness milestone.
+    """
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        return None
+

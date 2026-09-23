@@ -150,6 +150,7 @@ class ResendEmailProvider:
             "authentication_password_reset",
             "authentication_password_reset_confirmation",
             "academy_notification",
+            "platform_intelligence_escalation",
         }:
             supplied_html = content.get("html")
 
@@ -195,6 +196,7 @@ class ResendEmailProvider:
             "authentication_password_reset",
             "authentication_password_reset_confirmation",
             "academy_notification",
+            "platform_intelligence_escalation",
         }:
             supplied_sender = content.get("from")
 

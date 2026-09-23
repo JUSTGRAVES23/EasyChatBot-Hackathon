@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -13,6 +13,9 @@ from telegram.ext import (
     filters,
 )
 
+from app.application.ports.telegram_update_idempotency import (
+    TelegramUpdateIdempotencyPort,
+)
 from app.interfaces.telegram.beta_telegram_adapter import (
     BetaTelegramAdapter,
 )
@@ -28,6 +31,7 @@ class TelegramBotRuntime:
     Responsibilities:
     - Telegram application lifecycle;
     - Telegram handler registration;
+    - inbound Telegram update idempotency;
     - delegation to BetaTelegramAdapter;
     - exposing the already-created Telegram bot client to
       controlled infrastructure adapters.
@@ -46,6 +50,8 @@ class TelegramBotRuntime:
               v
         TelegramBotRuntime
               |
+              +----> durable update-idempotency claim
+              |
               v
         BetaTelegramAdapter
               |
@@ -60,6 +66,16 @@ class TelegramBotRuntime:
     response returned by the adapter.
 
     This prevents duplicate Telegram messages.
+
+    IMPORTANT INBOUND IDEMPOTENCY:
+
+    Telegram update_id is the durable inbound processing key.
+
+    A successful claim means this runtime instance owns processing
+    of that update.
+
+    A failed claim means the update has already been claimed and
+    must not enter the adapter/conversation/AI flow again.
 
     PUBLICATION CLIENT OWNERSHIP:
 
@@ -82,6 +98,9 @@ class TelegramBotRuntime:
         *,
         adapter: BetaTelegramAdapter,
         conversation_boundary: Any = None,
+        telegram_update_idempotency: (
+            TelegramUpdateIdempotencyPort | None
+        ) = None,
     ) -> None:
         if adapter is None:
             raise ValueError(
@@ -93,6 +112,16 @@ class TelegramBotRuntime:
         # Retained for constructor compatibility with existing
         # composition. Runtime does not execute the boundary.
         self._conversation_boundary = conversation_boundary
+
+        # Durable inbound Telegram update claim.
+        #
+        # The repository implementation uses the Telegram
+        # update_id primary key and PostgreSQL ON CONFLICT
+        # protection so concurrent application instances cannot
+        # process the same update twice.
+        self._telegram_update_idempotency = (
+            telegram_update_idempotency
+        )
 
         self._application: Application | None = None
         self._running = False
@@ -222,6 +251,43 @@ class TelegramBotRuntime:
         )
 
     # =========================================================
+    # Telegram inbound idempotency
+    # =========================================================
+
+    async def _claim_update(
+        self,
+        update: Update,
+    ) -> bool:
+        """
+        Claim a Telegram update before adapter execution.
+
+        Returns:
+            True:
+                This update was successfully claimed and may
+                continue through the existing adapter flow.
+
+            False:
+                This update was already claimed and must stop
+                immediately.
+
+        When the idempotency dependency is not configured, the
+        runtime preserves the existing behaviour. Production
+        composition is expected to provide the durable repository.
+        """
+
+        if self._telegram_update_idempotency is None:
+            return True
+
+        telegram_update_id = update.update_id
+
+        if telegram_update_id is None:
+            return True
+
+        return self._telegram_update_idempotency.claim(
+            telegram_update_id
+        )
+
+    # =========================================================
     # Telegram handlers
     # =========================================================
 
@@ -230,6 +296,13 @@ class TelegramBotRuntime:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
+        # Claim BEFORE entering the adapter.
+        #
+        # This protects /start updates from duplicate execution
+        # in the same way as private classroom messages.
+        if not await self._claim_update(update):
+            return
+
         await self._adapter.handle_start(
             update,
             context,
@@ -248,6 +321,25 @@ class TelegramBotRuntime:
             return
 
         try:
+            # =================================================
+            # INBOUND IDEMPOTENCY GATE
+            # =================================================
+            #
+            # The durable claim happens BEFORE:
+            #
+            #   - authorization;
+            #   - conversation boundary;
+            #   - private-chat service;
+            #   - AI runtime;
+            #   - provider execution;
+            #   - Telegram response delivery.
+            #
+            # Duplicate update_ids stop here.
+            #
+
+            if not await self._claim_update(update):
+                return
+
             # =================================================
             # SINGLE DELEGATION POINT
             # =================================================

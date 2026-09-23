@@ -94,6 +94,40 @@ RESEND_API_KEY = _get_config(
 
 
 # ============================================================
+# Platform Intelligence escalation email configuration
+# ============================================================
+
+PLATFORM_INTELLIGENCE_EMAIL_FROM = _get_config(
+    "PLATFORM_INTELLIGENCE_EMAIL_FROM",
+    "",
+)
+
+
+PLATFORM_INTELLIGENCE_ESCALATION_RECIPIENTS = {
+    "RISK_OWNER": _get_config(
+        "PLATFORM_INTELLIGENCE_RISK_OWNER_EMAIL",
+        "",
+    ),
+    "CONTROL_OWNER": _get_config(
+        "PLATFORM_INTELLIGENCE_CONTROL_OWNER_EMAIL",
+        "",
+    ),
+    "COMPLIANCE": _get_config(
+        "PLATFORM_INTELLIGENCE_COMPLIANCE_EMAIL",
+        "",
+    ),
+    "SECURITY": _get_config(
+        "PLATFORM_INTELLIGENCE_SECURITY_EMAIL",
+        "",
+    ),
+    "SENIOR_MANAGEMENT": _get_config(
+        "PLATFORM_INTELLIGENCE_SENIOR_MANAGEMENT_EMAIL",
+        "",
+    ),
+}
+
+
+# ============================================================
 # Circuit breaker configuration
 # ============================================================
 

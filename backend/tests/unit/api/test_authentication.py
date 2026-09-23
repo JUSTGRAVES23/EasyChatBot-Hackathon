@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -387,18 +386,17 @@ async def test_password_reset_context_maps_error_to_no_store_bad_request() -> No
     http_request = build_request(service)
     response = Response()
 
-    result = await get_password_reset_context(
-        http_request,
-        response,
-        token="invalid-token",
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await get_password_reset_context(
+            http_request,
+            response,
+            token="invalid-token",
+        )
 
-    # JSONResponse is returned directly by the route for this failure path.
-    assert result.status_code == 400
-    assert result.headers["cache-control"] == "no-store"
-    assert result.body == (
-        b'{"detail":"Invalid or expired password reset token"}'
-    )
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Invalid or expired password reset token"
+    assert exc_info.value.headers["Cache-Control"] == "no-store"
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.asyncio

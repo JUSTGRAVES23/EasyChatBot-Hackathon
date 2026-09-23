@@ -1,0 +1,1500 @@
+﻿            is PlatformIntelligenceEscalationDeliveryStatus.FAILED
+        ):
+            await self._repository.start_retry(
+                notification_key=record.notification_key,
+            )
+
+        # STARTED recovery deliberately does not call start_retry().
+        # The durable attempt remains the same because this is recovery
+        # of the interrupted attempt rather than a new FAILED retry.
+        dispatch_result = await self._dispatch_service.dispatch(
+            request=request,
+            email_request=email_request,
+        )
+
+        return PlatformIntelligenceEscalationRetryExecutionResult(
+            status=(
+                PlatformIntelligenceEscalationRetryExecutionStatus
+                .RETRIED
+            ),
+            notification_key=record.notification_key,
+            attempt=(
+                dispatch_result.attempt
+                if dispatch_result.attempt is not None
+                else record.attempt
+            ),
+            reason=policy_result.reason,
+            dispatch_result=dispatch_result,
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestration.py
+---------------------------------------------------------------------
+"""Contracts for controlled PI escalation retry orchestration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+    PlatformIntelligenceEscalationDispatchRequest,
+)
+
+
+class PlatformIntelligenceRetryRunStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryState:
+    """Authoritative state required immediately before retry dispatch."""
+
+    notification_key: str
+    recommendation_id: str
+    recommendation_status: str
+    review_status: str
+    decision_status: str
+    quality_gate_status: str
+    dispatch_request: PlatformIntelligenceEscalationDispatchRequest
+    email_request: Any
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "notification_key",
+            "recommendation_id",
+            "recommendation_status",
+            "review_status",
+            "decision_status",
+            "quality_gate_status",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be nonblank.")
+
+        if self.dispatch_request.notification_key != self.notification_key:
+            raise ValueError(
+                "dispatch_request.notification_key must match notification_key."
+            )
+        if self.dispatch_request.recommendation_id != self.recommendation_id:
+            raise ValueError(
+                "dispatch_request.recommendation_id must match recommendation_id."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryRunResult:
+    notification_key: str
+    status: PlatformIntelligenceRetryRunStatus
+    reason: str
+    attempt: int | None = None
+    provider_message_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not self.reason.strip():
+            raise ValueError("reason must be nonblank.")
+        if self.attempt is not None and self.attempt < 1:
+            raise ValueError("attempt must be at least 1.")
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py
+---------------------------------------------------------------------
+"""Controlled orchestration for one PI escalation retry candidate."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+from app.application.operations_center.platform_intelligence_escalation_retry_claim_service import (
+    PlatformIntelligenceEscalationRetryClaimService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
+    PlatformIntelligenceEscalationRetryExecutionResult,
+    PlatformIntelligenceEscalationRetryExecutionService,
+    PlatformIntelligenceEscalationRetryExecutionStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunResult,
+    PlatformIntelligenceRetryRunStatus,
+    PlatformIntelligenceRetryState,
+)
+
+
+class PlatformIntelligenceRetryStateReader(Protocol):
+    async def get_retry_state(
+        self,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+    ) -> PlatformIntelligenceRetryState | None: ...
+
+
+class PlatformIntelligenceRetryPolicyEvaluator(Protocol):
+    async def evaluate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> bool: ...
+
+
+class PlatformIntelligenceRetryExecutor(Protocol):
+    async def retry(
+        self,
+        *,
+        request: object,
+        email_request: object,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryExecutionResult: ...
+
+
+class PlatformIntelligenceEscalationRetryOrchestrator:
+    """Coordinates policy, durable claim, state revalidation and retry.
+
+    This service deliberately does not discover candidates, implement retry
+    policy, send email directly, or mutate human-review/risk state.
+
+    The canonical retry execution service remains the owner of retry-policy
+    enforcement and existing dispatch integration. The orchestrator only
+    supplies the authoritative dispatch context after the durable claim and
+    final state revalidation.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_reader: PlatformIntelligenceRetryStateReader,
+        policy_evaluator: PlatformIntelligenceRetryPolicyEvaluator,
+        claim_service: PlatformIntelligenceEscalationRetryClaimService,
+        retry_execution: PlatformIntelligenceRetryExecutor,
+    ) -> None:
+        self._state_reader = state_reader
+        self._policy_evaluator = policy_evaluator
+        self._claim_service = claim_service
+        self._retry_execution = retry_execution
+
+    async def run_candidate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryRunResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        eligible = await self._policy_evaluator.evaluate(
+            candidate=candidate,
+            reference_at=reference_at,
+        )
+        if not eligible:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_POLICY_NOT_ELIGIBLE",
+                attempt=candidate.attempt,
+            )
+
+        claim = await self._claim_service.claim(
+            notification_key=candidate.notification_key,
+            claimed_at=reference_at,
+        )
+        if claim is None:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_CANDIDATE_ALREADY_CLAIMED",
+                attempt=candidate.attempt,
+            )
+
+        state = await self._state_reader.get_retry_state(
+            notification_key=candidate.notification_key,
+            recommendation_id=candidate.recommendation_id,
+        )
+        if state is None:
+            return self._skipped(candidate, "AUTHORITATIVE_STATE_NOT_FOUND")
+        if state.notification_key != candidate.notification_key:
+            return self._skipped(candidate, "NOTIFICATION_KEY_MISMATCH")
+        if state.recommendation_id != candidate.recommendation_id:
+            return self._skipped(candidate, "RECOMMENDATION_ID_MISMATCH")
+        if state.recommendation_status != "RECOMMENDED":
+            return self._skipped(
+                candidate, "RECOMMENDATION_NO_LONGER_RECOMMENDED"
+            )
+        if state.review_status != "IN_REVIEW":
+            return self._skipped(candidate, "REVIEW_NOT_IN_REVIEW")
+        if state.decision_status != "PENDING_HUMAN_REVIEW":
+            return self._skipped(
+                candidate, "DECISION_NO_LONGER_PENDING_HUMAN_REVIEW"
+            )
+        if state.quality_gate_status != "PASSED":
+            return self._skipped(
+                candidate, "QUALITY_GATE_NO_LONGER_PASSED"
+            )
+
+        execution = await self._retry_execution.retry(
+            request=state.dispatch_request,
+            email_request=state.email_request,
+            reference_at=reference_at,
+        )
+
+        if (
+            execution.status
+            is PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED
+        ):
+            dispatch_result = execution.dispatch_result
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SUCCEEDED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+                provider_message_id=(
+                    dispatch_result.provider_message_id
+                    if dispatch_result is not None
+                    else None
+                ),
+            )
+
+        if execution.status in (
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_ELIGIBLE,
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_DUE,
+        ):
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+            )
+
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.FAILED,
+            reason=execution.reason,
+            attempt=execution.attempt,
+        )
+
+    @staticmethod
+    def _skipped(
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reason: str,
+    ) -> PlatformIntelligenceRetryRunResult:
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+            reason=reason,
+            attempt=candidate.attempt,
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_retry_worker.py
+---------------------------------------------------------------------
+"""Contracts for the bounded PI escalation retry worker."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class PlatformIntelligenceRetryWorkerItemStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryWorkerItemResult:
+    notification_key: str
+    status: PlatformIntelligenceRetryWorkerItemStatus
+    reason: str
+    attempt: int | None = None
+    provider_message_id: str | None = None
+    error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not self.reason.strip():
+            raise ValueError("reason must be nonblank.")
+        if self.attempt is not None and self.attempt < 1:
+            raise ValueError("attempt must be at least 1.")
+        if self.error_type is not None and not self.error_type.strip():
+            raise ValueError("error_type must be nonblank when provided.")
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryWorkerResult:
+    requested_limit: int
+    discovered_count: int
+    processed_count: int
+    succeeded_count: int
+    skipped_count: int
+    failed_count: int
+    items: tuple[PlatformIntelligenceRetryWorkerItemResult, ...]
+
+    def __post_init__(self) -> None:
+        if self.requested_limit < 1:
+            raise ValueError("requested_limit must be at least 1.")
+        if self.discovered_count < 0:
+            raise ValueError("discovered_count cannot be negative.")
+        if self.processed_count < 0:
+            raise ValueError("processed_count cannot be negative.")
+        if self.processed_count != len(self.items):
+            raise ValueError("processed_count must equal the number of items.")
+        if self.succeeded_count < 0 or self.skipped_count < 0 or self.failed_count < 0:
+            raise ValueError("result counts cannot be negative.")
+        if (
+            self.succeeded_count + self.skipped_count + self.failed_count
+            != self.processed_count
+        ):
+            raise ValueError("result counts must equal processed_count.")
+        if self.discovered_count > self.requested_limit:
+            raise ValueError("discovered_count cannot exceed requested_limit.")
+        keys = [item.notification_key for item in self.items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("worker result cannot contain duplicate notification keys.")
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryWorkerRequest:
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        if self.limit < 1:
+            raise ValueError("limit must be at least 1.")
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_retry_worker_service.py
+---------------------------------------------------------------------
+"""Bounded, scheduler-free orchestration boundary for PI retry work."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from app.application.operations_center.platform_intelligence_escalation_retry_candidate_discovery import (
+    PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+    PlatformIntelligenceEscalationRetryOrchestrator,
+)
+from app.application.operations_center.platform_intelligence_retry_worker import (
+    PlatformIntelligenceRetryWorkerItemResult,
+    PlatformIntelligenceRetryWorkerItemStatus,
+    PlatformIntelligenceRetryWorkerRequest,
+    PlatformIntelligenceRetryWorkerResult,
+)
+
+
+class PlatformIntelligenceRetryWorker:
+    """Process one bounded candidate batch through the governed retry chain.
+
+    This class deliberately does not:
+    - schedule itself;
+    - sleep;
+    - create background tasks;
+    - access providers;
+    - implement retry policy;
+    - claim candidates directly;
+    - mutate risk or human-review state.
+
+    The caller owns invocation timing and supplies the reference timestamp.
+    """
+
+    def __init__(
+        self,
+        *,
+        discovery_service: PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+        orchestrator: PlatformIntelligenceEscalationRetryOrchestrator,
+    ) -> None:
+        if discovery_service is None:
+            raise ValueError("discovery_service cannot be None.")
+
+        if orchestrator is None:
+            raise ValueError("orchestrator cannot be None.")
+
+        self._discovery_service = discovery_service
+        self._orchestrator = orchestrator
+
+    async def run(
+        self,
+        *,
+        request: PlatformIntelligenceRetryWorkerRequest,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryWorkerResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        batch = await self._discovery_service.discover(
+            limit=request.limit,
+        )
+
+        results: list[PlatformIntelligenceRetryWorkerItemResult] = []
+
+        for candidate in batch.candidates:
+            try:
+                execution = await self._orchestrator.run_candidate(
+                    candidate=candidate,
+                    reference_at=reference_at,
+                )
+
+            except Exception as exc:
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=candidate.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .FAILED
+                        ),
+                        reason="CANDIDATE_EXECUTION_ERROR",
+                        attempt=candidate.attempt,
+                        error_type=type(exc).__name__,
+                    )
+                )
+                continue
+
+            if (
+                execution.status
+                is PlatformIntelligenceRetryRunStatus.SUCCEEDED
+            ):
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .SUCCEEDED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                        provider_message_id=(
+                            execution.provider_message_id
+                        ),
+                    )
+                )
+
+            elif (
+                execution.status
+                is PlatformIntelligenceRetryRunStatus.SKIPPED
+            ):
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .SKIPPED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                    )
+                )
+
+            else:
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .FAILED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                    )
+                )
+
+        succeeded = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.SUCCEEDED
+            for item in results
+        )
+
+        skipped = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.SKIPPED
+            for item in results
+        )
+
+        failed = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.FAILED
+            for item in results
+        )
+
+        return PlatformIntelligenceRetryWorkerResult(
+            requested_limit=request.limit,
+            discovered_count=len(batch.candidates),
+            processed_count=len(results),
+            succeeded_count=succeeded,
+            skipped_count=skipped,
+            failed_count=failed,
+            items=tuple(results),
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\operations_center\test_platform_intelligence_escalation_retry_claiming.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import text
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.infrastructure.operations_center.sqlalchemy_platform_intelligence_escalation_delivery_repository import (
+    SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository,
+)
+from app.infrastructure.persistence.database import (
+    create_async_database_engine,
+    create_async_session_factory,
+)
+
+
+pytestmark = pytest.mark.asyncio
+
+
+def _database_required() -> None:
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("DATABASE_URL is required for PostgreSQL integration tests.")
+
+
+async def test_claim_retry_candidate_is_atomic_and_reclaimable_after_lease_expiry() -> None:
+    _database_required()
+
+    engine = create_async_database_engine()
+    key = f"pi-claim-{uuid4()}"
+
+    try:
+        repository = SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
+            create_async_session_factory(engine)
+        )
+
+        await repository.create_started(
+            notification_key=key,
+            recommendation_id=f"recommendation-{uuid4()}",
+            risk_decision_id=f"decision-{uuid4()}",
+            review_item_id=f"review-{uuid4()}",
+            correlation_id=f"correlation-{uuid4()}",
+        )
+        await repository.mark_failed(
+            notification_key=key,
+            error_code="PROVIDER_ERROR",
+        )
+
+        first_token = str(uuid4())
+        first_claimed_at = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+        first_expiry = first_claimed_at + timedelta(minutes=5)
+
+        first = await repository.claim_retry_candidate(
+            notification_key=key,
+            claim_token=first_token,
+            claimed_at=first_claimed_at,
+            lease_expires_at=first_expiry,
+        )
+        assert first is True
+
+        second = await repository.claim_retry_candidate(
+            notification_key=key,
+            claim_token=str(uuid4()),
+            claimed_at=first_claimed_at + timedelta(seconds=1),
+            lease_expires_at=first_expiry + timedelta(seconds=1),
+        )
+        assert second is False
+
+        third_token = str(uuid4())
+        third_claimed_at = first_expiry + timedelta(seconds=1)
+        third = await repository.claim_retry_candidate(
+            notification_key=key,
+            claim_token=third_token,
+            claimed_at=third_claimed_at,
+            lease_expires_at=third_claimed_at + timedelta(minutes=5),
+        )
+        assert third is True
+
+        async with repository._session_factory() as session:  # noqa: SLF001
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT claim_token, claimed_at, lease_expires_at
+                        FROM platform_intelligence_escalation_deliveries
+                        WHERE notification_key = :notification_key
+                        """
+                    ),
+                    {"notification_key": key},
+                )
+            ).mappings().one()
+
+        assert row["claim_token"] == third_token
+        assert row["claimed_at"] == third_claimed_at
+    finally:
+        async with repository._session_factory() as session:  # noqa: SLF001
+            await session.execute(
+                text(
+                    """
+                    DELETE FROM platform_intelligence_escalation_deliveries
+                    WHERE notification_key = :notification_key
+                    """
+                ),
+                {"notification_key": key},
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+async def test_claim_does_not_claim_succeeded_delivery() -> None:
+    _database_required()
+
+    engine = create_async_database_engine()
+    key = f"pi-claim-success-{uuid4()}"
+
+    try:
+        repository = SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
+            create_async_session_factory(engine)
+        )
+
+        await repository.create_started(
+            notification_key=key,
+            recommendation_id=f"recommendation-{uuid4()}",
+            risk_decision_id=f"decision-{uuid4()}",
+            review_item_id=f"review-{uuid4()}",
+            correlation_id=f"correlation-{uuid4()}",
+        )
+        await repository.mark_succeeded(
+            notification_key=key,
+            provider_message_id="provider-message",
+        )
+
+        claimed = await repository.claim_retry_candidate(
+            notification_key=key,
+            claim_token=str(uuid4()),
+            claimed_at=datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc),
+            lease_expires_at=datetime(
+                2026, 9, 22, 12, 5, tzinfo=timezone.utc
+            ),
+        )
+
+        assert claimed is False
+    finally:
+        async with repository._session_factory() as session:  # noqa: SLF001
+            await session.execute(
+                text(
+                    """
+                    DELETE FROM platform_intelligence_escalation_deliveries
+                    WHERE notification_key = :notification_key
+                    """
+                ),
+                {"notification_key": key},
+            )
+            await session.commit()
+        await engine.dispose()
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry import (
+    PlatformIntelligenceEscalationRetryDecision,
+    PlatformIntelligenceEscalationRetryPolicy,
+    PlatformIntelligenceEscalationRetryPolicyService,
+    PlatformIntelligenceEscalationRetryPolicyStatus,
+)
+
+
+REFERENCE = datetime(
+    2026,
+    9,
+    22,
+    10,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+@dataclass
+class Record:
+    notification_key: str
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    correlation_id: str
+    attempt: int
+    status: PlatformIntelligenceEscalationDeliveryStatus
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    created_at: datetime | None = REFERENCE
+    updated_at: datetime | None = REFERENCE
+
+
+def policy(**overrides):
+    values = {
+        "policy_id": "PI-RETRY",
+        "policy_version": "1.0",
+        "status": (
+            PlatformIntelligenceEscalationRetryPolicyStatus
+            .APPROVED
+        ),
+        "max_attempts": 4,
+        "base_backoff_seconds": 60,
+        "max_backoff_seconds": 300,
+        "retryable_error_codes": frozenset(
+            {
+                "TIMEOUT",
+                "CONNECTION_ERROR",
+                "PROVIDER_ERROR",
+            }
+        ),
+        "retry_interrupted_started": True,
+    }
+
+    values.update(overrides)
+
+    return PlatformIntelligenceEscalationRetryPolicy(
+        **values
+    )
+
+
+def record(
+    *,
+    status=PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+    attempt=1,
+    error_code="PROVIDER_ERROR",
+):
+    return Record(
+        notification_key=(
+            "platform_intelligence_escalation:REC-1"
+        ),
+        recommendation_id="REC-1",
+        risk_decision_id="DEC-1",
+        review_item_id="REV-1",
+        correlation_id="CORR-1",
+        attempt=attempt,
+        status=status,
+        error_code=error_code,
+        created_at=REFERENCE,
+        updated_at=REFERENCE,
+    )
+
+
+def test_retryable_failed_delivery_is_eligible_with_deterministic_backoff():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(attempt=1),
+        reference_at=REFERENCE + timedelta(seconds=60),
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.ELIGIBLE
+    )
+
+    assert result.backoff_seconds == 60
+
+    assert result.next_eligible_at == (
+        REFERENCE + timedelta(seconds=60)
+    )
+
+    assert result.policy_id == "PI-RETRY"
+    assert result.policy_version == "1.0"
+
+
+def test_failed_delivery_is_not_due_before_backoff():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(attempt=1),
+        reference_at=REFERENCE + timedelta(seconds=59),
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.ELIGIBLE
+    )
+
+    assert result.backoff_seconds == 60
+
+    assert result.next_eligible_at == (
+        REFERENCE + timedelta(seconds=60)
+    )
+
+
+def test_backoff_doubles_and_is_capped():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    assert service.backoff_seconds(attempt=1) == 60
+    assert service.backoff_seconds(attempt=2) == 120
+    assert service.backoff_seconds(attempt=3) == 240
+    assert service.backoff_seconds(attempt=4) == 300
+    assert service.backoff_seconds(attempt=10) == 300
+
+
+def test_non_retryable_error_is_not_eligible():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(
+            error_code="INVALID_RECIPIENT"
+        ),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+    assert "not retryable" in result.reason
+
+
+def test_missing_error_code_is_not_eligible():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(error_code=None),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+    assert "no error code" in result.reason
+
+
+def test_maximum_attempts_is_enforced():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(attempt=4),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+    assert "Maximum delivery attempts" in result.reason
+
+
+def test_draft_policy_cannot_authorize_retry():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy(
+            status=(
+                PlatformIntelligenceEscalationRetryPolicyStatus
+                .DRAFT
+            )
+        )
+    )
+
+    result = service.evaluate(
+        record=record(),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+    assert "not APPROVED" in result.reason
+
+
+def test_interrupted_started_delivery_is_policy_controlled():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(
+            status=(
+                PlatformIntelligenceEscalationDeliveryStatus
+                .STARTED
+            ),
+            attempt=1,
+            error_code=None,
+        ),
+        reference_at=REFERENCE + timedelta(seconds=60),
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.ELIGIBLE
+    )
+
+    assert result.backoff_seconds == 60
+
+    assert result.next_eligible_at == (
+        REFERENCE + timedelta(seconds=60)
+    )
+
+
+def test_started_recovery_can_be_disabled_by_policy():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy(
+            retry_interrupted_started=False
+        )
+    )
+
+    result = service.evaluate(
+        record=record(
+            status=(
+                PlatformIntelligenceEscalationDeliveryStatus
+                .STARTED
+            ),
+            error_code=None,
+        ),
+        reference_at=REFERENCE + timedelta(seconds=60),
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+
+def test_succeeded_delivery_is_never_retryable():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=record(
+            status=(
+                PlatformIntelligenceEscalationDeliveryStatus
+                .SUCCEEDED
+            ),
+            error_code=None,
+        ),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+
+def test_missing_delivery_timestamp_is_not_retryable():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    result = service.evaluate(
+        record=Record(
+            notification_key=(
+                "platform_intelligence_escalation:REC-1"
+            ),
+            recommendation_id="REC-1",
+            risk_decision_id="DEC-1",
+            review_item_id="REV-1",
+            correlation_id="CORR-1",
+            attempt=1,
+            status=(
+                PlatformIntelligenceEscalationDeliveryStatus
+                .FAILED
+            ),
+            error_code="PROVIDER_ERROR",
+            created_at=None,
+            updated_at=None,
+        ),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.decision
+        is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+    )
+
+    assert "updated_at" in result.reason
+
+
+def test_reference_time_must_be_timezone_aware():
+    service = PlatformIntelligenceEscalationRetryPolicyService(
+        policy=policy()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="timezone-aware",
+    ):
+        service.evaluate(
+            record=record(),
+            reference_at=datetime(
+                2026,
+                9,
+                22,
+                10,
+                0,
+            ),
+        )
+
+
+def test_policy_rejects_invalid_backoff_configuration():
+    with pytest.raises(
+        ValueError,
+        match="max_backoff_seconds",
+    ):
+        policy(
+            base_backoff_seconds=300,
+            max_backoff_seconds=60,
+        )
+
+
+def test_policy_rejects_invalid_attempt_limit():
+    with pytest.raises(
+        ValueError,
+        match="max_attempts",
+    ):
+        policy(
+            max_attempts=0
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_candidate_discovery.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidate_discovery import (
+    PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+)
+
+T1 = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
+T2 = datetime(2026, 9, 22, 10, 1, tzinfo=timezone.utc)
+
+
+@dataclass
+class Record:
+    notification_key: str
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    correlation_id: str
+    attempt: int
+    status: PlatformIntelligenceEscalationDeliveryStatus
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    created_at: datetime | None = T1
+    updated_at: datetime | None = T1
+
+
+class Repository:
+    def __init__(self, records):
+        self.records = records
+        self.limit = None
+
+    async def list_retry_candidates(self, *, limit):
+        self.limit = limit
+        return self.records
+
+
+@pytest.mark.asyncio
+async def test_discovery_returns_only_failed_and_started_candidates():
+    repository = Repository(
+        [
+            Record(
+                "key-succeeded",
+                "rec-s",
+                "dec-s",
+                "rev-s",
+                "corr-s",
+                1,
+                PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED,
+                updated_at=T1,
+            ),
+            Record(
+                "key-failed",
+                "rec-f",
+                "dec-f",
+                "rev-f",
+                "corr-f",
+                1,
+                PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+                error_code="PROVIDER_ERROR",
+                updated_at=T2,
+            ),
+            Record(
+                "key-started",
+                "rec-t",
+                "dec-t",
+                "rev-t",
+                "corr-t",
+                1,
+                PlatformIntelligenceEscalationDeliveryStatus.STARTED,
+                updated_at=T1,
+            ),
+        ]
+    )
+
+    service = PlatformIntelligenceEscalationRetryCandidateDiscoveryService(
+        repository=repository
+    )
+
+    result = await service.discover(limit=50)
+
+    assert repository.limit == 50
+    assert [item.notification_key for item in result.candidates] == [
+        "key-started",
+        "key-failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_is_deterministically_ordered():
+    repository = Repository(
+        [
+            Record(
+                "key-b",
+                "rec-b",
+                "dec-b",
+                "rev-b",
+                "corr-b",
+                1,
+                PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+                updated_at=T1,
+            ),
+            Record(
+                "key-a",
+                "rec-a",
+                "dec-a",
+                "rev-a",
+                "corr-a",
+                1,
+                PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+                updated_at=T1,
+            ),
+        ]
+    )
+
+    service = PlatformIntelligenceEscalationRetryCandidateDiscoveryService(
+        repository=repository
+    )
+
+    result = await service.discover(limit=10)
+
+    assert [item.notification_key for item in result.candidates] == [
+        "key-a",
+        "key-b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_preserves_retry_metadata():
+    repository = Repository(
+        [
+            Record(
+                "key-1",
+                "rec-1",
+                "dec-1",
+                "rev-1",
+                "corr-1",
+                2,
+                PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+                error_code="TIMEOUT",
+                updated_at=T2,
+            )
+        ]
+    )
+
+    service = PlatformIntelligenceEscalationRetryCandidateDiscoveryService(
+        repository=repository
+    )
+
+    result = await service.discover(limit=10)
+    candidate = result.candidates[0]
+
+    assert candidate.attempt == 2
+    assert candidate.error_code == "TIMEOUT"
+    assert candidate.updated_at == T2
+    assert candidate.status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_discovery_rejects_invalid_limit():
+    repository = Repository([])
+
+    service = PlatformIntelligenceEscalationRetryCandidateDiscoveryService(
+        repository=repository
+    )
+
+    with pytest.raises(ValueError, match="at least 1"):
+        await service.discover(limit=0)
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_claim_service.py
+---------------------------------------------------------------------
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.application.operations_center.platform_intelligence_escalation_retry_claims import (
+    RetryCandidateClaimStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_claim_service import (
+    PlatformIntelligenceEscalationRetryClaimService,
+)
+
+
+class FakeClaimRepository:
+    def __init__(self, result: bool) -> None:
+        self.result = result
+        self.calls = []
+
+    async def claim_retry_candidate(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_claim_returns_bounded_lease() -> None:
+    repository = FakeClaimRepository(True)
+    service = PlatformIntelligenceEscalationRetryClaimService(
+        repository,
+        lease_seconds=60,
+    )
+    reference = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+
+    claim = await service.claim(
+        notification_key="pi-key",
+        claimed_at=reference,
+    )
+
+    assert claim is not None
+    assert claim.notification_key == "pi-key"
+    assert claim.claimed_at == reference
+    assert claim.lease_expires_at == reference + timedelta(seconds=60)
+    assert claim.status is RetryCandidateClaimStatus.CLAIMED
+    assert repository.calls[0]["notification_key"] == "pi-key"
+
+
+@pytest.mark.asyncio
+async def test_claim_returns_none_when_candidate_is_already_claimed() -> None:
+    repository = FakeClaimRepository(False)
+    service = PlatformIntelligenceEscalationRetryClaimService(repository)
+
+    claim = await service.claim(
+        notification_key="pi-key",
+        claimed_at=datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert claim is None
+
+
+@pytest.mark.asyncio
+async def test_claim_rejects_naive_reference_time() -> None:
+    repository = FakeClaimRepository(True)
+    service = PlatformIntelligenceEscalationRetryClaimService(repository)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await service.claim(
+            notification_key="pi-key",
+            claimed_at=datetime(2026, 9, 22, 12, 0),
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_execution.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+    PlatformIntelligenceEscalationDispatchRequest,
+    PlatformIntelligenceEscalationDispatchResult,
+    PlatformIntelligenceEscalationDispatchStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry import (
+    PlatformIntelligenceEscalationRetryPolicy,
+    PlatformIntelligenceEscalationRetryPolicyService,
+    PlatformIntelligenceEscalationRetryPolicyStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
+    PlatformIntelligenceEscalationRetryExecutionService,
+    PlatformIntelligenceEscalationRetryExecutionStatus,
+)
+
+
+DELIVERY_TIME = datetime(
+    2026,
+    9,
+    22,
+    10,
+    0,
+    tzinfo=timezone.utc,
+)
+
+REFERENCE = datetime(
+    2026,
+    9,
+    22,
+    10,
+    1,
+    tzinfo=timezone.utc,
+)
+
+
+@dataclass
+class Record:
+    notification_key: str
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    correlation_id: str
+    attempt: int
+    status: PlatformIntelligenceEscalationDeliveryStatus
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    created_at: datetime | None = DELIVERY_TIME
+    updated_at: datetime | None = DELIVERY_TIME
+
+
+class Repository:
+    def __init__(self, record):
+        self.record = record
+        self.retries = 0
+
+    async def get_by_notification_key(self, key):
+        if self.record is None:
+            return None
+
+        if self.record.notification_key == key:
+            return self.record
+
+        return None
+
+    async def start_retry(self, *, notification_key):
+        self.retries += 1
+
+        self.record.attempt += 1
+        self.record.status = (
+            PlatformIntelligenceEscalationDeliveryStatus.STARTED
+        )
+        self.record.error_code = None
+        self.record.updated_at = REFERENCE
+
+        return self.record
+
+
+class Dispatch:
+    def __init__(self):
+        self.calls = 0
+
+    async def dispatch(self, *, request, email_request):
+        self.calls += 1
+
+        return PlatformIntelligenceEscalationDispatchResult(
+            status=PlatformIntelligenceEscalationDispatchStatus.SENT,
+            notification_key=request.notification_key,
+            provider_message_id="provider-1",
+            attempt=2,
+        )
+
+
+def policy():
+    return PlatformIntelligenceEscalationRetryPolicyService(
+        policy=PlatformIntelligenceEscalationRetryPolicy(
+            policy_id="PI-RETRY",
+            policy_version="1.0",
+            status=(
+                PlatformIntelligenceEscalationRetryPolicyStatus
+                .APPROVED
+            ),
+            max_attempts=4,
+            base_backoff_seconds=60,
+            max_backoff_seconds=300,
+            retryable_error_codes=frozenset(
+                {"PROVIDER_ERROR"}
+            ),
+            retry_interrupted_started=True,
+        )
+    )
+
+
+def request():
+    return PlatformIntelligenceEscalationDispatchRequest(
+        recommendation_id="REC-1",
+        risk_decision_id="DEC-1",
+        review_item_id="REV-1",
+        risk_level="HIGH",
+        risk_score=0.82,
+        quality_gate_status="PASSED",
+        review_status="IN_REVIEW",
+        decision_status="PENDING_HUMAN_REVIEW",
+        notification_key=(
+            "platform_intelligence_escalation:REC-1"
+        ),
+        correlation_id="CORR-1",
+        route="RISK_OWNER",
+        reasons=("High risk.",),
+    )
+
+
+def record(
+    status,
+    attempt=1,
+    error_code="PROVIDER_ERROR",
+):
+    return Record(
+        notification_key=(
+            "platform_intelligence_escalation:REC-1"
+        ),
+        recommendation_id="REC-1",
+        risk_decision_id="DEC-1",
+        review_item_id="REV-1",
+        correlation_id="CORR-1",
+        attempt=attempt,
+        status=status,
+        error_code=error_code,
+        created_at=DELIVERY_TIME,

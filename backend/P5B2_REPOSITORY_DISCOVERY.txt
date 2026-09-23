@@ -1,0 +1,3595 @@
+
+===== BILLING MODELS =====
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.infrastructure.persistence.database import Base
+
+
+class BillingPlanRecord(Base):
+    __tablename__ = "billing_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    audience: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    family_capable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    stripe_product_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class BillingPriceRecord(Base):
+    __tablename__ = "billing_prices"
+    __table_args__ = (UniqueConstraint("plan_id", "billing_interval", name="uq_billing_prices_plan_interval"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("billing_plans.id", ondelete="CASCADE"), nullable=False
+    )
+    price_code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    amount_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ParentChildRelationshipRecord(Base):
+    __tablename__ = "parent_child_relationships"
+    __table_args__ = (
+        UniqueConstraint("parent_user_id", "child_user_id", name="uq_parent_child_relationship"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(String(50), nullable=False, default="GUARDIAN")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ParentalConsentRecord(Base):
+    __tablename__ = "parental_consents"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    consent_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PaymentApprovalRequestRecord(Base):
+    __tablename__ = "payment_approval_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SubscriptionRecord(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    beneficiary_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    payer_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    stripe_customer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    stripe_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    current_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EntitlementRecord(Base):
+    __tablename__ = "entitlements"
+    __table_args__ = (UniqueConstraint("user_id", "plan_code", name="uq_entitlements_user_plan"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    ai_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    agent_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    premium_models: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    priority_processing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StripeWebhookEventRecord(Base):
+    __tablename__ = "stripe_webhook_events"
+
+    stripe_event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+===== DATABASE BASE =====
+
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import Column, Table, create_engine
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+
+class Base(DeclarativeBase):
+    """Canonical SQLAlchemy metadata registry for the platform."""
+
+    pass
+
+
+# The authentication subsystem owns the physical ``users`` table and
+# persists it through its raw-SQL repository.  This metadata-only table
+# exists solely so SQLAlchemy can resolve foreign keys from ORM models
+# that reference users.id.  It is not an ORM-mapped User entity and does
+# not create or manage the physical table.
+users_table = Table(
+    "users",
+    Base.metadata,
+    Column(
+        "id",
+        PGUUID(as_uuid=True),
+        nullable=False,
+    ),
+)
+
+
+def database_url() -> str:
+    """Return the canonical PostgreSQL connection URL."""
+
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        raise RuntimeError(
+            "DATABASE_URL is required for PostgreSQL persistence."
+        )
+
+    return value
+
+
+def create_database_engine():
+    """Create the existing synchronous PostgreSQL engine.
+
+    This API is preserved for the existing Beta 1 persistence layer.
+    """
+
+    return create_engine(
+        database_url(),
+        pool_pre_ping=True,
+        future=True,
+    )
+
+
+def create_session_factory(
+    engine,
+) -> sessionmaker[Session]:
+    """Create the existing synchronous session factory.
+
+    Preserved for existing Beta 1 repositories.
+    """
+
+    return sessionmaker(
+        bind=engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
+def async_database_url() -> str:
+    """Return DATABASE_URL adapted for SQLAlchemy async PostgreSQL.
+
+    The environment remains the single source of truth. We only adapt the
+    driver at the infrastructure boundary when the configured URL uses the
+    standard PostgreSQL SQLAlchemy scheme.
+    """
+
+    value = database_url()
+
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+
+    if value.startswith("postgresql://"):
+        return value.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    raise RuntimeError(
+        "DATABASE_URL must use a PostgreSQL URL compatible with "
+        "the synchronous or async PostgreSQL persistence boundary."
+    )
+
+
+def create_async_database_engine() -> AsyncEngine:
+    """Create the canonical asynchronous PostgreSQL engine.
+
+    This is used by durable WS-22 persistence while sharing the same
+    DATABASE_URL and canonical Base as the existing persistence layer.
+    """
+
+    return create_async_engine(
+        async_database_url(),
+        pool_pre_ping=True,
+    )
+
+
+def create_async_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    """Create the canonical asynchronous PostgreSQL session factory."""
+
+    return async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+===== EXISTING PERSISTENCE REPOSITORIES =====
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_beta_access_repository.py =====
+
+from __future__ import annotations
+
+from typing import Optional
+
+from app.application.beta_access.models import (
+    BetaConnectionToken,
+    BetaUserState,
+    TelegramBinding,
+)
+
+
+class InMemoryBetaUserRepository:
+    def __init__(self) -> None:
+        self._users: dict[str, BetaUserState] = {}
+
+    async def save(self, user: BetaUserState) -> BetaUserState:
+        self._users[user.user_id] = user
+        return user
+
+    async def get(
+        self,
+        user_id: str,
+    ) -> Optional[BetaUserState]:
+        return self._users.get(user_id)
+
+    async def get_by_telegram_id(
+        self,
+        telegram_id: int,
+    ) -> Optional[BetaUserState]:
+        for user in self._users.values():
+            if getattr(user, "telegram_id", None) == telegram_id:
+                return user
+
+        return None
+
+
+class InMemoryBetaTokenRepository:
+    def __init__(self) -> None:
+        self._tokens: dict[str, BetaConnectionToken] = {}
+
+    async def save(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+        self._tokens[token.token_id] = token
+        return token
+
+    async def get(
+        self,
+        token_id: str,
+    ) -> Optional[BetaConnectionToken]:
+        return self._tokens.get(token_id)
+
+    async def get_by_hash(
+        self,
+        token_hash: str,
+    ) -> Optional[BetaConnectionToken]:
+        for token in self._tokens.values():
+            if token.token_hash == token_hash:
+                return token
+
+        return None
+
+    async def mark_used(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+        """
+        Persist the token with its used_at timestamp.
+
+        The application service passes an immutable replacement of
+        the existing token, so the in-memory repository simply replaces
+        the stored record.
+        """
+        self._tokens[token.token_id] = token
+        return token
+
+
+class InMemoryTelegramBindingRepository:
+    def __init__(self) -> None:
+        self._bindings: dict[str, TelegramBinding] = {}
+
+    async def save(
+        self,
+        binding: TelegramBinding,
+    ) -> TelegramBinding:
+        self._bindings[binding.telegram_user_id] = binding
+        return binding
+
+    async def get_by_telegram_user_id(
+        self,
+        telegram_user_id: str,
+    ) -> Optional[TelegramBinding]:
+        return self._bindings.get(telegram_user_id)
+
+    async def get_by_user_id(
+        self,
+        user_id: str,
+    ) -> Optional[TelegramBinding]:
+        for binding in self._bindings.values():
+            if binding.user_id == user_id:
+                return binding
+
+        return None
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_event_repository.py =====
+
+"""
+In-Memory Voice Call Event Repository.
+
+Infrastructure implementation for
+voice lifecycle event storage.
+
+Responsibilities:
+- Store VoiceCallEvent objects in memory.
+- Retrieve events by voice_call_id.
+- Provide Beta persistence adapter.
+
+Does NOT:
+- Contain business logic.
+- Execute workflows.
+- Send notifications.
+- Call external providers.
+- Replace production event storage.
+"""
+
+from __future__ import annotations
+
+
+
+from app.application.uai.voice.voice_call_event_repository import (
+    VoiceCallEventRepository,
+)
+
+
+
+from app.domain.uai.voice.voice_call_event import (
+    VoiceCallEvent,
+)
+
+
+
+class InMemoryVoiceCallEventRepository(
+    VoiceCallEventRepository,
+):
+    """
+    In-memory repository for Beta.
+
+    Future replacement:
+    PostgreSQL/event store implementation.
+    """
+
+
+
+    def __init__(
+        self,
+    ) -> None:
+        """
+        Initialise repository storage.
+        """
+
+        self._events: list[
+            VoiceCallEvent
+        ] = []
+
+
+
+    def save(
+        self,
+        *,
+        event: VoiceCallEvent,
+    ) -> VoiceCallEvent:
+        """
+        Store a voice call event.
+        """
+
+
+        self._events.append(
+            event
+        )
+
+
+        return event
+
+
+
+    def get_by_voice_call_id(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> list[VoiceCallEvent]:
+        """
+        Retrieve events for a voice call.
+        """
+
+
+        return [
+            event
+            for event in self._events
+            if event.voice_call_id
+            ==
+            voice_call_id
+        ]
+
+
+
+    def get_all(
+        self,
+    ) -> list[VoiceCallEvent]:
+        """
+        Return all stored events.
+
+        Useful for Beta diagnostics
+        and tests.
+        """
+
+
+        return list(
+            self._events
+        )
+
+
+
+__all__ = [
+    "InMemoryVoiceCallEventRepository",
+]
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_invitation_repository.py =====
+
+"""
+In Memory Voice Call Invitation Repository.
+
+Infrastructure implementation of the
+VoiceCallInvitationRepository port.
+
+Responsibilities:
+- Store voice call invitations in memory.
+- Retrieve invitations by identity.
+- Delete invitations.
+
+Does NOT:
+- Send notifications.
+- Send emails.
+- Execute voice calls.
+- Manage LiveKit.
+- Contain business rules.
+"""
+
+from __future__ import annotations
+
+
+from app.application.uai.voice.voice_call_invitation_repository import (
+    VoiceCallInvitationRepository,
+)
+
+
+from app.domain.uai.voice.voice_call_invitation import (
+    VoiceCallInvitation,
+)
+
+
+
+class InMemoryVoiceCallInvitationRepository(
+    VoiceCallInvitationRepository,
+):
+    """
+    In-memory repository for Beta/testing.
+
+    Future replacement:
+
+        PostgreSQLVoiceCallInvitationRepository
+
+    without changing application services.
+    """
+
+
+
+    def __init__(
+        self,
+    ) -> None:
+
+        self._invitations: dict[
+            str,
+            VoiceCallInvitation,
+        ] = {}
+
+
+
+    def save(
+        self,
+        *,
+        invitation: VoiceCallInvitation,
+    ) -> VoiceCallInvitation:
+        """
+        Save invitation.
+        """
+
+
+        self._invitations[
+            invitation.id
+        ] = invitation
+
+
+        return invitation
+
+
+
+    def get_by_id(
+        self,
+        *,
+        invitation_id: str,
+    ) -> VoiceCallInvitation | None:
+        """
+        Retrieve invitation by id.
+        """
+
+
+        return self._invitations.get(
+            invitation_id
+        )
+
+
+
+    def delete(
+        self,
+        *,
+        invitation_id: str,
+    ) -> None:
+        """
+        Delete invitation.
+        """
+
+
+        self._invitations.pop(
+            invitation_id,
+            None,
+        )
+
+
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Remove all invitations.
+
+        Useful for tests.
+        """
+
+
+        self._invitations.clear()
+
+
+
+__all__ = [
+    "InMemoryVoiceCallInvitationRepository",
+]
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\in_memory_voice_call_notification_repository.py =====
+
+"""
+In Memory Voice Call Notification Repository.
+
+Infrastructure implementation of the
+VoiceCallNotificationRepository port.
+
+Responsibilities:
+- Store notifications in memory.
+- Retrieve notifications.
+- Delete notifications.
+
+Does NOT:
+- Send notifications.
+- Send emails.
+- Manage inbox UI.
+- Execute voice calls.
+"""
+
+from __future__ import annotations
+
+
+from app.application.uai.notifications.voice_call_notification_repository import (
+    VoiceCallNotificationRepository,
+)
+
+
+from app.domain.uai.notifications.voice_call_notification import (
+    VoiceCallNotification,
+)
+
+
+
+class InMemoryVoiceCallNotificationRepository(
+    VoiceCallNotificationRepository,
+):
+    """
+    Beta/test repository implementation.
+
+    Future replacement:
+
+        PostgreSQLVoiceCallNotificationRepository
+
+    without changing application services.
+    """
+
+
+
+    def __init__(
+        self,
+    ) -> None:
+
+        self._notifications: dict[
+            str,
+            VoiceCallNotification,
+        ] = {}
+
+
+
+    def save(
+        self,
+        *,
+        notification: VoiceCallNotification,
+    ) -> VoiceCallNotification:
+        """
+        Save notification.
+        """
+
+
+        self._notifications[
+            notification.id
+        ] = notification
+
+
+        return notification
+
+
+
+    def get_by_id(
+        self,
+        *,
+        notification_id: str,
+    ) -> VoiceCallNotification | None:
+        """
+        Retrieve notification.
+        """
+
+
+        return self._notifications.get(
+            notification_id
+        )
+
+
+
+    def delete(
+        self,
+        *,
+        notification_id: str,
+    ) -> None:
+        """
+        Delete notification.
+        """
+
+
+        self._notifications.pop(
+            notification_id,
+            None,
+        )
+
+
+
+    def clear(
+        self,
+    ) -> None:
+        """
+        Clear repository.
+
+        Useful for tests.
+        """
+
+
+        self._notifications.clear()
+
+
+
+__all__ = [
+    "InMemoryVoiceCallNotificationRepository",
+]
+
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_access_repository.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from app.application.beta_access.models import (
+    BetaConnectionToken,
+    BetaUserState,
+    TelegramBinding,
+)
+
+from app.application.beta_access.repositories import (
+    BetaTokenRepository,
+    BetaUserRepository,
+    TelegramBindingRepository,
+)
+
+from .beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PostgreSQLBetaUserRepository(BetaUserRepository):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get(
+        self,
+        user_id: str,
+    ) -> BetaUserState | None:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaUserRecord,
+                user_id,
+            )
+
+            return (
+                None
+                if row is None
+                else _user_from_record(row)
+            )
+
+
+    async def get_by_telegram_id(
+        self,
+        telegram_id: int,
+    ) -> BetaUserState | None:
+        """
+        Resolve Telegram identity.
+
+        Source of truth:
+
+            telegram_bindings
+                    |
+                    v
+                beta_users
+        """
+
+        with self._session_factory() as session:
+
+            binding = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id
+                    == str(telegram_id)
+                )
+            )
+
+
+            if binding is None:
+                return None
+
+
+            row = session.get(
+                BetaUserRecord,
+                binding.user_id,
+            )
+
+
+            if row is None:
+                return None
+
+
+            user = _user_from_record(row)
+
+
+            #
+            # Telegram binding is authoritative.
+            #
+            # Do not depend on beta_users.telegram_id.
+            #
+            return BetaUserState(
+                user_id=user.user_id,
+                email=user.email,
+                email_verified=user.email_verified,
+                beta_approved=user.beta_approved,
+                telegram_id=int(
+                    binding.telegram_user_id
+                ),
+                active_world_id=user.active_world_id,
+            )
+
+
+    async def save(
+        self,
+        user: BetaUserState,
+    ) -> BetaUserState:
+
+        now = _utcnow()
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaUserRecord,
+                user.user_id,
+            )
+
+
+            if row is None:
+
+                row = BetaUserRecord(
+                    id=user.user_id,
+                    email=user.email,
+                    email_verified=user.email_verified,
+                    approved=user.beta_approved,
+                    active_world_id=user.active_world_id,
+                    telegram_id=(
+                        None
+                        if user.telegram_id is None
+                        else str(user.telegram_id)
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                )
+
+                session.add(row)
+
+
+            else:
+
+                row.email = user.email
+                row.email_verified = user.email_verified
+                row.approved = user.beta_approved
+                row.active_world_id = user.active_world_id
+
+                row.telegram_id = (
+                    None
+                    if user.telegram_id is None
+                    else str(user.telegram_id)
+                )
+
+                row.updated_at = now
+
+
+            session.commit()
+
+
+        return user
+
+
+
+class PostgreSQLBetaTokenRepository(
+    BetaTokenRepository
+):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get_by_hash(
+        self,
+        token_hash: str,
+    ) -> BetaConnectionToken | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(BetaConnectionTokenRecord).where(
+                    BetaConnectionTokenRecord.token_hash
+                    == token_hash
+                )
+            )
+
+            return (
+                None
+                if row is None
+                else _token_from_record(row)
+            )
+
+
+    async def save(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+
+        now = _utcnow()
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                BetaConnectionTokenRecord,
+                token.token_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    BetaConnectionTokenRecord(
+                        id=token.token_id,
+                        token_hash=token.token_hash,
+                        user_id=token.user_id,
+                        expires_at=token.expires_at,
+                        used_at=token.used_at,
+                        created_at=now,
+                    )
+                )
+
+            else:
+
+                row.used_at = token.used_at
+
+
+            session.commit()
+
+
+        return token
+
+
+    async def mark_used(
+        self,
+        token: BetaConnectionToken,
+    ) -> BetaConnectionToken:
+
+        return await self.save(token)
+
+
+
+class PostgreSQLTelegramBindingRepository(
+    TelegramBindingRepository
+):
+
+    def __init__(
+        self,
+        session_factory,
+    ):
+        self._session_factory = session_factory
+
+
+    async def get_by_telegram_user_id(
+        self,
+        telegram_user_id: str,
+    ) -> TelegramBinding | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.telegram_user_id
+                    == telegram_user_id
+                )
+            )
+
+
+            return (
+                None
+                if row is None
+                else _binding_from_record(row)
+            )
+
+
+    async def get_by_user_id(
+        self,
+        user_id: str,
+    ) -> TelegramBinding | None:
+
+        with self._session_factory() as session:
+
+            row = session.scalar(
+                select(TelegramBindingRecord).where(
+                    TelegramBindingRecord.user_id
+                    == user_id
+                )
+            )
+
+
+            return (
+                None
+                if row is None
+                else _binding_from_record(row)
+            )
+
+
+    async def save(
+        self,
+        binding: TelegramBinding,
+    ) -> TelegramBinding:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                TelegramBindingRecord,
+                binding.binding_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    TelegramBindingRecord(
+                        id=binding.binding_id,
+                        user_id=binding.user_id,
+                        telegram_user_id=binding.telegram_user_id,
+                        chat_id=binding.chat_id,
+                        connected_at=binding.connected_at,
+                    )
+                )
+
+
+            else:
+
+                row.telegram_user_id = (
+                    binding.telegram_user_id
+                )
+
+                row.chat_id = (
+                    binding.chat_id
+                )
+
+                row.connected_at = (
+                    binding.connected_at
+                )
+
+
+            session.commit()
+
+
+        return binding
+
+
+
+def _user_from_record(
+    row: BetaUserRecord,
+) -> BetaUserState:
+
+    return BetaUserState(
+        user_id=row.id,
+        email=row.email,
+        email_verified=row.email_verified,
+        beta_approved=row.approved,
+        telegram_id=(
+            None
+            if row.telegram_id is None
+            else int(row.telegram_id)
+        ),
+        active_world_id=row.active_world_id,
+    )
+
+
+
+def _token_from_record(
+    row: BetaConnectionTokenRecord,
+) -> BetaConnectionToken:
+
+    return BetaConnectionToken(
+        token_id=row.id,
+        user_id=row.user_id,
+        token_hash=row.token_hash,
+        expires_at=row.expires_at,
+        used_at=row.used_at,
+    )
+
+
+
+def _binding_from_record(
+    row: TelegramBindingRecord,
+) -> TelegramBinding:
+
+    return TelegramBinding(
+        binding_id=row.id,
+        user_id=row.user_id,
+        telegram_user_id=row.telegram_user_id,
+        chat_id=row.chat_id,
+        connected_at=row.connected_at,
+    )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_beta_connection_token_repository.py =====
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+
+from app.domain.beta_access.beta_access_repository import BetaConnectionTokenRepository
+from app.domain.beta_access.beta_connection_token import BetaConnectionToken
+from app.infrastructure.persistence.beta_connection_token_models import BetaConnectionTokenModel
+
+
+class PostgreSQLBetaConnectionTokenRepository(BetaConnectionTokenRepository):
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add(self, token: BetaConnectionToken) -> None:
+        self._session.add(BetaConnectionTokenModel(
+            id=token.id, user_id=token.user_id, token_hash=token.token_hash,
+            expires_at=token.expires_at, used_at=token.used_at, created_at=token.created_at,
+        ))
+        self._session.flush()
+
+    def get_by_hash(self, token_hash: str) -> BetaConnectionToken | None:
+        row = self._session.scalar(select(BetaConnectionTokenModel).where(
+            BetaConnectionTokenModel.token_hash == token_hash
+        ))
+        if row is None:
+            return None
+        return BetaConnectionToken(
+            id=row.id, user_id=row.user_id, token_hash=row.token_hash,
+            expires_at=row.expires_at, created_at=row.created_at, used_at=row.used_at,
+        )
+
+    def mark_used(self, token_id: str, used_at: datetime) -> None:
+        self._session.execute(
+            update(BetaConnectionTokenModel)
+            .where(BetaConnectionTokenModel.id == token_id)
+            .where(BetaConnectionTokenModel.used_at.is_(None))
+            .values(used_at=used_at)
+        )
+        self._session.flush()
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_conversation_event_repository.py =====
+
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from app.application.conversation.conversation_event_models import (
+    ConversationEvent,
+)
+
+from app.application.conversation.conversation_event_repository import (
+    ConversationEventRepository,
+)
+
+from .conversation_event_records import (
+    ConversationEventRecord,
+)
+
+
+class PostgreSQLConversationEventRepository(
+    ConversationEventRepository
+):
+    """
+    PostgreSQL implementation of conversation event storage.
+
+    Privacy isolation:
+
+        telegram_user_hash
+                +
+          conversation_id
+                +
+             world_id
+
+    Governance:
+
+        privacy_hash_version
+                +
+        retention_policy_id
+
+    Responsibility:
+
+    - persist conversation events
+    - retrieve conversation history
+
+    Does NOT:
+
+    - validate business rules
+    - create memories
+    - analyse learning behaviour
+    - create RAG knowledge
+    """
+
+    def __init__(
+        self,
+        session_factory,
+    ) -> None:
+        if session_factory is None:
+            raise ValueError(
+                "session_factory cannot be None."
+            )
+
+        self._session_factory = session_factory
+
+    async def save(
+        self,
+        event: ConversationEvent,
+    ) -> ConversationEvent:
+        """
+        Persist an anonymised conversation event.
+
+        Privacy and retention governance values are taken
+        from the validated event metadata and persisted into
+        their dedicated database columns.
+        """
+
+        metadata = event.metadata or {}
+
+        privacy_hash_version = metadata.get(
+            "privacy_hash_version",
+        )
+
+        retention_policy_id = metadata.get(
+            "retention_policy_id",
+        )
+
+        if not privacy_hash_version:
+            raise ValueError(
+                "Conversation event is missing "
+                "privacy_hash_version."
+            )
+
+        if not retention_policy_id:
+            raise ValueError(
+                "Conversation event is missing "
+                "retention_policy_id."
+            )
+
+        with self._session_factory() as session:
+            record = ConversationEventRecord(
+                id=event.event_id,
+                conversation_id=event.conversation_id,
+                telegram_user_hash=(
+                    event.telegram_user_hash
+                ),
+                world_id=event.world_id,
+                channel=event.channel,
+                role=event.role,
+                content=event.content,
+                metadata_json=metadata,
+                privacy_hash_version=(
+                    privacy_hash_version
+                ),
+                retention_policy_id=(
+                    retention_policy_id
+                ),
+                created_at=event.created_at,
+            )
+
+            session.add(record)
+            session.commit()
+
+        return event
+
+    async def get_recent(
+        self,
+        *,
+        telegram_user_hash: str,
+        conversation_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[ConversationEvent]:
+        """
+        Retrieve recent conversation events for one
+        pseudonymised Telegram identity, conversation,
+        and learning world.
+
+        Isolation key:
+
+            telegram_user_hash
+                    +
+            conversation_id
+                    +
+                world_id
+
+        Results are returned in chronological order so
+        callers can construct conversation context safely.
+        """
+
+        if limit <= 0:
+            return []
+
+        if not telegram_user_hash:
+            raise ValueError(
+                "telegram_user_hash cannot be empty."
+            )
+
+        if not conversation_id:
+            raise ValueError(
+                "conversation_id cannot be empty."
+            )
+
+        if not world_id:
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(
+                    ConversationEventRecord
+                )
+                .where(
+                    ConversationEventRecord.telegram_user_hash
+                    == telegram_user_hash
+                )
+                .where(
+                    ConversationEventRecord.conversation_id
+                    == conversation_id
+                )
+                .where(
+                    ConversationEventRecord.world_id
+                    == world_id
+                )
+                .order_by(
+                    ConversationEventRecord.created_at.desc()
+                )
+                .limit(limit)
+            ).all()
+
+        return [
+            _event_from_record(row)
+            for row in reversed(rows)
+        ]
+
+
+def _event_from_record(
+    row: ConversationEventRecord,
+) -> ConversationEvent:
+    """
+    Convert the persistence record back into the
+    application-domain conversation event.
+
+    Governance fields remain available through metadata
+    so the domain event retains its original contract.
+    """
+
+    metadata = dict(
+        row.metadata_json or {}
+    )
+
+    metadata.setdefault(
+        "privacy_hash_version",
+        row.privacy_hash_version,
+    )
+
+    metadata.setdefault(
+        "retention_policy_id",
+        row.retention_policy_id,
+    )
+
+    return ConversationEvent(
+        event_id=row.id,
+        conversation_id=row.conversation_id,
+        telegram_user_hash=(
+            row.telegram_user_hash
+        ),
+        world_id=row.world_id,
+        channel=row.channel,
+        role=row.role,
+        content=row.content,
+        metadata=metadata,
+        created_at=row.created_at,
+    )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_functionality_control_repository.py =====
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import select
+
+from app.application.provider_management.functionality_operational_control_service import (
+    OperationalControlResult,
+)
+from app.infrastructure.persistence.functionality_control_records import (
+    FunctionalityControlAuditRecord,
+    FunctionalityControlStateRecord,
+)
+
+
+class PostgreSQLFunctionalityControlRepository:
+    """Durable functionality control state and audit repository."""
+
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+
+        self._session_factory = session_factory
+
+    def get_availability(
+        self,
+        *,
+        environment: str,
+        functionality_id: str,
+    ) -> str:
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(FunctionalityControlStateRecord).where(
+                    FunctionalityControlStateRecord.environment
+                    == environment,
+                    FunctionalityControlStateRecord.functionality_id
+                    == functionality_id,
+                )
+            )
+
+        if record is None:
+            return "enabled"
+
+        return record.availability
+
+    def get_last_action(
+        self,
+        *,
+        environment: str,
+        functionality_id: str,
+    ) -> OperationalControlResult | None:
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(FunctionalityControlStateRecord).where(
+                    FunctionalityControlStateRecord.environment
+                    == environment,
+                    FunctionalityControlStateRecord.functionality_id
+                    == functionality_id,
+                )
+            )
+
+        if record is None or record.changed_at is None:
+            return None
+
+        return OperationalControlResult(
+            functionality_id=record.functionality_id,
+            environment=record.environment,
+            availability=record.availability,
+            action=record.action or "unknown",
+            reason=record.reason,
+            changed_at=record.changed_at,
+            changed_by=record.changed_by or "unknown",
+        )
+
+    def record_transition(
+        self,
+        *,
+        functionality_id: str,
+        environment: str,
+        availability: str,
+        action: str,
+        reason: str | None,
+        changed_at: datetime,
+        changed_by: str,
+    ) -> OperationalControlResult:
+        with self._session_factory() as session:
+            state = session.scalar(
+                select(FunctionalityControlStateRecord).where(
+                    FunctionalityControlStateRecord.environment
+                    == environment,
+                    FunctionalityControlStateRecord.functionality_id
+                    == functionality_id,
+                )
+            )
+
+            if state is None:
+                state = FunctionalityControlStateRecord(
+                    functionality_id=functionality_id,
+                    environment=environment,
+                )
+                session.add(state)
+
+            state.availability = availability
+            state.action = action
+            state.reason = reason
+            state.changed_at = changed_at
+            state.changed_by = changed_by
+
+            session.add(
+                FunctionalityControlAuditRecord(
+                    functionality_id=functionality_id,
+                    environment=environment,
+                    action=action,
+                    availability=availability,
+                    changed_by=changed_by,
+                    reason=reason,
+                    changed_at=changed_at,
+                )
+            )
+
+            session.commit()
+
+        return OperationalControlResult(
+            functionality_id=functionality_id,
+            environment=environment,
+            availability=availability,
+            action=action,
+            reason=reason,
+            changed_at=changed_at,
+            changed_by=changed_by,
+        )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learner_skill_state_repository.py =====
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.learning_assessment.learner_skill_state import LearnerSkillState
+from app.domain.learning_assessment.repositories import LearnerSkillStateRepository
+from app.infrastructure.persistence.learner_skill_state_models import LearnerSkillStateRecord
+from app.infrastructure.persistence.learning_world_models import LearningWorldModel
+
+
+class PostgreSQLLearnerSkillStateRepository(LearnerSkillStateRepository):
+    """PostgreSQL adapter for the current learner skill-state projection."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    def get(
+        self, *, learner_id: str, world_id: str, skill_id: str
+    ) -> LearnerSkillState | None:
+        learner = self._validate_identifier(learner_id, "learner_id")
+        world = self._validate_identifier(world_id, "world_id")
+        skill = self._validate_identifier(skill_id, "skill_id")
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LearnerSkillStateRecord)
+                .join(
+                    LearningWorldModel,
+                    LearnerSkillStateRecord.world_id == LearningWorldModel.id,
+                )
+                .where(
+                    LearnerSkillStateRecord.learner_id == learner,
+                    LearningWorldModel.identifier == world,
+                    LearnerSkillStateRecord.skill_id == skill,
+                )
+            )
+            if row is None:
+                return None
+            return self._to_domain(row, world_id=world)
+
+    def save(self, state: LearnerSkillState) -> LearnerSkillState:
+        if not isinstance(state, LearnerSkillState):
+            raise TypeError("state must be a LearnerSkillState.")
+
+        with self._session_factory() as session:
+            world = session.scalar(
+                select(LearningWorldModel).where(
+                    LearningWorldModel.identifier == state.world_id
+                )
+            )
+            if world is None:
+                raise ValueError(f"Learning World not found: {state.world_id!r}.")
+
+            row = session.scalar(
+                select(LearnerSkillStateRecord).where(
+                    LearnerSkillStateRecord.learner_id == state.learner_id,
+                    LearnerSkillStateRecord.world_id == world.id,
+                    LearnerSkillStateRecord.skill_id == state.skill_id,
+                )
+            )
+
+            if row is None:
+                row = LearnerSkillStateRecord(
+                    learner_id=state.learner_id,
+                    world_id=world.id,
+                    skill_id=state.skill_id,
+                    attempt_count=state.attempt_count,
+                    correct_count=state.correct_count,
+                    incorrect_count=state.incorrect_count,
+                    failure_streak=state.failure_streak,
+                    success_streak=state.success_streak,
+                    last_attempt_at=state.last_attempt_at,
+                    last_failure_at=state.last_failure_at,
+                    last_success_at=state.last_success_at,
+                    reinforcement_required=state.reinforcement_required,
+                    created_at=state.last_attempt_at,
+                    updated_at=state.last_attempt_at,
+                )
+                session.add(row)
+            else:
+                row.attempt_count = state.attempt_count
+                row.correct_count = state.correct_count
+                row.incorrect_count = state.incorrect_count
+                row.failure_streak = state.failure_streak
+                row.success_streak = state.success_streak
+                row.last_attempt_at = state.last_attempt_at
+                row.last_failure_at = state.last_failure_at
+                row.last_success_at = state.last_success_at
+                row.reinforcement_required = state.reinforcement_required
+                row.updated_at = state.last_attempt_at
+
+            session.commit()
+            session.refresh(row)
+            return self._to_domain(row, world_id=state.world_id)
+
+    @staticmethod
+    def _validate_identifier(value: str, name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string.")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{name} cannot be empty.")
+        return normalized
+
+    @staticmethod
+    def _to_domain(row: LearnerSkillStateRecord, *, world_id: str) -> LearnerSkillState:
+        return LearnerSkillState(
+            learner_id=row.learner_id,
+            world_id=world_id,
+            skill_id=row.skill_id,
+            attempt_count=row.attempt_count,
+            correct_count=row.correct_count,
+            incorrect_count=row.incorrect_count,
+            failure_streak=row.failure_streak,
+            success_streak=row.success_streak,
+            last_attempt_at=row.last_attempt_at,
+            last_failure_at=row.last_failure_at,
+            last_success_at=row.last_success_at,
+            reinforcement_required=row.reinforcement_required,
+        )
+
+
+__all__ = ["PostgreSQLLearnerSkillStateRepository"]
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learner_world_access_repository.py =====
+
+"""PostgreSQL adapter for learner-to-World access."""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.learning.learner_world_access import LearnerWorldAccess
+from app.domain.learning.learner_world_access_repository import (
+    LearnerWorldAccessRepository,
+)
+from app.infrastructure.persistence.learner_world_access_model import (
+    LearnerWorldAccessRecord,
+)
+
+
+class PostgreSQLLearnerWorldAccessRepository(LearnerWorldAccessRepository):
+    """Synchronous repository; application async callers execute it off-loop."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+        self._session_factory = session_factory
+
+    def save(self, access: LearnerWorldAccess) -> LearnerWorldAccess:
+        with self._session_factory() as session:
+            record = session.get(LearnerWorldAccessRecord, access.access_id)
+
+            if record is None:
+                record = LearnerWorldAccessRecord(
+                    id=access.access_id,
+                    user_id=access.user_id,
+                    world_id=access.world_id,
+                    status=access.status,
+                    access_source=access.access_source,
+                    created_at=access.created_at,
+                    updated_at=access.updated_at,
+                )
+                session.add(record)
+            else:
+                record.status = access.status
+                record.access_source = access.access_source
+                record.updated_at = access.updated_at
+
+            session.commit()
+            session.refresh(record)
+
+            return self._to_domain(record)
+
+    def get_by_id(self, access_id):
+        with self._session_factory() as session:
+            record = session.get(LearnerWorldAccessRecord, access_id)
+            return self._to_domain(record) if record is not None else None
+
+    def get_by_user_and_world(self, *, user_id, world_id):
+        with self._session_factory() as session:
+            record = session.scalar(
+                select(LearnerWorldAccessRecord).where(
+                    LearnerWorldAccessRecord.user_id == user_id,
+                    LearnerWorldAccessRecord.world_id == world_id,
+                )
+            )
+            return self._to_domain(record) if record is not None else None
+
+    def list_by_user(self, *, user_id):
+        with self._session_factory() as session:
+            records = session.scalars(
+                select(LearnerWorldAccessRecord)
+                .where(LearnerWorldAccessRecord.user_id == user_id)
+                .order_by(LearnerWorldAccessRecord.created_at)
+            ).all()
+
+            return tuple(self._to_domain(record) for record in records)
+
+    @staticmethod
+    def _to_domain(record: LearnerWorldAccessRecord) -> LearnerWorldAccess:
+        return LearnerWorldAccess(
+            access_id=record.id,
+            user_id=record.user_id,
+            world_id=record.world_id,
+            status=record.status,
+            access_source=record.access_source,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_assessment_repositories.py =====
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.learning_assessment.assessment_attempt import (
+    AssessmentAttempt,
+    AssessmentOutcome,
+)
+from app.domain.learning_assessment.learning_event import (
+    LearningEvent,
+    LearningEventOutcome,
+)
+from app.domain.learning_assessment.question import (
+    AssessmentQuestion,
+    QuestionType,
+)
+from app.domain.learning_assessment.repositories import (
+    AssessmentAttemptRepository,
+    AssessmentQuestionRepository,
+    LearningEventRepository,
+)
+from app.infrastructure.persistence.learning_assessment_models import (
+    AssessmentAttemptRecord,
+    AssessmentQuestionRecord,
+    LearningEventRecord,
+)
+from app.infrastructure.persistence.learning_world_models import LearningWorldModel
+
+
+class PostgreSQLAssessmentQuestionRepository(AssessmentQuestionRepository):
+    """PostgreSQL adapter for assessment question definitions."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def get(self, *, question_id: str) -> AssessmentQuestion | None:
+        normalized = self._validate_identifier(question_id, "question_id")
+
+        with self._session_factory() as session:
+            row = session.execute(
+                select(AssessmentQuestionRecord, LearningWorldModel.identifier)
+                .join(
+                    LearningWorldModel,
+                    AssessmentQuestionRecord.world_id == LearningWorldModel.id,
+                )
+                .where(AssessmentQuestionRecord.question_id == normalized)
+            ).first()
+
+            if row is None:
+                return None
+
+            record, world_id = row
+            return self._to_domain(record, world_id=world_id)
+
+    @staticmethod
+    def _to_domain(
+        row: AssessmentQuestionRecord, *, world_id: str
+    ) -> AssessmentQuestion:
+        return AssessmentQuestion(
+            question_id=row.question_id,
+            world_id=world_id,
+            skill_id=row.skill_id,
+            prompt=row.prompt,
+            expected_answer=row.expected_answer,
+            question_type=QuestionType(row.question_type),
+            difficulty=row.difficulty,
+            explanation=row.explanation,
+        )
+
+    @staticmethod
+    def _validate_identifier(value: str, name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string.")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{name} cannot be empty.")
+        return normalized
+
+
+class PostgreSQLAssessmentAttemptRepository(AssessmentAttemptRepository):
+    """PostgreSQL adapter for assessment attempt history."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def save(self, attempt: AssessmentAttempt) -> AssessmentAttempt:
+        if not isinstance(attempt, AssessmentAttempt):
+            raise TypeError("attempt must be an AssessmentAttempt.")
+
+        with self._session_factory() as session:
+            world = self._resolve_world(session, attempt.world_id)
+            question = session.scalar(
+                select(AssessmentQuestionRecord).where(
+                    AssessmentQuestionRecord.question_id == attempt.question_id,
+                    AssessmentQuestionRecord.world_id == world.id,
+                )
+            )
+            if question is None:
+                raise ValueError(
+                    f"Assessment question not found in Learning World: "
+                    f"{attempt.question_id!r}."
+                )
+
+            row = AssessmentAttemptRecord(
+                attempt_id=attempt.attempt_id,
+                learner_id=attempt.learner_id,
+                world_id=world.id,
+                question_id=attempt.question_id,
+                answer=attempt.answer,
+                outcome=attempt.outcome.value,
+                score=float(attempt.score),
+                created_at=attempt.created_at,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_domain(row, world_id=attempt.world_id)
+
+    async def get_recent_for_skill(
+        self,
+        *,
+        learner_id: str,
+        world_id: str,
+        skill_id: str,
+        limit: int = 20,
+    ) -> list[AssessmentAttempt]:
+        learner = self._validate_identifier(learner_id, "learner_id")
+        world_value = self._validate_identifier(world_id, "world_id")
+        skill = self._validate_identifier(skill_id, "skill_id")
+
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be a positive integer.")
+
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(AssessmentAttemptRecord)
+                .join(
+                    LearningWorldModel,
+                    AssessmentAttemptRecord.world_id == LearningWorldModel.id,
+                )
+                .join(
+                    AssessmentQuestionRecord,
+                    AssessmentAttemptRecord.question_id
+                    == AssessmentQuestionRecord.question_id,
+                )
+                .where(
+                    AssessmentAttemptRecord.learner_id == learner,
+                    LearningWorldModel.identifier == world_value,
+                    AssessmentQuestionRecord.skill_id == skill,
+                )
+                .order_by(AssessmentAttemptRecord.created_at.desc())
+                .limit(limit)
+            ).all()
+
+            return [
+                self._to_domain(row, world_id=world_value)
+                for row in rows
+            ]
+
+    @staticmethod
+    def _resolve_world(session: Session, world_id: str) -> LearningWorldModel:
+        world = session.scalar(
+            select(LearningWorldModel).where(
+                LearningWorldModel.identifier == world_id.strip()
+            )
+        )
+        if world is None:
+            raise ValueError(f"Learning World not found: {world_id!r}.")
+        return world
+
+    @staticmethod
+    def _to_domain(
+        row: AssessmentAttemptRecord, *, world_id: str
+    ) -> AssessmentAttempt:
+        return AssessmentAttempt(
+            attempt_id=row.attempt_id,
+            learner_id=row.learner_id,
+            world_id=world_id,
+            question_id=row.question_id,
+            answer=row.answer,
+            outcome=AssessmentOutcome(row.outcome),
+            score=row.score,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _validate_identifier(value: str, name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string.")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{name} cannot be empty.")
+        return normalized
+
+
+class PostgreSQLLearningEventRepository(LearningEventRepository):
+    """PostgreSQL adapter for educational learning-event history."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def save(self, event: LearningEvent) -> LearningEvent:
+        if not isinstance(event, LearningEvent):
+            raise TypeError("event must be a LearningEvent.")
+
+        with self._session_factory() as session:
+            world = self._resolve_world(session, event.world_id)
+
+            row = LearningEventRecord(
+                event_id=event.event_id,
+                learner_id=event.learner_id,
+                world_id=world.id,
+                question_id=event.question_id,
+                skill_id=event.skill_id,
+                outcome=event.outcome.value,
+                created_at=event.created_at,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_domain(row, world_id=event.world_id)
+
+    async def count_recent_failures(
+        self,
+        *,
+        learner_id: str,
+        world_id: str,
+        skill_id: str,
+        limit: int = 20,
+    ) -> int:
+        learner = self._validate_identifier(learner_id, "learner_id")
+        world_value = self._validate_identifier(world_id, "world_id")
+        skill = self._validate_identifier(skill_id, "skill_id")
+
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be a positive integer.")
+
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(LearningEventRecord)
+                .join(
+                    LearningWorldModel,
+                    LearningEventRecord.world_id == LearningWorldModel.id,
+                )
+                .where(
+                    LearningEventRecord.learner_id == learner,
+                    LearningWorldModel.identifier == world_value,
+                    LearningEventRecord.skill_id == skill,
+                )
+                .order_by(LearningEventRecord.created_at.desc())
+                .limit(limit)
+            ).all()
+
+            return sum(
+                1
+                for row in rows
+                if row.outcome == LearningEventOutcome.INCORRECT.value
+            )
+
+    @staticmethod
+    def _resolve_world(session: Session, world_id: str) -> LearningWorldModel:
+        world = session.scalar(
+            select(LearningWorldModel).where(
+                LearningWorldModel.identifier == world_id.strip()
+            )
+        )
+        if world is None:
+            raise ValueError(f"Learning World not found: {world_id!r}.")
+        return world
+
+    @staticmethod
+    def _to_domain(
+        row: LearningEventRecord, *, world_id: str
+    ) -> LearningEvent:
+        return LearningEvent(
+            event_id=row.event_id,
+            learner_id=row.learner_id,
+            world_id=world_id,
+            question_id=row.question_id,
+            skill_id=row.skill_id,
+            outcome=LearningEventOutcome(row.outcome),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _validate_identifier(value: str, name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string.")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{name} cannot be empty.")
+        return normalized
+
+
+__all__ = [
+    "PostgreSQLAssessmentQuestionRepository",
+    "PostgreSQLAssessmentAttemptRepository",
+    "PostgreSQLLearningEventRepository",
+]
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_evidence_repository.py =====
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.learning_assessment.learning_evidence import (
+    LearningEvidence,
+    LearningEvidenceCategory,
+    LearningEvidenceSeverity,
+    LearningEvidenceSource,
+    LearningEvidenceStatus,
+)
+from app.domain.learning_assessment.learning_evidence_repositories import (
+    LearningEvidenceRepository,
+)
+from app.infrastructure.persistence.learning_evidence_models import LearningEvidenceRecord
+from app.infrastructure.persistence.learning_world_models import LearningWorldModel
+
+
+class PostgreSQLLearningEvidenceRepository(LearningEvidenceRepository):
+    """PostgreSQL adapter for normalized learning evidence."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def get_by_observation_id(
+        self,
+        *,
+        observation_id: str,
+    ) -> LearningEvidence | None:
+        normalized = self._validate_identifier(observation_id, "observation_id")
+
+        with self._session_factory() as session:
+            row = session.execute(
+                select(LearningEvidenceRecord, LearningWorldModel.identifier)
+                .join(
+                    LearningWorldModel,
+                    LearningEvidenceRecord.world_id == LearningWorldModel.id,
+                )
+                .where(
+                    LearningEvidenceRecord.observation_id == normalized
+                )
+            ).first()
+
+            if row is None:
+                return None
+
+            record, world_id = row
+            return self._to_domain(record, world_id=world_id)
+
+    async def save(self, evidence: LearningEvidence) -> LearningEvidence:
+        if not isinstance(evidence, LearningEvidence):
+            raise TypeError("evidence must be a LearningEvidence.")
+
+        with self._session_factory() as session:
+            world = self._resolve_world(session, evidence.world_id)
+
+            row = LearningEvidenceRecord(
+                evidence_id=evidence.evidence_id,
+                observation_id=evidence.observation_id,
+                learner_id=evidence.learner_id,
+                world_id=world.id,
+                skill_id=evidence.skill_id,
+                category=evidence.category.value,
+                status=evidence.status.value,
+                severity=evidence.severity.value,
+                confidence=float(evidence.confidence),
+                subtype=evidence.subtype,
+                learner_text=evidence.learner_text,
+                expected_text=evidence.expected_text,
+                explanation=evidence.explanation,
+                source=evidence.source.value,
+                created_at=evidence.created_at,
+            )
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                # A concurrent retry of the same observation may race the
+                # pre-read. The unique observation_id constraint is the final
+                # idempotency boundary; recover the already-persisted record.
+                session.rollback()
+                existing = session.execute(
+                    select(LearningEvidenceRecord, LearningWorldModel.identifier)
+                    .join(
+                        LearningWorldModel,
+                        LearningEvidenceRecord.world_id == LearningWorldModel.id,
+                    )
+                    .where(
+                        LearningEvidenceRecord.observation_id
+                        == evidence.observation_id
+                    )
+                ).first()
+                if existing is None:
+                    raise
+                record, world_id = existing
+                return self._to_domain(record, world_id=world_id)
+
+            session.refresh(row)
+            return self._to_domain(row, world_id=evidence.world_id)
+
+    async def get_recent_for_skill(
+        self,
+        *,
+        learner_id: str,
+        world_id: str,
+        skill_id: str,
+        limit: int = 20,
+    ) -> list[LearningEvidence]:
+        learner = self._validate_identifier(learner_id, "learner_id")
+        world_value = self._validate_identifier(world_id, "world_id")
+        skill = self._validate_identifier(skill_id, "skill_id")
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer.")
+
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(LearningEvidenceRecord, LearningWorldModel.identifier)
+                .join(
+                    LearningWorldModel,
+                    LearningEvidenceRecord.world_id == LearningWorldModel.id,
+                )
+                .where(
+                    LearningEvidenceRecord.learner_id == learner,
+                    LearningWorldModel.identifier == world_value,
+                    LearningEvidenceRecord.skill_id == skill,
+                )
+                .order_by(LearningEvidenceRecord.created_at.desc())
+                .limit(limit)
+            ).all()
+
+            return [
+                self._to_domain(row, world_id=resolved_world_id)
+                for row, resolved_world_id in rows
+            ]
+
+    @staticmethod
+    def _resolve_world(
+        session: Session,
+        world_id: str,
+    ) -> LearningWorldModel:
+        normalized = world_id.strip()
+        world = session.scalar(
+            select(LearningWorldModel).where(
+                LearningWorldModel.identifier == normalized
+            )
+        )
+        if world is None:
+            raise ValueError(f"Learning World not found: {world_id!r}.")
+        return world
+
+    @staticmethod
+    def _to_domain(
+        row: LearningEvidenceRecord,
+        *,
+        world_id: str,
+    ) -> LearningEvidence:
+        return LearningEvidence(
+            evidence_id=row.evidence_id,
+            observation_id=row.observation_id,
+            learner_id=row.learner_id,
+            world_id=world_id,
+            skill_id=row.skill_id,
+            category=LearningEvidenceCategory(row.category),
+            status=LearningEvidenceStatus(row.status),
+            severity=LearningEvidenceSeverity(row.severity),
+            confidence=row.confidence,
+            subtype=row.subtype,
+            learner_text=row.learner_text,
+            expected_text=row.expected_text,
+            explanation=row.explanation,
+            source=LearningEvidenceSource(row.source),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _validate_identifier(value: str, name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string.")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{name} cannot be empty.")
+        return normalized
+
+
+__all__ = ["PostgreSQLLearningEvidenceRepository"]
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py =====
+
+"""PostgreSQL adapter for the Learning World catalogue repository."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.application.world_catalogue.models import LearningWorldCatalogueEntry
+from app.application.world_catalogue.repositories import (
+    LearningWorldCatalogueRepository,
+)
+
+from .learning_world_models import LearningWorldModel
+
+
+class PostgreSQLLearningWorldCatalogueRepository(
+    LearningWorldCatalogueRepository
+):
+    """PostgreSQL implementation of the Learning World catalogue."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+
+        self._session_factory = session_factory
+
+    def get_by_identifier(
+        self,
+        identifier: str,
+    ) -> LearningWorldCatalogueEntry | None:
+        if not identifier or not identifier.strip():
+            raise ValueError("identifier is required.")
+
+        normalized_identifier = identifier.strip()
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LearningWorldModel).where(
+                    LearningWorldModel.identifier == normalized_identifier
+                )
+            )
+
+            return None if row is None else self._to_domain(row)
+
+    def get_by_id(
+        self,
+        world_id: UUID,
+    ) -> LearningWorldCatalogueEntry | None:
+        """Return a catalogue entry by its authoritative World UUID."""
+        if not isinstance(world_id, UUID):
+            raise ValueError("world_id must be a UUID.")
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LearningWorldModel).where(
+                    LearningWorldModel.id == world_id
+                )
+            )
+
+            return None if row is None else self._to_domain(row)
+
+    def list_all(self) -> tuple[LearningWorldCatalogueEntry, ...]:
+        """Return every configured World, including disabled Worlds."""
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(LearningWorldModel).order_by(
+                    LearningWorldModel.identifier
+                )
+            ).all()
+
+            return tuple(
+                self._to_domain(row)
+                for row in rows
+            )
+
+    @staticmethod
+    def _to_domain(
+        row: LearningWorldModel,
+    ) -> LearningWorldCatalogueEntry:
+        return LearningWorldCatalogueEntry(
+            id=row.id,
+            identifier=row.identifier,
+            name=row.name,
+            description=row.description,
+            language=row.language,
+            version=row.version,
+            status=row.status,
+            enabled=row.enabled,
+            world_type=row.world_type,
+            learning_domain=row.learning_domain,
+            runtime_world_id=row.runtime_world_id,
+        )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_memory_repository.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from app.application.memory.memory_models import (
+    ConversationMemory,
+)
+
+from app.application.memory.memory_repository import (
+    ConversationMemoryRepository,
+)
+
+from .memory_records import (
+    ConversationMemoryRecord,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+
+class PostgreSQLConversationMemoryRepository(
+    ConversationMemoryRepository
+):
+    """
+    PostgreSQL implementation of conversation memory storage.
+
+    Isolation boundary:
+
+        telegram_user_id
+                +
+             world_id
+
+    """
+
+    def __init__(
+        self,
+        session_factory,
+    ) -> None:
+
+        self._session_factory = session_factory
+
+
+
+    async def save(
+        self,
+        memory: ConversationMemory,
+    ) -> ConversationMemory:
+
+        with self._session_factory() as session:
+
+            row = session.get(
+                ConversationMemoryRecord,
+                memory.memory_id,
+            )
+
+
+            if row is None:
+
+                session.add(
+                    ConversationMemoryRecord(
+                        id=memory.memory_id,
+
+                        telegram_user_id=(
+                            memory.telegram_user_id
+                        ),
+
+                        world_id=(
+                            memory.world_id
+                        ),
+
+                        memory_key=(
+                            memory.memory_key
+                        ),
+
+                        memory_value=(
+                            memory.memory_value
+                        ),
+
+                        created_at=(
+                            memory.created_at
+                        ),
+                    )
+                )
+
+
+            else:
+
+                row.memory_value = (
+                    memory.memory_value
+                )
+
+
+            session.commit()
+
+
+        return memory
+
+
+
+    async def get_user_memories(
+        self,
+        *,
+        telegram_user_id: str,
+        world_id: str,
+    ) -> list[ConversationMemory]:
+
+        with self._session_factory() as session:
+
+            rows = session.scalars(
+                select(
+                    ConversationMemoryRecord
+                )
+                .where(
+                    ConversationMemoryRecord.telegram_user_id
+                    == telegram_user_id
+                )
+                .where(
+                    ConversationMemoryRecord.world_id
+                    == world_id
+                )
+                .order_by(
+                    ConversationMemoryRecord.created_at
+                )
+            ).all()
+
+
+            return [
+                _memory_from_record(row)
+                for row in rows
+            ]
+
+
+
+    async def clear_user_memory(
+        self,
+        *,
+        telegram_user_id: str,
+        world_id: str,
+    ) -> None:
+
+        with self._session_factory() as session:
+
+            rows = session.scalars(
+                select(
+                    ConversationMemoryRecord
+                )
+                .where(
+                    ConversationMemoryRecord.telegram_user_id
+                    == telegram_user_id
+                )
+                .where(
+                    ConversationMemoryRecord.world_id
+                    == world_id
+                )
+            ).all()
+
+
+            for row in rows:
+                session.delete(row)
+
+
+            session.commit()
+
+
+
+def _memory_from_record(
+    row: ConversationMemoryRecord,
+) -> ConversationMemory:
+
+    return ConversationMemory(
+
+        memory_id=row.id,
+
+        telegram_user_id=(
+            row.telegram_user_id
+        ),
+
+        world_id=(
+            row.world_id
+        ),
+
+        memory_key=(
+            row.memory_key
+        ),
+
+        memory_value=(
+            row.memory_value
+        ),
+
+        created_at=(
+            row.created_at
+        ),
+    )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_private_chat_repository.py =====
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.application.private_chat.models import (
+    PrivateChatActiveConversation,
+    PrivateChatConversation,
+    PrivateChatMessage,
+)
+from app.application.private_chat.repository import PrivateChatRepository
+from app.infrastructure.persistence.private_chat_models import (
+    PrivateChatActiveConversationRecord,
+    PrivateChatConversationRecord,
+    PrivateChatMessageRecord,
+)
+
+
+class PostgreSQLPrivateChatRepository(PrivateChatRepository):
+    """PostgreSQL adapter for authenticated private-chat persistence."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation | None:
+        """
+        Return a conversation only when it belongs to the supplied user
+        and selected World.
+
+        Conversation ownership and World binding are therefore enforced
+        by the persistence query rather than by caller-side filtering.
+        """
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+
+        if record is None:
+            return None
+
+        return self._to_conversation(record)
+
+    def get_conversation_for_user(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+    ) -> PrivateChatConversation | None:
+        """
+        Return a conversation owned by the supplied user.
+
+        This method remains available for the existing application
+        repository contract. It deliberately does not require a World
+        because that is the historical repository-level lookup contract.
+        """
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+            )
+        )
+
+        if record is None:
+            return None
+
+        return self._to_conversation(record)
+
+    def get_active_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> PrivateChatActiveConversation | None:
+        """
+        Return the server-selected active conversation and its recent
+        persisted message history for the supplied user and World.
+        """
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        active_record = self._session.scalar(
+            select(PrivateChatActiveConversationRecord).where(
+                PrivateChatActiveConversationRecord.user_id == user_id,
+                PrivateChatActiveConversationRecord.world_id == world_id,
+            )
+        )
+
+        if active_record is None:
+            return None
+
+        conversation_record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == active_record.conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+
+        if conversation_record is None:
+            return None
+
+        messages = self.get_recent_messages(
+            conversation_id=conversation_record.conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+            limit=limit,
+        )
+
+        return PrivateChatActiveConversation(
+            conversation=self._to_conversation(conversation_record),
+            messages=messages,
+        )
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+    ) -> PrivateChatConversation:
+        now = datetime.now(timezone.utc)
+
+        record = PrivateChatConversationRecord(
+            user_id=user_id,
+            world_id=world_id,
+            created_at=now,
+            updated_at=now,
+        )
+
+        self._session.add(record)
+        self._session.flush()
+
+        return self._to_conversation(record)
+
+    def set_active_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+        conversation_id: UUID,
+    ) -> None:
+        """
+        Point one user/World pair at the supplied conversation.
+
+        This method deliberately does not delete or modify historical
+        conversations. It only changes the active pointer.
+        """
+        conversation = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+
+        if conversation is None:
+            raise ValueError(
+                "Private chat conversation not found"
+            )
+
+        active_record = self._session.scalar(
+            select(PrivateChatActiveConversationRecord).where(
+                PrivateChatActiveConversationRecord.user_id == user_id,
+                PrivateChatActiveConversationRecord.world_id == world_id,
+            )
+        )
+
+        if active_record is None:
+            active_record = PrivateChatActiveConversationRecord(
+                user_id=user_id,
+                world_id=world_id,
+                conversation_id=conversation_id,
+            )
+            self._session.add(active_record)
+        else:
+            active_record.conversation_id = conversation_id
+
+        self._session.flush()
+
+    def save_message(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        message: PrivateChatMessage,
+    ) -> PrivateChatMessage:
+        record = PrivateChatMessageRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            world_id=world_id,
+            role=message.role,
+            content=message.content,
+            created_at=message.created_at,
+        )
+
+        self._session.add(record)
+        self._session.flush()
+
+        return self._to_message(record)
+
+    def get_recent_messages(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> list[PrivateChatMessage]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        records = self._session.scalars(
+            select(PrivateChatMessageRecord)
+            .where(
+                PrivateChatMessageRecord.conversation_id
+                == conversation_id,
+                PrivateChatMessageRecord.user_id == user_id,
+                PrivateChatMessageRecord.world_id == world_id,
+            )
+            .order_by(
+                PrivateChatMessageRecord.created_at.desc()
+            )
+            .limit(limit)
+        ).all()
+
+        return [
+            self._to_message(record)
+            for record in reversed(records)
+        ]
+
+    def touch_conversation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: str,
+        world_id: str,
+    ) -> None:
+        record = self._session.scalar(
+            select(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+
+        if record is None:
+            raise ValueError(
+                "Private chat conversation not found"
+            )
+
+        record.updated_at = datetime.now(timezone.utc)
+        self._session.flush()
+
+    def commit(self) -> None:
+        self._session.commit()
+
+    def rollback(self) -> None:
+        self._session.rollback()
+
+    def close(self) -> None:
+        self._session.close()
+
+    @staticmethod
+    def _to_conversation(
+        record: PrivateChatConversationRecord,
+    ) -> PrivateChatConversation:
+        return PrivateChatConversation(
+            conversation_id=record.conversation_id,
+            user_id=record.user_id,
+            world_id=record.world_id,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    @staticmethod
+    def _to_message(
+        record: PrivateChatMessageRecord,
+    ) -> PrivateChatMessage:
+        return PrivateChatMessage(
+            conversation_id=record.conversation_id,
+            role=record.role,
+            content=record.content,
+            created_at=record.created_at,
+        )
+
+    @staticmethod
+    def _to_active_conversation(
+        record: PrivateChatActiveConversationRecord,
+        conversation: PrivateChatConversationRecord,
+        messages: list[PrivateChatMessage],
+    ) -> PrivateChatActiveConversation:
+        return PrivateChatActiveConversation(
+            conversation=PostgreSQLPrivateChatRepository._to_conversation(
+                conversation
+            ),
+            messages=messages,
+        )
+
+
+__all__ = [
+    "PostgreSQLPrivateChatRepository",
+]
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_provider_usage_repository.py =====
+
+from __future__ import annotations
+
+from src.ai_runtime.providers.usage.models import ProviderUsageEvent
+from src.ai_runtime.providers.usage.repository import ProviderUsageRepository
+
+from .provider_usage_records import ProviderUsageRecord
+
+
+class PostgreSQLProviderUsageRepository(ProviderUsageRepository):
+    def __init__(self, session_factory) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory is required.")
+
+        self._session_factory = session_factory
+
+    def save(self, event: ProviderUsageEvent) -> None:
+        if event is None:
+            raise ValueError("Provider usage event cannot be None.")
+
+        with self._session_factory() as session:
+            session.add(
+                ProviderUsageRecord(
+                    provider=event.provider,
+                    model=event.model,
+                    capability=event.capability,
+                    functionality=event.functionality,
+                    agent=event.agent,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    total_tokens=event.total_tokens,
+                    latency_ms=event.latency_ms,
+                    estimated_cost=event.estimated_cost,
+                    quality_score=event.quality_score,
+                    success=event.success,
+                    provider_request_id=event.provider_request_id,
+                    created_at=event.created_at,
+                )
+            )
+            session.commit()
+
+    def get_all(self) -> list[ProviderUsageEvent]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ProviderUsageRecord)
+                .order_by(
+                    ProviderUsageRecord.created_at.asc(),
+                    ProviderUsageRecord.id.asc(),
+                )
+                .all()
+            )
+
+        return [_event_from_record(row) for row in rows]
+
+    def clear(self) -> None:
+        with self._session_factory() as session:
+            session.query(ProviderUsageRecord).delete()
+            session.commit()
+
+
+def _event_from_record(row: ProviderUsageRecord) -> ProviderUsageEvent:
+    return ProviderUsageEvent(
+        provider=row.provider,
+        model=row.model,
+        capability=row.capability,
+        functionality=row.functionality,
+        agent=row.agent,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        total_tokens=row.total_tokens,
+        latency_ms=row.latency_ms,
+        estimated_cost=row.estimated_cost,
+        quality_score=float(row.quality_score),
+        success=row.success,
+        provider_request_id=row.provider_request_id,
+        created_at=row.created_at,
+    )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_study_material_repository.py =====
+
+"""PostgreSQL adapter for the Study Material repository."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.application.study_material.repositories import (
+    StudyMaterialRepository,
+)
+from app.domain.study_material.study_material import (
+    StudyMaterial,
+    StudyMaterialStatus,
+    StudyMaterialType,
+)
+from app.infrastructure.persistence.learning_world_models import (
+    LearningWorldModel,
+)
+from app.infrastructure.persistence.study_material_models import (
+    StudyMaterialRecord,
+)
+
+
+class PostgreSQLStudyMaterialRepository(
+    StudyMaterialRepository,
+):
+    """
+    PostgreSQL implementation of the Study Material repository.
+
+    The application-facing World identifier is the authoritative
+    Learning World `identifier` (for example, `french_world`).
+
+    The Study Material persistence table stores the corresponding
+    Learning World UUID in `study_materials.world_id`.
+
+    This adapter therefore joins against the authoritative
+    Learning World catalogue when reading materials.
+
+    Learner identity, Telegram identifiers, conversation identifiers,
+    progress, AI/RAG state and content ingestion are deliberately
+    outside this repository.
+    """
+
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        if session_factory is None:
+            raise ValueError(
+                "session_factory cannot be None."
+            )
+
+        self._session_factory = session_factory
+
+    def list_published_by_world(
+        self,
+        world_id: str,
+    ) -> list[StudyMaterial]:
+        """
+        Return published Study Materials for one Learning World.
+
+        Results are deterministically ordered by:
+
+        1. display_order ascending
+        2. material_id ascending
+        """
+
+        normalized_world_id = self._validate_world_id(
+            world_id
+        )
+
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(StudyMaterialRecord)
+                .join(
+                    LearningWorldModel,
+                    StudyMaterialRecord.world_id
+                    == LearningWorldModel.id,
+                )
+                .where(
+                    LearningWorldModel.identifier
+                    == normalized_world_id,
+                    StudyMaterialRecord.status
+                    == StudyMaterialStatus.PUBLISHED.value,
+                )
+                .order_by(
+                    StudyMaterialRecord.display_order.asc(),
+                    StudyMaterialRecord.material_id.asc(),
+                )
+            ).all()
+
+            return [
+                self._to_domain(
+                    row,
+                    world_id=normalized_world_id,
+                )
+                for row in rows
+            ]
+
+    def get_published(
+        self,
+        material_id: UUID,
+        world_id: str,
+    ) -> StudyMaterial | None:
+        """
+        Return one published Study Material belonging to
+        the supplied Learning World.
+
+        The World identifier is part of the query boundary so a
+        material belonging to another World cannot be returned
+        merely because its UUID is known.
+        """
+
+        if not isinstance(material_id, UUID):
+            raise ValueError(
+                "material_id must be a UUID."
+            )
+
+        normalized_world_id = self._validate_world_id(
+            world_id
+        )
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(StudyMaterialRecord)
+                .join(
+                    LearningWorldModel,
+                    StudyMaterialRecord.world_id
+                    == LearningWorldModel.id,
+                )
+                .where(
+                    StudyMaterialRecord.material_id
+                    == material_id,
+                    LearningWorldModel.identifier
+                    == normalized_world_id,
+                    StudyMaterialRecord.status
+                    == StudyMaterialStatus.PUBLISHED.value,
+                )
+            )
+
+            if row is None:
+                return None
+
+            return self._to_domain(
+                row,
+                world_id=normalized_world_id,
+            )
+
+    @staticmethod
+    def _validate_world_id(
+        world_id: str,
+    ) -> str:
+        if not isinstance(world_id, str):
+            raise TypeError(
+                "world_id must be a string."
+            )
+
+        normalized = world_id.strip()
+
+        if not normalized:
+            raise ValueError(
+                "world_id cannot be empty."
+            )
+
+        return normalized
+
+    @staticmethod
+    def _to_domain(
+        row: StudyMaterialRecord,
+        *,
+        world_id: str,
+    ) -> StudyMaterial:
+        try:
+            material_type = StudyMaterialType(
+                row.material_type
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Unsupported Study Material type: "
+                f"{row.material_type!r}."
+            ) from exc
+
+        try:
+            status = StudyMaterialStatus(
+                row.status
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Unsupported Study Material status: "
+                f"{row.status!r}."
+            ) from exc
+
+        return StudyMaterial(
+            material_id=row.material_id,
+            world_id=world_id,
+            title=row.title,
+            description=row.description,
+            material_type=material_type,
+            status=status,
+            display_order=row.display_order,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+
+__all__ = [
+    "PostgreSQLStudyMaterialRepository",
+]
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_world_telegram_destination_repository.py =====
+
+"""PostgreSQL adapter for World Telegram destinations."""
+
+from __future__ import annotations
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.world_telegram import (
+    TelegramDestinationType,
+    WorldTelegramDestination,
+)
+
+from .world_telegram_destination_models import WorldTelegramDestinationRecord
+
+
+class PostgreSQLWorldTelegramDestinationRepository:
+    """PostgreSQL implementation of the destination repository."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    def get_by_id(self, destination_id):
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(WorldTelegramDestinationRecord).where(
+                    WorldTelegramDestinationRecord.id == destination_id
+                )
+            )
+            return None if row is None else self._to_domain(row)
+
+    def get_by_world_and_chat(self, *, world_id, telegram_chat_id):
+        if not telegram_chat_id or not telegram_chat_id.strip():
+            raise ValueError("telegram_chat_id is required.")
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(WorldTelegramDestinationRecord).where(
+                    WorldTelegramDestinationRecord.world_id == world_id,
+                    WorldTelegramDestinationRecord.telegram_chat_id
+                    == telegram_chat_id.strip(),
+                )
+            )
+            return None if row is None else self._to_domain(row)
+
+    def list_by_world(self, world_id):
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(WorldTelegramDestinationRecord)
+                .where(WorldTelegramDestinationRecord.world_id == world_id)
+                .order_by(WorldTelegramDestinationRecord.telegram_chat_id)
+            ).all()
+            return tuple(self._to_domain(row) for row in rows)
+
+    def save(self, destination):
+        with self._session_factory() as session:
+            row = session.get(
+                WorldTelegramDestinationRecord,
+                destination.id,
+            )
+
+            if row is None:
+                row = WorldTelegramDestinationRecord(id=destination.id)
+                session.add(row)
+
+            row.world_id = destination.world_id
+            row.telegram_chat_id = destination.telegram_chat_id
+            row.destination_type = destination.destination_type.value
+            row.enabled = destination.enabled
+            row.created_at = destination.created_at
+            row.updated_at = destination.updated_at
+
+            session.commit()
+            session.refresh(row)
+            return self._to_domain(row)
+
+    def delete(self, destination_id):
+        with self._session_factory() as session:
+            result = session.execute(
+                delete(WorldTelegramDestinationRecord).where(
+                    WorldTelegramDestinationRecord.id == destination_id
+                )
+            )
+            session.commit()
+            return bool(result.rowcount)
+
+    @staticmethod
+    def _to_domain(row):
+        return WorldTelegramDestination(
+            id=row.id,
+            world_id=row.world_id,
+            telegram_chat_id=row.telegram_chat_id,
+            destination_type=TelegramDestinationType(row.destination_type),
+            enabled=row.enabled,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\postgresql_world_telegram_membership_repository.py =====
+
+"""PostgreSQL repository for World Telegram memberships."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.world_telegram import (
+    TelegramMembershipStatus,
+    WorldTelegramMembership,
+)
+
+from .world_telegram_membership_models import WorldTelegramMembershipRecord
+
+
+class PostgreSQLWorldTelegramMembershipRepository:
+    """PostgreSQL implementation of the membership repository."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    def get_by_id(self, membership_id):
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(WorldTelegramMembershipRecord).where(
+                    WorldTelegramMembershipRecord.id == membership_id
+                )
+            )
+            return None if row is None else self._to_domain(row)
+
+    def get_by_destination_and_user(self, *, destination_id, user_id):
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(WorldTelegramMembershipRecord).where(
+                    WorldTelegramMembershipRecord.destination_id == destination_id,
+                    WorldTelegramMembershipRecord.user_id == user_id,
+                )
+            )
+            return None if row is None else self._to_domain(row)
+
+    def list_by_destination(self, destination_id):
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(WorldTelegramMembershipRecord)
+                .where(
+                    WorldTelegramMembershipRecord.destination_id == destination_id
+                )
+                .order_by(WorldTelegramMembershipRecord.user_id)
+            ).all()
+            return tuple(self._to_domain(row) for row in rows)
+
+    def save(self, membership):
+        with self._session_factory() as session:
+            row = session.get(
+                WorldTelegramMembershipRecord,
+                membership.id,
+            )
+            if row is None:
+                row = WorldTelegramMembershipRecord(id=membership.id)
+                session.add(row)
+
+            row.destination_id = membership.destination_id
+            row.user_id = membership.user_id
+            row.status = membership.status.value
+            row.joined_at = membership.joined_at
+            row.left_at = membership.left_at
+            row.created_at = membership.created_at
+            row.updated_at = membership.updated_at
+
+            session.commit()
+            session.refresh(row)
+            return self._to_domain(row)
+
+    def delete(self, membership_id):
+        with self._session_factory() as session:
+            result = session.execute(
+                delete(WorldTelegramMembershipRecord).where(
+                    WorldTelegramMembershipRecord.id == membership_id
+                )
+            )
+            session.commit()
+            return bool(result.rowcount)
+
+    @staticmethod
+    def _to_domain(row):
+        return WorldTelegramMembership(
+            id=row.id,
+            destination_id=row.destination_id,
+            user_id=row.user_id,
+            status=TelegramMembershipStatus(row.status),
+            joined_at=row.joined_at,
+            left_at=row.left_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\persistence\voice_call_repository.py =====
+
+"""
+Voice Call Repository Infrastructure Adapter.
+
+Infrastructure implementation for
+VoiceCall persistence.
+
+Responsibilities:
+- Implement application repository contract.
+- Provide persistence boundary.
+- Hide storage implementation details.
+
+Does NOT:
+- Handle HTTP.
+- Manage LiveKit.
+- Execute AI runtime.
+- Send notifications.
+- Own business lifecycle rules.
+
+Beta implementation:
+- In-memory storage placeholder.
+- Replace with SQLAlchemy implementation
+  when existing persistence pattern is confirmed.
+"""
+
+from __future__ import annotations
+
+
+from app.application.uai.voice.voice_call_repository import (
+    VoiceCallRepository,
+)
+
+
+from app.domain.uai.voice.voice_call import (
+    VoiceCall,
+)
+
+
+
+class InMemoryVoiceCallRepository(
+    VoiceCallRepository,
+):
+    """
+    Temporary infrastructure repository.
+
+    Keeps persistence boundary ready
+    without introducing a new database
+    implementation prematurely.
+    """
+
+
+
+    def __init__(self) -> None:
+        """
+        Initialise storage.
+        """
+
+        self._storage: dict[
+            str,
+            VoiceCall,
+        ] = {}
+
+
+
+    def save(
+        self,
+        *,
+        voice_call: VoiceCall,
+    ) -> VoiceCall:
+        """
+        Store voice call.
+        """
+
+
+        self._storage[
+            voice_call.id
+        ] = voice_call
+
+
+        return voice_call
+
+
+
+    def get_by_id(
+        self,
+        *,
+        voice_call_id: str,
+    ) -> VoiceCall | None:
+        """
+        Retrieve voice call.
+        """
+
+
+        return self._storage.get(
+            voice_call_id,
+        )
+
+
+
+__all__ = [
+    "InMemoryVoiceCallRepository",
+]
+
+
+===== BILLING TESTS =====
+
+
+===== FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\billing\test_billing_models.py =====
+
+from app.infrastructure.persistence.billing_models import (
+    BillingPlanRecord,
+    BillingPriceRecord,
+    ParentChildRelationshipRecord,
+    ParentalConsentRecord,
+    PaymentApprovalRequestRecord,
+    SubscriptionRecord,
+    EntitlementRecord,
+    StripeWebhookEventRecord,
+)
+
+
+def test_p5b1_models_register_expected_tables():
+    expected = {
+        "billing_plans",
+        "billing_prices",
+        "parent_child_relationships",
+        "parental_consents",
+        "payment_approval_requests",
+        "subscriptions",
+        "entitlements",
+        "stripe_webhook_events",
+    }
+    actual = {
+        BillingPlanRecord.__tablename__,
+        BillingPriceRecord.__tablename__,
+        ParentChildRelationshipRecord.__tablename__,
+        ParentalConsentRecord.__tablename__,
+        PaymentApprovalRequestRecord.__tablename__,
+        SubscriptionRecord.__tablename__,
+        EntitlementRecord.__tablename__,
+        StripeWebhookEventRecord.__tablename__,
+    }
+    assert actual == expected
+
+
+def test_p5b1_subscription_separates_payer_and_beneficiary():
+    columns = {column.name for column in SubscriptionRecord.__table__.columns}
+    assert "payer_user_id" in columns
+    assert "beneficiary_user_id" in columns
+
+
+def test_p5b1_relationship_supports_multiple_guardians_per_child():
+    assert "parent_user_id" in ParentChildRelationshipRecord.__table__.columns
+    assert "child_user_id" in ParentChildRelationshipRecord.__table__.columns
+    assert "uq_parent_child_relationship" in {
+        constraint.name for constraint in ParentChildRelationshipRecord.__table__.constraints
+    }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -85,6 +86,36 @@ class PasswordResetConfirmResponse(BaseModel):
 
 class PasswordResetContextResponse(BaseModel):
     email: EmailStr
+
+
+def _session_cookie_secure() -> bool:
+    """Return the configured Secure flag for the authentication session cookie.
+
+    Production-safe default: True.
+
+    Local HTTP development may explicitly set:
+        EASYCHATBOT_SESSION_COOKIE_SECURE=false
+
+    Any other non-boolean value is rejected rather than silently
+    weakening or changing the security configuration.
+    """
+    raw_value = os.getenv("EASYCHATBOT_SESSION_COOKIE_SECURE")
+
+    if raw_value is None or not raw_value.strip():
+        return True
+
+    normalized = raw_value.strip().lower()
+
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+
+    raise RuntimeError(
+        "EASYCHATBOT_SESSION_COOKIE_SECURE must be a boolean value "
+        "(true/false)."
+    )
 
 
 @router.get(
@@ -205,7 +236,7 @@ async def login(
         key="easychatbot_session",
         value=str(result.session_id),
         httponly=True,
-        secure=True,
+        secure=_session_cookie_secure(),
         samesite="lax",
         max_age=expires_in_seconds,
         path="/",
@@ -271,9 +302,9 @@ async def request_password_reset(
     ),
 )
 async def get_password_reset_context(
-    token: str,
     http_request: Request,
     response: Response,
+    token: str,
 ) -> PasswordResetContextResponse:
     """Resolve safe account context from a reset bearer token."""
     service = http_request.app.state.authentication_service
@@ -291,6 +322,7 @@ async def get_password_reset_context(
         ) from None
 
     response.headers["Cache-Control"] = "no-store"
+
     return PasswordResetContextResponse(
         email=context.email,
     )

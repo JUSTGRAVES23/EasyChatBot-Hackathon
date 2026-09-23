@@ -48,3 +48,7 @@ __all__ = [
     "WorldTelegramDestinationRecord",
     "WorldTelegramMembershipRecord",
 ]
+# W19.10 — Telegram inbound update idempotency
+from app.infrastructure.persistence.telegram_update_idempotency_models import (
+    TelegramUpdateIdempotencyRecord,
+)

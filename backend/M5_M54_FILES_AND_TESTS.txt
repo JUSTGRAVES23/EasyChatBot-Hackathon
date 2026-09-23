@@ -1,0 +1,449 @@
+﻿=== FILE EXISTENCE ===
+app\application\payment\entitlement_policy.py : True
+app\application\learning\subscription_world_access_service.py : True
+tests\application\learning\test_subscription_world_access_service.py : True
+tests\application\payment\test_entitlement_policy.py : False
+=== FILE CONTENTS ===
+===== app\application\payment\entitlement_policy.py =====
+"""Policy translating subscription plans into Learning World access tiers.
+
+Plans do not map directly to individual Learning Worlds.
+
+Instead:
+    subscription plan
+        -> entitlement capability
+        -> allowed World access tiers
+
+The policy is intentionally provider-neutral and contains no persistence,
+Stripe, or WorldAccessService logic.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.domain.learning.world_access_tier import WorldAccessTier
+
+
+NORMAL_PLAN = "NORMAL"
+PREMIUM_PLAN = "PREMIUM"
+
+
+@dataclass(frozen=True, slots=True)
+class EntitlementAccessPolicy:
+    """Resolved World-access capability for one entitlement plan."""
+
+    plan_code: str
+    active: bool
+    allowed_world_tiers: frozenset[WorldAccessTier]
+
+    def allows_tier(self, tier: WorldAccessTier) -> bool:
+        """Return whether the entitlement permits the supplied World tier."""
+        if not self.active:
+            return False
+
+        return tier in self.allowed_world_tiers
+
+
+class UnknownEntitlementPlanError(ValueError):
+    """Raised when an unknown plan would otherwise fail open."""
+
+
+class EntitlementPolicy:
+    """Canonical plan-to-capability policy.
+
+    Current product policy:
+
+    NORMAL
+        -> NORMAL Worlds
+
+    PREMIUM
+        -> NORMAL + PREMIUM Worlds
+
+    SPECIAL
+        -> never implicitly granted by a subscription plan
+
+    Unknown plans
+        -> fail closed
+
+    This class deliberately does not contain individual World identifiers.
+    """
+
+    _PLAN_TIERS: dict[str, frozenset[WorldAccessTier]] = {
+        NORMAL_PLAN: frozenset(
+            {
+                WorldAccessTier.NORMAL,
+            }
+        ),
+        PREMIUM_PLAN: frozenset(
+            {
+                WorldAccessTier.NORMAL,
+                WorldAccessTier.PREMIUM,
+            }
+        ),
+    }
+
+    def resolve(
+        self,
+        *,
+        plan_code: str,
+        active: bool,
+    ) -> EntitlementAccessPolicy:
+        if not isinstance(plan_code, str):
+            raise ValueError("plan_code must be a string.")
+
+        normalized_plan = plan_code.strip().upper()
+
+        if not normalized_plan:
+            raise ValueError("plan_code is required.")
+
+        tiers = self._PLAN_TIERS.get(normalized_plan)
+
+        if tiers is None:
+            raise UnknownEntitlementPlanError(
+                f"Unsupported entitlement plan: {plan_code!r}."
+            )
+
+        return EntitlementAccessPolicy(
+            plan_code=normalized_plan,
+            active=bool(active),
+            allowed_world_tiers=tiers if active else frozenset(),
+        )
+
+
+__all__ = [
+    "EntitlementAccessPolicy",
+    "EntitlementPolicy",
+    "NORMAL_PLAN",
+    "PREMIUM_PLAN",
+    "UnknownEntitlementPlanError",
+]
+===== app\application\learning\subscription_world_access_service.py =====
+"""Provision Learning World access from subscription entitlements."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from app.application.payment.entitlement_policy import (
+    EntitlementPolicy,
+)
+from app.application.services.world_access_service import (
+    WorldAccessService,
+)
+from app.domain.learning.learner_world_access import SUBSCRIPTION
+from app.domain.learning.world_access_tier import WorldAccessTier
+
+
+class SubscriptionWorldAccessService:
+    """Translate an active subscription entitlement into World access.
+
+    Responsibilities:
+    - resolve the plan's access-tier capability;
+    - enumerate authoritative Learning Worlds;
+    - grant permitted World access through WorldAccessService;
+    - revoke subscription-originated access when no longer permitted.
+
+    This service does NOT:
+    - call Stripe;
+    - persist subscriptions;
+    - persist entitlements;
+    - create Learning Worlds;
+    - map plans to individual World identifiers;
+    - delete learning history;
+    - revoke Beta/Admin access.
+
+    WorldAccessService remains the canonical authorization boundary.
+    """
+
+    def __init__(
+        self,
+        *,
+        entitlement_policy: EntitlementPolicy,
+        world_access_service: WorldAccessService,
+        learning_world_repository,
+    ) -> None:
+        if entitlement_policy is None:
+            raise ValueError("entitlement_policy cannot be None.")
+
+        if world_access_service is None:
+            raise ValueError("world_access_service cannot be None.")
+
+        if learning_world_repository is None:
+            raise ValueError(
+                "learning_world_repository cannot be None."
+            )
+
+        self._entitlement_policy = entitlement_policy
+        self._world_access_service = world_access_service
+        self._learning_world_repository = learning_world_repository
+
+    async def synchronize(
+        self,
+        *,
+        user_id: UUID,
+        plan_code: str,
+        active: bool,
+    ) -> None:
+        """Reconcile subscription-originated World access.
+
+        Active plans:
+            NORMAL  -> NORMAL Worlds
+            PREMIUM -> NORMAL + PREMIUM Worlds
+
+        Inactive plans:
+            subscription-originated NORMAL/PREMIUM access is revoked.
+
+        SPECIAL Worlds are never automatically granted.
+        """
+
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+        policy = self._entitlement_policy.resolve(
+            plan_code=plan_code,
+            active=active,
+        )
+
+        worlds = self._learning_world_repository.list_all()
+
+        for world in worlds:
+            tier = self._world_access_tier(world)
+
+            if policy.allows_tier(tier):
+                await self._world_access_service.grant_access(
+                    user_id=user_id,
+                    world_identifier=world.identifier,
+                    access_source=SUBSCRIPTION,
+                )
+                continue
+
+            # Only subscription-originated access may be revoked here.
+            # Beta/Admin/other independently granted access is preserved.
+            await self._world_access_service.revoke_access(
+                user_id=user_id,
+                world_identifier=world.identifier,
+                access_source=SUBSCRIPTION,
+            )
+
+    @staticmethod
+    def _world_access_tier(world) -> WorldAccessTier:
+        tier = getattr(world, "access_tier", None)
+
+        if not isinstance(tier, WorldAccessTier):
+            raise ValueError(
+                "Learning World catalogue entry has an invalid "
+                "access_tier."
+            )
+
+        return tier
+
+
+__all__ = ["SubscriptionWorldAccessService"]
+===== tests\application\learning\test_subscription_world_access_service.py =====
+from __future__ import annotations
+
+from dataclasses import dataclass
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
+
+from app.application.learning.subscription_world_access_service import (
+    SubscriptionWorldAccessService,
+)
+from app.application.payment.entitlement_policy import (
+    EntitlementPolicy,
+    UnknownEntitlementPlanError,
+)
+from app.domain.learning.learner_world_access import (
+    ADMIN,
+    BETA,
+    SUBSCRIPTION,
+)
+from app.domain.learning.world_access_tier import WorldAccessTier
+
+
+@dataclass(frozen=True)
+class FakeWorld:
+    identifier: str
+    access_tier: WorldAccessTier
+
+
+class FakeWorldRepository:
+    def __init__(self, worlds):
+        self.worlds = tuple(worlds)
+
+    def list_all(self):
+        return self.worlds
+
+
+@pytest.fixture
+def user_id():
+    return uuid4()
+
+
+@pytest.fixture
+def worlds():
+    return (
+        FakeWorld(
+            identifier="french",
+            access_tier=WorldAccessTier.NORMAL,
+        ),
+        FakeWorld(
+            identifier="french-b1",
+            access_tier=WorldAccessTier.PREMIUM,
+        ),
+        FakeWorld(
+            identifier="special-world",
+            access_tier=WorldAccessTier.SPECIAL,
+        ),
+    )
+
+
+@pytest.fixture
+def world_access_service():
+    service = AsyncMock()
+    return service
+
+
+@pytest.fixture
+def service(worlds, world_access_service):
+    return SubscriptionWorldAccessService(
+        entitlement_policy=EntitlementPolicy(),
+        world_access_service=world_access_service,
+        learning_world_repository=FakeWorldRepository(worlds),
+    )
+
+
+@pytest.mark.asyncio
+async def test_normal_grants_normal_and_revokes_premium_and_special(
+    service,
+    world_access_service,
+    user_id,
+):
+    await service.synchronize(
+        user_id=user_id,
+        plan_code="NORMAL",
+        active=True,
+    )
+
+    world_access_service.grant_access.assert_awaited_once_with(
+        user_id=user_id,
+        world_identifier="french",
+        access_source=SUBSCRIPTION,
+    )
+
+    assert world_access_service.revoke_access.await_count == 2
+
+    revoked_calls = {
+        call.kwargs["world_identifier"]
+        for call in world_access_service.revoke_access.await_args_list
+    }
+
+    assert revoked_calls == {
+        "french-b1",
+        "special-world",
+    }
+
+
+@pytest.mark.asyncio
+async def test_premium_grants_normal_and_premium_but_not_special(
+    service,
+    world_access_service,
+    user_id,
+):
+    await service.synchronize(
+        user_id=user_id,
+        plan_code="PREMIUM",
+        active=True,
+    )
+
+    assert world_access_service.grant_access.await_count == 2
+
+    granted_calls = {
+        call.kwargs["world_identifier"]
+        for call in world_access_service.grant_access.await_args_list
+    }
+
+    assert granted_calls == {
+        "french",
+        "french-b1",
+    }
+
+    world_access_service.revoke_access.assert_awaited_once_with(
+        user_id=user_id,
+        world_identifier="special-world",
+        access_source=SUBSCRIPTION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_inactive_subscription_revokes_subscription_access_only(
+    service,
+    world_access_service,
+    user_id,
+):
+    await service.synchronize(
+        user_id=user_id,
+        plan_code="PREMIUM",
+        active=False,
+    )
+
+    assert world_access_service.grant_access.await_count == 0
+    assert world_access_service.revoke_access.await_count == 3
+
+    for call in world_access_service.revoke_access.await_args_list:
+        assert call.kwargs["user_id"] == user_id
+        assert call.kwargs["access_source"] == SUBSCRIPTION
+
+
+@pytest.mark.asyncio
+async def test_beta_and_admin_access_are_never_revoked_directly(
+    service,
+    world_access_service,
+    user_id,
+):
+    await service.synchronize(
+        user_id=user_id,
+        plan_code="NORMAL",
+        active=True,
+    )
+
+    for call in world_access_service.revoke_access.await_args_list:
+        assert call.kwargs["access_source"] == SUBSCRIPTION
+
+    assert BETA != SUBSCRIPTION
+    assert ADMIN != SUBSCRIPTION
+
+
+def test_unknown_plan_fails_closed():
+    policy = EntitlementPolicy()
+
+    with pytest.raises(
+        UnknownEntitlementPlanError,
+        match="Unsupported entitlement plan",
+    ):
+        policy.resolve(
+            plan_code="UNKNOWN_PLAN",
+            active=True,
+        )
+
+
+def test_inactive_policy_has_no_allowed_tiers():
+    policy = EntitlementPolicy()
+
+    resolved = policy.resolve(
+        plan_code="PREMIUM",
+        active=False,
+    )
+
+    assert resolved.active is False
+    assert resolved.allowed_world_tiers == frozenset()
+===== tests\application\payment\test_entitlement_policy.py =====
+=== FOCUSED TESTS ===
+FAIL
+ERROR: file or directory not found: tests\application\payment\test_entitlement_policy.py
+System.Management.Automation.RemoteException
+
+no tests ran in 0.03s

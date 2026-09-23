@@ -1,0 +1,158 @@
+﻿BEGIN;
+
+CREATE TABLE alembic_version (
+    version_num VARCHAR(32) NOT NULL, 
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);
+
+-- Running upgrade  -> 20260922_p5b1_billing_persistence
+
+CREATE TABLE billing_plans (
+    id UUID NOT NULL, 
+    plan_code VARCHAR(100) NOT NULL, 
+    display_name VARCHAR(255) NOT NULL, 
+    plan_type VARCHAR(50) NOT NULL, 
+    audience VARCHAR(50), 
+    family_capable BOOLEAN DEFAULT false NOT NULL, 
+    stripe_product_id VARCHAR(255), 
+    active BOOLEAN DEFAULT true NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    UNIQUE (plan_code)
+);
+
+CREATE TABLE billing_prices (
+    id UUID NOT NULL, 
+    plan_id UUID NOT NULL, 
+    price_code VARCHAR(100) NOT NULL, 
+    stripe_price_id VARCHAR(255) NOT NULL, 
+    billing_interval VARCHAR(20) NOT NULL, 
+    currency VARCHAR(3) NOT NULL, 
+    amount_minor INTEGER NOT NULL, 
+    active BOOLEAN DEFAULT true NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(plan_id) REFERENCES billing_plans (id) ON DELETE CASCADE, 
+    UNIQUE (price_code), 
+    UNIQUE (stripe_price_id), 
+    CONSTRAINT uq_billing_prices_plan_interval UNIQUE (plan_id, billing_interval)
+);
+
+CREATE TABLE parent_child_relationships (
+    id UUID NOT NULL, 
+    parent_user_id UUID NOT NULL, 
+    child_user_id UUID NOT NULL, 
+    relationship_type VARCHAR(50) NOT NULL, 
+    status VARCHAR(30) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    verified_at TIMESTAMP WITH TIME ZONE, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(parent_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    FOREIGN KEY(child_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    CONSTRAINT uq_parent_child_relationship UNIQUE (parent_user_id, child_user_id)
+);
+
+CREATE TABLE parental_consents (
+    id UUID NOT NULL, 
+    parent_user_id UUID NOT NULL, 
+    child_user_id UUID NOT NULL, 
+    consent_type VARCHAR(50) NOT NULL, 
+    status VARCHAR(30) NOT NULL, 
+    granted_at TIMESTAMP WITH TIME ZONE, 
+    revoked_at TIMESTAMP WITH TIME ZONE, 
+    expires_at TIMESTAMP WITH TIME ZONE, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(parent_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    FOREIGN KEY(child_user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+CREATE TABLE payment_approval_requests (
+    id UUID NOT NULL, 
+    child_user_id UUID NOT NULL, 
+    parent_user_id UUID NOT NULL, 
+    plan_code VARCHAR(100) NOT NULL, 
+    stripe_price_id VARCHAR(255) NOT NULL, 
+    status VARCHAR(30) NOT NULL, 
+    token_hash VARCHAR(255) NOT NULL, 
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    approved_at TIMESTAMP WITH TIME ZONE, 
+    rejected_at TIMESTAMP WITH TIME ZONE, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(child_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    FOREIGN KEY(parent_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    UNIQUE (token_hash)
+);
+
+CREATE TABLE subscriptions (
+    id UUID NOT NULL, 
+    beneficiary_user_id UUID NOT NULL, 
+    payer_user_id UUID NOT NULL, 
+    stripe_customer_id VARCHAR(255) NOT NULL, 
+    stripe_subscription_id VARCHAR(255) NOT NULL, 
+    stripe_price_id VARCHAR(255) NOT NULL, 
+    plan_code VARCHAR(100) NOT NULL, 
+    status VARCHAR(30) NOT NULL, 
+    current_period_start TIMESTAMP WITH TIME ZONE, 
+    current_period_end TIMESTAMP WITH TIME ZONE, 
+    cancel_at_period_end BOOLEAN DEFAULT false NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(beneficiary_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    FOREIGN KEY(payer_user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    UNIQUE (stripe_subscription_id)
+);
+
+CREATE TABLE entitlements (
+    id UUID NOT NULL, 
+    user_id UUID NOT NULL, 
+    plan_code VARCHAR(100) NOT NULL, 
+    ai_credits INTEGER DEFAULT 0 NOT NULL, 
+    agent_access BOOLEAN DEFAULT false NOT NULL, 
+    premium_models BOOLEAN DEFAULT false NOT NULL, 
+    priority_processing BOOLEAN DEFAULT false NOT NULL, 
+    active BOOLEAN DEFAULT true NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    CONSTRAINT uq_entitlements_user_plan UNIQUE (user_id, plan_code)
+);
+
+CREATE TABLE stripe_webhook_events (
+    stripe_event_id VARCHAR(255) NOT NULL, 
+    event_type VARCHAR(100) NOT NULL, 
+    processed BOOLEAN DEFAULT false NOT NULL, 
+    processed_at TIMESTAMP WITH TIME ZONE, 
+    payload JSONB NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (stripe_event_id)
+);
+
+INSERT INTO alembic_version (version_num) VALUES ('20260922_p5b1_billing_persistence') RETURNING alembic_version.version_num;
+
+-- Running upgrade 20260922_p5b1_billing_persistence -> 20260922_p5b2_user_policy_profile
+
+CREATE TABLE user_policy_profiles (
+    id UUID NOT NULL, 
+    user_id UUID NOT NULL, 
+    policy_classification VARCHAR(50) NOT NULL, 
+    guardian_required BOOLEAN DEFAULT false NOT NULL, 
+    jurisdiction VARCHAR(100), 
+    policy_version VARCHAR(100) NOT NULL, 
+    policy_effective_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE, 
+    CONSTRAINT uq_user_policy_profiles_user UNIQUE (user_id)
+);
+
+UPDATE alembic_version SET version_num='20260922_p5b2_user_policy_profile' WHERE alembic_version.version_num = '20260922_p5b1_billing_persistence';
+
+COMMIT;
+

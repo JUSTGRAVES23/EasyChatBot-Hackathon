@@ -1,0 +1,2286 @@
+﻿================================================================================
+PI-5A.6 FINAL COMPOSITION + MIGRATION INSPECTION
+Generated: 2026-09-23 17:47:14
+Repository: C:\AI Folder\EasyChatBot-Hackathon\backend
+================================================================================
+
+================================================================================
+1. APP MAIN — FULL FILE
+================================================================================
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load the repository-root environment before application composition.
+# This preserves the project's established .env configuration convention
+# used by the production database and Telegram runtime scripts.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+from app.application.composition.conversation_composition import (
+    create_conversation_runtime,
+)
+from app.application.composition.private_chat_composition import (
+    build_private_chat_service_factory,
+)
+from app.application.composition.learner_context_composition import (
+    build_production_learner_context_service,
+)
+from app.application.identity.authentication_email_service import (
+    AuthenticationEmailService,
+)
+from app.application.identity.authentication_service import (
+    AuthenticationService,
+)
+from app.application.authorization.authorization_service import (
+    AuthorizationService,
+)
+from app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+from app.application.developer_admin.developer_admin_audit import (
+    DeveloperAdminAuditService,
+)
+from app.application.developer_admin.developer_admin_service import (
+    DeveloperAdminService,
+)
+from app.application.developer_admin.developer_admin_transaction_service import (
+    DeveloperAdminTransactionService,
+)
+from app.application.developer_admin.developer_admin_uow_factory import (
+    DeveloperAdminUnitOfWorkFactory,
+)
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.identity.transaction_authorization import (
+    TransactionAuthorizationApplicationService,
+)
+from app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+from app.application.operations_center.dashboard_composition import (
+    create_operations_center_composition,
+)
+from app.application.persistence_operations import (
+    PersistenceDiagnosticsService,
+)
+from app.application.privacy.privacy_governance_composition import (
+    get_privacy_governance_composition,
+)
+from app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+from app.application.study_material.service import (
+    StudyMaterialService,
+)
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+from app.application.world_catalogue.service import (
+    LearningWorldCatalogueService,
+)
+
+from app.api.academy_questionnaires import (
+    router as academy_questionnaires_router,
+)
+from app.api.questionnaire_runtime import (
+    create_questionnaire_runtime_router,
+)
+from app.application.learning_assessment.questionnaire_runtime_composition import (
+    create_questionnaire_runtime,
+)
+from app.api.private_chat import router as private_chat_router
+from app.api.learner_context import (
+    router as learner_context_router,
+)
+from app.api.study_material import (
+    router as study_material_router,
+)
+from app.api.authentication import (
+    router as authentication_router,
+)
+from app.api.dependencies.authorization import require_permission
+from app.api.operations_center import (
+    create_operations_center_router,
+)
+from app.api.routes.persistence_operations_routes import (
+    create_persistence_operations_router,
+)
+from app.api.routes.developer_admin_routes import (
+    router as developer_admin_router,
+)
+from app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+from app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+from app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+from app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+from app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+from app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+from app.application.privacy.screening.service import (
+    ScreeningService,
+)
+
+from app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from app.infrastructure.developer_admin.postgresql_developer_admin_uow_factory import (
+    PostgreSQLDeveloperAdminUnitOfWorkFactory,
+)
+from app.infrastructure.email.authentication_email_sender import (
+    AuthenticationEmailSenderAdapter,
+)
+from app.infrastructure.persistence.database import (
+    Base,
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from app.infrastructure.persistence.postgresql_functionality_control_repository import (
+    PostgreSQLFunctionalityControlRepository,
+)
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_study_material_repository import (
+    PostgreSQLStudyMaterialRepository,
+)
+from app.infrastructure.persistence.postgresql_user_policy_profile_repository import (
+    PostgreSQLUserPolicyProfileRepository,
+)
+from app.infrastructure.security.trusted_clock import SystemTrustedClock
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.transaction_authorization import (
+    TransactionAuthorizationConsumer,
+    TransactionAuthorizationRegistry,
+)
+from app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+from app.project_control_center.api.project_control_router import (
+    create_project_control_router,
+)
+from app.project_control_center.api.project_registry_router import (
+    create_project_registry_router,
+)
+from app.project_control_center.application.project_registry_service import (
+    ProjectRegistryService,
+)
+from app.project_control_center.application.project_discovery_service import (
+    ProjectDiscoveryService,
+)
+from app.project_control_center.api.project_discovery_router import (
+    create_project_discovery_router,
+)
+from app.project_control_center.infrastructure.composition import (
+    create_project_control_service,
+)
+from app.project_control_center.infrastructure.in_memory import (
+    InMemorySnapshotRepository,
+)
+from app.infrastructure.persistence.postgresql_project_registry import (
+    PostgreSQLProjectRegistry,
+)
+from app.infrastructure.persistence.postgresql_project_discovery import (
+    PostgreSQLProjectDiscoveryRepository,
+)
+
+from cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+from governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+from governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+from governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+from governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+def _required_environment(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for authentication email composition."
+        )
+
+    return value
+
+
+def _create_announcement_components():
+    telegram_client = TelegramAnnouncementClient()
+
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    return (
+        telegram_client,
+        announcement_publisher,
+    )
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+    finally:
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+
+        if telegram_client is not None:
+            try:
+                await telegram_client.close()
+            except Exception as exc:
+                print(
+                    "Telegram announcement client shutdown failed:",
+                    exc,
+                )
+
+        auth_engine = getattr(
+            application.state,
+            "auth_engine",
+            None,
+        )
+
+        if auth_engine is not None:
+            try:
+                await auth_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL authentication engine shutdown failed:",
+                    exc,
+                )
+
+        provider_usage_engine = getattr(
+            application.state,
+            "provider_usage_engine",
+            None,
+        )
+
+        if provider_usage_engine is not None:
+            try:
+                provider_usage_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL provider-usage engine shutdown failed:",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    academy_config = (
+        AcademyActivationConfig.from_environment()
+    )
+
+    auth_engine = create_async_database_engine()
+
+    auth_session_factory = (
+        create_async_session_factory(
+            auth_engine,
+        )
+    )
+
+    auth_repository = (
+        PostgreSQLAuthenticationRepository(
+            auth_session_factory,
+        )
+    )
+
+    email_provider_manager = EmailProviderManager()
+
+    authentication_email_sender = AuthenticationEmailSenderAdapter(
+        provider_manager=email_provider_manager,
+    )
+
+    authentication_email_service = AuthenticationEmailService(
+        authentication_email_sender,
+        frontend_base_url=_required_environment(
+            "EASYCHATBOT_PORTAL_URL",
+        ),
+    )
+
+    authentication_service = AuthenticationService(
+        auth_repository,
+        email_service=authentication_email_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Developer Administration
+    #
+    # Production path:
+    #
+    #   DeveloperAdminService
+    #          |
+    #          +--> DeveloperAdminUnitOfWorkFactory
+    #                  |
+    #                  +--> fresh PostgreSQLDeveloperAdminUnitOfWork
+    #                          |
+    #                          +--> fresh AsyncSession
+    #                          |
+    #                          +--> fresh transaction
+    #                          |
+    #                          +--> auth_user_roles
+    #                          |
+    #                          +--> developer_admin_audit_events
+    #          |
+    #          +--> DeveloperAdminAuditService
+    #
+    # Each Developer Admin mutation receives a fresh Unit-of-Work
+    # instance. The role mutation and its security audit evidence
+    # therefore remain within the same database transaction while
+    # mutable UoW/session state is never shared between operations.
+    #
+    # The standalone audit repository owns transactions only when its
+    # standalone ``record`` operation is used. The production Developer
+    # Admin mutation uses ``record_in_session`` through the UoW.
+    # ------------------------------------------------------------------
+
+    developer_admin_unit_of_work_factory = (
+        PostgreSQLDeveloperAdminUnitOfWorkFactory(
+            auth_session_factory,
+        )
+    )
+
+    developer_admin_audit_service = (
+        DeveloperAdminAuditService()
+    )
+
+    developer_admin_service = DeveloperAdminService(
+        repository=auth_repository,
+        unit_of_work_factory=developer_admin_unit_of_work_factory,
+        audit_service=developer_admin_audit_service,
+    )
+
+    # ------------------------------------------------------------------
+    # W15.2.1 Transaction Authorization
+    #
+    # Transaction authorization is composed once at the application root.
+    # The registry and consumer are application-lifetime components and
+    # provide their own synchronization boundaries.
+    #
+    # Authentication assurance remains a separate trusted-evidence
+    # boundary. This composition does not manufacture MFA/A2 evidence.
+    # ------------------------------------------------------------------
+
+    authorization_service = AuthorizationService()
+
+    transaction_authorization_registry = (
+        TransactionAuthorizationRegistry()
+    )
+
+    transaction_authorization_consumer = (
+        TransactionAuthorizationConsumer(
+            transaction_authorization_registry,
+        )
+    )
+
+    transaction_authorization_service = (
+        TransactionAuthorizationApplicationService(
+            authorization_service=authorization_service,
+            registry=transaction_authorization_registry,
+            consumer=transaction_authorization_consumer,
+        )
+    )
+
+    trusted_clock = SystemTrustedClock()
+
+    developer_admin_transaction_service = (
+        DeveloperAdminTransactionService(
+            developer_admin_service=developer_admin_service,
+            transaction_authorization_service=(
+                transaction_authorization_service
+            ),
+            clock=trusted_clock,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Provider usage / synchronous application persistence
+    #
+    # The provider-usage repository is synchronous by contract.
+    # It therefore receives a synchronous engine/session factory.
+    #
+    # It must not receive the async authentication session factory.
+    # ------------------------------------------------------------------
+
+    provider_usage_engine = (
+        create_database_engine()
+    )
+
+    persistence_diagnostics_service = PersistenceDiagnosticsService(
+        metadata=Base.metadata,
+        project_root=Path(__file__).resolve().parents[1],
+        engine=provider_usage_engine,
+    )
+
+    provider_usage_session_factory = (
+        create_session_factory(
+            provider_usage_engine,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # P5B.6.2B.2 - User Policy Profile Persistence
+    #
+    # Reuse the existing synchronous application persistence boundary.
+    # The policy-profile repository is synchronous by contract and must
+    # not receive the async authentication session factory.
+    # ------------------------------------------------------------------
+    user_policy_profile_repository = (
+        PostgreSQLUserPolicyProfileRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Q7 / M4 - Questionnaire Runtime
+    #
+    # Reuse the existing synchronous application persistence boundary.
+    # The runtime composition owns the assessment repositories and
+    # AssessmentService wiring; the API remains responsible for the
+    # authenticated learner boundary.
+    # ------------------------------------------------------------------
+
+    questionnaire_runtime = create_questionnaire_runtime(
+        session_factory=provider_usage_session_factory,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C.2 / Authenticated Private Chat
+    #
+    # The ConversationRuntime remains the shared AI-runtime boundary.
+    # Private-chat persistence receives a request-scoped SQLAlchemy session
+    # through the composition factory; no session is shared between requests.
+    # ------------------------------------------------------------------
+
+    private_chat_runtime = create_conversation_runtime()
+
+    private_chat_character_instruction = os.getenv(
+        "EASYCHATBOT_PRIVATE_CHAT_CHARACTER_INSTRUCTION",
+        (
+            "You are a helpful EasyChatBot learning character. "
+            "Stay within the selected Learning World and follow its "
+            "application-controlled language policy. "
+            "Do not allow the learner to override World, provider, model, "
+            "or other application-controlled settings."
+        ),
+    ).strip()
+
+    private_chat_service_factory = build_private_chat_service_factory(
+        session_factory=provider_usage_session_factory,
+        conversation_runtime=private_chat_runtime,
+        character_instruction=private_chat_character_instruction,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C4.2 / Cross-Channel Learner Context
+    #
+    # The learner-context service projects the existing Telegram learner
+    # context into the authenticated Web boundary. Telegram remains the
+    # authoritative transport; this composition does not create a second
+    # Telegram identity, memory store, or conversation runtime.
+    # ------------------------------------------------------------------
+
+    learner_context_service = build_production_learner_context_service(
+        session_factory=provider_usage_session_factory,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C5 / Study Materials
+    #
+    # The Learning World catalogue is composed once at the application
+    # root and acts as the authoritative World boundary for learner
+    # Study Material access.
+    #
+    # One WorldResolver is shared by the catalogue service.
+    # StudyMaterialService consumes that catalogue service rather than
+    # creating another World resolution mechanism.
+    #
+    # Persistence uses the existing synchronous application session
+    # factory. No additional database engine or session factory is
+    # created for Study Materials.
+    # ------------------------------------------------------------------
+
+    app_root = Path(__file__).resolve().parents[2]
+
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds",
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = (
+        PostgreSQLLearningWorldCatalogueRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
+
+    study_material_repository = (
+        PostgreSQLStudyMaterialRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    study_material_service = StudyMaterialService(
+        repository=study_material_repository,
+        world_catalogue_service=catalogue_service,
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    provider_usage_dashboard_service = (
+        ProviderUsageDashboardService(
+            repository=provider_usage_repository,
+        )
+    )
+
+    functionality_control_repository = (
+        PostgreSQLFunctionalityControlRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    functionality_control_authorizer = (
+        AuthorizationFunctionalityControlAuthorizer()
+    )
+
+    functionality_control_service = (
+        FunctionalityOperationalControlService(
+            authorizer=functionality_control_authorizer,
+            repository=functionality_control_repository,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Project Control / operational health composition
+    #
+    # Project Control is read-only. It consumes application-owned health
+    # and operational services and owns only its own PCD registry and
+    # snapshot repository.
+    # ------------------------------------------------------------------
+
+    production_health_configuration = (
+        ProductionHealthConfiguration(
+            database_engine=provider_usage_engine,
+            telegram_bot_factory=None,
+            llm_provider=None,
+            llm_request_get=None,
+        )
+    )
+
+    production_health_service = (
+        ProductionHealthService(
+            configuration=production_health_configuration,
+        )
+    )
+
+    production_readiness_service = (
+        production_health_service._readiness_service
+    )
+
+    operational_health_snapshot_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=production_readiness_service,
+        )
+    )
+
+    operational_event_service = (
+        OperationalEventService()
+    )
+
+    operational_dashboard_service = (
+        OperationalDashboardService(
+            health_snapshot_service=operational_health_snapshot_service,
+            event_service=operational_event_service,
+        )
+    )
+
+    privacy_governance_composition = (
+        get_privacy_governance_composition()
+    )
+
+    project_registry = PostgreSQLProjectRegistry(
+        provider_usage_session_factory,
+    )
+
+    project_registry_service = ProjectRegistryService(
+        project_registry,
+    )
+
+    project_discovery_repository = PostgreSQLProjectDiscoveryRepository(
+        provider_usage_session_factory,
+    )
+
+    project_discovery_service = ProjectDiscoveryService(
+        discovery_repository=project_discovery_repository,
+        project_registry=project_registry_service,
+    )
+
+    project_snapshot_repository = (
+        InMemorySnapshotRepository()
+    )
+
+    project_control_service = (
+        create_project_control_service(
+            registry=project_registry,
+            snapshots=project_snapshot_repository,
+            health_service=production_health_service,
+            dashboard_service=operational_dashboard_service,
+            case_registry=(
+                privacy_governance_composition.case_registry
+            ),
+        )
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = (
+            auth_session_factory
+        )
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = (
+            create_academy_one_week_workflow(
+                session_factory=academy_session_factory,
+                telegram_bot=announcement_telegram_client,
+            )
+        )
+
+    scheduler_runtime = (
+        create_cybersecurity_scheduler_runtime(
+            academy_one_week_workflow=academy_one_week_workflow,
+        )
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = (
+        scheduler_runtime
+    )
+
+    application.state.auth_repository = (
+        auth_repository
+    )
+
+    application.state.authentication_service = (
+        authentication_service
+    )
+
+    application.state.developer_admin_service = (
+        developer_admin_service
+    )
+
+    application.state.developer_admin_transaction_service = (
+        developer_admin_transaction_service
+    )
+
+    application.state.auth_engine = (
+        auth_engine
+    )
+
+    application.state.provider_usage_engine = (
+        provider_usage_engine
+    )
+
+    application.state.user_policy_profile_repository = (
+        user_policy_profile_repository
+    )
+
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+
+    application.state.private_chat_service_factory = (
+        private_chat_service_factory
+    )
+
+    application.state.learner_context_service = (
+        learner_context_service
+    )
+
+    application.state.study_material_service = (
+        study_material_service
+    )
+
+    application.state.private_chat_character_instruction = (
+        private_chat_character_instruction
+    )
+
+    application.state.project_control_service = (
+        project_control_service
+    )
+
+    application.state.project_discovery_service = (
+        project_discovery_service
+    )
+
+    application.state.production_health_service = (
+        production_health_service
+    )
+
+    application.state.operational_dashboard_service = (
+        operational_dashboard_service
+    )
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.include_router(
+        authentication_router,
+    )
+
+    application.include_router(
+        private_chat_router,
+        prefix="/api",
+    )
+
+    application.include_router(
+        learner_context_router,
+        prefix="/api",
+    )
+
+    application.include_router(
+        study_material_router,
+    )
+
+    application.include_router(
+        developer_admin_router,
+    )
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    operations_center_composition = (
+        create_operations_center_composition(
+            provider_usage_dashboard_service=(
+                provider_usage_dashboard_service
+            ),
+            functionality_control_service=(
+                functionality_control_service
+            ),
+        )
+    )
+
+    application.include_router(
+        create_operations_center_router(
+            composition=operations_center_composition,
+        ),
+    )
+
+    application.include_router(
+        create_persistence_operations_router(
+            persistence_diagnostics_service,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        )
+    )
+
+    application.include_router(
+        create_project_control_router(
+            project_control=project_control_service,
+        ),
+    )
+
+    application.include_router(
+        create_project_registry_router(
+            project_registry=project_registry_service,
+        ),
+    )
+
+    application.include_router(
+        create_project_discovery_router(
+            project_discovery=project_discovery_service,
+        ),
+    )
+
+    application.include_router(
+        create_email_workflows_router(
+            session_factory=provider_usage_session_factory,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        ),
+    )
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    processing_registry = (
+        create_beta1_processing_registry()
+    )
+
+    screening_service = ScreeningService()
+
+    screening_adapter = (
+        ProcessingActivityScreeningAdapter(
+            screening_service,
+        )
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    # Q7 / M4 - Questionnaire Runtime
+    #
+    # Authenticated learner runtime endpoint:
+    # POST /api/academy/questionnaires/answers
+    #
+    # Learner identity is derived server-side from the authenticated
+    # principal. The runtime reuses the existing AssessmentService and
+    # synchronous PostgreSQL persistence boundary.
+    application.include_router(
+        create_questionnaire_runtime_router(
+            runtime=questionnaire_runtime,
+        ),
+    )
+
+    # Academy World - Static Questionnaires
+    #
+    # This exposes:
+    # GET /api/academy/worlds/{world_id}/questionnaires
+    #
+    # Questionnaire content remains controlled/static.
+    # Recommendation metadata is handled separately.
+
+    application.include_router(
+        academy_questionnaires_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]
+
+
+
+
+
+================================================================================
+2. APP MAIN — PI / SCHEDULER / OPERATIONS CENTER REFERENCES
+================================================================================
+
+
+  app\main.py:66:from app.application.health.production_health_configuration import (
+  app\main.py:67:    ProductionHealthConfiguration,
+  app\main.py:68:)
+  app\main.py:69:from app.application.health.production_health_service import (
+  app\main.py:70:    ProductionHealthService,
+  app\main.py:71:)
+> app\main.py:72:from app.application.operations_center.dashboard_composition import (
+> app\main.py:73:    create_operations_center_composition,
+  app\main.py:74:)
+  app\main.py:75:from app.application.persistence_operations import (
+  app\main.py:76:    PersistenceDiagnosticsService,
+  app\main.py:77:)
+  app\main.py:78:from app.application.privacy.privacy_governance_composition import (
+  app\main.py:79:    get_privacy_governance_composition,
+  app\main.py:80:)
+  app\main.py:81:from app.application.provider_management.functionality_control_authorizer import (
+  app\main.py:82:    AuthorizationFunctionalityControlAuthorizer,
+  app\main.py:83:)
+  app\main.py:114:    router as study_material_router,
+  app\main.py:115:)
+  app\main.py:116:from app.api.authentication import (
+  app\main.py:117:    router as authentication_router,
+  app\main.py:118:)
+  app\main.py:119:from app.api.dependencies.authorization import require_permission
+> app\main.py:120:from app.api.operations_center import (
+> app\main.py:121:    create_operations_center_router,
+  app\main.py:122:)
+  app\main.py:123:from app.api.routes.persistence_operations_routes import (
+  app\main.py:124:    create_persistence_operations_router,
+  app\main.py:125:)
+  app\main.py:126:from app.api.routes.developer_admin_routes import (
+  app\main.py:127:    router as developer_admin_router,
+  app\main.py:128:)
+> app\main.py:129:from app.api.operations_center_email_workflows import (
+  app\main.py:130:    create_email_workflows_router,
+  app\main.py:131:)
+  app\main.py:132:from app.api.privacy_governance import (
+  app\main.py:133:    router as privacy_governance_router,
+  app\main.py:134:)
+  app\main.py:135:from app.api.privacy_screening import (
+  app\main.py:136:    create_privacy_screening_router,
+  app\main.py:137:)
+  app\main.py:138:from app.api.provider_management_controls import (
+  app\main.py:139:    router as provider_management_controls_router,
+  app\main.py:233:    PostgreSQLProjectRegistry,
+  app\main.py:234:)
+  app\main.py:235:from app.infrastructure.persistence.postgresql_project_discovery import (
+  app\main.py:236:    PostgreSQLProjectDiscoveryRepository,
+  app\main.py:237:)
+  app\main.py:238:
+> app\main.py:239:from cybersecurity.email.email_provider_manager import (
+  app\main.py:240:    EmailProviderManager,
+  app\main.py:241:)
+> app\main.py:242:from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+> app\main.py:243:    create_cybersecurity_scheduler_runtime,
+  app\main.py:244:)
+  app\main.py:245:
+  app\main.py:246:from governance.api.governance_audit_api import (
+  app\main.py:247:    router as governance_audit_router,
+  app\main.py:248:)
+  app\main.py:249:from governance.api.governance_change_lifecycle_api import (
+  app\main.py:250:    router as governance_change_lifecycle_router,
+  app\main.py:251:)
+  app\main.py:252:from governance.api.governance_evidence_api import (
+  app\main.py:253:    router as governance_evidence_router,
+  app\main.py:254:)
+  app\main.py:255:from governance.api.governance_operations_api import (
+  app\main.py:256:    router as governance_operations_router,
+  app\main.py:257:)
+  app\main.py:258:
+> app\main.py:259:from app.api.cybersecurity_decision_support import (
+> app\main.py:260:    router as cybersecurity_decision_support_router,
+  app\main.py:261:)
+> app\main.py:262:from app.api.cybersecurity_intelligence import (
+> app\main.py:263:    router as cybersecurity_intelligence_router,
+  app\main.py:264:)
+> app\main.py:265:from app.api.cybersecurity_live_reports import (
+> app\main.py:266:    router as cybersecurity_live_reports_router,
+  app\main.py:267:)
+> app\main.py:268:from app.api.cybersecurity_reports import (
+> app\main.py:269:    router as cybersecurity_reports_router,
+  app\main.py:270:)
+  app\main.py:271:
+  app\main.py:272:
+  app\main.py:273:def _required_environment(name: str) -> str:
+  app\main.py:274:    value = os.getenv(name, "").strip()
+  app\main.py:275:
+  app\main.py:276:    if not value:
+  app\main.py:277:        raise RuntimeError(
+  app\main.py:278:            f"{name} is required for authentication email composition."
+  app\main.py:279:        )
+  app\main.py:295:
+  app\main.py:296:
+  app\main.py:297:@asynccontextmanager
+  app\main.py:298:async def lifespan(
+  app\main.py:299:    application: FastAPI,
+  app\main.py:300:):
+> app\main.py:301:    scheduler_runtime = application.state.scheduler_runtime
+  app\main.py:302:
+  app\main.py:303:    try:
+> app\main.py:304:        await scheduler_runtime.start()
+  app\main.py:305:    except Exception as exc:
+  app\main.py:306:        print(
+> app\main.py:307:            "Cybersecurity scheduler startup failed:",
+  app\main.py:308:            exc,
+  app\main.py:309:        )
+  app\main.py:310:
+  app\main.py:311:    yield
+  app\main.py:312:
+  app\main.py:313:    try:
+> app\main.py:314:        await scheduler_runtime.stop()
+  app\main.py:315:    except Exception as exc:
+  app\main.py:316:        print(
+> app\main.py:317:            "Cybersecurity scheduler shutdown failed:",
+  app\main.py:318:            exc,
+  app\main.py:319:        )
+  app\main.py:320:
+  app\main.py:321:    finally:
+  app\main.py:322:        telegram_client = getattr(
+  app\main.py:323:            application.state,
+  app\main.py:324:            "announcement_telegram_client",
+  app\main.py:325:            None,
+  app\main.py:326:        )
+  app\main.py:327:
+  app\main.py:758:            create_academy_one_week_workflow(
+  app\main.py:759:                session_factory=academy_session_factory,
+  app\main.py:760:                telegram_bot=announcement_telegram_client,
+  app\main.py:761:            )
+  app\main.py:762:        )
+  app\main.py:763:
+> app\main.py:764:    scheduler_runtime = (
+> app\main.py:765:        create_cybersecurity_scheduler_runtime(
+  app\main.py:766:            academy_one_week_workflow=academy_one_week_workflow,
+  app\main.py:767:        )
+  app\main.py:768:    )
+  app\main.py:769:
+  app\main.py:770:    application = FastAPI(
+  app\main.py:771:        title="EasyChatBot API",
+  app\main.py:772:        description="AI character learning platform API",
+  app\main.py:773:        version="0.1.0",
+  app\main.py:774:        lifespan=lifespan,
+  app\main.py:775:    )
+  app\main.py:776:
+> app\main.py:777:    application.state.scheduler_runtime = (
+> app\main.py:778:        scheduler_runtime
+  app\main.py:779:    )
+  app\main.py:780:
+  app\main.py:781:    application.state.auth_repository = (
+  app\main.py:782:        auth_repository
+  app\main.py:783:    )
+  app\main.py:784:
+  app\main.py:785:    application.state.authentication_service = (
+  app\main.py:786:        authentication_service
+  app\main.py:787:    )
+  app\main.py:788:
+  app\main.py:898:    )
+  app\main.py:899:
+  app\main.py:900:    application.include_router(
+  app\main.py:901:        voice_notification_acceptance_router,
+  app\main.py:902:    )
+  app\main.py:903:
+> app\main.py:904:    operations_center_composition = (
+> app\main.py:905:        create_operations_center_composition(
+  app\main.py:906:            provider_usage_dashboard_service=(
+  app\main.py:907:                provider_usage_dashboard_service
+  app\main.py:908:            ),
+  app\main.py:909:            functionality_control_service=(
+  app\main.py:910:                functionality_control_service
+  app\main.py:911:            ),
+  app\main.py:912:        )
+  app\main.py:913:    )
+  app\main.py:914:
+  app\main.py:915:    application.include_router(
+> app\main.py:916:        create_operations_center_router(
+> app\main.py:917:            composition=operations_center_composition,
+  app\main.py:918:        ),
+  app\main.py:919:    )
+  app\main.py:920:
+  app\main.py:921:    application.include_router(
+  app\main.py:922:        create_persistence_operations_router(
+  app\main.py:923:            persistence_diagnostics_service,
+  app\main.py:924:            operator_dependency=require_permission(
+  app\main.py:925:                Permission.INTERNAL_DATA_READ,
+  app\main.py:926:            ),
+  app\main.py:927:        )
+  app\main.py:995:
+  app\main.py:996:    application.include_router(
+  app\main.py:997:        governance_change_lifecycle_router,
+  app\main.py:998:    )
+  app\main.py:999:
+  app\main.py:1000:    application.include_router(
+> app\main.py:1001:        cybersecurity_intelligence_router,
+  app\main.py:1002:    )
+  app\main.py:1003:
+  app\main.py:1004:    application.include_router(
+> app\main.py:1005:        cybersecurity_decision_support_router,
+  app\main.py:1006:    )
+  app\main.py:1007:
+  app\main.py:1008:    application.include_router(
+> app\main.py:1009:        cybersecurity_reports_router,
+  app\main.py:1010:    )
+  app\main.py:1011:
+  app\main.py:1012:    application.include_router(
+> app\main.py:1013:        cybersecurity_live_reports_router,
+  app\main.py:1014:    )
+  app\main.py:1015:
+  app\main.py:1016:    # Q7 / M4 - Questionnaire Runtime
+  app\main.py:1017:    #
+  app\main.py:1018:    # Authenticated learner runtime endpoint:
+  app\main.py:1019:    # POST /api/academy/questionnaires/answers
+  app\main.py:1020:    #
+  app\main.py:1021:    # Learner identity is derived server-side from the authenticated
+  app\main.py:1022:    # principal. The runtime reuses the existing AssessmentService and
+  app\main.py:1023:    # synchronous PostgreSQL persistence boundary.
+
+
+
+
+================================================================================
+3. SCHEDULER COMPOSITION — REFERENCES
+================================================================================
+
+
+  app\main.core.remote.py:33:# Business logic remains outside.
+  app\main.core.remote.py:34:#
+  app\main.core.remote.py:35:
+  app\main.core.remote.py:36:from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+> app\main.core.remote.py:37:    create_cybersecurity_scheduler_runtime,
+  app\main.core.remote.py:38:)
+  app\main.core.remote.py:39:
+  app\main.core.remote.py:40:
+  app\main.core.remote.py:41:#
+  app\main.core.remote.py:42:# Governance Audit API
+  app\main.core.remote.py:43:#
+  app\main.core.remote.py:44:# Read-only governance evidence boundary.
+  app\main.core.remote.py:45:#
+  app\main.core.remote.py:217:#
+  app\main.core.remote.py:218:# Scheduler runtime instance
+  app\main.core.remote.py:219:#
+  app\main.core.remote.py:220:
+> app\main.core.remote.py:221:scheduler_runtime = create_cybersecurity_scheduler_runtime()
+  app\main.core.remote.py:222:
+  app\main.core.remote.py:223:
+  app\main.core.remote.py:224:@asynccontextmanager
+  app\main.core.remote.py:225:async def lifespan(
+  app\main.core.remote.py:226:    application: FastAPI,
+  app\main.core.remote.py:227:):
+  app\main.core.remote.py:228:    """
+  app\main.core.remote.py:229:    Application lifecycle.
+  app\main.py:239:from cybersecurity.email.email_provider_manager import (
+  app\main.py:240:    EmailProviderManager,
+  app\main.py:241:)
+  app\main.py:242:from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+> app\main.py:243:    create_cybersecurity_scheduler_runtime,
+  app\main.py:244:)
+  app\main.py:245:
+  app\main.py:246:from governance.api.governance_audit_api import (
+  app\main.py:247:    router as governance_audit_router,
+  app\main.py:248:)
+  app\main.py:249:from governance.api.governance_change_lifecycle_api import (
+  app\main.py:250:    router as governance_change_lifecycle_router,
+  app\main.py:251:)
+  app\main.py:761:            )
+  app\main.py:762:        )
+  app\main.py:763:
+  app\main.py:764:    scheduler_runtime = (
+> app\main.py:765:        create_cybersecurity_scheduler_runtime(
+  app\main.py:766:            academy_one_week_workflow=academy_one_week_workflow,
+  app\main.py:767:        )
+  app\main.py:768:    )
+  app\main.py:769:
+  app\main.py:770:    application = FastAPI(
+  app\main.py:771:        title="EasyChatBot API",
+  app\main.py:772:        description="AI character learning platform API",
+  app\main.py:773:        version="0.1.0",
+
+
+
+
+================================================================================
+4. OPERATIONS CENTER COMPOSITION — REFERENCES
+================================================================================
+
+
+  app\api\platform_intelligence_review.py:6:from fastapi import APIRouter, Depends, HTTPException, status
+  app\api\platform_intelligence_review.py:7:
+  app\api\platform_intelligence_review.py:8:from app.api.dependencies.authorization import require_permission
+  app\api\platform_intelligence_review.py:9:from app.application.operations_center.platform_intelligence_review_api import (
+> app\api\platform_intelligence_review.py:10:    PlatformIntelligenceReviewAPI,
+  app\api\platform_intelligence_review.py:11:    PlatformIntelligenceReviewNotConfigured,
+  app\api\platform_intelligence_review.py:12:)
+  app\api\platform_intelligence_review.py:13:from app.domain.authorization.permissions import Permission
+  app\api\platform_intelligence_review.py:14:
+  app\api\platform_intelligence_review.py:15:
+  app\api\platform_intelligence_review.py:16:def create_platform_intelligence_review_router(
+  app\api\platform_intelligence_review.py:17:    *,
+> app\api\platform_intelligence_review.py:18:    api: PlatformIntelligenceReviewAPI,
+  app\api\platform_intelligence_review.py:19:) -> APIRouter:
+  app\api\platform_intelligence_review.py:20:    """Create the read-only PI review router.
+  app\api\platform_intelligence_review.py:21:
+  app\api\platform_intelligence_review.py:22:    The caller owns composition and dependency injection. No global runtime or
+  app\api\platform_intelligence_review.py:23:    repository is constructed here.
+  app\api\platform_intelligence_review.py:24:    """
+  app\api\platform_intelligence_review.py:25:    if api is None:
+  app\api\platform_intelligence_review.py:26:        raise ValueError("api is required.")
+  app\application\operations_center\dashboard_composition.py:15:from app.application.health.production_readiness_service import (
+  app\application\operations_center\dashboard_composition.py:16:    ProductionReadinessService,
+  app\application\operations_center\dashboard_composition.py:17:)
+  app\application\operations_center\dashboard_composition.py:18:from app.application.operations_center.platform_intelligence_review_api import (
+> app\application\operations_center\dashboard_composition.py:19:    create_platform_intelligence_review_api,
+  app\application\operations_center\dashboard_composition.py:20:)
+  app\application\operations_center\dashboard_composition.py:21:from app.application.operations_center.announcement_group_operations_api import (
+  app\application\operations_center\dashboard_composition.py:22:    AnnouncementGroupOperationsAPI,
+  app\application\operations_center\dashboard_composition.py:23:)
+  app\application\operations_center\dashboard_composition.py:24:from app.application.operations_center.chat_operations_dashboard_api import (
+  app\application\operations_center\dashboard_composition.py:25:    ChatOperationsDashboardAPI,
+  app\application\operations_center\dashboard_composition.py:26:)
+  app\application\operations_center\dashboard_composition.py:27:from app.application.operations_center.dashboard_api import (
+  app\application\operations_center\dashboard_composition.py:58:        ) = None,
+  app\application\operations_center\dashboard_composition.py:59:        functionality_control_service: (
+  app\application\operations_center\dashboard_composition.py:60:            FunctionalityOperationalControlService | None
+  app\application\operations_center\dashboard_composition.py:61:        ) = None,
+> app\application\operations_center\dashboard_composition.py:62:        platform_intelligence_review_source: PlatformIntelligenceReviewSource | None = None,
+> app\application\operations_center\dashboard_composition.py:63:        platform_intelligence_review_api: PlatformIntelligenceReviewAPI | None = None,
+  app\application\operations_center\dashboard_composition.py:64:    ) -> None:
+  app\application\operations_center\dashboard_composition.py:65:        configuration = ProductionHealthConfiguration()
+  app\application\operations_center\dashboard_composition.py:66:
+  app\application\operations_center\dashboard_composition.py:67:        readiness_service = ProductionReadinessService(
+  app\application\operations_center\dashboard_composition.py:68:            checks=configuration.build_checks(),
+  app\application\operations_center\dashboard_composition.py:69:        )
+  app\application\operations_center\dashboard_composition.py:70:
+  app\application\operations_center\dashboard_composition.py:71:        health_snapshot_service = OperationalHealthSnapshotService(
+  app\application\operations_center\dashboard_composition.py:108:
+  app\application\operations_center\dashboard_composition.py:109:        self._platform_intelligence_review_api = (
+  app\application\operations_center\dashboard_composition.py:110:            platform_intelligence_review_api
+  app\application\operations_center\dashboard_composition.py:111:            if platform_intelligence_review_api is not None
+> app\application\operations_center\dashboard_composition.py:112:            else create_platform_intelligence_review_api(
+> app\application\operations_center\dashboard_composition.py:113:                source=platform_intelligence_review_source
+  app\application\operations_center\dashboard_composition.py:114:            )
+  app\application\operations_center\dashboard_composition.py:115:        )
+  app\application\operations_center\dashboard_composition.py:116:        self._event_service = event_service
+  app\application\operations_center\dashboard_composition.py:117:        self._dashboard_service = dashboard_service
+  app\application\operations_center\dashboard_composition.py:118:        self._dashboard_api = dashboard_api
+  app\application\operations_center\dashboard_composition.py:119:        self._chat_operations_api = chat_operations_api
+  app\application\operations_center\dashboard_composition.py:120:        self._private_classroom_api = private_classroom_api
+  app\application\operations_center\dashboard_composition.py:121:        self._announcement_group_api = announcement_group_api
+  app\application\operations_center\dashboard_composition.py:159:    ) -> FunctionalityOperationalControlService:
+  app\application\operations_center\dashboard_composition.py:160:        return self._functionality_control_service
+  app\application\operations_center\dashboard_composition.py:161:
+  app\application\operations_center\dashboard_composition.py:162:    @property
+> app\application\operations_center\dashboard_composition.py:163:    def platform_intelligence_review_api(self) -> PlatformIntelligenceReviewAPI:
+  app\application\operations_center\dashboard_composition.py:164:        return self._platform_intelligence_review_api
+  app\application\operations_center\dashboard_composition.py:165:
+  app\application\operations_center\dashboard_composition.py:166:    @property
+  app\application\operations_center\dashboard_composition.py:167:    def provider_usage_dashboard_service(
+  app\application\operations_center\dashboard_composition.py:168:        self,
+  app\application\operations_center\dashboard_composition.py:169:    ) -> ProviderUsageDashboardService | None:
+  app\application\operations_center\dashboard_composition.py:170:        return self._provider_usage_dashboard_service
+  app\application\operations_center\dashboard_composition.py:171:
+  app\application\operations_center\dashboard_composition.py:177:    ) = None,
+  app\application\operations_center\dashboard_composition.py:178:    functionality_control_service: (
+  app\application\operations_center\dashboard_composition.py:179:        FunctionalityOperationalControlService | None
+  app\application\operations_center\dashboard_composition.py:180:    ) = None,
+> app\application\operations_center\dashboard_composition.py:181:    platform_intelligence_review_source: PlatformIntelligenceReviewSource | None = None,
+> app\application\operations_center\dashboard_composition.py:182:    platform_intelligence_review_api: PlatformIntelligenceReviewAPI | None = None,
+  app\application\operations_center\dashboard_composition.py:183:) -> OperationsCenterComposition:
+  app\application\operations_center\dashboard_composition.py:184:    return OperationsCenterComposition(
+  app\application\operations_center\dashboard_composition.py:185:        provider_usage_dashboard_service=provider_usage_dashboard_service,
+  app\application\operations_center\dashboard_composition.py:186:        functionality_control_service=functionality_control_service,
+> app\application\operations_center\dashboard_composition.py:187:        platform_intelligence_review_source=platform_intelligence_review_source,
+  app\application\operations_center\dashboard_composition.py:188:        platform_intelligence_review_api=platform_intelligence_review_api,
+  app\application\operations_center\dashboard_composition.py:189:    )
+  app\application\operations_center\dashboard_composition.py:190:
+  app\application\operations_center\dashboard_composition.py:191:
+  app\application\operations_center\dashboard_composition.py:192:def create_operations_center_dashboard_api() -> OperationsCenterDashboardAPI:
+  app\application\operations_center\dashboard_composition.py:193:    return OperationsCenterComposition().dashboard_api
+  app\application\operations_center\dashboard_composition.py:194:
+  app\application\operations_center\dashboard_composition.py:195:
+  app\application\operations_center\platform_intelligence_review_api.py:4:
+  app\application\operations_center\platform_intelligence_review_api.py:5:from dataclasses import dataclass
+  app\application\operations_center\platform_intelligence_review_api.py:6:from typing import Any
+  app\application\operations_center\platform_intelligence_review_api.py:7:
+> app\application\operations_center\platform_intelligence_review_api.py:8:from app.application.operations_center.platform_intelligence_review_source import (
+  app\application\operations_center\platform_intelligence_review_api.py:9:    PlatformIntelligenceReviewSource,
+  app\application\operations_center\platform_intelligence_review_api.py:10:)
+  app\application\operations_center\platform_intelligence_review_api.py:11:
+  app\application\operations_center\platform_intelligence_review_api.py:12:
+  app\application\operations_center\platform_intelligence_review_api.py:13:class PlatformIntelligenceReviewNotConfigured(RuntimeError):
+  app\application\operations_center\platform_intelligence_review_api.py:14:    """Raised when the canonical PI review source is not configured."""
+  app\application\operations_center\platform_intelligence_review_api.py:15:
+  app\application\operations_center\platform_intelligence_review_api.py:16:
+  app\application\operations_center\platform_intelligence_review_api.py:17:@dataclass(frozen=True, slots=True)
+> app\application\operations_center\platform_intelligence_review_api.py:18:class PlatformIntelligenceReviewAPI:
+  app\application\operations_center\platform_intelligence_review_api.py:19:    """Read-only application boundary for PI review projections."""
+  app\application\operations_center\platform_intelligence_review_api.py:20:
+  app\application\operations_center\platform_intelligence_review_api.py:21:    source: PlatformIntelligenceReviewSource | None = None
+  app\application\operations_center\platform_intelligence_review_api.py:22:
+  app\application\operations_center\platform_intelligence_review_api.py:23:    @property
+  app\application\operations_center\platform_intelligence_review_api.py:24:    def configured(self) -> bool:
+  app\application\operations_center\platform_intelligence_review_api.py:25:        return self.source is not None
+  app\application\operations_center\platform_intelligence_review_api.py:26:
+  app\application\operations_center\platform_intelligence_review_api.py:142:        """Private marker preventing accidental metadata expansion."""
+  app\application\operations_center\platform_intelligence_review_api.py:143:        return ()
+  app\application\operations_center\platform_intelligence_review_api.py:144:
+  app\application\operations_center\platform_intelligence_review_api.py:145:
+> app\application\operations_center\platform_intelligence_review_api.py:146:def create_platform_intelligence_review_api(
+  app\application\operations_center\platform_intelligence_review_api.py:147:    source: PlatformIntelligenceReviewSource | None = None,
+> app\application\operations_center\platform_intelligence_review_api.py:148:) -> PlatformIntelligenceReviewAPI:
+  app\application\operations_center\platform_intelligence_review_api.py:149:    """Create the governed PI review application boundary."""
+  app\application\operations_center\platform_intelligence_review_api.py:150:
+> app\application\operations_center\platform_intelligence_review_api.py:151:    return PlatformIntelligenceReviewAPI(source=source)
+  app\application\operations_center\platform_intelligence_review_api.py:152:
+  app\application\operations_center\platform_intelligence_review_api.py:153:
+  app\application\operations_center\platform_intelligence_review_api.py:154:__all__ = [
+> app\application\operations_center\platform_intelligence_review_api.py:155:    "PlatformIntelligenceReviewAPI",
+  app\application\operations_center\platform_intelligence_review_api.py:156:    "PlatformIntelligenceReviewNotConfigured",
+> app\application\operations_center\platform_intelligence_review_api.py:157:    "create_platform_intelligence_review_api",
+  app\application\operations_center\platform_intelligence_review_api.py:158:]
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:11:)
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:12:from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:13:    PlatformIntelligenceRetryState,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:14:)
+> app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:15:from app.application.operations_center.platform_intelligence_review_source import (
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:16:    PlatformIntelligenceReviewSource,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:17:)
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:18:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:19:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:20:class PostgreSQLPlatformIntelligenceReviewSource(
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:21:    PlatformIntelligenceReviewSource,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:22:    PlatformIntelligenceRetryStateReader,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:23:):
+
+
+
+
+================================================================================
+5. PI RETRY COMPOSITION — REFERENCES
+================================================================================
+
+
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:22:    PlatformIntelligenceRetryState,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:23:)
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:24:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:25:
+> app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:26:class PlatformIntelligenceRetryStateReader(Protocol):
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:27:    async def get_retry_state(
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:28:        self,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:29:        *,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:30:        notification_key: str,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:31:        recommendation_id: str,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:32:    ) -> PlatformIntelligenceRetryState | None: ...
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:33:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:34:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:50:        reference_at: datetime,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:51:    ) -> PlatformIntelligenceEscalationRetryExecutionResult: ...
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:52:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:53:
+> app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:54:class PlatformIntelligenceEscalationRetryOrchestrator:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:55:    """Coordinates policy, durable claim, state revalidation and retry.
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:56:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:57:    This service deliberately does not discover candidates, implement retry
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:58:    policy, send email directly, or mutate human-review/risk state.
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:59:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:60:    The canonical retry execution service remains the owner of retry-policy
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:61:    enforcement and existing dispatch integration. The orchestrator only
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:62:    supplies the authoritative dispatch context after the durable claim and
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:65:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:66:    def __init__(
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:67:        self,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:68:        *,
+> app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:69:        state_reader: PlatformIntelligenceRetryStateReader,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:70:        policy_evaluator: PlatformIntelligenceRetryPolicyEvaluator,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:71:        claim_service: PlatformIntelligenceEscalationRetryClaimService,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:72:        retry_execution: PlatformIntelligenceRetryExecutor,
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:73:    ) -> None:
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:74:        self._state_reader = state_reader
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:75:        self._policy_evaluator = policy_evaluator
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:76:        self._claim_service = claim_service
+  app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py:77:        self._retry_execution = retry_execution
+  app\application\operations_center\platform_intelligence_retry_worker.py:6:from datetime import datetime
+  app\application\operations_center\platform_intelligence_retry_worker.py:7:from enum import StrEnum
+  app\application\operations_center\platform_intelligence_retry_worker.py:8:
+  app\application\operations_center\platform_intelligence_retry_worker.py:9:
+> app\application\operations_center\platform_intelligence_retry_worker.py:10:class PlatformIntelligenceRetryWorkerItemStatus(StrEnum):
+  app\application\operations_center\platform_intelligence_retry_worker.py:11:    SUCCEEDED = "SUCCEEDED"
+  app\application\operations_center\platform_intelligence_retry_worker.py:12:    SKIPPED = "SKIPPED"
+  app\application\operations_center\platform_intelligence_retry_worker.py:13:    FAILED = "FAILED"
+  app\application\operations_center\platform_intelligence_retry_worker.py:14:
+  app\application\operations_center\platform_intelligence_retry_worker.py:15:
+  app\application\operations_center\platform_intelligence_retry_worker.py:16:@dataclass(frozen=True, slots=True)
+> app\application\operations_center\platform_intelligence_retry_worker.py:17:class PlatformIntelligenceRetryWorkerItemResult:
+  app\application\operations_center\platform_intelligence_retry_worker.py:18:    notification_key: str
+> app\application\operations_center\platform_intelligence_retry_worker.py:19:    status: PlatformIntelligenceRetryWorkerItemStatus
+  app\application\operations_center\platform_intelligence_retry_worker.py:20:    reason: str
+  app\application\operations_center\platform_intelligence_retry_worker.py:21:    attempt: int | None = None
+  app\application\operations_center\platform_intelligence_retry_worker.py:22:    provider_message_id: str | None = None
+  app\application\operations_center\platform_intelligence_retry_worker.py:23:    error_type: str | None = None
+  app\application\operations_center\platform_intelligence_retry_worker.py:24:
+  app\application\operations_center\platform_intelligence_retry_worker.py:25:    def __post_init__(self) -> None:
+  app\application\operations_center\platform_intelligence_retry_worker.py:26:        if not self.notification_key.strip():
+  app\application\operations_center\platform_intelligence_retry_worker.py:27:            raise ValueError("notification_key must be nonblank.")
+  app\application\operations_center\platform_intelligence_retry_worker.py:33:            raise ValueError("error_type must be nonblank when provided.")
+  app\application\operations_center\platform_intelligence_retry_worker.py:34:
+  app\application\operations_center\platform_intelligence_retry_worker.py:35:
+  app\application\operations_center\platform_intelligence_retry_worker.py:36:@dataclass(frozen=True, slots=True)
+> app\application\operations_center\platform_intelligence_retry_worker.py:37:class PlatformIntelligenceRetryWorkerResult:
+  app\application\operations_center\platform_intelligence_retry_worker.py:38:    requested_limit: int
+  app\application\operations_center\platform_intelligence_retry_worker.py:39:    discovered_count: int
+  app\application\operations_center\platform_intelligence_retry_worker.py:40:    processed_count: int
+  app\application\operations_center\platform_intelligence_retry_worker.py:41:    succeeded_count: int
+  app\application\operations_center\platform_intelligence_retry_worker.py:42:    skipped_count: int
+  app\application\operations_center\platform_intelligence_retry_worker.py:43:    failed_count: int
+> app\application\operations_center\platform_intelligence_retry_worker.py:44:    items: tuple[PlatformIntelligenceRetryWorkerItemResult, ...]
+  app\application\operations_center\platform_intelligence_retry_worker.py:45:
+  app\application\operations_center\platform_intelligence_retry_worker.py:46:    def __post_init__(self) -> None:
+  app\application\operations_center\platform_intelligence_retry_worker.py:47:        if self.requested_limit < 1:
+  app\application\operations_center\platform_intelligence_retry_worker.py:48:            raise ValueError("requested_limit must be at least 1.")
+  app\application\operations_center\platform_intelligence_retry_worker.py:49:        if self.discovered_count < 0:
+  app\application\operations_center\platform_intelligence_retry_worker.py:50:            raise ValueError("discovered_count cannot be negative.")
+  app\application\operations_center\platform_intelligence_retry_worker.py:51:        if self.processed_count < 0:
+  app\application\operations_center\platform_intelligence_retry_worker.py:52:            raise ValueError("processed_count cannot be negative.")
+  app\application\operations_center\platform_intelligence_retry_worker.py:66:            raise ValueError("worker result cannot contain duplicate notification keys.")
+  app\application\operations_center\platform_intelligence_retry_worker.py:67:
+  app\application\operations_center\platform_intelligence_retry_worker.py:68:
+  app\application\operations_center\platform_intelligence_retry_worker.py:69:@dataclass(frozen=True, slots=True)
+> app\application\operations_center\platform_intelligence_retry_worker.py:70:class PlatformIntelligenceRetryWorkerRequest:
+  app\application\operations_center\platform_intelligence_retry_worker.py:71:    limit: int = 100
+  app\application\operations_center\platform_intelligence_retry_worker.py:72:
+  app\application\operations_center\platform_intelligence_retry_worker.py:73:    def __post_init__(self) -> None:
+  app\application\operations_center\platform_intelligence_retry_worker.py:74:        if self.limit < 1:
+  app\application\operations_center\platform_intelligence_retry_worker.py:75:            raise ValueError("limit must be at least 1.")
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:10:from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:11:    PlatformIntelligenceRetryRunStatus,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:12:)
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:13:from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:14:    PlatformIntelligenceEscalationRetryOrchestrator,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:15:)
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:16:from app.application.operations_center.platform_intelligence_retry_worker import (
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:17:    PlatformIntelligenceRetryWorkerItemResult,
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:18:    PlatformIntelligenceRetryWorkerItemStatus,
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:19:    PlatformIntelligenceRetryWorkerRequest,
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:20:    PlatformIntelligenceRetryWorkerResult,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:21:)
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:22:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:23:
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:24:class PlatformIntelligenceRetryWorker:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:25:    """Process one bounded candidate batch through the governed retry chain.
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:26:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:27:    This class deliberately does not:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:28:    - schedule itself;
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:29:    - sleep;
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:30:    - create background tasks;
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:31:    - access providers;
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:32:    - implement retry policy;
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:39:    def __init__(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:40:        self,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:41:        *,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:42:        discovery_service: PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:43:        orchestrator: PlatformIntelligenceEscalationRetryOrchestrator,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:44:    ) -> None:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:45:        if discovery_service is None:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:46:            raise ValueError("discovery_service cannot be None.")
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:47:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:48:        if orchestrator is None:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:49:            raise ValueError("orchestrator cannot be None.")
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:50:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:51:        self._discovery_service = discovery_service
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:53:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:54:    async def run(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:55:        self,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:56:        *,
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:57:        request: PlatformIntelligenceRetryWorkerRequest,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:58:        reference_at: datetime,
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:59:    ) -> PlatformIntelligenceRetryWorkerResult:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:60:        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:61:            raise ValueError("reference_at must be timezone-aware.")
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:62:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:63:        batch = await self._discovery_service.discover(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:64:            limit=request.limit,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:65:        )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:66:
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:67:        results: list[PlatformIntelligenceRetryWorkerItemResult] = []
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:68:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:69:        for candidate in batch.candidates:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:70:            try:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:71:                execution = await self._orchestrator.run_candidate(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:72:                    candidate=candidate,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:73:                    reference_at=reference_at,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:74:                )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:75:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:76:            except Exception as exc:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:77:                results.append(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:78:                    PlatformIntelligenceRetryWorkerItemResult(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:79:                        notification_key=candidate.notification_key,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:80:                        status=(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:81:                            PlatformIntelligenceRetryWorkerItemStatus
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:82:                            .FAILED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:83:                        ),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:84:                        reason="CANDIDATE_EXECUTION_ERROR",
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:85:                        attempt=candidate.attempt,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:86:                        error_type=type(exc).__name__,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:87:                    )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:88:                )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:89:                continue
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:92:                execution.status
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:93:                is PlatformIntelligenceRetryRunStatus.SUCCEEDED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:94:            ):
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:95:                results.append(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:96:                    PlatformIntelligenceRetryWorkerItemResult(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:97:                        notification_key=execution.notification_key,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:98:                        status=(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:99:                            PlatformIntelligenceRetryWorkerItemStatus
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:100:                            .SUCCEEDED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:101:                        ),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:102:                        reason=execution.reason,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:103:                        attempt=execution.attempt,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:104:                        provider_message_id=(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:105:                            execution.provider_message_id
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:106:                        ),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:107:                    )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:111:                execution.status
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:112:                is PlatformIntelligenceRetryRunStatus.SKIPPED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:113:            ):
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:114:                results.append(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:115:                    PlatformIntelligenceRetryWorkerItemResult(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:116:                        notification_key=execution.notification_key,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:117:                        status=(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:118:                            PlatformIntelligenceRetryWorkerItemStatus
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:119:                            .SKIPPED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:120:                        ),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:121:                        reason=execution.reason,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:122:                        attempt=execution.attempt,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:123:                    )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:124:                )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:125:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:126:            else:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:127:                results.append(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:128:                    PlatformIntelligenceRetryWorkerItemResult(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:129:                        notification_key=execution.notification_key,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:130:                        status=(
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:131:                            PlatformIntelligenceRetryWorkerItemStatus
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:132:                            .FAILED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:133:                        ),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:134:                        reason=execution.reason,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:135:                        attempt=execution.attempt,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:136:                    )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:137:                )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:138:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:139:        succeeded = sum(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:140:            item.status
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:141:            is PlatformIntelligenceRetryWorkerItemStatus.SUCCEEDED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:142:            for item in results
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:143:        )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:144:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:145:        skipped = sum(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:146:            item.status
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:147:            is PlatformIntelligenceRetryWorkerItemStatus.SKIPPED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:148:            for item in results
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:149:        )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:150:
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:151:        failed = sum(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:152:            item.status
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:153:            is PlatformIntelligenceRetryWorkerItemStatus.FAILED
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:154:            for item in results
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:155:        )
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:156:
+> app\application\operations_center\platform_intelligence_retry_worker_service.py:157:        return PlatformIntelligenceRetryWorkerResult(
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:158:            requested_limit=request.limit,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:159:            discovered_count=len(batch.candidates),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:160:            processed_count=len(results),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:161:            succeeded_count=succeeded,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:162:            skipped_count=skipped,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:163:            failed_count=failed,
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:164:            items=tuple(results),
+  app\application\operations_center\platform_intelligence_retry_worker_service.py:165:        )
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:6:from app.application.operations_center.platform_intelligence_authoritative_state import (
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:7:    PlatformIntelligenceAuthoritativeStateRepository,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:8:)
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:9:from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+> app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:10:    PlatformIntelligenceRetryStateReader,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:11:)
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:12:from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:13:    PlatformIntelligenceRetryState,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:14:)
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:15:from app.application.operations_center.platform_intelligence_review_source import (
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:16:    PlatformIntelligenceReviewSource,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:17:)
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:18:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:19:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:20:class PostgreSQLPlatformIntelligenceReviewSource(
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:21:    PlatformIntelligenceReviewSource,
+> app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:22:    PlatformIntelligenceRetryStateReader,
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:23:):
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:24:    """
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:25:    Production read adapter over authoritative Platform Intelligence state.
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:26:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:27:    Architecture boundary:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:28:
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:29:        PostgreSQL authoritative PI state
+  app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py:30:                    |
+
+
+
+
+================================================================================
+6. PI ESCALATION AUDIT MIGRATION — FULL FILE
+================================================================================
+
+"""PI-5A.5.9 append-only durable delivery audit history."""
+
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+revision: str = "20260922_pi_esc_audit"
+down_revision: Union[str, Sequence[str], None] = "20260922_pi_esc_claim"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "platform_intelligence_escalation_delivery_audit",
+        sa.Column("audit_id", sa.Uuid(), nullable=False),
+        sa.Column("notification_key", sa.String(length=255), nullable=False),
+        sa.Column("recommendation_id", sa.String(length=255), nullable=False),
+        sa.Column("risk_decision_id", sa.String(length=255), nullable=False),
+        sa.Column("review_item_id", sa.String(length=255), nullable=False),
+        sa.Column("correlation_id", sa.String(length=255), nullable=False),
+        sa.Column("attempt", sa.Integer(), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("provider_message_id", sa.String(length=255), nullable=True),
+        sa.Column("error_code", sa.String(length=255), nullable=True),
+        sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("audit_id"),
+        sa.CheckConstraint("attempt >= 1", name="ck_pi_esc_audit_attempt"),
+    )
+    op.create_index(
+        "ix_pi_esc_audit_notification_occurred",
+        "platform_intelligence_escalation_delivery_audit",
+        ["notification_key", "occurred_at"],
+    )
+    op.create_index(
+        "ix_pi_esc_audit_recommendation_id",
+        "platform_intelligence_escalation_delivery_audit",
+        ["recommendation_id"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "ix_pi_esc_audit_recommendation_id",
+        table_name="platform_intelligence_escalation_delivery_audit",
+    )
+    op.drop_index(
+        "ix_pi_esc_audit_notification_occurred",
+        table_name="platform_intelligence_escalation_delivery_audit",
+    )
+    op.drop_table("platform_intelligence_escalation_delivery_audit")
+
+
+================================================================================
+7. PI AUTHORITATIVE REVIEW STATE MIGRATION — FULL FILE
+================================================================================
+
+"""Add authoritative Platform Intelligence review state.
+
+Revision ID: 20260923_pi_authoritative_review_state
+Revises: pi_esc_delivery
+Create Date: 2026-09-23
+"""
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+
+revision = "20260923_pi_authoritative_review_state"
+down_revision = "20260922_pi_esc_delivery"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "platform_intelligence_review_states",
+        sa.Column("review_item_id", sa.String(length=255), nullable=False),
+        sa.Column("risk_decision_id", sa.String(length=255), nullable=False),
+        sa.Column("risk_assessment_id", sa.String(length=255), nullable=False),
+        sa.Column("scope", sa.String(length=255), nullable=False),
+        sa.Column("risk_level", sa.String(length=64), nullable=False),
+        sa.Column("risk_score", sa.Float(), nullable=False),
+        sa.Column("priority", sa.String(length=64), nullable=False),
+        sa.Column("review_status", sa.String(length=64), nullable=False),
+        sa.Column("decision_status", sa.String(length=64), nullable=False),
+        sa.Column("quality_gate_status", sa.String(length=64), nullable=False),
+        sa.Column(
+            "evidence_references",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column(
+            "historical_references",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column("policy_id", sa.String(length=255), nullable=False),
+        sa.Column("policy_version", sa.String(length=128), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("assigned_reviewer", sa.String(length=255), nullable=True),
+        sa.Column("assigned_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("review_due_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("rationale", sa.Text(), nullable=False, server_default=""),
+        sa.Column("recommendation_status", sa.String(length=64), nullable=True),
+        sa.Column("recommendation_route", sa.String(length=128), nullable=True),
+        sa.Column(
+            "recommendation_reasons",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column("recommendation_id", sa.String(length=255), nullable=True),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.PrimaryKeyConstraint("review_item_id"),
+        sa.CheckConstraint(
+            "risk_score >= 0 AND risk_score <= 1",
+            name="ck_pi_review_state_risk_score",
+        ),
+    )
+
+    op.create_index(
+        "ix_pi_review_state_risk_decision_id",
+        "platform_intelligence_review_states",
+        ["risk_decision_id"],
+    )
+    op.create_index(
+        "ix_pi_review_state_recommendation_id",
+        "platform_intelligence_review_states",
+        ["recommendation_id"],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "ix_pi_review_state_recommendation_id",
+        table_name="platform_intelligence_review_states",
+    )
+    op.drop_index(
+        "ix_pi_review_state_risk_decision_id",
+        table_name="platform_intelligence_review_states",
+    )
+    op.drop_table("platform_intelligence_review_states")
+
+
+
+
+================================================================================
+8. ALEMBIC HEADS
+================================================================================
+
+20260901_cmp_monitoring_plan_items (head)
+20260903_m4_2_r4_user_role (compliance_documentation) (head)
+20260907_provider_usage_events (provider_usage_ledger) (head)
+20260910_functionality_operational_control (functionality_operational_control) (head)
+20260915_developer_admin_bootstrap_audit (authorization) (head)
+20260916_project_registry_bootstrap (project_registry) (head)
+20260917_luxembourgish_world (head)
+20260917_m2_c5_study_materials (head)
+20260917_project_discovery (project_discovery) (head)
+20260918_email_workflow_registry (email_workflow_registry) (head)
+20260922_p5b2_user_policy_profile (billing) (head)
+20260922_pi_esc_audit (pi_esc_delivery) (head)
+20260923_pi_authoritative_review_state (pi_esc_delivery) (head)
+pi_m5_entitlement_world_access_tier (learning_assessment) (head)
+
+
+================================================================================
+9. ALEMBIC CURRENT DATABASE STATE
+================================================================================
+
+.\.venv\Scripts\python.exe : INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+At line:2 char:5
++     .\.venv\Scripts\python.exe -m alembic current
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo              : NotSpecified: (INFO      [alembic....Postgresql    Impl.:String) [], Remot    eException
+    + FullyQualifiedErrorId     : NativeCommandError
+ 
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+20260917_m2_c5_study_materials (head)
+20260918_email_workflow_registry (head)
+20260923_pi_authoritative_review_state (head)
+20260907_provider_usage_events (head)
+20260910_functionality_operational_control (head)
+20260922_p5b1_billing_persistence
+20260923_w19_10_telegram_update_idempotency
+20260922_pi_esc_audit (head)
+20260915_developer_admin_bootstrap_audit (head)
+20260903_m4_2_r4_user_role (head)
+20260901_cmp_monitoring_plan_items (head)
+20260916_project_registry_bootstrap (head)
+20260917_project_discovery (head)
+
+
+================================================================================
+10. ALEMBIC HISTORY — PI RELEVANT
+================================================================================
+
+
+  20260922_p5b1_billing_persistence -> 20260922_p5b2_user_policy_profile (billing) (head), P5B.2 user policy profile persistence.
+  <base> -> 20260922_p5b1_billing_persistence (billing), P5B.1 billing, family, consent, entitlement and Stripe persistence.
+> 20260922_pi_esc_claim -> 20260922_pi_esc_audit (pi_esc_delivery) (head), PI-5A.5.9 append-only durable delivery audit history.
+> 20260922_pi_esc_delivery -> 20260922_pi_esc_claim (pi_esc_delivery), Add durable retry candidate lease fields.
+> 20260922_pi_esc_delivery -> 20260923_pi_authoritative_review_state (pi_esc_delivery) (head), Add authoritative Platform Intelligence review state.
+> <base> -> 20260922_pi_esc_delivery (pi_esc_delivery) (branchpoint), PI-5A.5.2B durable escalation delivery persistence.
+  405914bece20 -> 8f1522bc0a08 (branchpoint), add telegram id to users
+  e75bf3e7c80b -> 405914bece20, add learning world id to events
+  db461433a79d -> e75bf3e7c80b, create users table
+
+
+
+
+================================================================================
+11. PI-RELATED FILE INVENTORY
+================================================================================
+
+
+FullName                                                                                                                                                                          Length LastWriteTime        
+--------                                                                                                                                                                          ------ -------------        
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\platform_intelligence_review.py                                                                                                  2728 9/22/2026 9:13:52 AM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\__pycache__\platform_intelligence_review.cpython-312.pyc                                                                         3616 9/22/2026 10:52:57 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\api\__pycache__\platform_intelligence_review.cpython-313.pyc                                                                         3574 9/22/2026 11:15:52 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_authoritative_state.py                                                           2842 9/23/2026 3:08:32 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_delivery.py                                                           2039 9/22/2026 2:56:46 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_delivery_audit.py                                                     2650 9/22/2026 6:03:52 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_dispatch.py                                                          10125 9/22/2026 5:09:19 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_email.py                                                             13489 9/22/2026 4:06:21 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry.py                                                             11526 9/22/2026 7:20:33 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_candidates.py                                                   1299 9/22/2026 5:24:14 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_candidate_discovery.py                                          2693 9/22/2026 5:24:14 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_claims.py                                                       1357 9/22/2026 5:37:46 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_claim_service.py                                                2534 9/22/2026 5:37:46 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_execution.py                                                    5592 9/22/2026 7:20:53 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestration.py                                                2323 9/22/2026 5:52:14 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py                                                 7173 9/22/2026 5:52:14 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_retry_worker.py                                                                  2820 9/22/2026 6:14:48 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_retry_worker_service.py                                                          5794 9/22/2026 8:20:05 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_review_api.py                                                                    5038 9/22/2026 9:29:26 AM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_review_source.py                                                                 1748 9/22/2026 9:29:26 AM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_authoritative_state.cpython-313.pyc                                  4225 9/23/2026 5:11:14 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_delivery.cpython-312.pyc                                  3306 9/22/2026 4:59:23 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_delivery.cpython-313.pyc                                  3420 9/22/2026 5:52:06 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_delivery_audit.cpython-313.pyc                            4049 9/22/2026 8:09:16 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_dispatch.cpython-312.pyc                                 11089 9/22/2026 5:09:53 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_dispatch.cpython-313.pyc                                 11327 9/22/2026 6:04:08 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_email.cpython-312.pyc                                    17084 9/22/2026 6:04:50 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_email.cpython-313.pyc                                    17275 9/22/2026 4:12:55 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry.cpython-313.pyc                                    11616 9/22/2026 7:21:42 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_candidates.cpython-313.pyc                          2401 9/22/2026 7:25:51 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_candidate_discovery.cpython-313.pyc                 3392 9/22/2026 7:25:51 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_claims.cpython-313.pyc                              2371 9/22/2026 7:39:33 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_claim_service.cpython-313.pyc                       3635 9/22/2026 7:39:33 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_execution.cpython-313.pyc                           5532 9/23/2026 1:21:34 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_orchestration.cpython-313.pyc                       3592 9/22/2026 7:53:16 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_escalation_retry_orchestrator.cpython-313.pyc                        8218 9/23/2026 1:21:33 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_retry_worker.cpython-313.pyc                                         4950 9/22/2026 8:16:33 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_retry_worker_service.cpython-313.pyc                                 5820 9/23/2026 1:21:33 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_review_api.cpython-312.pyc                                           7055 9/22/2026 10:52:57 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_review_api.cpython-313.pyc                                           6495 9/22/2026 11:30:42 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_review_source.cpython-312.pyc                                        2121 9/22/2026 10:52:57 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\__pycache__\platform_intelligence_review_source.cpython-313.pyc                                        2882 9/22/2026 11:30:42 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\privacy_governance_reminder_scheduler.py                                                                        10002 8/23/2026 4:03:59 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\privacy\__pycache__\privacy_governance_reminder_scheduler.cpython-313.pyc                                               11955 9/18/2026 9:09:42 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\platform_intelligence_escalation_email_sender.py                                                                3136 9/22/2026 4:06:37 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\__pycache__\platform_intelligence_escalation_email_sender.cpython-312.pyc                                       3769 9/22/2026 6:04:50 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\email\__pycache__\platform_intelligence_escalation_email_sender.cpython-313.pyc                                       3908 9/22/2026 4:12:55 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py                                                9379 9/23/2026 5:16:07 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_authoritative_state_repository.py                                  9666 9/23/2026 3:08:32 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_escalation_delivery_audit_repository.py                            4947 9/22/2026 6:03:52 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_escalation_delivery_repository.py                                 16440 9/22/2026 6:03:52 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\__pycache__\platform_intelligence_authoritative_review_source.cpython-313.pyc                      10088 9/23/2026 5:16:22 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\__pycache__\sqlalchemy_platform_intelligence_authoritative_state_repository.cpython-313.pyc        12725 9/23/2026 5:21:08 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\__pycache__\sqlalchemy_platform_intelligence_escalation_delivery_audit_repository.cpython-313.pyc   7136 9/22/2026 8:09:26 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\__pycache__\sqlalchemy_platform_intelligence_escalation_delivery_repository.cpython-312.pyc        11242 9/22/2026 5:50:21 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\__pycache__\sqlalchemy_platform_intelligence_escalation_delivery_repository.cpython-313.pyc        19522 9/22/2026 8:09:26 PM 
+
+
+
+
+================================================================================
+12. PI-RELATED TEST INVENTORY
+================================================================================
+
+
+FullName                                                                                                                                    Length LastWriteTime        
+--------                                                                                                                                    ------ -------------        
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_postgresql_retry.py                                                7251 9/16/2026 10:23:08 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\announcements\test_ws22_3_5_5_failure_retry_integration.py                                   6712 9/16/2026 10:23:04 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_operations_center_platform_intelligence_integration.py                              3391 9/22/2026 9:13:52 AM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\api\test_platform_intelligence_review.py                                                     1125 9/22/2026 8:50:04 AM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\operations_center\test_platform_intelligence_review_api.py                       3426 9/22/2026 11:20:58 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\application\operations_center\test_platform_intelligence_review_composition.py               2261 9/22/2026 11:23:39 AM
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\operations_center\test_platform_intelligence_escalation_delivery_audit.py        3383 9/22/2026 6:03:52 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\operations_center\test_platform_intelligence_escalation_delivery_repository.py  11722 9/22/2026 7:35:02 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\operations_center\test_platform_intelligence_escalation_dispatch_postgres.py     8898 9/22/2026 4:01:38 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\integration\operations_center\test_platform_intelligence_escalation_retry_claiming.py        5401 9/22/2026 5:37:46 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\infrastructure\email\test_platform_intelligence_escalation_email_sender.py              2573 9/22/2026 4:10:38 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_authoritative_review_source.py             3432 9/23/2026 5:18:48 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_authoritative_state.py                     1634 9/23/2026 3:08:32 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_delivery_audit.py               2220 9/22/2026 6:03:52 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_dispatch.py                     7493 9/22/2026 5:07:56 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry.py                        9165 9/22/2026 7:21:23 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_candidate_discovery.py    4609 9/22/2026 5:24:14 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_claim_service.py          2095 9/22/2026 5:37:46 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_execution.py              8281 9/22/2026 7:21:09 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_orchestrator.py           9900 9/22/2026 7:55:18 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_retry_worker.py                            7437 9/22/2026 6:17:10 PM 
+C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\email_workflows\test_platform_intelligence_escalation_email.py        3402 9/22/2026 4:09:41 PM 
+
+
+
+
+================================================================================
+13. GIT STATUS
+================================================================================
+
+ M app/api/authentication.py
+ M app/application/composition/beta_telegram_composition.py
+ M app/application/composition/beta_telegram_production.py
+ M app/application/identity/authentication_service.py
+ M app/application/operations_center/email_workflows/registry_bootstrap.py
+ M app/domain/payment/models.py
+ M app/infrastructure/persistence/model_registry.py
+ M app/infrastructure/persistence/postgresql_learning_world_catalogue_repository.py
+ M app/infrastructure/telegram/telegram_bot_runtime.py
+ M app/main.py
+ M cybersecurity/email/email_configuration.py
+ M cybersecurity/email/resend_email_provider.py
+ M easychatbot_backend.egg-info/PKG-INFO
+ M easychatbot_backend.egg-info/SOURCES.txt
+ M easychatbot_backend.egg-info/requires.txt
+ M pyproject.toml
+ M tests/unit/api/test_authentication.py
+ M tests/unit/operations_center/email_workflows/test_registry_bootstrap.py
+ M ../learning_assessment_alembic_final_state.txt
+?? ../=
+?? ../P5B_6_2B_COMPOSITION_ROOT.txt
+?? ../P5B_6_2B_DATABASE_FACTORY_SIGNATURES.txt
+?? ../P5B_6_2B_MAIN_AUTH_COMPOSITION.txt
+?? ../P5B_6_2B_MAIN_IMPORTS_DATABASE.txt
+?? ../P5B_6_2B_SYNC_ENGINE_LIFECYCLE.txt
+?? ../PI-5A.6_AI_AGENTS_AUTHORITATIVE_REVIEW_DISCOVERY.txt
+?? ../PI-5A.6_AI_AGENTS_AUTHORITATIVE_REVIEW_DISCOVERY_V2.txt
+?? ../PI-5A.6_AUTHORITATIVE_COMPOSITION_FILES.txt
+?? ../PI-5A.6_CANONICAL_RISK_REVIEW_RUNTIME_DISCOVERY.txt
+?? ../PI-5A.6_PERSISTENCE_AND_TEST_CONVENTIONS.txt
+?? ../PI-5A.6_PRODUCTION_COMPOSITION_DISCOVERY.txt
+?? ../PI-5A.6_PRODUCTION_COMPOSITION_DISCOVERY_V2.txt
+?? ../PI-5A.6_REVIEW_SOURCE_STATE_COMPOSITION.txt
+?? ../PI-5A.6_TARGETED_PRODUCTION_TRACE.txt
+?? ../PI-5A.6_TARGETED_RUNTIME_TRACE.txt
+?? ../PI-5A.6_TRACE_ALL.txt
+?? ../PI-5A.6_TRACE_PART1.txt
+?? ../PI-5A.6_TRACE_PART2.txt
+?? ../PI-5A.6_TRACE_PART3.txt
+?? ../PI_5A5_2C_DISPATCH_INSPECTION_CORRECTED.txt
+?? ../PI_5A5_DURABLE_EXECUTION_REFERENCE.txt
+?? ../PI_5A_6_AUTHORITATIVE_STATE_DISCOVERY.txt
+?? ../PI_5A_6_EXTERNAL_INVOCATION_SOURCE_INSPECTION_FINAL.txt
+?? ../PI_5A_6_EXTERNAL_INVOCATION_SOURCE_INSPECTION_v2.txt
+?? ../PI_5A_6_FILES_ONLY.txt
+?? ../PI_5A_6_PRODUCTION_COMPOSITION_ACTUAL.txt
+?? ../PI_5A_6_SCHEDULER_PI_COMPOSITION.txt
+?? ../W19.10-A3_Canonical_Learning_Context_Multi_Learner_State_Audit.txt
+?? ../W19.10-A4_Learning_Context_Authority_World_State_Audit.txt
+?? ../W19_10_A11_PRODUCTION_HARDENING_IDEMPOTENCY_FAILURE_AUDIT.txt
+?? ../W19_10_A12_TELEGRAM_UPDATE_IDEMPOTENCY_REUSE_AUDIT.txt
+?? ../W19_10_A6_BETA_CONTEXT_RUNTIME_AUDIT.txt
+?? ../W19_10_A6_IMPORT_WIRING_AUDIT.txt
+?? ../W19_10_A6_TARGETED_CALLER_AUDIT.txt
+?? ../W19_10_A7_BETA_CONTEXT_FINAL_DEPENDENCY_AUDIT.txt
+?? ../W19_10_A8_BETA_CONTEXT_DELETION_SAFETY_AUDIT.txt
+?? ../W19_10_A9_ACTIVE_WORLD_AUTHORITY_FINAL_AUDIT.txt
+?? ../W19_10_CONTROL_GAP_ASSESSMENT.txt
+?? AUTH_TARGETED_DIFF.txt
+?? M5_ALEMBIC_CURRENT_STATE.txt
+?? M5_ALEMBIC_DB_DIAGNOSTIC.txt
+?? M5_ALEMBIC_GRAPH_VALIDATION.txt
+?? M5_ALEMBIC_RUNTIME_CHECK.txt
+?? M5_M51_FILES_VERIFICATION.txt
+?? M5_PHASE0_ALEMBIC_VERIFICATION.txt
+?? P5B1_DDL_SUMMARY.txt
+?? P5B1_MIGRATION_SQL.txt
+?? P5B2_PAYMENT_CONTRACT_DISCOVERY.txt
+?? P5B2_REPOSITORY_DISCOVERY.txt
+?? P5B_6_2B1_POLICY_PROFILE_DOMAIN_CHECK.txt
+?? P5B_6_2B_2_OFFLINE_SQL.txt
+?? P5B_6_2B_POLICY_PROFILE_PERSISTENCE_DISCOVERY.txt
+?? P5B_6_2B_REGISTRATION_ARCHITECTURE_DISCOVERY.txt
+?? P5B_6_2B_REGISTRATION_TEST_DISCOVERY.txt
+?? P5B_AUTH_FILE_1_API_AUTHENTICATION.txt
+?? P5B_DATABASE_BASE.txt
+?? P5B_FAMILY_CONSENT_FULL.txt
+?? P5B_PAYMENT_API_FULL.txt
+?? P5_AUTH_MODEL_FOCUSED.txt
+?? P5_DATABASE_PERSISTENCE_DISCOVERY.txt
+?? P5_USER_AUTH_SUBSCRIPTION_DISCOVERY.txt
+?? P5_USER_SCHEMA_MIGRATION_DISCOVERY.txt
+?? PI-5A.6-final-composition-migration-inspection.txt
+?? PI-5A.6-production-composition-inspection.txt
+?? PI-5A.6_BUILD_CONVENTIONS.txt
+?? PI-5A.6_PRODUCTION_COMPOSITION_DISCOVERY_V2.txt
+?? alembic.ini
+?? alembic/versions/20260922_p5b1_billing_persistence.py
+?? alembic/versions/20260922_p5b2_user_policy_profile.py
+?? alembic/versions/20260922_pi_esc_audit.py
+?? alembic/versions/20260922_pi_esc_claim.py
+?? alembic/versions/20260922_pi_esc_delivery.py
+?? alembic/versions/20260923_pi_authoritative_review_state.py
+?? alembic/versions/20260923_w19_10_telegram_update_idempotency.py
+?? alembic/versions/PI_M5_entitlement_world_access_tier.py
+?? app/api/authentication.py.AUTH_BACKUP_20260923
+?? app/api/authentication.py.AUTH_BACKUP_20260923_2
+?? app/api/world_selection.py
+?? app/application/operations_center/platform_intelligence_authoritative_state.py
+?? app/application/operations_center/platform_intelligence_escalation_delivery.py
+?? app/application/operations_center/platform_intelligence_escalation_delivery_audit.py
+?? app/application/operations_center/platform_intelligence_escalation_dispatch.py
+?? app/application/operations_center/platform_intelligence_escalation_email.py
+?? app/application/operations_center/platform_intelligence_escalation_retry.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_candidate_discovery.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_candidates.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_claim_service.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_claims.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_execution.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_orchestration.py
+?? app/application/operations_center/platform_intelligence_escalation_retry_orchestrator.py
+?? app/application/operations_center/platform_intelligence_retry_worker.py
+?? app/application/operations_center/platform_intelligence_retry_worker_service.py
+?? app/application/payment/authorization_models.py
+?? app/application/payment/checkout_eligibility_service.py
+?? app/application/payment/checkout_models.py
+?? app/application/payment/create_checkout.py
+?? app/application/payment/guardian_registration.py
+?? app/application/payment/guardian_registration.py.P5B6_2B1_BACKUP
+?? app/application/payment/payment_authorization_service.py
+?? app/application/payment/payment_event_router.py
+?? app/application/payment/subscription_entitlement_service.py
+?? app/application/ports/
+?? app/application/world_selection/
+?? app/domain/billing/
+?? app/domain/learning/world_access_tier.py
+?? app/domain/policy_profile/
+?? app/infrastructure/email/platform_intelligence_escalation_email_sender.py
+?? app/infrastructure/operations_center/
+?? app/infrastructure/persistence/billing_models.py
+?? app/infrastructure/persistence/postgresql_entitlement_repository.py
+?? app/infrastructure/persistence/postgresql_parent_child_relationship_repository.py
+?? app/infrastructure/persistence/postgresql_parental_consent_repository.py
+?? app/infrastructure/persistence/postgresql_payment_event_repository.py
+?? app/infrastructure/persistence/postgresql_subscription_repository.py
+?? app/infrastructure/persistence/postgresql_telegram_update_idempotency_repository.py
+?? app/infrastructure/persistence/postgresql_user_policy_profile_repository.py
+?? app/infrastructure/persistence/telegram_update_idempotency_models.py
+?? app/infrastructure/persistence/user_policy_profile_models.py
+?? app/main.py.P5B_6_2B_B2_BACKUP
+?? cybersecurity/scheduler/cybersecurity_apscheduler_adapter.py.PI_5A_6_BACKUP_20260923_132120
+?? pyproject.toml.P5B2_BACKUP
+?? stripe_s1_1_payment_architecture.txt
+?? stripe_s5_1_1_billing_catalogue_mapping.txt
+?? stripe_s5_1_access_entitlement_inventory.txt
+?? stripe_s5_1_access_entitlement_inventory.zip
+?? stripe_s5_1_access_entitlement_sources.txt
+?? stripe_s5_1_access_entitlement_sources.zip
+?? stripe_s5_1_access_entitlement_sources/
+?? tests/api/test_world_selection.py
+?? tests/application/world_selection/
+?? tests/beta_access/test_w19_9_learner_journey_integration.py
+?? tests/integration/operations_center/
+?? tests/unit/billing/
+?? tests/unit/infrastructure/email/test_platform_intelligence_escalation_email_sender.py
+?? tests/unit/operations_center/email_workflows/test_platform_intelligence_escalation_email.py
+?? tests/unit/operations_center/test_platform_intelligence_authoritative_review_source.py
+?? tests/unit/operations_center/test_platform_intelligence_authoritative_state.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_delivery_audit.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_dispatch.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_retry.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_retry_candidate_discovery.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_retry_claim_service.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_retry_execution.py
+?? tests/unit/operations_center/test_platform_intelligence_escalation_retry_orchestrator.py
+?? tests/unit/operations_center/test_platform_intelligence_retry_worker.py
+?? tests/unit/telegram/
+?? ../backend_private_chat_inspection_v2.txt
+?? ../developer-admin-uow-inspection.txt
+?? ../m2-c3-character-canonical-source-inspection.txt
+?? ../m2-c3-character-world-architecture-inspection.txt
+?? ../m2c_alembic_diagnostics.txt
+?? ../status.HTTP_400_BAD_REQUEST
+?? ../status.HTTP_404_NOT_FOUND
+?? ../tests/domain/
+?? ../tests/unit/operations_center/
+
+
+================================================================================
+END OF PI-5A.6 INSPECTION
+================================================================================

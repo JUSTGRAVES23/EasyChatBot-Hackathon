@@ -1,0 +1,1674 @@
+﻿============================================================
+PI-5A.6 CONCRETE PRODUCTION COMPOSITION SOURCES
+Generated: 2026-09-23 21:41:06
+Repository: C:\AI Folder\EasyChatBot-Hackathon\backend
+
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\platform_intelligence_authoritative_review_source.py
+################################################################
+
+from __future__ import annotations
+
+from dataclasses import asdict
+from typing import Any
+
+from app.application.operations_center.platform_intelligence_authoritative_state import (
+    PlatformIntelligenceAuthoritativeStateRepository,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+    PlatformIntelligenceRetryStateReader,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryState,
+)
+from app.application.operations_center.platform_intelligence_review_source import (
+    PlatformIntelligenceReviewSource,
+)
+
+
+class PostgreSQLPlatformIntelligenceReviewSource(
+    PlatformIntelligenceReviewSource,
+    PlatformIntelligenceRetryStateReader,
+):
+    """
+    Production read adapter over authoritative Platform Intelligence state.
+
+    Architecture boundary:
+
+        PostgreSQL authoritative PI state
+                    |
+                    v
+        PostgreSQLPlatformIntelligenceReviewSource
+                    |
+              +-----+------+
+              |            |
+              v            v
+        Review projection  Retry state
+              |            |
+              v            v
+        Review API     Retry Orchestrator
+
+    Responsibilities:
+    - read authoritative PI state;
+    - expose the governed review projection;
+    - expose recommended escalations;
+    - rehydrate the existing retry-state contract.
+
+    Non-responsibilities:
+    - no retry policy;
+    - no dispatch;
+    - no email sending;
+    - no delivery persistence;
+    - no scheduler;
+    - no mutation of risk/review state.
+    """
+
+    def __init__(
+        self,
+        repository: PlatformIntelligenceAuthoritativeStateRepository,
+    ) -> None:
+        if repository is None:
+            raise ValueError("repository must not be None.")
+
+        self._repository = repository
+
+    # ------------------------------------------------------------------
+    # Existing ReviewSource synchronous contract
+    # ------------------------------------------------------------------
+    #
+    # The current ReviewSource application boundary is synchronous,
+    # while authoritative persistence is asynchronous.
+    #
+    # The async methods below are therefore the production persistence
+    # adapter entry points. These synchronous methods intentionally fail
+    # closed rather than performing unsafe event-loop manipulation.
+    #
+    # Composition must use the async methods when binding this adapter
+    # to the async PostgreSQL repository.
+
+    def list_reviews(self) -> tuple[Any, ...]:
+        raise RuntimeError(
+            "Use list_reviews_async() from the async application composition."
+        )
+
+    def get_review(
+        self,
+        review_item_id: str,
+    ) -> Any | None:
+        raise RuntimeError(
+            "Use get_review_async() from the async application composition."
+        )
+
+    def list_escalations(self) -> tuple[Any, ...]:
+        raise RuntimeError(
+            "Use list_escalations_async() from the async application composition."
+        )
+
+    # ------------------------------------------------------------------
+    # Async authoritative-state API
+    # ------------------------------------------------------------------
+
+    async def list_reviews_async(
+        self,
+    ) -> tuple[dict[str, Any], ...]:
+        states = await self._repository.list_all()
+
+        return tuple(
+            self._projection(state)
+            for state in states
+        )
+
+    async def get_review_async(
+        self,
+        review_item_id: str,
+    ) -> dict[str, Any] | None:
+        if not review_item_id or not review_item_id.strip():
+            raise ValueError("review_item_id must not be blank.")
+
+        state = await self._repository.get(review_item_id)
+
+        if state is None:
+            return None
+
+        return self._projection(state)
+
+    async def list_escalations_async(
+        self,
+    ) -> tuple[dict[str, Any], ...]:
+        states = await self._repository.list_all()
+
+        return tuple(
+            self._projection(state)
+            for state in states
+            if state.recommendation_status == "RECOMMENDED"
+        )
+
+    # ------------------------------------------------------------------
+    # Retry State Reader
+    # ------------------------------------------------------------------
+
+    async def get_retry_state(
+        self,
+        notification_key: str,
+        recommendation_id: str,
+    ) -> PlatformIntelligenceRetryState | None:
+        if not notification_key or not notification_key.strip():
+            raise ValueError("notification_key must not be blank.")
+
+        if not recommendation_id or not recommendation_id.strip():
+            raise ValueError("recommendation_id must not be blank.")
+
+        state = await self._repository.get_by_recommendation_id(
+            recommendation_id
+        )
+
+        if state is None:
+            return None
+
+        if state.recommendation_id != recommendation_id:
+            return None
+
+        return PlatformIntelligenceRetryState(
+            notification_key=notification_key,
+            recommendation_id=recommendation_id,
+            recommendation_status=state.recommendation_status or "",
+            review_status=state.review_status,
+            decision_status=state.decision_status,
+            quality_gate_status=state.quality_gate_status,
+            dispatch_request=self._dispatch_request(
+                state,
+                notification_key,
+            ),
+            email_request=self._email_request(
+                state,
+                notification_key,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Projection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _projection(
+        state: Any,
+    ) -> dict[str, Any]:
+        """
+        Return the persisted authoritative state as the governed
+        Operations Center projection.
+
+        The aggregate is immutable, so asdict() is safe here and keeps
+        this adapter free from a second projection model.
+        """
+        return asdict(state)
+
+    # ------------------------------------------------------------------
+    # Existing canonical dispatch contract
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dispatch_request(
+        state: Any,
+        notification_key: str,
+    ) -> Any:
+        """
+        Rehydrate the existing canonical PI escalation dispatch request.
+
+        This adapter does not implement dispatch behaviour. It only
+        reconstructs the immutable request consumed by the existing
+        dispatch service.
+        """
+        from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+            PlatformIntelligenceEscalationDispatchRequest,
+        )
+
+        return PlatformIntelligenceEscalationDispatchRequest(
+            notification_key=notification_key,
+            recommendation_id=state.recommendation_id or "",
+            risk_decision_id=state.risk_decision_id,
+            review_item_id=state.review_item_id,
+            risk_level=state.risk_level,
+            risk_score=state.risk_score,
+            quality_gate_status=state.quality_gate_status,
+            review_status=state.review_status,
+            decision_status=state.decision_status,
+            correlation_id=notification_key,
+            route=state.recommendation_route or "",
+            reasons=state.recommendation_reasons,
+        )
+
+    # ------------------------------------------------------------------
+    # Existing canonical email contract
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _email_request(
+        state: Any,
+        notification_key: str,
+    ) -> Any:
+        """
+        Rehydrate the existing canonical PI escalation email request.
+
+        The authoritative state contains created_at, not updated_at.
+        created_at is therefore the authoritative timestamp used for
+        generated_at during retry-state reconstruction.
+        """
+        from app.application.operations_center.platform_intelligence_escalation_email import (
+            PlatformIntelligenceEscalationEmailRequest,
+        )
+
+        return PlatformIntelligenceEscalationEmailRequest(
+            recommendation_id=state.recommendation_id or "",
+            risk_decision_id=state.risk_decision_id,
+            review_item_id=state.review_item_id,
+            scope=state.scope,
+            risk_level=state.risk_level,
+            risk_score=state.risk_score,
+            quality_gate_status=state.quality_gate_status,
+            review_status=state.review_status,
+            decision_status=state.decision_status,
+            route=state.recommendation_route or "",
+            reasons=state.recommendation_reasons,
+            evidence_references=state.evidence_references,
+            historical_references=state.historical_references,
+            policy_id=state.policy_id,
+            policy_version=state.policy_version,
+            rationale=state.rationale,
+            generated_at=state.created_at.isoformat(),
+            notification_key=notification_key,
+        )
+
+
+__all__ = [
+    "PostgreSQLPlatformIntelligenceReviewSource",
+]
+
+END FILE
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_authoritative_state_repository.py
+################################################################
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from typing import Any
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.application.operations_center.platform_intelligence_authoritative_state import (
+    PlatformIntelligenceAuthoritativeState,
+)
+
+
+class SqlAlchemyPlatformIntelligenceAuthoritativeStateRepository:
+    """PostgreSQL repository for the authoritative PI review aggregate."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        self._session_factory = session_factory
+
+    async def list_all(
+        self,
+    ) -> tuple[PlatformIntelligenceAuthoritativeState, ...]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM platform_intelligence_review_states
+                    ORDER BY created_at ASC, review_item_id ASC
+                    """
+                )
+            )
+            return tuple(
+                self._to_state(row)
+                for row in result.mappings().all()
+            )
+
+    async def get(
+        self,
+        review_item_id: str,
+    ) -> PlatformIntelligenceAuthoritativeState | None:
+        if not review_item_id.strip():
+            raise ValueError("review_item_id must not be blank.")
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM platform_intelligence_review_states
+                    WHERE review_item_id = :review_item_id
+                    """
+                ),
+                {"review_item_id": review_item_id},
+            )
+            row = result.mappings().first()
+            return self._to_state(row) if row is not None else None
+
+    async def get_by_recommendation_id(
+        self,
+        recommendation_id: str,
+    ) -> PlatformIntelligenceAuthoritativeState | None:
+        if not recommendation_id.strip():
+            raise ValueError("recommendation_id must not be blank.")
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM platform_intelligence_review_states
+                    WHERE recommendation_id = :recommendation_id
+                    """
+                ),
+                {"recommendation_id": recommendation_id},
+            )
+            row = result.mappings().first()
+            return self._to_state(row) if row is not None else None
+
+    async def save(
+        self,
+        state: PlatformIntelligenceAuthoritativeState,
+    ) -> None:
+        async with self._session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO platform_intelligence_review_states (
+                        review_item_id,
+                        risk_decision_id,
+                        risk_assessment_id,
+                        scope,
+                        risk_level,
+                        risk_score,
+                        priority,
+                        review_status,
+                        decision_status,
+                        quality_gate_status,
+                        evidence_references,
+                        historical_references,
+                        policy_id,
+                        policy_version,
+                        created_at,
+                        assigned_reviewer,
+                        assigned_at,
+                        review_due_at,
+                        rationale,
+                        recommendation_status,
+                        recommendation_route,
+                        recommendation_reasons,
+                        recommendation_id,
+                        updated_at
+                    )
+                    VALUES (
+                        :review_item_id,
+                        :risk_decision_id,
+                        :risk_assessment_id,
+                        :scope,
+                        :risk_level,
+                        :risk_score,
+                        :priority,
+                        :review_status,
+                        :decision_status,
+                        :quality_gate_status,
+                        CAST(:evidence_references AS JSONB),
+                        CAST(:historical_references AS JSONB),
+                        :policy_id,
+                        :policy_version,
+                        :created_at,
+                        :assigned_reviewer,
+                        :assigned_at,
+                        :review_due_at,
+                        :rationale,
+                        :recommendation_status,
+                        :recommendation_route,
+                        CAST(:recommendation_reasons AS JSONB),
+                        :recommendation_id,
+                        CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (review_item_id)
+                    DO UPDATE SET
+                        risk_decision_id = EXCLUDED.risk_decision_id,
+                        risk_assessment_id = EXCLUDED.risk_assessment_id,
+                        scope = EXCLUDED.scope,
+                        risk_level = EXCLUDED.risk_level,
+                        risk_score = EXCLUDED.risk_score,
+                        priority = EXCLUDED.priority,
+                        review_status = EXCLUDED.review_status,
+                        decision_status = EXCLUDED.decision_status,
+                        quality_gate_status = EXCLUDED.quality_gate_status,
+                        evidence_references = EXCLUDED.evidence_references,
+                        historical_references = EXCLUDED.historical_references,
+                        policy_id = EXCLUDED.policy_id,
+                        policy_version = EXCLUDED.policy_version,
+                        assigned_reviewer = EXCLUDED.assigned_reviewer,
+                        assigned_at = EXCLUDED.assigned_at,
+                        review_due_at = EXCLUDED.review_due_at,
+                        rationale = EXCLUDED.rationale,
+                        recommendation_status = EXCLUDED.recommendation_status,
+                        recommendation_route = EXCLUDED.recommendation_route,
+                        recommendation_reasons = EXCLUDED.recommendation_reasons,
+                        recommendation_id = EXCLUDED.recommendation_id,
+                        updated_at = CURRENT_TIMESTAMP
+                    """
+                ),
+                self._params(state),
+            )
+            await session.commit()
+
+    @staticmethod
+    def _params(
+        state: PlatformIntelligenceAuthoritativeState,
+    ) -> dict[str, Any]:
+        return {
+            "review_item_id": state.review_item_id,
+            "risk_decision_id": state.risk_decision_id,
+            "risk_assessment_id": state.risk_assessment_id,
+            "scope": state.scope,
+            "risk_level": state.risk_level,
+            "risk_score": state.risk_score,
+            "priority": state.priority,
+            "review_status": state.review_status,
+            "decision_status": state.decision_status,
+            "quality_gate_status": state.quality_gate_status,
+            "evidence_references": json.dumps(state.evidence_references),
+            "historical_references": json.dumps(state.historical_references),
+            "policy_id": state.policy_id,
+            "policy_version": state.policy_version,
+            "created_at": state.created_at,
+            "assigned_reviewer": state.assigned_reviewer,
+            "assigned_at": state.assigned_at,
+            "review_due_at": state.review_due_at,
+            "rationale": state.rationale,
+            "recommendation_status": state.recommendation_status,
+            "recommendation_route": state.recommendation_route,
+            "recommendation_reasons": json.dumps(state.recommendation_reasons),
+            "recommendation_id": state.recommendation_id,
+        }
+
+    @staticmethod
+    def _to_state(
+        row: Mapping[str, Any],
+    ) -> PlatformIntelligenceAuthoritativeState:
+        return PlatformIntelligenceAuthoritativeState(
+            review_item_id=str(row["review_item_id"]),
+            risk_decision_id=str(row["risk_decision_id"]),
+            risk_assessment_id=str(row["risk_assessment_id"]),
+            scope=str(row["scope"]),
+            risk_level=str(row["risk_level"]),
+            risk_score=float(row["risk_score"]),
+            priority=str(row["priority"]),
+            review_status=str(row["review_status"]),
+            decision_status=str(row["decision_status"]),
+            quality_gate_status=str(row["quality_gate_status"]),
+            evidence_references=tuple(row["evidence_references"] or ()),
+            historical_references=tuple(row["historical_references"] or ()),
+            policy_id=str(row["policy_id"]),
+            policy_version=str(row["policy_version"]),
+            created_at=row["created_at"],
+            assigned_reviewer=row["assigned_reviewer"],
+            assigned_at=row["assigned_at"],
+            review_due_at=row["review_due_at"],
+            rationale=str(row["rationale"] or ""),
+            recommendation_status=row["recommendation_status"],
+            recommendation_route=row["recommendation_route"],
+            recommendation_reasons=tuple(row["recommendation_reasons"] or ()),
+            recommendation_id=row["recommendation_id"],
+        )
+
+END FILE
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_escalation_delivery_repository.py
+################################################################
+
+"""PostgreSQL persistence adapter for PI escalation delivery."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryRecord,
+    PlatformIntelligenceEscalationDeliveryRepository,
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_delivery_audit import (
+    PlatformIntelligenceEscalationDeliveryAuditRecord,
+    PlatformIntelligenceEscalationDeliveryAuditStatus,
+)
+from app.infrastructure.operations_center.sqlalchemy_platform_intelligence_escalation_delivery_audit_repository import (
+    SqlAlchemyPlatformIntelligenceEscalationDeliveryAuditRepository,
+)
+
+
+class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
+    PlatformIntelligenceEscalationDeliveryRepository
+):
+    _TABLE = "platform_intelligence_escalation_deliveries"
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def get_by_notification_key(self, notification_key: str):
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT notification_key, recommendation_id,
+                           risk_decision_id, review_item_id, correlation_id,
+                           attempt, status, provider_message_id, error_code,
+                           created_at, updated_at
+                    FROM {self._TABLE}
+                    WHERE notification_key = :notification_key
+                    """
+                ),
+                {"notification_key": notification_key},
+            )
+            row = result.mappings().first()
+            return None if row is None else self._to_record(row)
+
+    async def list_retry_candidates(self, *, limit: int):
+        if limit < 1:
+            raise ValueError("limit must be at least 1.")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT notification_key, recommendation_id,
+                           risk_decision_id, review_item_id, correlation_id,
+                           attempt, status, provider_message_id, error_code,
+                           created_at, updated_at
+                    FROM {self._TABLE}
+                    WHERE status IN (:failed, :started)
+                    ORDER BY updated_at ASC NULLS FIRST, notification_key ASC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                    "limit": limit,
+                },
+            )
+            return tuple(self._to_record(row) for row in result.mappings().all())
+
+    async def claim_retry_candidate(
+        self, *, notification_key: str, claim_token: str,
+        claimed_at: datetime, lease_expires_at: datetime,
+    ) -> bool:
+        if not notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not claim_token.strip():
+            raise ValueError("claim_token must be nonblank.")
+        if claimed_at.tzinfo is None or claimed_at.utcoffset() is None:
+            raise ValueError("claimed_at must be timezone-aware.")
+        if lease_expires_at.tzinfo is None or lease_expires_at.utcoffset() is None:
+            raise ValueError("lease_expires_at must be timezone-aware.")
+        if lease_expires_at <= claimed_at:
+            raise ValueError("lease_expires_at must be after claimed_at.")
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET claim_token = :claim_token,
+                        claimed_at = :claimed_at,
+                        lease_expires_at = :lease_expires_at
+                    WHERE notification_key = :notification_key
+                      AND status IN (:failed, :started)
+                      AND (
+                          lease_expires_at IS NULL
+                          OR lease_expires_at <= :claimed_at
+                      )
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "claim_token": claim_token,
+                    "claimed_at": claimed_at,
+                    "lease_expires_at": lease_expires_at,
+                    "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                },
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def create_started(
+        self, *, notification_key: str, recommendation_id: str,
+        risk_decision_id: str, review_item_id: str, correlation_id: str,
+    ):
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            await session.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._TABLE} (
+                        notification_key, recommendation_id, risk_decision_id,
+                        review_item_id, correlation_id, attempt, status,
+                        provider_message_id, error_code, created_at, updated_at,
+                        claim_token, claimed_at, lease_expires_at
+                    )
+                    VALUES (
+                        :notification_key, :recommendation_id, :risk_decision_id,
+                        :review_item_id, :correlation_id, 1, :status,
+                        NULL, NULL, :created_at, :updated_at,
+                        NULL, NULL, NULL
+                    )
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "recommendation_id": recommendation_id,
+                    "risk_decision_id": risk_decision_id,
+                    "review_item_id": review_item_id,
+                    "correlation_id": correlation_id,
+                    "status": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await self._insert_audit(
+                session,
+                notification_key=notification_key,
+                recommendation_id=recommendation_id,
+                risk_decision_id=risk_decision_id,
+                review_item_id=review_item_id,
+                correlation_id=correlation_id,
+                attempt=1,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.STARTED,
+                occurred_at=now,
+            )
+            await session.commit()
+
+        record = await self.get_by_notification_key(notification_key)
+        if record is None:
+            raise RuntimeError("Created PI escalation delivery could not be reloaded.")
+        return record
+
+    async def mark_succeeded(
+        self, *, notification_key: str, provider_message_id: str | None,
+    ):
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET status = :status,
+                        provider_message_id = :provider_message_id,
+                        error_code = NULL,
+                        updated_at = :updated_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL
+                    WHERE notification_key = :notification_key
+                    RETURNING notification_key, recommendation_id,
+                              risk_decision_id, review_item_id, correlation_id,
+                              attempt, status, provider_message_id,
+                              error_code, created_at, updated_at
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "status": PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED.value,
+                    "provider_message_id": provider_message_id,
+                    "updated_at": now,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await session.rollback()
+                raise KeyError(f"Unknown PI escalation notification key: {notification_key}")
+
+            record = self._to_record(row)
+            if not provider_message_id:
+                await session.rollback()
+                raise ValueError("Successful PI delivery requires provider_message_id.")
+
+            await self._insert_audit(
+                session,
+                notification_key=record.notification_key,
+                recommendation_id=record.recommendation_id,
+                risk_decision_id=record.risk_decision_id,
+                review_item_id=record.review_item_id,
+                correlation_id=record.correlation_id,
+                attempt=record.attempt,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.SUCCEEDED,
+                provider_message_id=provider_message_id,
+                occurred_at=now,
+            )
+            await session.commit()
+            return record
+
+    async def mark_failed(self, *, notification_key: str, error_code: str):
+        if not error_code.strip():
+            raise ValueError("error_code must be nonblank.")
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET status = :status,
+                        provider_message_id = NULL,
+                        error_code = :error_code,
+                        updated_at = :updated_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL
+                    WHERE notification_key = :notification_key
+                    RETURNING notification_key, recommendation_id,
+                              risk_decision_id, review_item_id, correlation_id,
+                              attempt, status, provider_message_id,
+                              error_code, created_at, updated_at
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "status": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "error_code": error_code,
+                    "updated_at": now,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await session.rollback()
+                raise KeyError(f"Unknown PI escalation notification key: {notification_key}")
+
+            record = self._to_record(row)
+            await self._insert_audit(
+                session,
+                notification_key=record.notification_key,
+                recommendation_id=record.recommendation_id,
+                risk_decision_id=record.risk_decision_id,
+                review_item_id=record.review_item_id,
+                correlation_id=record.correlation_id,
+                attempt=record.attempt,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.FAILED,
+                error_code=error_code,
+                occurred_at=now,
+            )
+            await session.commit()
+            return record
+
+    async def start_retry(self, *, notification_key: str):
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET attempt = attempt + 1,
+                        status = :started,
+                        provider_message_id = NULL,
+                        error_code = NULL,
+                        updated_at = :updated_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL
+                    WHERE notification_key = :notification_key
+                      AND status = :failed
+                    RETURNING notification_key, recommendation_id,
+                              risk_decision_id, review_item_id, correlation_id,
+                              attempt, status, provider_message_id,
+                              error_code, created_at, updated_at
+                    """
+                ),
+                {
+                    "notification_key": notification_key,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
+                    "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
+                    "updated_at": now,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await session.rollback()
+                raise RuntimeError(
+                    "PI escalation delivery can only be retried from FAILED."
+                )
+
+            record = self._to_record(row)
+            await self._insert_audit(
+                session,
+                notification_key=record.notification_key,
+                recommendation_id=record.recommendation_id,
+                risk_decision_id=record.risk_decision_id,
+                review_item_id=record.review_item_id,
+                correlation_id=record.correlation_id,
+                attempt=record.attempt,
+                status=PlatformIntelligenceEscalationDeliveryAuditStatus.STARTED,
+                occurred_at=now,
+            )
+            await session.commit()
+            return record
+
+    @staticmethod
+    async def _insert_audit(
+        session: AsyncSession,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+        risk_decision_id: str,
+        review_item_id: str,
+        correlation_id: str,
+        attempt: int,
+        status: PlatformIntelligenceEscalationDeliveryAuditStatus,
+        occurred_at: datetime,
+        provider_message_id: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        record = PlatformIntelligenceEscalationDeliveryAuditRecord(
+            audit_id=uuid4(),
+            notification_key=notification_key,
+            recommendation_id=recommendation_id,
+            risk_decision_id=risk_decision_id,
+            review_item_id=review_item_id,
+            correlation_id=correlation_id,
+            attempt=attempt,
+            status=status,
+            provider_message_id=provider_message_id,
+            error_code=error_code,
+            occurred_at=occurred_at,
+        )
+        await SqlAlchemyPlatformIntelligenceEscalationDeliveryAuditRepository.insert_with_session(
+            session, record
+        )
+
+    @staticmethod
+    def _to_record(row: Mapping[str, Any]):
+        return PlatformIntelligenceEscalationDeliveryRecord(
+            notification_key=str(row["notification_key"]),
+            recommendation_id=str(row["recommendation_id"]),
+            risk_decision_id=str(row["risk_decision_id"]),
+            review_item_id=str(row["review_item_id"]),
+            correlation_id=str(row["correlation_id"]),
+            attempt=int(row["attempt"]),
+            status=PlatformIntelligenceEscalationDeliveryStatus(str(row["status"])),
+            provider_message_id=row["provider_message_id"],
+            error_code=row["error_code"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+END FILE
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_escalation_delivery_audit_repository.py
+################################################################
+
+"""PostgreSQL read/append adapter for PI delivery audit history."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.application.operations_center.platform_intelligence_escalation_delivery_audit import (
+    PlatformIntelligenceEscalationDeliveryAuditRecord,
+    PlatformIntelligenceEscalationDeliveryAuditRepository,
+    PlatformIntelligenceEscalationDeliveryAuditStatus,
+)
+
+
+class SqlAlchemyPlatformIntelligenceEscalationDeliveryAuditRepository(
+    PlatformIntelligenceEscalationDeliveryAuditRepository
+):
+    _TABLE = "platform_intelligence_escalation_delivery_audit"
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+        self._session_factory = session_factory
+
+    async def append(self, record: PlatformIntelligenceEscalationDeliveryAuditRecord) -> None:
+        if record.occurred_at is None:
+            raise ValueError("occurred_at is required for durable audit persistence.")
+        async with self._session_factory() as session:
+            await self._insert(session, record)
+            await session.commit()
+
+    async def list_by_notification_key(self, notification_key: str):
+        if not notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    f"""
+                    SELECT audit_id, notification_key, recommendation_id,
+                           risk_decision_id, review_item_id, correlation_id,
+                           attempt, status, provider_message_id, error_code,
+                           occurred_at
+                    FROM {self._TABLE}
+                    WHERE notification_key = :notification_key
+                    ORDER BY occurred_at ASC, audit_id ASC
+                    """
+                ),
+                {"notification_key": notification_key},
+            )
+            return tuple(self._to_record(row) for row in result.mappings().all())
+
+    @classmethod
+    async def insert_with_session(
+        cls,
+        session: AsyncSession,
+        record: PlatformIntelligenceEscalationDeliveryAuditRecord,
+    ) -> None:
+        if record.occurred_at is None:
+            raise ValueError("occurred_at is required for durable audit persistence.")
+        await cls._insert(session, record)
+
+    @classmethod
+    async def _insert(
+        cls,
+        session: AsyncSession,
+        record: PlatformIntelligenceEscalationDeliveryAuditRecord,
+    ) -> None:
+        await session.execute(
+            text(
+                f"""
+                INSERT INTO {cls._TABLE} (
+                    audit_id, notification_key, recommendation_id,
+                    risk_decision_id, review_item_id, correlation_id,
+                    attempt, status, provider_message_id, error_code,
+                    occurred_at
+                )
+                VALUES (
+                    :audit_id, :notification_key, :recommendation_id,
+                    :risk_decision_id, :review_item_id, :correlation_id,
+                    :attempt, :status, :provider_message_id, :error_code,
+                    :occurred_at
+                )
+                """
+            ),
+            {
+                "audit_id": record.audit_id,
+                "notification_key": record.notification_key,
+                "recommendation_id": record.recommendation_id,
+                "risk_decision_id": record.risk_decision_id,
+                "review_item_id": record.review_item_id,
+                "correlation_id": record.correlation_id,
+                "attempt": record.attempt,
+                "status": record.status.value,
+                "provider_message_id": record.provider_message_id,
+                "error_code": record.error_code,
+                "occurred_at": record.occurred_at,
+            },
+        )
+
+    @staticmethod
+    def _to_record(row: Mapping[str, Any]) -> PlatformIntelligenceEscalationDeliveryAuditRecord:
+        return PlatformIntelligenceEscalationDeliveryAuditRecord(
+            audit_id=UUID(str(row["audit_id"])),
+            notification_key=str(row["notification_key"]),
+            recommendation_id=str(row["recommendation_id"]),
+            risk_decision_id=str(row["risk_decision_id"]),
+            review_item_id=str(row["review_item_id"]),
+            correlation_id=str(row["correlation_id"]),
+            attempt=int(row["attempt"]),
+            status=PlatformIntelligenceEscalationDeliveryAuditStatus(str(row["status"])),
+            provider_message_id=row["provider_message_id"],
+            error_code=row["error_code"],
+            occurred_at=row["occurred_at"],
+        )
+
+END FILE
+
+MISSING FILE: .\app\application\operations_center\platform_intelligence_escalation_dispatch_service.py
+
+MISSING FILE: .\app\application\operations_center\platform_intelligence_escalation_retry_policy.py
+
+MISSING FILE: .\app\application\operations_center\platform_intelligence_escalation_retry_policy_service.py
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_candidate_discovery.py
+################################################################
+
+from __future__ import annotations
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+    PlatformIntelligenceEscalationRetryCandidateBatch,
+    PlatformIntelligenceEscalationRetryCandidateRepository,
+)
+
+
+class PlatformIntelligenceEscalationRetryCandidateDiscoveryService:
+    """Discover durable retry work without executing it.
+
+    This boundary deliberately does not:
+    - call the retry policy;
+    - mutate delivery state;
+    - send email;
+    - schedule work;
+    - claim/lock candidates.
+
+    Policy eligibility and execution remain separate steps.
+    """
+
+    def __init__(
+        self,
+        *,
+        repository: PlatformIntelligenceEscalationRetryCandidateRepository,
+    ) -> None:
+        if repository is None:
+            raise ValueError("repository cannot be None.")
+
+        self._repository = repository
+
+    async def discover(
+        self,
+        *,
+        limit: int = 100,
+    ) -> PlatformIntelligenceEscalationRetryCandidateBatch:
+        if limit < 1:
+            raise ValueError("limit must be at least 1.")
+
+        records = await self._repository.list_retry_candidates(
+            limit=limit,
+        )
+
+        candidates: list[PlatformIntelligenceEscalationRetryCandidate] = []
+
+        for record in records:
+            if record.status not in (
+                PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+                PlatformIntelligenceEscalationDeliveryStatus.STARTED,
+            ):
+                continue
+
+            candidates.append(
+                PlatformIntelligenceEscalationRetryCandidate(
+                    notification_key=record.notification_key,
+                    recommendation_id=record.recommendation_id,
+                    risk_decision_id=record.risk_decision_id,
+                    review_item_id=record.review_item_id,
+                    correlation_id=record.correlation_id,
+                    attempt=record.attempt,
+                    status=record.status.value,
+                    error_code=record.error_code,
+                    updated_at=record.updated_at,
+                )
+            )
+
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.updated_at is None,
+                candidate.updated_at,
+                candidate.notification_key,
+            )
+        )
+
+        return PlatformIntelligenceEscalationRetryCandidateBatch(
+            candidates=tuple(candidates),
+            limit=limit,
+        )
+
+END FILE
+
+MISSING FILE: .\app\application\operations_center\platform_intelligence_escalation_retry_claim.py
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_execution.py
+################################################################
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+from app.application.operations_center.platform_intelligence_escalation_delivery import (
+    PlatformIntelligenceEscalationDeliveryStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+    PlatformIntelligenceEscalationDispatchRequest,
+    PlatformIntelligenceEscalationDispatchResult,
+    PlatformIntelligenceEscalationDispatchService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry import (
+    PlatformIntelligenceEscalationRetryDecision,
+    PlatformIntelligenceEscalationRetryPolicyService,
+)
+
+
+class PlatformIntelligenceEscalationRetryExecutionStatus(StrEnum):
+    NOT_ELIGIBLE = "NOT_ELIGIBLE"
+    NOT_DUE = "NOT_DUE"
+    RETRIED = "RETRIED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationRetryExecutionResult:
+    status: PlatformIntelligenceEscalationRetryExecutionStatus
+    notification_key: str
+    attempt: int
+    reason: str
+    dispatch_result: PlatformIntelligenceEscalationDispatchResult | None = None
+
+
+class PlatformIntelligenceEscalationRetryExecutionService:
+    """Execute one policy-authorized retry without owning scheduling.
+
+    This service:
+    - retrieves the authoritative durable delivery record;
+    - evaluates retry policy;
+    - enforces the policy-derived due time;
+    - increments FAILED attempts only through the repository;
+    - preserves the attempt number for STARTED recovery;
+    - delegates actual delivery to the existing dispatch service.
+
+    It does not:
+    - schedule future work;
+    - sleep;
+    - call an email provider directly;
+    - mutate delivery state directly.
+    """
+
+    def __init__(
+        self,
+        *,
+        delivery_repository: object,
+        retry_policy: PlatformIntelligenceEscalationRetryPolicyService,
+        dispatch_service: PlatformIntelligenceEscalationDispatchService,
+    ) -> None:
+        if delivery_repository is None:
+            raise ValueError(
+                "delivery_repository cannot be None."
+            )
+
+        if retry_policy is None:
+            raise ValueError(
+                "retry_policy cannot be None."
+            )
+
+        if dispatch_service is None:
+            raise ValueError(
+                "dispatch_service cannot be None."
+            )
+
+        self._repository = delivery_repository
+        self._retry_policy = retry_policy
+        self._dispatch_service = dispatch_service
+
+    async def retry(
+        self,
+        *,
+        request: PlatformIntelligenceEscalationDispatchRequest,
+        email_request: object,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryExecutionResult:
+        record = await self._repository.get_by_notification_key(
+            request.notification_key
+        )
+
+        if record is None:
+            raise ValueError(
+                "Retry requires an existing durable delivery record."
+            )
+
+        if record.notification_key != request.notification_key:
+            raise ValueError(
+                "Delivery record notification key does not match request."
+            )
+
+        policy_result = self._retry_policy.evaluate(
+            record=record,
+            reference_at=reference_at,
+        )
+
+        if (
+            policy_result.decision
+            is PlatformIntelligenceEscalationRetryDecision.NOT_ELIGIBLE
+        ):
+            return PlatformIntelligenceEscalationRetryExecutionResult(
+                status=(
+                    PlatformIntelligenceEscalationRetryExecutionStatus
+                    .NOT_ELIGIBLE
+                ),
+                notification_key=record.notification_key,
+                attempt=record.attempt,
+                reason=policy_result.reason,
+            )
+
+        if (
+            policy_result.next_eligible_at is not None
+            and reference_at < policy_result.next_eligible_at
+        ):
+            return PlatformIntelligenceEscalationRetryExecutionResult(
+                status=(
+                    PlatformIntelligenceEscalationRetryExecutionStatus
+                    .NOT_DUE
+                ),
+                notification_key=record.notification_key,
+                attempt=record.attempt,
+                reason=(
+                    "Retry is eligible but the policy-derived "
+                    "backoff window has not elapsed."
+                ),
+            )
+
+        if (
+            record.status
+            is PlatformIntelligenceEscalationDeliveryStatus.FAILED
+        ):
+            await self._repository.start_retry(
+                notification_key=record.notification_key,
+            )
+
+        # STARTED recovery deliberately does not call start_retry().
+        # The durable attempt remains the same because this is recovery
+        # of the interrupted attempt rather than a new FAILED retry.
+        dispatch_result = await self._dispatch_service.dispatch(
+            request=request,
+            email_request=email_request,
+        )
+
+        return PlatformIntelligenceEscalationRetryExecutionResult(
+            status=(
+                PlatformIntelligenceEscalationRetryExecutionStatus
+                .RETRIED
+            ),
+            notification_key=record.notification_key,
+            attempt=(
+                dispatch_result.attempt
+                if dispatch_result.attempt is not None
+                else record.attempt
+            ),
+            reason=policy_result.reason,
+            dispatch_result=dispatch_result,
+        )
+
+END FILE
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py
+################################################################
+
+"""Controlled orchestration for one PI escalation retry candidate."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+from app.application.operations_center.platform_intelligence_escalation_retry_claim_service import (
+    PlatformIntelligenceEscalationRetryClaimService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
+    PlatformIntelligenceEscalationRetryExecutionResult,
+    PlatformIntelligenceEscalationRetryExecutionService,
+    PlatformIntelligenceEscalationRetryExecutionStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunResult,
+    PlatformIntelligenceRetryRunStatus,
+    PlatformIntelligenceRetryState,
+)
+
+
+class PlatformIntelligenceRetryStateReader(Protocol):
+    async def get_retry_state(
+        self,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+    ) -> PlatformIntelligenceRetryState | None: ...
+
+
+class PlatformIntelligenceRetryPolicyEvaluator(Protocol):
+    async def evaluate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> bool: ...
+
+
+class PlatformIntelligenceRetryExecutor(Protocol):
+    async def retry(
+        self,
+        *,
+        request: object,
+        email_request: object,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryExecutionResult: ...
+
+
+class PlatformIntelligenceEscalationRetryOrchestrator:
+    """Coordinates policy, durable claim, state revalidation and retry.
+
+    This service deliberately does not discover candidates, implement retry
+    policy, send email directly, or mutate human-review/risk state.
+
+    The canonical retry execution service remains the owner of retry-policy
+    enforcement and existing dispatch integration. The orchestrator only
+    supplies the authoritative dispatch context after the durable claim and
+    final state revalidation.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_reader: PlatformIntelligenceRetryStateReader,
+        policy_evaluator: PlatformIntelligenceRetryPolicyEvaluator,
+        claim_service: PlatformIntelligenceEscalationRetryClaimService,
+        retry_execution: PlatformIntelligenceRetryExecutor,
+    ) -> None:
+        self._state_reader = state_reader
+        self._policy_evaluator = policy_evaluator
+        self._claim_service = claim_service
+        self._retry_execution = retry_execution
+
+    async def run_candidate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryRunResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        eligible = await self._policy_evaluator.evaluate(
+            candidate=candidate,
+            reference_at=reference_at,
+        )
+        if not eligible:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_POLICY_NOT_ELIGIBLE",
+                attempt=candidate.attempt,
+            )
+
+        claim = await self._claim_service.claim(
+            notification_key=candidate.notification_key,
+            claimed_at=reference_at,
+        )
+        if claim is None:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_CANDIDATE_ALREADY_CLAIMED",
+                attempt=candidate.attempt,
+            )
+
+        state = await self._state_reader.get_retry_state(
+            notification_key=candidate.notification_key,
+            recommendation_id=candidate.recommendation_id,
+        )
+        if state is None:
+            return self._skipped(candidate, "AUTHORITATIVE_STATE_NOT_FOUND")
+        if state.notification_key != candidate.notification_key:
+            return self._skipped(candidate, "NOTIFICATION_KEY_MISMATCH")
+        if state.recommendation_id != candidate.recommendation_id:
+            return self._skipped(candidate, "RECOMMENDATION_ID_MISMATCH")
+        if state.recommendation_status != "RECOMMENDED":
+            return self._skipped(
+                candidate, "RECOMMENDATION_NO_LONGER_RECOMMENDED"
+            )
+        if state.review_status != "IN_REVIEW":
+            return self._skipped(candidate, "REVIEW_NOT_IN_REVIEW")
+        if state.decision_status != "PENDING_HUMAN_REVIEW":
+            return self._skipped(
+                candidate, "DECISION_NO_LONGER_PENDING_HUMAN_REVIEW"
+            )
+        if state.quality_gate_status != "PASSED":
+            return self._skipped(
+                candidate, "QUALITY_GATE_NO_LONGER_PASSED"
+            )
+
+        execution = await self._retry_execution.retry(
+            request=state.dispatch_request,
+            email_request=state.email_request,
+            reference_at=reference_at,
+        )
+
+        if (
+            execution.status
+            is PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED
+        ):
+            dispatch_result = execution.dispatch_result
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SUCCEEDED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+                provider_message_id=(
+                    dispatch_result.provider_message_id
+                    if dispatch_result is not None
+                    else None
+                ),
+            )
+
+        if execution.status in (
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_ELIGIBLE,
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_DUE,
+        ):
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+            )
+
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.FAILED,
+            reason=execution.reason,
+            attempt=execution.attempt,
+        )
+
+    @staticmethod
+    def _skipped(
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reason: str,
+    ) -> PlatformIntelligenceRetryRunResult:
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+            reason=reason,
+            attempt=candidate.attempt,
+        )
+
+END FILE
+
+################################################################
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\operations_center\platform_intelligence_retry_worker_service.py
+################################################################
+
+"""Bounded, scheduler-free orchestration boundary for PI retry work."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from app.application.operations_center.platform_intelligence_escalation_retry_candidate_discovery import (
+    PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+    PlatformIntelligenceEscalationRetryOrchestrator,
+)
+from app.application.operations_center.platform_intelligence_retry_worker import (
+    PlatformIntelligenceRetryWorkerItemResult,
+    PlatformIntelligenceRetryWorkerItemStatus,
+    PlatformIntelligenceRetryWorkerRequest,
+    PlatformIntelligenceRetryWorkerResult,
+)
+
+
+class PlatformIntelligenceRetryWorker:
+    """Process one bounded candidate batch through the governed retry chain.
+
+    This class deliberately does not:
+    - schedule itself;
+    - sleep;
+    - create background tasks;
+    - access providers;
+    - implement retry policy;
+    - claim candidates directly;
+    - mutate risk or human-review state.
+
+    The caller owns invocation timing and supplies the reference timestamp.
+    """
+
+    def __init__(
+        self,
+        *,
+        discovery_service: PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+        orchestrator: PlatformIntelligenceEscalationRetryOrchestrator,
+    ) -> None:
+        if discovery_service is None:
+            raise ValueError("discovery_service cannot be None.")
+
+        if orchestrator is None:
+            raise ValueError("orchestrator cannot be None.")
+
+        self._discovery_service = discovery_service
+        self._orchestrator = orchestrator
+
+    async def run(
+        self,
+        *,
+        request: PlatformIntelligenceRetryWorkerRequest,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryWorkerResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        batch = await self._discovery_service.discover(
+            limit=request.limit,
+        )
+
+        results: list[PlatformIntelligenceRetryWorkerItemResult] = []
+
+        for candidate in batch.candidates:
+            try:
+                execution = await self._orchestrator.run_candidate(
+                    candidate=candidate,
+                    reference_at=reference_at,
+                )
+
+            except Exception as exc:
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=candidate.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .FAILED
+                        ),
+                        reason="CANDIDATE_EXECUTION_ERROR",
+                        attempt=candidate.attempt,
+                        error_type=type(exc).__name__,
+                    )
+                )
+                continue
+
+            if (
+                execution.status
+                is PlatformIntelligenceRetryRunStatus.SUCCEEDED
+            ):
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .SUCCEEDED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                        provider_message_id=(
+                            execution.provider_message_id
+                        ),
+                    )
+                )
+
+            elif (
+                execution.status
+                is PlatformIntelligenceRetryRunStatus.SKIPPED
+            ):
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .SKIPPED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                    )
+                )
+
+            else:
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .FAILED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                    )
+                )
+
+        succeeded = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.SUCCEEDED
+            for item in results
+        )
+
+        skipped = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.SKIPPED
+            for item in results
+        )
+
+        failed = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.FAILED
+            for item in results
+        )
+
+        return PlatformIntelligenceRetryWorkerResult(
+            requested_limit=request.limit,
+            discovered_count=len(batch.candidates),
+            processed_count=len(results),
+            succeeded_count=succeeded,
+            skipped_count=skipped,
+            failed_count=failed,
+            items=tuple(results),
+        )
+
+END FILE

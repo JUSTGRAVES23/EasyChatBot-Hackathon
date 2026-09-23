@@ -1,0 +1,1780 @@
+============================================================
+PI-5A.6 SCHEDULER COMPOSITION INSPECTION
+Generated: 2026-09-23 17:53:19
+Repo: C:\AI Folder\EasyChatBot-Hackathon\backend
+============================================================
+
+============================================================
+1. SCHEDULER DIRECTORY INVENTORY
+============================================================
+
+
+FullName                    
+--------                    
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+
+
+
+
+============================================================
+2. CYBERSECURITY SCHEDULER FACTORY
+============================================================
+
+"""
+Cybersecurity Scheduler Factory.
+
+Creates the single shared scheduler runtime.
+
+Academy is composed as an optional application workflow and
+registered on the existing scheduler. No second scheduler is created.
+"""
+
+from __future__ import annotations
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    CybersecuritySchedulerRuntime,
+)
+
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+from cybersecurity.scheduler.scheduler_configuration import (
+    SCHEDULER_TIMEZONE,
+)
+
+from cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+    CybersecuritySchedulerWorkflow,
+)
+
+from cybersecurity.email.cybersecurity_email_service import (
+    CybersecurityEmailService,
+)
+
+from app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+def create_cybersecurity_scheduler_runtime(
+    workflow_service=None,
+    *,
+    academy_one_week_workflow=None,
+) -> CybersecuritySchedulerRuntime:
+    """Create the single shared scheduler runtime."""
+
+    if workflow_service is None:
+        email_service = CybersecurityEmailService(
+            recipient="davdbarbero1999@gmail.com",
+        )
+
+        workflow_service = CybersecuritySchedulerWorkflow(
+            email_service=email_service,
+        )
+
+    scheduler = AsyncIOScheduler(
+        timezone=SCHEDULER_TIMEZONE,
+    )
+
+    # Academy production composition is explicit and injectable.
+    #
+    # It is deliberately NOT created here automatically because the
+    # application import path must remain safe when PostgreSQL is not
+    # configured in a development/test environment.
+    #
+    # Production composition may inject the completed Academy workflow.
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    return CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+
+__all__ = [
+    "create_cybersecurity_scheduler_runtime",
+]
+
+
+
+============================================================
+3. CYBERSECURITY APSCHEDULER ADAPTER
+============================================================
+
+"""
+Cybersecurity APScheduler Adapter.
+
+Infrastructure boundary for scheduled workflows.
+
+Responsibilities:
+- register existing cybersecurity jobs;
+- optionally register privacy governance reminders;
+- optionally register Academy notification workflows;
+- start and stop the single APScheduler instance.
+
+Does NOT:
+- own Academy eligibility;
+- own Academy delivery state;
+- send emails directly;
+- send Telegram messages directly;
+- make governance decisions;
+- create a second scheduler.
+"""
+
+from __future__ import annotations
+
+from cybersecurity.scheduler.scheduler_configuration import (
+    DAILY_REPORT_HOUR,
+    DAILY_REPORT_MINUTE,
+    WEEKLY_REPORT_DAY,
+    WEEKLY_REPORT_HOUR,
+    WEEKLY_REPORT_MINUTE,
+)
+
+
+class CybersecurityAPSchedulerAdapter:
+    """APScheduler implementation boundary.
+
+    All scheduled application workflows share this single scheduler.
+
+    Optional workflows remain dependency-injected so existing
+    cybersecurity-only tests and deployments remain backwards compatible.
+    """
+
+    def __init__(
+        self,
+        scheduler,
+        workflow_service,
+        governance_reminder_workflow=None,
+        governance_reminder_interval_minutes: int = 60,
+        academy_one_week_workflow=None,
+        academy_one_week_hour: int = 8,
+        academy_one_week_minute: int = 15,
+    ) -> None:
+        if scheduler is None:
+            raise ValueError("scheduler cannot be None.")
+
+        if workflow_service is None:
+            raise ValueError("workflow_service cannot be None.")
+
+        if governance_reminder_interval_minutes <= 0:
+            raise ValueError(
+                "governance_reminder_interval_minutes must be > 0."
+            )
+
+        if not 0 <= academy_one_week_hour <= 23:
+            raise ValueError(
+                "academy_one_week_hour must be between 0 and 23."
+            )
+
+        if not 0 <= academy_one_week_minute <= 59:
+            raise ValueError(
+                "academy_one_week_minute must be between 0 and 59."
+            )
+
+        self.scheduler = scheduler
+        self.workflow_service = workflow_service
+
+        self.governance_reminder_workflow = (
+            governance_reminder_workflow
+        )
+        self.governance_reminder_interval_minutes = (
+            governance_reminder_interval_minutes
+        )
+
+        self.academy_one_week_workflow = (
+            academy_one_week_workflow
+        )
+        self.academy_one_week_hour = academy_one_week_hour
+        self.academy_one_week_minute = academy_one_week_minute
+
+    def register_jobs(self) -> None:
+        """Register all enabled workflows on the single scheduler."""
+
+        self.scheduler.add_job(
+            self.workflow_service.create_daily_report,
+            trigger="cron",
+            hour=DAILY_REPORT_HOUR,
+            minute=DAILY_REPORT_MINUTE,
+            id="cybersecurity_daily_report",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self.workflow_service.create_weekly_report,
+            trigger="cron",
+            day_of_week=WEEKLY_REPORT_DAY,
+            hour=WEEKLY_REPORT_HOUR,
+            minute=WEEKLY_REPORT_MINUTE,
+            id="cybersecurity_weekly_report",
+            replace_existing=True,
+        )
+
+        if self.governance_reminder_workflow is not None:
+            self.scheduler.add_job(
+                self.governance_reminder_workflow.run,
+                trigger="interval",
+                minutes=self.governance_reminder_interval_minutes,
+                id="privacy_governance_reminder",
+                replace_existing=True,
+            )
+
+        if self.academy_one_week_workflow is not None:
+            self.scheduler.add_job(
+                self.academy_one_week_workflow.run,
+                trigger="cron",
+                hour=self.academy_one_week_hour,
+                minute=self.academy_one_week_minute,
+                id="academy_one_week_milestone",
+                replace_existing=True,
+            )
+
+    def register_critical_handler(self, handler) -> None:
+        self.critical_handler = handler
+
+    async def trigger_critical_event(self, event: dict):
+        if not hasattr(self, "critical_handler"):
+            return None
+
+        return await self.critical_handler(event)
+
+    def start(self) -> None:
+        if not self.scheduler.running:
+            self.scheduler.start()
+
+    def shutdown(self) -> None:
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+
+
+__all__ = [
+    "CybersecurityAPSchedulerAdapter",
+]
+
+
+============================================================
+4. ALL SCHEDULER TEST FILES
+============================================================
+
+
+FullName                    
+--------                    
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+
+
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_real_lifespan_scheduler_smoke.py
+============================================================
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_academy_real_shared_scheduler_lifespan_smoke():
+    """
+    Controlled end-to-end scheduler lifecycle smoke test.
+
+    Uses:
+    - real FastAPI lifespan;
+    - real CybersecuritySchedulerRuntime;
+    - real CybersecurityAPSchedulerAdapter;
+    - real APScheduler.
+
+    Academy execution and external delivery remain mocked.
+
+    No real email or Telegram delivery occurs.
+    """
+
+    fake_engine = MagicMock(
+        name="auth_engine",
+    )
+
+    fake_session_factory = MagicMock(
+        name="auth_session_factory",
+    )
+
+    telegram_client = MagicMock(
+        spec=TelegramAnnouncementClient,
+        name="announcement_telegram_client",
+    )
+
+    announcement_publisher = MagicMock(
+        name="announcement_publisher",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    academy_execution_count = 0
+
+    async def academy_run():
+        nonlocal academy_execution_count
+
+        academy_execution_count += 1
+
+        return {
+            "candidates": 0,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+    academy_workflow.run = academy_run
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "EASYCHATBOT_ACADEMY_SCHEDULER_ENABLED": "true",
+                "EASYCHATBOT_ACADEMY_FIRST_RUN_ENABLED": "true",
+            },
+            clear=False,
+        ),
+        patch(
+            "app.main.create_async_database_engine",
+            return_value=fake_engine,
+        ),
+        patch(
+            "app.main.create_async_session_factory",
+            return_value=fake_session_factory,
+        ),
+        patch(
+            "app.main.PostgreSQLAuthenticationRepository",
+            return_value=MagicMock(
+                name="auth_repository",
+            ),
+        ),
+        patch(
+            "app.main._create_announcement_components",
+            return_value=(
+                telegram_client,
+                announcement_publisher,
+            ),
+        ),
+        patch(
+            "app.main.create_academy_one_week_workflow",
+            return_value=academy_workflow,
+        ),
+    ):
+        from app.main import create_application
+
+        application = create_application()
+
+        runtime = application.state.scheduler_runtime
+        adapter = runtime.scheduler_adapter
+        scheduler = adapter.scheduler
+
+        #
+        # Application construction must not start scheduling.
+        #
+
+        assert scheduler.running is False
+
+        async with application.router.lifespan_context(
+            application,
+        ):
+            #
+            # FastAPI lifespan starts the existing scheduler.
+            #
+
+            assert scheduler.running is True
+
+            jobs = scheduler.get_jobs()
+
+            job_ids = {
+                job.id
+                for job in jobs
+            }
+
+            #
+            # Existing cybersecurity jobs remain registered.
+            #
+
+            assert (
+                "cybersecurity_daily_report"
+                in job_ids
+            )
+
+            assert (
+                "cybersecurity_weekly_report"
+                in job_ids
+            )
+
+            #
+            # Academy is registered on the same scheduler.
+            #
+
+            assert (
+                "academy_one_week_milestone"
+                in job_ids
+            )
+
+            assert (
+                adapter.academy_one_week_workflow
+                is academy_workflow
+            )
+
+            #
+            # Starting the scheduler must not execute the Academy
+            # cron job immediately.
+            #
+
+            await asyncio.sleep(0.05)
+
+            assert academy_execution_count == 0
+
+            #
+            # No Telegram delivery may occur.
+            #
+            # close() is intentionally excluded because it is normal
+            # FastAPI lifespan cleanup and is not a delivery operation.
+            #
+
+            telegram_delivery_calls = [
+                call
+                for call in telegram_client.method_calls
+                if call[0] not in {"close"}
+            ]
+
+            assert telegram_delivery_calls == []
+
+        #
+        # FastAPI lifespan has exited and requested scheduler shutdown.
+        #
+
+        for _ in range(20):
+            if scheduler.running is False:
+                break
+
+            await asyncio.sleep(0.01)
+
+        assert scheduler.running is False
+
+    #
+    # Academy must never have executed during this smoke test.
+    #
+
+    assert academy_execution_count == 0
+
+    #
+    # Telegram close is expected lifecycle cleanup.
+    #
+
+    telegram_client.close.assert_called_once()
+
+    #
+    # No Telegram delivery operation occurred.
+    #
+
+    telegram_delivery_calls = [
+        call
+        for call in telegram_client.method_calls
+        if call[0] not in {"close"}
+    ]
+
+    assert telegram_delivery_calls == []
+
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_invocation.py
+============================================================
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+def test_academy_scheduler_job_points_to_workflow_run():
+    """
+    The Academy scheduler job must point to the actual async
+    AcademyOneWeekWorkflow.run() method.
+    """
+
+    scheduler = MagicMock(
+        name="shared_scheduler",
+    )
+
+    workflow_service = MagicMock(
+        name="cybersecurity_workflow_service",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    academy_workflow.run = AsyncMock(
+        name="academy_workflow_run",
+        return_value={
+            "candidates": 0,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+        },
+    )
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter.register_jobs()
+
+    academy_calls = [
+        call
+        for call in scheduler.add_job.call_args_list
+        if call.kwargs.get("id") == "academy_one_week_milestone"
+    ]
+
+    assert len(academy_calls) == 1
+
+    academy_call = academy_calls[0]
+
+    assert academy_call.args[0] is academy_workflow.run
+    assert academy_call.kwargs["trigger"] == "cron"
+    assert academy_call.kwargs["hour"] == 8
+    assert academy_call.kwargs["minute"] == 15
+
+
+@pytest.mark.asyncio
+async def test_registered_academy_job_can_invoke_workflow_without_external_delivery():
+    """
+    Invoke the registered callback directly.
+
+    This simulates APScheduler executing the job while avoiding
+    production scheduler startup and all external delivery.
+    """
+
+    scheduler = MagicMock(
+        name="shared_scheduler",
+    )
+
+    workflow_service = MagicMock(
+        name="cybersecurity_workflow_service",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    academy_workflow.run = AsyncMock(
+        name="academy_workflow_run",
+        return_value={
+            "candidates": 0,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+        },
+    )
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter.register_jobs()
+
+    academy_call = next(
+        call
+        for call in scheduler.add_job.call_args_list
+        if call.kwargs.get("id") == "academy_one_week_milestone"
+    )
+
+    registered_callback = academy_call.args[0]
+
+    result = await registered_callback()
+
+    assert result == {
+        "candidates": 0,
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+
+    academy_workflow.run.assert_awaited_once_with()
+
+
+def test_academy_registration_does_not_start_scheduler():
+    """
+    Registering the Academy callback must not start APScheduler.
+    """
+
+    scheduler = MagicMock(
+        name="shared_scheduler",
+    )
+
+    workflow_service = MagicMock(
+        name="cybersecurity_workflow_service",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter.register_jobs()
+
+    scheduler.start.assert_not_called()
+    scheduler.shutdown.assert_not_called()
+
+
+def test_academy_registration_keeps_existing_scheduler_jobs():
+    """
+    Academy registration must preserve the existing cybersecurity jobs.
+    """
+
+    scheduler = MagicMock(
+        name="shared_scheduler",
+    )
+
+    workflow_service = MagicMock(
+        name="cybersecurity_workflow_service",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter.register_jobs()
+
+    registered_ids = {
+        call.kwargs["id"]
+        for call in scheduler.add_job.call_args_list
+    }
+
+    assert {
+        "cybersecurity_daily_report",
+        "cybersecurity_weekly_report",
+        "academy_one_week_milestone",
+    }.issubset(registered_ids)
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_lifecycle.py
+============================================================
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    CybersecuritySchedulerRuntime,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_shared_scheduler_lifecycle_starts_and_stops_cleanly():
+    """
+    The shared scheduler runtime must start and stop cleanly.
+
+    Academy is already injected into the existing scheduler boundary.
+    """
+
+    adapter = MagicMock(
+        name="scheduler_adapter",
+    )
+
+    adapter.start = MagicMock(
+        name="start",
+    )
+
+    adapter.shutdown = MagicMock(
+        name="shutdown",
+    )
+
+    runtime = CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+    await runtime.start()
+
+    adapter.start.assert_called_once()
+
+    await runtime.stop()
+
+    adapter.shutdown.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_lifecycle_does_not_execute_academy_workflow():
+    """
+    Starting/stopping the scheduler lifecycle must not directly execute
+    the Academy workflow.
+    """
+
+    scheduler = MagicMock(
+        name="shared_scheduler",
+    )
+
+    scheduler.running = False
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    adapter = MagicMock(
+        name="scheduler_adapter",
+    )
+
+    adapter.scheduler = scheduler
+    adapter.academy_one_week_workflow = academy_workflow
+
+    adapter.start = MagicMock(
+        name="start",
+    )
+
+    adapter.shutdown = MagicMock(
+        name="shutdown",
+    )
+
+    runtime = CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+    await runtime.start()
+    await runtime.stop()
+
+    academy_workflow.run.assert_not_called()
+
+
+def test_scheduler_runtime_uses_existing_adapter():
+    """
+    Runtime must use the supplied scheduler adapter rather than creating
+    scheduler infrastructure itself.
+    """
+
+    adapter = MagicMock(
+        name="existing_scheduler_adapter",
+    )
+
+    runtime = CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+    assert runtime.scheduler_adapter is adapter
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_registration.py
+============================================================
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+def _create_controlled_scheduler():
+    scheduler = MagicMock(
+        name="shared_scheduler",
+    )
+
+    scheduler.running = False
+
+    return scheduler
+
+
+def test_academy_workflow_is_injected_into_existing_scheduler():
+    """
+    Academy workflow must be injected into the existing scheduler
+    runtime boundary.
+    """
+
+    scheduler = _create_controlled_scheduler()
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    with patch(
+        "cybersecurity.scheduler.cybersecurity_scheduler_factory.AsyncIOScheduler",
+        return_value=scheduler,
+    ):
+
+        runtime = create_cybersecurity_scheduler_runtime(
+            workflow_service=MagicMock(
+                name="cybersecurity_workflow",
+            ),
+            academy_one_week_workflow=academy_workflow,
+        )
+
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.scheduler is scheduler
+
+    assert (
+        adapter.academy_one_week_workflow
+        is academy_workflow
+    )
+
+
+def test_academy_job_registration_does_not_start_scheduler():
+    """
+    Academy registration must add exactly one Academy job and must not
+    start or execute the scheduler.
+    """
+
+    scheduler = _create_controlled_scheduler()
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    with patch(
+        "cybersecurity.scheduler.cybersecurity_scheduler_factory.AsyncIOScheduler",
+        return_value=scheduler,
+    ):
+
+        runtime = create_cybersecurity_scheduler_runtime(
+            workflow_service=MagicMock(
+                name="cybersecurity_workflow",
+            ),
+            academy_one_week_workflow=academy_workflow,
+        )
+
+    adapter = runtime.scheduler_adapter
+
+    adapter.register_jobs()
+
+    academy_calls = [
+        call
+        for call in scheduler.add_job.call_args_list
+        if call.kwargs.get("id")
+        == "academy_one_week_milestone"
+    ]
+
+    assert len(academy_calls) == 1
+
+    academy_call = academy_calls[0]
+
+    assert (
+        academy_call.args[0]
+        is academy_workflow.run
+    )
+
+    assert (
+        academy_call.kwargs["trigger"]
+        == "cron"
+    )
+
+    assert (
+        academy_call.kwargs["hour"]
+        == adapter.academy_one_week_hour
+    )
+
+    assert (
+        academy_call.kwargs["minute"]
+        == adapter.academy_one_week_minute
+    )
+
+    assert (
+        academy_call.kwargs["id"]
+        == "academy_one_week_milestone"
+    )
+
+    assert (
+        academy_call.kwargs["replace_existing"]
+        is True
+    )
+
+    assert scheduler.start.called is False
+
+    assert scheduler.running is False
+
+    assert academy_workflow.run.called is False
+
+
+def test_academy_and_cybersecurity_jobs_share_one_scheduler():
+    """
+    Academy and existing cybersecurity jobs must be registered on
+    the same scheduler instance.
+    """
+
+    scheduler = _create_controlled_scheduler()
+
+    cybersecurity_workflow = MagicMock(
+        name="cybersecurity_workflow",
+    )
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    with patch(
+        "cybersecurity.scheduler.cybersecurity_scheduler_factory.AsyncIOScheduler",
+        return_value=scheduler,
+    ):
+
+        runtime = create_cybersecurity_scheduler_runtime(
+            workflow_service=cybersecurity_workflow,
+            academy_one_week_workflow=academy_workflow,
+        )
+
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.scheduler is scheduler
+
+    adapter.register_jobs()
+
+    registered_ids = {
+        call.kwargs.get("id")
+        for call in scheduler.add_job.call_args_list
+    }
+
+    assert (
+        "cybersecurity_daily_report"
+        in registered_ids
+    )
+
+    assert (
+        "cybersecurity_weekly_report"
+        in registered_ids
+    )
+
+    assert (
+        "academy_one_week_milestone"
+        in registered_ids
+    )
+
+    assert scheduler.start.called is False
+    assert scheduler.running is False
+
+    assert cybersecurity_workflow.create_daily_report.called is False
+    assert cybersecurity_workflow.create_weekly_report.called is False
+    assert academy_workflow.run.called is False
+
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\academy\test_academy_scheduler_smoke.py
+============================================================
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import MagicMock
+
+import pytest
+
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_shared_scheduler_start_registers_academy_and_stops_cleanly():
+    """
+    Controlled real APScheduler lifecycle smoke test.
+
+    Verifies:
+    - one shared scheduler;
+    - Academy job registration;
+    - existing cybersecurity jobs registration;
+    - scheduler starts inside a running asyncio event loop;
+    - scheduler becomes running;
+    - Academy workflow is not executed;
+    - shutdown is invoked cleanly.
+
+    No real email or Telegram delivery is performed.
+    """
+
+    academy_workflow = MagicMock(
+        name="academy_one_week_workflow",
+    )
+
+    runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(
+            name="cybersecurity_workflow",
+        ),
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter = runtime.scheduler_adapter
+
+    try:
+        adapter.register_jobs()
+
+        jobs = adapter.scheduler.get_jobs()
+
+        job_ids = {
+            job.id
+            for job in jobs
+        }
+
+        assert (
+            "academy_one_week_milestone"
+            in job_ids
+        )
+
+        assert (
+            "cybersecurity_daily_report"
+            in job_ids
+        )
+
+        assert (
+            "cybersecurity_weekly_report"
+            in job_ids
+        )
+
+        assert adapter.scheduler.running is False
+
+        adapter.start()
+
+        assert adapter.scheduler.running is True
+
+        # Starting the scheduler must not execute Academy immediately.
+        assert academy_workflow.run.call_count == 0
+
+    finally:
+        adapter.shutdown()
+
+        # Give the asyncio scheduler event loop one opportunity to
+        # process its shutdown state.
+        await asyncio.sleep(0)
+
+    # The important lifecycle contract is that shutdown was invoked
+    # and no Academy execution occurred.
+    assert academy_workflow.run.call_count == 0
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_factory_composition.py
+============================================================
+
+from unittest.mock import MagicMock
+
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+
+def test_scheduler_factory_accepts_existing_academy_workflow():
+    academy_workflow = MagicMock()
+
+    runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(),
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.academy_one_week_workflow is academy_workflow
+
+
+def test_scheduler_factory_creates_one_shared_scheduler():
+    academy_workflow = MagicMock()
+
+    runtime = create_cybersecurity_scheduler_runtime(
+        workflow_service=MagicMock(),
+        academy_one_week_workflow=academy_workflow,
+    )
+
+    adapter = runtime.scheduler_adapter
+
+    assert adapter.scheduler is not None
+    assert adapter.academy_one_week_workflow is academy_workflow
+    assert adapter.scheduler.running is False
+
+
+============================================================
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\cybersecurity\test_academy_scheduler_registration.py
+============================================================
+
+from __future__ import annotations
+
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+
+class FakeScheduler:
+    def __init__(self) -> None:
+        self.jobs: list[dict] = []
+        self.running = False
+
+    def add_job(self, function, **kwargs):
+        self.jobs.append(
+            {
+                "function": function,
+                **kwargs,
+            }
+        )
+
+    def start(self) -> None:
+        self.running = True
+
+    def shutdown(self) -> None:
+        self.running = False
+
+
+class FakeCybersecurityWorkflow:
+    async def create_daily_report(self):
+        return {"type": "daily"}
+
+    async def create_weekly_report(self):
+        return {"type": "weekly"}
+
+
+class FakeAcademyWorkflow:
+    async def run(self):
+        return {
+            "candidates": 0,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+
+def test_academy_workflow_is_registered_on_existing_scheduler() -> None:
+    scheduler = FakeScheduler()
+    academy = FakeAcademyWorkflow()
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=FakeCybersecurityWorkflow(),
+        academy_one_week_workflow=academy,
+    )
+
+    adapter.register_jobs()
+
+    assert len(scheduler.jobs) == 3
+
+    academy_jobs = [
+        job
+        for job in scheduler.jobs
+        if job["id"] == "academy_one_week_milestone"
+    ]
+
+    assert len(academy_jobs) == 1
+
+    job = academy_jobs[0]
+
+    assert job["function"] == academy.run
+    assert job["trigger"] == "cron"
+    assert job["hour"] == 8
+    assert job["minute"] == 15
+    assert job["replace_existing"] is True
+
+
+def test_existing_jobs_remain_registered() -> None:
+    scheduler = FakeScheduler()
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=FakeCybersecurityWorkflow(),
+        academy_one_week_workflow=FakeAcademyWorkflow(),
+    )
+
+    adapter.register_jobs()
+
+    job_ids = {
+        job["id"]
+        for job in scheduler.jobs
+    }
+
+    assert job_ids == {
+        "cybersecurity_daily_report",
+        "cybersecurity_weekly_report",
+        "academy_one_week_milestone",
+    }
+
+
+def test_academy_registration_is_optional() -> None:
+    scheduler = FakeScheduler()
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=FakeCybersecurityWorkflow(),
+    )
+
+    adapter.register_jobs()
+
+    assert len(scheduler.jobs) == 2
+
+    job_ids = {
+        job["id"]
+        for job in scheduler.jobs
+    }
+
+    assert "academy_one_week_milestone" not in job_ids
+
+
+def test_academy_schedule_is_configurable() -> None:
+    scheduler = FakeScheduler()
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=FakeCybersecurityWorkflow(),
+        academy_one_week_workflow=FakeAcademyWorkflow(),
+        academy_one_week_hour=9,
+        academy_one_week_minute=30,
+    )
+
+    adapter.register_jobs()
+
+    academy_job = next(
+        job
+        for job in scheduler.jobs
+        if job["id"] == "academy_one_week_milestone"
+    )
+
+    assert academy_job["hour"] == 9
+    assert academy_job["minute"] == 30
+
+
+def test_invalid_academy_hour_is_rejected() -> None:
+    scheduler = FakeScheduler()
+
+    try:
+        CybersecurityAPSchedulerAdapter(
+            scheduler=scheduler,
+            workflow_service=FakeCybersecurityWorkflow(),
+            academy_one_week_workflow=FakeAcademyWorkflow(),
+            academy_one_week_hour=24,
+        )
+    except ValueError as exc:
+        assert "academy_one_week_hour" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_invalid_academy_minute_is_rejected() -> None:
+    scheduler = FakeScheduler()
+
+    try:
+        CybersecurityAPSchedulerAdapter(
+            scheduler=scheduler,
+            workflow_service=FakeCybersecurityWorkflow(),
+            academy_one_week_workflow=FakeAcademyWorkflow(),
+            academy_one_week_minute=60,
+        )
+    except ValueError as exc:
+        assert "academy_one_week_minute" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+============================================================
+5. REFERENCES TO create_cybersecurity_scheduler_runtime
+============================================================
+
+
+Path                        
+----                        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\main.core
+.remote.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\main.core
+.remote.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\main.py  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\main.py  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\cybersecurity
+\scheduler\cybersecurity_sch
+eduler_factory.py           
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\cybersecurity
+\scheduler\cybersecurity_sch
+eduler_factory.py           
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_activation_reg
+istration.py                
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_activation_reg
+istration.py                
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_activation_reg
+istration.py                
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_co
+mposition.py                
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_co
+mposition.py                
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_co
+mposition.py                
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_li
+fecycle.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_li
+fecycle.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_li
+fecycle.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_li
+fecycle.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_li
+fecycle.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_application_li
+fecycle.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_fastapi_lifesp
+an_activation.py            
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_production_com
+position.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_production_com
+position.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_production_com
+position.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_production_com
+position.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_scheduler_regi
+stration.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_scheduler_regi
+stration.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_scheduler_regi
+stration.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_scheduler_regi
+stration.py                 
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_scheduler_smok
+e.py                        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\academy
+\test_academy_scheduler_smok
+e.py                        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\cyberse
+curity\test_academy_schedule
+r_factory_composition.py    
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\cyberse
+curity\test_academy_schedule
+r_factory_composition.py    
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\cyberse
+curity\test_academy_schedule
+r_factory_composition.py    
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\securit
+y\test_authentication_applic
+ation_composition.py        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\securit
+y\test_authentication_applic
+ation_composition.py        
+
+
+
+
+============================================================
+6. REFERENCES TO add_job / scheduler job REGISTRATION
+============================================================
+
+
+Path                        
+----                        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\cybersecurity
+\scheduler\cybersecurity_aps
+cheduler_adapter.py         
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\cybersecurity
+\scheduler\cybersecurity_aps
+cheduler_adapter.py         
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\cybersecurity
+\scheduler\cybersecurity_aps
+cheduler_adapter.py         
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\cybersecurity
+\scheduler\cybersecurity_aps
+cheduler_adapter.py         
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\cyberse
+curity\test_academy_schedule
+r_registration.py           
+
+
+
+
+============================================================
+7. PI RETRY WORKER / RETRY ORCHESTRATOR REFERENCES
+============================================================
+
+
+Path                        
+----                        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\applicati
+on\operations_center\platfor
+m_intelligence_retry_worker_
+service.py                  
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\app\infrastru
+cture\operations_center\plat
+form_intelligence_authoritat
+ive_review_source.py        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_escalation_re
+try_orchestrator.py         
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+
+
+

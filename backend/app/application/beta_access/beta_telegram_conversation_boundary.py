@@ -16,6 +16,7 @@ from app.application.provider_management.functionality_operational_control_servi
 from app.application.private_chat.telegram_private_chat_bridge import (
     TelegramPrivateChatBridge,
 )
+from app.application.failures.provider_failure import ProviderFailure
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +398,29 @@ class BetaTelegramConversationBoundary:
                             message=clean_message,
                         )
                     )
+
+        except ProviderFailure as exc:
+            await self._record(
+                event_type="telegram_classroom_conversation",
+                telegram_user_id=telegram_user_id,
+                outcome="provider_failure",
+                metadata={
+                    "world_id": context.world_id,
+                    "error_type": type(exc).__name__,
+                    "failure_code": exc.code,
+                    "provider_id": exc.provider_id,
+                },
+            )
+
+            logger.warning(
+                "Telegram conversation provider failure.",
+                extra={
+                    "failure_code": exc.code,
+                    "provider_id": exc.provider_id,
+                },
+            )
+
+            raise
 
         except Exception as exc:
             await self._record(

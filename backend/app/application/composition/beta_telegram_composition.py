@@ -22,6 +22,9 @@ from app.application.beta_access.policies import (
 from app.application.beta_access.telegram_conversation_service import (
     TelegramConversationService,
 )
+from app.application.ports.telegram_update_idempotency import (
+    TelegramUpdateIdempotencyPort,
+)
 from app.application.provider_management.functionality_operational_control_service import (
     FunctionalityOperationalControlService,
 )
@@ -155,6 +158,9 @@ def create_beta_telegram_composition(
     language_detector: LanguageDetector | None = None,
     private_chat_service_factory: Callable[[], Any] | None = None,
     world_start_router: WorldTelegramStartRouter | None = None,
+    telegram_update_idempotency: (
+        TelegramUpdateIdempotencyPort | None
+    ) = None,
 ) -> BetaTelegramComposition:
     """Create the Beta Telegram application composition.
 
@@ -164,6 +170,10 @@ def create_beta_telegram_composition(
     Learning World portfolio after successful Beta onboarding.
 
     Telegram never selects or changes the user's active World.
+
+    Telegram update idempotency is injected through the application
+    port. The infrastructure implementation belongs to the production
+    composition root.
     """
 
     if expiration_minutes <= 0:
@@ -357,10 +367,10 @@ def create_beta_telegram_composition(
     )
 
     start_handler = BetaTelegramStartHandler(
-    beta_access_service=beta_access_service,
-    beta_world_access_service=beta_world_access_service,
-    privacy_identifier_service=privacy_identifier_service,
-)
+        beta_access_service=beta_access_service,
+        beta_world_access_service=beta_world_access_service,
+        privacy_identifier_service=privacy_identifier_service,
+    )
 
     adapter = BetaTelegramAdapter(
         start_handler=start_handler,
@@ -372,6 +382,7 @@ def create_beta_telegram_composition(
     runtime = TelegramBotRuntime(
         adapter=adapter,
         conversation_boundary=conversation_boundary,
+        telegram_update_idempotency=telegram_update_idempotency,
     )
 
     return BetaTelegramComposition(
@@ -396,5 +407,3 @@ __all__ = [
     "BetaTelegramComposition",
     "create_beta_telegram_composition",
 ]
-
-

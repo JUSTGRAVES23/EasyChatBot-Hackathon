@@ -1,8 +1,11 @@
 ﻿"""Application model for the authoritative Learning World catalogue."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import UUID
+
+from app.domain.learning.world_access_tier import WorldAccessTier
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +23,7 @@ class LearningWorldCatalogueEntry:
     world_type: str
     learning_domain: str
     runtime_world_id: str | None
+    access_tier: WorldAccessTier = WorldAccessTier.NORMAL
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, UUID):
@@ -33,12 +37,23 @@ class LearningWorldCatalogueEntry:
             "world_type",
             "learning_domain",
         ):
-            if not getattr(self, field_name).strip():
+            value = getattr(self, field_name)
+
+            if not isinstance(value, str) or not value.strip():
                 raise ValueError(
                     f"Learning World catalogue {field_name} cannot be empty."
                 )
 
-        if self.runtime_world_id is not None and not self.runtime_world_id.strip():
+        if self.runtime_world_id is not None:
+            if not isinstance(self.runtime_world_id, str):
+                raise ValueError("runtime_world_id must be a string when provided.")
+
+            if not self.runtime_world_id.strip():
+                raise ValueError(
+                    "runtime_world_id cannot be blank when provided."
+                )
+
+        if not isinstance(self.access_tier, WorldAccessTier):
             raise ValueError(
-                "runtime_world_id cannot be blank when provided."
+                "Learning World catalogue access_tier must be a WorldAccessTier."
             )

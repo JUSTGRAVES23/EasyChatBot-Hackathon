@@ -1,0 +1,862 @@
+﻿
+P5B.6.2B REGISTRATION ARCHITECTURE DISCOVERY
+Generated: 2026-09-22 19:56:28
+============================================================
+
+### 1. CANONICAL AUTHENTICATION API ###
+
+
+from datetime import datetime, timezone
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, EmailStr, Field
+
+from app.api.dependencies.identity import get_current_principal
+from app.application.identity.authentication_service import AuthenticationError
+from app.domain.identity.principal import Principal
+
+
+# NOTE:
+# The authentication service must be composed into app.state
+# by the application's existing bootstrap/composition root.
+#
+# Routes intentionally consume the composed application service rather than
+# constructing AuthenticationService instances themselves. This preserves
+# the production dependency graph, including authentication email delivery.
+
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["authentication"],
+)
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    username: str = Field(
+        min_length=2,
+        max_length=100,
+    )
+    password: str = Field(
+        min_length=12,
+        max_length=256,
+    )
+
+
+class RegisterResponse(BaseModel):
+    user_id: UUID
+    detail: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(
+        min_length=1,
+        max_length=256,
+    )
+
+
+class LoginResponse(BaseModel):
+    detail: str
+    expires_at: str
+
+
+class SessionResponse(BaseModel):
+    authenticated: bool
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetRequestResponse(BaseModel):
+    detail: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(
+        min_length=1,
+        max_length=512,
+    )
+    new_password: str = Field(
+        min_length=12,
+        max_length=256,
+    )
+
+
+class PasswordResetConfirmResponse(BaseModel):
+    detail: str
+
+
+class PasswordResetContextResponse(BaseModel):
+    email: EmailStr
+
+
+@router.get(
+    "/session",
+    response_model=SessionResponse,
+    summary="Check the current authentication session",
+    description=(
+        "Return whether the current request has a valid authenticated "
+        "application session. The session identifier and other sensitive "
+        "authentication data are never returned."
+    ),
+)
+async def get_session(
+    principal: Principal = Depends(get_current_principal),
+) -> SessionResponse:
+    """
+    Return the current authentication state.
+
+    Authentication is resolved exclusively through the existing
+    get_current_principal() dependency and SessionIdentityProvider.
+
+    This endpoint intentionally exposes only authentication state.
+    It does not expose the session identifier, credentials, or other
+    sensitive authentication material.
+    """
+    return SessionResponse(
+        authenticated=principal.is_active,
+    )
+
+
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register(
+    request: RegisterRequest,
+    http_request: Request,
+) -> RegisterResponse:
+    """
+    Register a new account through the composed authentication service.
+
+    Registration creates the account and verification token and triggers
+    verification-email delivery through the configured application/provider
+    boundary. The route itself does not select or call an email provider.
+    """
+    service = http_request.app.state.authentication_service
+
+    try:
+        user_id = await service.register(
+            email=str(request.email),
+            username=request.username,
+            password=request.password,
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from None
+
+    return RegisterResponse(
+        user_id=user_id,
+        detail=(
+            "Registration successful. "
+            "Email verification is required."
+        ),
+    )
+
+
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+)
+async def login(
+    request: LoginRequest,
+    http_request: Request,
+    response: Response,
+) -> LoginResponse:
+    """
+    Authenticate through the composed authentication service.
+
+    The service enforces account status and email verification before a
+    server-side session is created.
+    """
+    service = http_request.app.state.authentication_service
+
+    try:
+        result = await service.authenticate(
+            email=str(request.email),
+            password=request.password,
+            device_name=http_request.headers.get("user-agent"),
+            ip_address=(
+                http_request.client.host
+                if http_request.client
+
+### 2. AUTHENTICATION SERVICE — CLASS / CONSTRUCTOR / REGISTER ###
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
+import hashlib
+import hmac
+import secrets
+import logging
+
+
+logger = logging.getLogger(__name__)
+
+
+class AuthenticationError(ValueError):
+    """Expected authentication failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResult:
+    session_id: UUID
+    user_id: UUID
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PasswordResetContext:
+    """Safe reset-link context exposed to the frontend."""
+
+    email: str
+
+
+class PasswordHasher:
+    """PBKDF2 password hashing using the Python standard library."""
+
+    algorithm = "pbkdf2_sha256"
+    iterations = 600_000
+    salt_bytes = 32
+
+    def hash(self, password: str) -> str:
+        if len(password) < 12:
+            raise AuthenticationError(
+                "Password must contain at least 12 characters."
+            )
+
+        salt = secrets.token_bytes(self.salt_bytes)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            self.iterations,
+        )
+
+        return (
+            f"{self.algorithm}${self.iterations}$"
+            f"{salt.hex()}${digest.hex()}"
+        )
+
+    def verify(self, password: str, encoded: str) -> bool:
+        try:
+            algorithm, iterations, salt_hex, digest_hex = encoded.split("$")
+
+            if algorithm != self.algorithm:
+                return False
+
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt_hex),
+                int(iterations),
+            )
+
+            return hmac.compare_digest(
+                candidate.hex(),
+                digest_hex,
+            )
+        except (ValueError, TypeError):
+            return False
+
+
+class AuthenticationService:
+    """Application service for registration/login/session lifecycle.
+
+    Persistence is supplied through a repository protocol so the service does
+    not depend on a particular ORM implementation.
+
+    Authentication email delivery is supplied through the application email
+    service boundary. Provider selection and provider credentials remain
+    outside this service.
+    """
+
+    def __init__(
+        self,
+        repository,
+        *,
+        email_service=None,
+        password_hasher: PasswordHasher | None = None,
+        session_ttl: timedelta = timedelta(hours=12),
+    ) -> None:
+        self._repository = repository
+        self._email_service = email_service
+        self._password_hasher = password_hasher or PasswordHasher()
+        self._session_ttl = session_ttl
+
+    async def register(
+        self,
+        *,
+        email: str,
+        username: str,
+        password: str,
+    ):
+        normalized_email = email.strip().lower()
+        normalized_username = username.strip()
+
+        if not normalized_email or "@" not in normalized_email:
+            raise AuthenticationError("A valid email is required.")
+
+        if not normalized_username:
+            raise AuthenticationError("Username is required.")
+
+        if await self._repository.email_exists(normalized_email):
+            raise AuthenticationError(
+                "An account with this email already exists."
+            )
+
+        if await self._repository.username_exists(normalized_username):
+            raise AuthenticationError(
+                "That username is already in use."
+            )
+
+        user_id = uuid4()
+        password_hash = self._password_hasher.hash(password)
+
+        await self._repository.create_user(
+            user_id=user_id,
+            email=normalized_email,
+            username=normalized_username,
+        )
+
+        await self._repository.create_password_credential(
+            user_id=user_id,
+            password_hash=password_hash,
+        )
+
+        verification_token = (
+            await self._repository.create_email_verification(
+                user_id=user_id,
+                email=normalized_email,
+            )
+        )
+
+        if self._email_service is None:
+            raise AuthenticationError(
+                "Registration email delivery is not configured."
+            )
+
+        try:
+            await self._email_service.send_verification_email(
+                email=normalized_email,
+                username=normalized_username,
+                verification_token=verification_token,
+            )
+        except Exception:
+            raise AuthenticationError(
+                "Registration email could not be sent. "
+                "Please try again later."
+            ) from None
+
+        return user_id
+
+    async def authenticate(
+        self,
+        *,
+        email: str,
+        password: str,
+        device_name: str | None = None,
+        ip_address: str | None = None,
+    ) -> SessionResult:
+        user = await self._repository.get_user_by_email(
+            email.strip().lower()
+        )
+
+        if user is None:
+            raise AuthenticationError(
+                "Invalid email or password."
+            )
+
+        if user.status != "active":
+            raise AuthenticationError(
+                "Account is not active."
+
+### 3. PERSISTENCE MODEL REGISTRATION ###
+
+"""Explicit registration of the authoritative SQLAlchemy ORM models.
+
+This module exists solely to ensure that the canonical Base.metadata registry
+contains the application's authoritative persistence models before consumers
+such as schema diagnostics inspect it.
+
+Do not import legacy or duplicate ORM models here.
+"""
+
+from app.infrastructure.persistence.beta_access_models import (
+    BetaConnectionTokenRecord,
+    BetaUserRecord,
+    TelegramBindingRecord,
+)
+from app.infrastructure.persistence.conversation_event_records import (
+    ConversationEventRecord,
+)
+from app.infrastructure.persistence.functionality_control_records import (
+    FunctionalityControlAuditRecord,
+    FunctionalityControlStateRecord,
+)
+from app.infrastructure.persistence.learning_world_models import (
+    LearningWorldModel,
+)
+from app.infrastructure.persistence.memory_records import (
+    ConversationMemoryRecord,
+)
+from app.infrastructure.persistence.provider_usage_records import (
+    ProviderUsageRecord,
+)
+from app.infrastructure.persistence.world_telegram_destination_models import (
+    WorldTelegramDestinationRecord,
+)
+from app.infrastructure.persistence.world_telegram_membership_models import (
+    WorldTelegramMembershipRecord,
+)
+
+__all__ = [
+    "BetaConnectionTokenRecord",
+    "BetaUserRecord",
+    "TelegramBindingRecord",
+    "ConversationEventRecord",
+    "FunctionalityControlStateRecord",
+    "FunctionalityControlAuditRecord",
+    "ConversationMemoryRecord",
+    "ProviderUsageRecord",
+    "LearningWorldModel",
+    "WorldTelegramDestinationRecord",
+    "WorldTelegramMembershipRecord",
+]
+
+### 4. EXISTING BILLING ORM MODELS ###
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.infrastructure.persistence.database import Base
+
+
+class BillingPlanRecord(Base):
+    __tablename__ = "billing_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    audience: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    family_capable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    stripe_product_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class BillingPriceRecord(Base):
+    __tablename__ = "billing_prices"
+    __table_args__ = (UniqueConstraint("plan_id", "billing_interval", name="uq_billing_prices_plan_interval"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("billing_plans.id", ondelete="CASCADE"), nullable=False
+    )
+    price_code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    amount_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ParentChildRelationshipRecord(Base):
+    __tablename__ = "parent_child_relationships"
+    __table_args__ = (
+        UniqueConstraint("parent_user_id", "child_user_id", name="uq_parent_child_relationship"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(String(50), nullable=False, default="GUARDIAN")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ParentalConsentRecord(Base):
+    __tablename__ = "parental_consents"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    consent_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PaymentApprovalRequestRecord(Base):
+    __tablename__ = "payment_approval_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    child_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    parent_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SubscriptionRecord(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    beneficiary_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    payer_user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    stripe_customer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    stripe_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    stripe_price_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    current_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EntitlementRecord(Base):
+    __tablename__ = "entitlements"
+    __table_args__ = (UniqueConstraint("user_id", "plan_code", name="uq_entitlements_user_plan"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    ai_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    agent_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    premium_models: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    priority_processing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StripeWebhookEventRecord(Base):
+    __tablename__ = "stripe_webhook_events"
+
+    stripe_event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+### 5. EXISTING BILLING MIGRATION ###
+
+"""P5B.1 billing, family, consent, entitlement and Stripe persistence.
+
+Revision ID: 20260922_p5b1_billing_persistence
+Revises: <base>
+Create Date: 2026-09-22
+
+This is intentionally an independent Alembic branch. It relies on the
+physical users table already provided by the authentication subsystem but
+does not alter or own that table.
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+revision: str = "20260922_p5b1_billing_persistence"
+down_revision: Union[str, Sequence[str], None] = None
+branch_labels: Union[str, Sequence[str], None] = ("billing",)
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "billing_plans",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("plan_code", sa.String(100), nullable=False),
+        sa.Column("display_name", sa.String(255), nullable=False),
+        sa.Column("plan_type", sa.String(50), nullable=False),
+        sa.Column("audience", sa.String(50), nullable=True),
+        sa.Column("family_capable", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("stripe_product_id", sa.String(255), nullable=True),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("plan_code"),
+    )
+
+    op.create_table(
+        "billing_prices",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("plan_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("price_code", sa.String(100), nullable=False),
+        sa.Column("stripe_price_id", sa.String(255), nullable=False),
+        sa.Column("billing_interval", sa.String(20), nullable=False),
+        sa.Column("currency", sa.String(3), nullable=False),
+        sa.Column("amount_minor", sa.Integer(), nullable=False),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["plan_id"], ["billing_plans.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("price_code"),
+        sa.UniqueConstraint("stripe_price_id"),
+        sa.UniqueConstraint("plan_id", "billing_interval", name="uq_billing_prices_plan_interval"),
+    )
+
+    op.create_table(
+        "parent_child_relationships",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("parent_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("child_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("relationship_type", sa.String(50), nullable=False),
+        sa.Column("status", sa.String(30), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
+        sa.ForeignKeyConstraint(["parent_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["child_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("parent_user_id", "child_user_id", name="uq_parent_child_relationship"),
+    )
+
+    op.create_table(
+        "parental_consents",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("parent_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("child_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("consent_type", sa.String(50), nullable=False),
+        sa.Column("status", sa.String(30), nullable=False),
+        sa.Column("granted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["parent_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["child_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    op.create_table(
+        "payment_approval_requests",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("child_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("parent_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("plan_code", sa.String(100), nullable=False),
+        sa.Column("stripe_price_id", sa.String(255), nullable=False),
+        sa.Column("status", sa.String(30), nullable=False),
+        sa.Column("token_hash", sa.String(255), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("rejected_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["child_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["parent_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("token_hash"),
+    )
+
+    op.create_table(
+        "subscriptions",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("beneficiary_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("payer_user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("stripe_customer_id", sa.String(255), nullable=False),
+        sa.Column("stripe_subscription_id", sa.String(255), nullable=False),
+        sa.Column("stripe_price_id", sa.String(255), nullable=False),
+        sa.Column("plan_code", sa.String(100), nullable=False),
+        sa.Column("status", sa.String(30), nullable=False),
+        sa.Column("current_period_start", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("current_period_end", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("cancel_at_period_end", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["beneficiary_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["payer_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("stripe_subscription_id"),
+    )
+
+    op.create_table(
+        "entitlements",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("plan_code", sa.String(100), nullable=False),
+        sa.Column("ai_credits", sa.Integer(), nullable=False, server_default=sa.text("0")),
+        sa.Column("agent_access", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("premium_models", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("priority_processing", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("user_id", "plan_code", name="uq_entitlements_user_plan"),
+    )
+
+    op.create_table(
+        "stripe_webhook_events",
+        sa.Column("stripe_event_id", sa.String(255), nullable=False),
+        sa.Column("event_type", sa.String(100), nullable=False),
+        sa.Column("processed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint("stripe_event_id"),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("stripe_webhook_events")
+    op.drop_table("entitlements")
+    op.drop_table("subscriptions")
+    op.drop_table("payment_approval_requests")
+    op.drop_table("parental_consents")
+    op.drop_table("parent_child_relationships")
+    op.drop_table("billing_prices")
+    op.drop_table("billing_plans")
+
+### 6. CURRENT GUARDIAN REGISTRATION FOUNDATION ###
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class AgePolicyClassification(str, Enum):
+    ADULT = "adult"
+    STUDENT = "student"
+    UNDER_15 = "under_15"
+    AGE_15_TO_17 = "age_15_to_17"
+
+
+@dataclass(frozen=True)
+class GuardianRegistrationRequirement:
+    required: bool
+    guardian_email: str | None = None
+
+
+def evaluate_guardian_registration_requirement(
+    classification: AgePolicyClassification,
+    guardian_email: str | None = None,
+) -> GuardianRegistrationRequirement:
+    if classification == AgePolicyClassification.UNDER_15:
+        if not guardian_email or not guardian_email.strip():
+            return GuardianRegistrationRequirement(
+                required=True,
+                guardian_email=None,
+            )
+
+        return GuardianRegistrationRequirement(
+            required=True,
+            guardian_email=guardian_email.strip().lower(),
+        )
+
+    return GuardianRegistrationRequirement(
+        required=False,
+        guardian_email=None,
+    )
+
+
+__all__ = [
+    "AgePolicyClassification",
+    "GuardianRegistrationRequirement",
+    "evaluate_guardian_registration_requirement",
+]
+
+### 7. CURRENT GUARDIAN REGISTRATION TESTS ###
+
+from app.application.payment.guardian_registration import (
+    AgePolicyClassification,
+    evaluate_guardian_registration_requirement,
+)
+
+
+def test_under_15_requires_guardian_email():
+    result = evaluate_guardian_registration_requirement(
+        AgePolicyClassification.UNDER_15,
+    )
+
+    assert result.required is True
+    assert result.guardian_email is None
+
+
+def test_under_15_accepts_guardian_email():
+    result = evaluate_guardian_registration_requirement(
+        AgePolicyClassification.UNDER_15,
+        " Parent@Example.COM ",
+    )
+
+    assert result.required is True
+    assert result.guardian_email == "parent@example.com"
+
+
+def test_adult_does_not_require_guardian_email():
+    result = evaluate_guardian_registration_requirement(
+        AgePolicyClassification.ADULT,
+    )
+
+    assert result.required is False
+    assert result.guardian_email is None
+
+
+def test_student_does_not_automatically_require_guardian_email():
+    result = evaluate_guardian_registration_requirement(
+        AgePolicyClassification.STUDENT,
+    )
+
+    assert result.required is False
+
+
+def test_15_to_17_does_not_automatically_require_guardian_email():
+    result = evaluate_guardian_registration_requirement(
+        AgePolicyClassification.AGE_15_TO_17,
+    )
+
+    assert result.required is False
+
+============================================================
+END OF DISCOVERY
+============================================================

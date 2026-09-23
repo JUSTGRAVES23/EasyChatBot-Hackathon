@@ -1,0 +1,600 @@
+============================================================
+PI-5A.6 RETRY PRODUCTION COMPOSITION INSPECTION
+Generated: 2026-09-23 17:57:30
+Repo: C:\AI Folder\EasyChatBot-Hackathon\backend
+============================================================
+
+============================================================
+1. RETRY WORKER
+============================================================
+
+"""Contracts for the bounded PI escalation retry worker."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class PlatformIntelligenceRetryWorkerItemStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryWorkerItemResult:
+    notification_key: str
+    status: PlatformIntelligenceRetryWorkerItemStatus
+    reason: str
+    attempt: int | None = None
+    provider_message_id: str | None = None
+    error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not self.reason.strip():
+            raise ValueError("reason must be nonblank.")
+        if self.attempt is not None and self.attempt < 1:
+            raise ValueError("attempt must be at least 1.")
+        if self.error_type is not None and not self.error_type.strip():
+            raise ValueError("error_type must be nonblank when provided.")
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryWorkerResult:
+    requested_limit: int
+    discovered_count: int
+    processed_count: int
+    succeeded_count: int
+    skipped_count: int
+    failed_count: int
+    items: tuple[PlatformIntelligenceRetryWorkerItemResult, ...]
+
+    def __post_init__(self) -> None:
+        if self.requested_limit < 1:
+            raise ValueError("requested_limit must be at least 1.")
+        if self.discovered_count < 0:
+            raise ValueError("discovered_count cannot be negative.")
+        if self.processed_count < 0:
+            raise ValueError("processed_count cannot be negative.")
+        if self.processed_count != len(self.items):
+            raise ValueError("processed_count must equal the number of items.")
+        if self.succeeded_count < 0 or self.skipped_count < 0 or self.failed_count < 0:
+            raise ValueError("result counts cannot be negative.")
+        if (
+            self.succeeded_count + self.skipped_count + self.failed_count
+            != self.processed_count
+        ):
+            raise ValueError("result counts must equal processed_count.")
+        if self.discovered_count > self.requested_limit:
+            raise ValueError("discovered_count cannot exceed requested_limit.")
+        keys = [item.notification_key for item in self.items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("worker result cannot contain duplicate notification keys.")
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryWorkerRequest:
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        if self.limit < 1:
+            raise ValueError("limit must be at least 1.")
+
+
+============================================================
+2. RETRY WORKER SERVICE
+============================================================
+
+"""Bounded, scheduler-free orchestration boundary for PI retry work."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from app.application.operations_center.platform_intelligence_escalation_retry_candidate_discovery import (
+    PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+    PlatformIntelligenceEscalationRetryOrchestrator,
+)
+from app.application.operations_center.platform_intelligence_retry_worker import (
+    PlatformIntelligenceRetryWorkerItemResult,
+    PlatformIntelligenceRetryWorkerItemStatus,
+    PlatformIntelligenceRetryWorkerRequest,
+    PlatformIntelligenceRetryWorkerResult,
+)
+
+
+class PlatformIntelligenceRetryWorker:
+    """Process one bounded candidate batch through the governed retry chain.
+
+    This class deliberately does not:
+    - schedule itself;
+    - sleep;
+    - create background tasks;
+    - access providers;
+    - implement retry policy;
+    - claim candidates directly;
+    - mutate risk or human-review state.
+
+    The caller owns invocation timing and supplies the reference timestamp.
+    """
+
+    def __init__(
+        self,
+        *,
+        discovery_service: PlatformIntelligenceEscalationRetryCandidateDiscoveryService,
+        orchestrator: PlatformIntelligenceEscalationRetryOrchestrator,
+    ) -> None:
+        if discovery_service is None:
+            raise ValueError("discovery_service cannot be None.")
+
+        if orchestrator is None:
+            raise ValueError("orchestrator cannot be None.")
+
+        self._discovery_service = discovery_service
+        self._orchestrator = orchestrator
+
+    async def run(
+        self,
+        *,
+        request: PlatformIntelligenceRetryWorkerRequest,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryWorkerResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        batch = await self._discovery_service.discover(
+            limit=request.limit,
+        )
+
+        results: list[PlatformIntelligenceRetryWorkerItemResult] = []
+
+        for candidate in batch.candidates:
+            try:
+                execution = await self._orchestrator.run_candidate(
+                    candidate=candidate,
+                    reference_at=reference_at,
+                )
+
+            except Exception as exc:
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=candidate.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .FAILED
+                        ),
+                        reason="CANDIDATE_EXECUTION_ERROR",
+                        attempt=candidate.attempt,
+                        error_type=type(exc).__name__,
+                    )
+                )
+                continue
+
+            if (
+                execution.status
+                is PlatformIntelligenceRetryRunStatus.SUCCEEDED
+            ):
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .SUCCEEDED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                        provider_message_id=(
+                            execution.provider_message_id
+                        ),
+                    )
+                )
+
+            elif (
+                execution.status
+                is PlatformIntelligenceRetryRunStatus.SKIPPED
+            ):
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .SKIPPED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                    )
+                )
+
+            else:
+                results.append(
+                    PlatformIntelligenceRetryWorkerItemResult(
+                        notification_key=execution.notification_key,
+                        status=(
+                            PlatformIntelligenceRetryWorkerItemStatus
+                            .FAILED
+                        ),
+                        reason=execution.reason,
+                        attempt=execution.attempt,
+                    )
+                )
+
+        succeeded = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.SUCCEEDED
+            for item in results
+        )
+
+        skipped = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.SKIPPED
+            for item in results
+        )
+
+        failed = sum(
+            item.status
+            is PlatformIntelligenceRetryWorkerItemStatus.FAILED
+            for item in results
+        )
+
+        return PlatformIntelligenceRetryWorkerResult(
+            requested_limit=request.limit,
+            discovered_count=len(batch.candidates),
+            processed_count=len(results),
+            succeeded_count=succeeded,
+            skipped_count=skipped,
+            failed_count=failed,
+            items=tuple(results),
+        )
+
+============================================================
+3. RETRY ORCHESTRATOR
+============================================================
+
+"""Controlled orchestration for one PI escalation retry candidate."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+from app.application.operations_center.platform_intelligence_escalation_retry_claim_service import (
+    PlatformIntelligenceEscalationRetryClaimService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
+    PlatformIntelligenceEscalationRetryExecutionResult,
+    PlatformIntelligenceEscalationRetryExecutionService,
+    PlatformIntelligenceEscalationRetryExecutionStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunResult,
+    PlatformIntelligenceRetryRunStatus,
+    PlatformIntelligenceRetryState,
+)
+
+
+class PlatformIntelligenceRetryStateReader(Protocol):
+    async def get_retry_state(
+        self,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+    ) -> PlatformIntelligenceRetryState | None: ...
+
+
+class PlatformIntelligenceRetryPolicyEvaluator(Protocol):
+    async def evaluate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> bool: ...
+
+
+class PlatformIntelligenceRetryExecutor(Protocol):
+    async def retry(
+        self,
+        *,
+        request: object,
+        email_request: object,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryExecutionResult: ...
+
+
+class PlatformIntelligenceEscalationRetryOrchestrator:
+    """Coordinates policy, durable claim, state revalidation and retry.
+
+    This service deliberately does not discover candidates, implement retry
+    policy, send email directly, or mutate human-review/risk state.
+
+    The canonical retry execution service remains the owner of retry-policy
+    enforcement and existing dispatch integration. The orchestrator only
+    supplies the authoritative dispatch context after the durable claim and
+    final state revalidation.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_reader: PlatformIntelligenceRetryStateReader,
+        policy_evaluator: PlatformIntelligenceRetryPolicyEvaluator,
+        claim_service: PlatformIntelligenceEscalationRetryClaimService,
+        retry_execution: PlatformIntelligenceRetryExecutor,
+    ) -> None:
+        self._state_reader = state_reader
+        self._policy_evaluator = policy_evaluator
+        self._claim_service = claim_service
+        self._retry_execution = retry_execution
+
+    async def run_candidate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryRunResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        eligible = await self._policy_evaluator.evaluate(
+            candidate=candidate,
+            reference_at=reference_at,
+        )
+        if not eligible:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_POLICY_NOT_ELIGIBLE",
+                attempt=candidate.attempt,
+            )
+
+        claim = await self._claim_service.claim(
+            notification_key=candidate.notification_key,
+            claimed_at=reference_at,
+        )
+        if claim is None:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_CANDIDATE_ALREADY_CLAIMED",
+                attempt=candidate.attempt,
+            )
+
+        state = await self._state_reader.get_retry_state(
+            notification_key=candidate.notification_key,
+            recommendation_id=candidate.recommendation_id,
+        )
+        if state is None:
+            return self._skipped(candidate, "AUTHORITATIVE_STATE_NOT_FOUND")
+        if state.notification_key != candidate.notification_key:
+            return self._skipped(candidate, "NOTIFICATION_KEY_MISMATCH")
+        if state.recommendation_id != candidate.recommendation_id:
+            return self._skipped(candidate, "RECOMMENDATION_ID_MISMATCH")
+        if state.recommendation_status != "RECOMMENDED":
+            return self._skipped(
+                candidate, "RECOMMENDATION_NO_LONGER_RECOMMENDED"
+            )
+        if state.review_status != "IN_REVIEW":
+            return self._skipped(candidate, "REVIEW_NOT_IN_REVIEW")
+        if state.decision_status != "PENDING_HUMAN_REVIEW":
+            return self._skipped(
+                candidate, "DECISION_NO_LONGER_PENDING_HUMAN_REVIEW"
+            )
+        if state.quality_gate_status != "PASSED":
+            return self._skipped(
+                candidate, "QUALITY_GATE_NO_LONGER_PASSED"
+            )
+
+        execution = await self._retry_execution.retry(
+            request=state.dispatch_request,
+            email_request=state.email_request,
+            reference_at=reference_at,
+        )
+
+        if (
+            execution.status
+            is PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED
+        ):
+            dispatch_result = execution.dispatch_result
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SUCCEEDED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+                provider_message_id=(
+                    dispatch_result.provider_message_id
+                    if dispatch_result is not None
+                    else None
+                ),
+            )
+
+        if execution.status in (
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_ELIGIBLE,
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_DUE,
+        ):
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+            )
+
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.FAILED,
+            reason=execution.reason,
+            attempt=execution.attempt,
+        )
+
+    @staticmethod
+    def _skipped(
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reason: str,
+    ) -> PlatformIntelligenceRetryRunResult:
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+            reason=reason,
+            attempt=candidate.attempt,
+        )
+
+
+============================================================
+4. RETRY EXECUTION
+============================================================
+
+"""Contracts for controlled PI escalation retry orchestration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+    PlatformIntelligenceEscalationDispatchRequest,
+)
+
+
+class PlatformIntelligenceRetryRunStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryState:
+    """Authoritative state required immediately before retry dispatch."""
+
+    notification_key: str
+    recommendation_id: str
+    recommendation_status: str
+    review_status: str
+    decision_status: str
+    quality_gate_status: str
+    dispatch_request: PlatformIntelligenceEscalationDispatchRequest
+    email_request: Any
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "notification_key",
+            "recommendation_id",
+            "recommendation_status",
+            "review_status",
+            "decision_status",
+            "quality_gate_status",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be nonblank.")
+
+        if self.dispatch_request.notification_key != self.notification_key:
+            raise ValueError(
+                "dispatch_request.notification_key must match notification_key."
+            )
+        if self.dispatch_request.recommendation_id != self.recommendation_id:
+            raise ValueError(
+                "dispatch_request.recommendation_id must match recommendation_id."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryRunResult:
+    notification_key: str
+    status: PlatformIntelligenceRetryRunStatus
+    reason: str
+    attempt: int | None = None
+    provider_message_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not self.reason.strip():
+            raise ValueError("reason must be nonblank.")
+        if self.attempt is not None and self.attempt < 1:
+            raise ValueError("attempt must be at least 1.")
+
+
+============================================================
+5. RETRY CLAIM / DISCOVERY COMPONENTS
+============================================================
+
+
+FullName                    
+--------                    
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+
+
+
+
+============================================================
+6. EXISTING RETRY COMPOSITION REFERENCES
+============================================================
+
+
+Path                        
+----                        
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\announc
+ements\test_ws22_3_5_5_failu
+re_retry_integration.py     
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+C:\AI Folder\EasyChatBot-Hac
+kathon\backend\tests\unit\op
+erations_center\test_platfor
+m_intelligence_retry_worker.
+py                          
+
+
+
+
+============================================================
+7. RETRY TEST INVENTORY
+============================================================
+
+
+FullName                    
+--------                    
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+C:\AI Folder\EasyChatBot-...
+
+
+

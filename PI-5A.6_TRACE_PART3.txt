@@ -1,0 +1,2270 @@
+﻿        updated_at=DELIVERY_TIME,
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_retries_only_when_due():
+    repository = Repository(
+        record(
+            PlatformIntelligenceEscalationDeliveryStatus.FAILED
+        )
+    )
+
+    dispatch = Dispatch()
+
+    service = PlatformIntelligenceEscalationRetryExecutionService(
+        delivery_repository=repository,
+        retry_policy=policy(),
+        dispatch_service=dispatch,
+    )
+
+    early = await service.retry(
+        request=request(),
+        email_request=object(),
+        reference_at=datetime(
+            2026,
+            9,
+            22,
+            10,
+            0,
+            30,
+            tzinfo=timezone.utc,
+        ),
+    )
+
+    assert (
+        early.status
+        is PlatformIntelligenceEscalationRetryExecutionStatus
+        .NOT_DUE
+    )
+
+    assert repository.retries == 0
+    assert dispatch.calls == 0
+
+    due = await service.retry(
+        request=request(),
+        email_request=object(),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        due.status
+        is PlatformIntelligenceEscalationRetryExecutionStatus
+        .RETRIED
+    )
+
+    assert repository.retries == 1
+    assert dispatch.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_failure_does_not_dispatch():
+    repository = Repository(
+        record(
+            PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+            error_code="INVALID_RECIPIENT",
+        )
+    )
+
+    dispatch = Dispatch()
+
+    service = PlatformIntelligenceEscalationRetryExecutionService(
+        delivery_repository=repository,
+        retry_policy=policy(),
+        dispatch_service=dispatch,
+    )
+
+    result = await service.retry(
+        request=request(),
+        email_request=object(),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.status
+        is PlatformIntelligenceEscalationRetryExecutionStatus
+        .NOT_ELIGIBLE
+    )
+
+    assert repository.retries == 0
+    assert dispatch.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_started_recovery_does_not_increment_attempt():
+    repository = Repository(
+        record(
+            PlatformIntelligenceEscalationDeliveryStatus.STARTED,
+            error_code=None,
+        )
+    )
+
+    dispatch = Dispatch()
+
+    service = PlatformIntelligenceEscalationRetryExecutionService(
+        delivery_repository=repository,
+        retry_policy=policy(),
+        dispatch_service=dispatch,
+    )
+
+    result = await service.retry(
+        request=request(),
+        email_request=object(),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.status
+        is PlatformIntelligenceEscalationRetryExecutionStatus
+        .RETRIED
+    )
+
+    assert repository.retries == 0
+    assert repository.record.attempt == 1
+    assert dispatch.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_prevents_retry():
+    repository = Repository(
+        record(
+            PlatformIntelligenceEscalationDeliveryStatus.FAILED,
+            attempt=4,
+        )
+    )
+
+    dispatch = Dispatch()
+
+    service = PlatformIntelligenceEscalationRetryExecutionService(
+        delivery_repository=repository,
+        retry_policy=policy(),
+        dispatch_service=dispatch,
+    )
+
+    result = await service.retry(
+        request=request(),
+        email_request=object(),
+        reference_at=REFERENCE,
+    )
+
+    assert (
+        result.status
+        is PlatformIntelligenceEscalationRetryExecutionStatus
+        .NOT_ELIGIBLE
+    )
+
+    assert repository.retries == 0
+    assert dispatch.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_requires_existing_durable_record():
+    repository = Repository(None)
+    dispatch = Dispatch()
+
+    service = PlatformIntelligenceEscalationRetryExecutionService(
+        delivery_repository=repository,
+        retry_policy=policy(),
+        dispatch_service=dispatch,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="existing durable",
+    ):
+        await service.retry(
+            request=request(),
+            email_request=object(),
+            reference_at=REFERENCE,
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_escalation_retry_orchestrator.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+    PlatformIntelligenceEscalationDispatchRequest,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
+    PlatformIntelligenceEscalationRetryExecutionResult,
+    PlatformIntelligenceEscalationRetryExecutionStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunStatus,
+    PlatformIntelligenceRetryState,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestrator import (
+    PlatformIntelligenceEscalationRetryOrchestrator,
+)
+
+
+REFERENCE = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+
+NOTIFICATION_KEY = (
+    "platform_intelligence_escalation:recommendation-1"
+)
+
+
+def dispatch_request() -> PlatformIntelligenceEscalationDispatchRequest:
+    return PlatformIntelligenceEscalationDispatchRequest(
+        recommendation_id="recommendation-1",
+        risk_decision_id="decision-1",
+        review_item_id="review-1",
+        risk_level="HIGH",
+        risk_score=0.82,
+        quality_gate_status="PASSED",
+        review_status="IN_REVIEW",
+        decision_status="PENDING_HUMAN_REVIEW",
+        notification_key=NOTIFICATION_KEY,
+        correlation_id="correlation-1",
+        route="RISK_OWNER",
+        reasons=("High risk level.",),
+    )
+
+
+def candidate() -> PlatformIntelligenceEscalationRetryCandidate:
+    return PlatformIntelligenceEscalationRetryCandidate(
+        notification_key=NOTIFICATION_KEY,
+        recommendation_id="recommendation-1",
+        risk_decision_id="decision-1",
+        review_item_id="review-1",
+        correlation_id="correlation-1",
+        attempt=1,
+        status="FAILED",
+        updated_at=REFERENCE,
+        error_code="PROVIDER_ERROR",
+    )
+
+
+class FakePolicy:
+    def __init__(self, eligible: bool) -> None:
+        self.eligible = eligible
+        self.calls = 0
+
+    async def evaluate(self, **kwargs):
+        self.calls += 1
+        return self.eligible
+
+
+class FakeClaimService:
+    def __init__(self, claim) -> None:
+        self.claim_result = claim
+        self.calls = 0
+
+    async def claim(self, **kwargs):
+        self.calls += 1
+        return self.claim_result
+
+
+class FakeStateReader:
+    def __init__(self, state) -> None:
+        self.state = state
+        self.calls = 0
+
+    async def get_retry_state(self, **kwargs):
+        self.calls += 1
+        return self.state
+
+
+@dataclass(frozen=True)
+class FakeClaim:
+    token: str = "claim-token"
+
+
+class FakeRetryExecution:
+    def __init__(
+        self,
+        result: PlatformIntelligenceEscalationRetryExecutionResult,
+    ) -> None:
+        self.result = result
+        self.calls = 0
+        self.kwargs = None
+
+    async def retry(self, **kwargs):
+        self.calls += 1
+        self.kwargs = kwargs
+        return self.result
+
+
+def valid_state() -> PlatformIntelligenceRetryState:
+    return PlatformIntelligenceRetryState(
+        notification_key=NOTIFICATION_KEY,
+        recommendation_id="recommendation-1",
+        recommendation_status="RECOMMENDED",
+        review_status="IN_REVIEW",
+        decision_status="PENDING_HUMAN_REVIEW",
+        quality_gate_status="PASSED",
+        dispatch_request=dispatch_request(),
+        email_request=object(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_not_policy_eligible_does_not_claim_or_execute() -> None:
+    policy = FakePolicy(False)
+    claims = FakeClaimService(FakeClaim())
+    state = FakeStateReader(valid_state())
+
+    execution = FakeRetryExecution(
+        PlatformIntelligenceEscalationRetryExecutionResult(
+            status=PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED,
+            notification_key=NOTIFICATION_KEY,
+            attempt=1,
+            reason="SUCCEEDED",
+        )
+    )
+
+    orchestrator = PlatformIntelligenceEscalationRetryOrchestrator(
+        state_reader=state,
+        policy_evaluator=policy,
+        claim_service=claims,
+        retry_execution=execution,
+    )
+
+    result = await orchestrator.run_candidate(
+        candidate=candidate(),
+        reference_at=REFERENCE,
+    )
+
+    assert result.status is PlatformIntelligenceRetryRunStatus.SKIPPED
+    assert result.reason == "RETRY_POLICY_NOT_ELIGIBLE"
+    assert claims.calls == 0
+    assert state.calls == 0
+    assert execution.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_already_claimed_does_not_revalidate_or_execute() -> None:
+    policy = FakePolicy(True)
+    claims = FakeClaimService(None)
+    state = FakeStateReader(valid_state())
+
+    execution = FakeRetryExecution(
+        PlatformIntelligenceEscalationRetryExecutionResult(
+            status=PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED,
+            notification_key=NOTIFICATION_KEY,
+            attempt=1,
+            reason="SUCCEEDED",
+        )
+    )
+
+    orchestrator = PlatformIntelligenceEscalationRetryOrchestrator(
+        state_reader=state,
+        policy_evaluator=policy,
+        claim_service=claims,
+        retry_execution=execution,
+    )
+
+    result = await orchestrator.run_candidate(
+        candidate=candidate(),
+        reference_at=REFERENCE,
+    )
+
+    assert result.status is PlatformIntelligenceRetryRunStatus.SKIPPED
+    assert result.reason == "RETRY_CANDIDATE_ALREADY_CLAIMED"
+    assert state.calls == 0
+    assert execution.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_authoritative_state_blocks_execution() -> None:
+    policy = FakePolicy(True)
+    claims = FakeClaimService(FakeClaim())
+
+    state = FakeStateReader(
+        PlatformIntelligenceRetryState(
+            notification_key=NOTIFICATION_KEY,
+            recommendation_id="recommendation-1",
+            recommendation_status="NOT_RECOMMENDED",
+            review_status="IN_REVIEW",
+            decision_status="PENDING_HUMAN_REVIEW",
+            quality_gate_status="PASSED",
+            dispatch_request=dispatch_request(),
+            email_request=object(),
+        )
+    )
+
+    execution = FakeRetryExecution(
+        PlatformIntelligenceEscalationRetryExecutionResult(
+            status=PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED,
+            notification_key=NOTIFICATION_KEY,
+            attempt=1,
+            reason="SUCCEEDED",
+        )
+    )
+
+    orchestrator = PlatformIntelligenceEscalationRetryOrchestrator(
+        state_reader=state,
+        policy_evaluator=policy,
+        claim_service=claims,
+        retry_execution=execution,
+    )
+
+    result = await orchestrator.run_candidate(
+        candidate=candidate(),
+        reference_at=REFERENCE,
+    )
+
+    assert result.status is PlatformIntelligenceRetryRunStatus.SKIPPED
+    assert result.reason == "RECOMMENDATION_NO_LONGER_RECOMMENDED"
+    assert execution.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_valid_state_executes_after_claim() -> None:
+    policy = FakePolicy(True)
+    claims = FakeClaimService(FakeClaim())
+    state = FakeStateReader(valid_state())
+
+    execution = FakeRetryExecution(
+        PlatformIntelligenceEscalationRetryExecutionResult(
+            status=PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED,
+            notification_key=NOTIFICATION_KEY,
+            attempt=2,
+            reason="RETRY_DISPATCHED",
+            dispatch_result=type(
+                "DispatchResult",
+                (),
+                {"provider_message_id": "provider-message-2"},
+            )(),
+        )
+    )
+
+    orchestrator = PlatformIntelligenceEscalationRetryOrchestrator(
+        state_reader=state,
+        policy_evaluator=policy,
+        claim_service=claims,
+        retry_execution=execution,
+    )
+
+    result = await orchestrator.run_candidate(
+        candidate=candidate(),
+        reference_at=REFERENCE,
+    )
+
+    assert result.status is PlatformIntelligenceRetryRunStatus.SUCCEEDED
+    assert result.reason == "RETRY_DISPATCHED"
+    assert result.attempt == 2
+    assert result.provider_message_id == "provider-message-2"
+
+    assert claims.calls == 1
+    assert state.calls == 1
+    assert execution.calls == 1
+
+    assert execution.kwargs["request"] == dispatch_request()
+    assert execution.kwargs["email_request"] is state.state.email_request
+    assert execution.kwargs["reference_at"] == REFERENCE
+
+
+@pytest.mark.asyncio
+async def test_naive_reference_time_is_rejected() -> None:
+    orchestrator = PlatformIntelligenceEscalationRetryOrchestrator(
+        state_reader=FakeStateReader(valid_state()),
+        policy_evaluator=FakePolicy(True),
+        claim_service=FakeClaimService(FakeClaim()),
+        retry_execution=FakeRetryExecution(
+            PlatformIntelligenceEscalationRetryExecutionResult(
+                status=PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED,
+                notification_key=NOTIFICATION_KEY,
+                attempt=1,
+                reason="SUCCEEDED",
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await orchestrator.run_candidate(
+            candidate=candidate(),
+            reference_at=datetime(2026, 9, 22, 12, 0),
+        )
+
+
+def test_candidate_contract_requires_correlation_id() -> None:
+    with pytest.raises(TypeError, match="correlation_id"):
+        PlatformIntelligenceEscalationRetryCandidate(
+            notification_key=NOTIFICATION_KEY,
+            recommendation_id="recommendation-1",
+            risk_decision_id="decision-1",
+            review_item_id="review-1",
+            attempt=1,
+            status="FAILED",
+            updated_at=REFERENCE,
+            error_code="PROVIDER_ERROR",
+        )
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\tests\unit\operations_center\test_platform_intelligence_retry_worker.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidateBatch,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunResult,
+    PlatformIntelligenceRetryRunStatus,
+)
+from app.application.operations_center.platform_intelligence_retry_worker import (
+    PlatformIntelligenceRetryWorkerItemStatus,
+    PlatformIntelligenceRetryWorkerRequest,
+)
+from app.application.operations_center.platform_intelligence_retry_worker_service import (
+    PlatformIntelligenceRetryWorker,
+)
+
+
+REFERENCE = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+
+
+class Candidate:
+    def __init__(self, key: str, attempt: int = 1) -> None:
+        self.notification_key = key
+        self.recommendation_id = f"rec-{key}"
+        self.attempt = attempt
+
+
+class Discovery:
+    def __init__(self, candidates) -> None:
+        self.candidates = tuple(candidates)
+        self.calls = 0
+        self.limit = None
+
+    async def discover(self, *, limit: int):
+        self.calls += 1
+        self.limit = limit
+        return PlatformIntelligenceEscalationRetryCandidateBatch(
+            candidates=self.candidates,
+            limit=limit,
+        )
+
+
+class Orchestrator:
+    def __init__(self, results=None, errors=None) -> None:
+        self.results = results or {}
+        self.errors = errors or {}
+        self.calls = []
+
+    async def run_candidate(self, *, candidate, reference_at):
+        self.calls.append((candidate.notification_key, reference_at))
+        if candidate.notification_key in self.errors:
+            raise self.errors[candidate.notification_key]
+        return self.results[candidate.notification_key]
+
+
+def run_result(key, status, reason, attempt=1, provider=None):
+    return PlatformIntelligenceRetryRunResult(
+        notification_key=key,
+        status=status,
+        reason=reason,
+        attempt=attempt,
+        provider_message_id=provider,
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_is_a_noop():
+    discovery = Discovery([])
+    orchestrator = Orchestrator()
+
+    worker = PlatformIntelligenceRetryWorker(
+        discovery_service=discovery,
+        orchestrator=orchestrator,
+    )
+
+    result = await worker.run(
+        request=PlatformIntelligenceRetryWorkerRequest(limit=10),
+        reference_at=REFERENCE,
+    )
+
+    assert result.discovered_count == 0
+    assert result.processed_count == 0
+    assert result.succeeded_count == 0
+    assert result.skipped_count == 0
+    assert result.failed_count == 0
+    assert result.items == ()
+    assert discovery.calls == 1
+    assert discovery.limit == 10
+    assert orchestrator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_processes_bounded_batch_and_preserves_results():
+    candidates = [Candidate("key-a"), Candidate("key-b"), Candidate("key-c")]
+    discovery = Discovery(candidates)
+    orchestrator = Orchestrator(
+        results={
+            "key-a": run_result(
+                "key-a",
+                PlatformIntelligenceRetryRunStatus.SUCCEEDED,
+                "RETRY_DISPATCHED",
+                attempt=2,
+                provider="provider-a",
+            ),
+            "key-b": run_result(
+                "key-b",
+                PlatformIntelligenceRetryRunStatus.SKIPPED,
+                "RETRY_POLICY_NOT_ELIGIBLE",
+            ),
+            "key-c": run_result(
+                "key-c",
+                PlatformIntelligenceRetryRunStatus.FAILED,
+                "DISPATCH_FAILED",
+            ),
+        }
+    )
+
+    worker = PlatformIntelligenceRetryWorker(
+        discovery_service=discovery,
+        orchestrator=orchestrator,
+    )
+
+    result = await worker.run(
+        request=PlatformIntelligenceRetryWorkerRequest(limit=3),
+        reference_at=REFERENCE,
+    )
+
+    assert result.discovered_count == 3
+    assert result.processed_count == 3
+    assert result.succeeded_count == 1
+    assert result.skipped_count == 1
+    assert result.failed_count == 1
+    assert [item.notification_key for item in result.items] == [
+        "key-a",
+        "key-b",
+        "key-c",
+    ]
+    assert result.items[0].status is PlatformIntelligenceRetryWorkerItemStatus.SUCCEEDED
+    assert result.items[0].provider_message_id == "provider-a"
+    assert result.items[1].status is PlatformIntelligenceRetryWorkerItemStatus.SKIPPED
+    assert result.items[2].status is PlatformIntelligenceRetryWorkerItemStatus.FAILED
+    assert orchestrator.calls == [
+        ("key-a", REFERENCE),
+        ("key-b", REFERENCE),
+        ("key-c", REFERENCE),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_one_candidate_exception_does_not_abort_remaining_candidates():
+    candidates = [Candidate("key-a"), Candidate("key-b"), Candidate("key-c")]
+    discovery = Discovery(candidates)
+    orchestrator = Orchestrator(
+        results={
+            "key-a": run_result(
+                "key-a",
+                PlatformIntelligenceRetryRunStatus.SUCCEEDED,
+                "RETRY_DISPATCHED",
+            ),
+            "key-c": run_result(
+                "key-c",
+                PlatformIntelligenceRetryRunStatus.SKIPPED,
+                "RETRY_CANDIDATE_ALREADY_CLAIMED",
+            ),
+        },
+        errors={"key-b": RuntimeError("provider failure")},
+    )
+
+    worker = PlatformIntelligenceRetryWorker(
+        discovery_service=discovery,
+        orchestrator=orchestrator,
+    )
+
+    result = await worker.run(
+        request=PlatformIntelligenceRetryWorkerRequest(limit=3),
+        reference_at=REFERENCE,
+    )
+
+    assert result.processed_count == 3
+    assert result.succeeded_count == 1
+    assert result.skipped_count == 1
+    assert result.failed_count == 1
+
+    failed = result.items[1]
+    assert failed.notification_key == "key-b"
+    assert failed.reason == "CANDIDATE_EXECUTION_ERROR"
+    assert failed.error_type == "RuntimeError"
+
+    assert len(orchestrator.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_naive_reference_time():
+    worker = PlatformIntelligenceRetryWorker(
+        discovery_service=Discovery([]),
+        orchestrator=Orchestrator(),
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await worker.run(
+            request=PlatformIntelligenceRetryWorkerRequest(limit=1),
+            reference_at=datetime(2026, 9, 22, 12, 0),
+        )
+
+
+def test_worker_request_rejects_invalid_limit():
+    with pytest.raises(ValueError, match="at least 1"):
+        PlatformIntelligenceRetryWorkerRequest(limit=0)
+
+
+def test_worker_result_rejects_duplicate_notification_keys():
+    from app.application.operations_center.platform_intelligence_retry_worker import (
+        PlatformIntelligenceRetryWorkerItemResult,
+        PlatformIntelligenceRetryWorkerResult,
+    )
+
+    item = PlatformIntelligenceRetryWorkerItemResult(
+        notification_key="duplicate",
+        status=PlatformIntelligenceRetryWorkerItemStatus.SKIPPED,
+        reason="SKIPPED",
+        attempt=1,
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        PlatformIntelligenceRetryWorkerResult(
+            requested_limit=2,
+            discovered_count=2,
+            processed_count=2,
+            succeeded_count=0,
+            skipped_count=2,
+            failed_count=0,
+            items=(item, item),
+        )
+
+=====================================================================
+36. EXACT SCHEDULER PRODUCTION FILE CONTENTS
+=====================================================================
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\app\main.py
+---------------------------------------------------------------------
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load the repository-root environment before application composition.
+# This preserves the project's established .env configuration convention
+# used by the production database and Telegram runtime scripts.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.application.academy.academy_activation import (
+    AcademyActivationConfig,
+)
+from app.application.composition.conversation_composition import (
+    create_conversation_runtime,
+)
+from app.application.composition.private_chat_composition import (
+    build_private_chat_service_factory,
+)
+from app.application.composition.learner_context_composition import (
+    build_production_learner_context_service,
+)
+from app.application.identity.authentication_email_service import (
+    AuthenticationEmailService,
+)
+from app.application.identity.authentication_service import (
+    AuthenticationService,
+)
+from app.application.authorization.authorization_service import (
+    AuthorizationService,
+)
+from app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+from app.application.developer_admin.developer_admin_audit import (
+    DeveloperAdminAuditService,
+)
+from app.application.developer_admin.developer_admin_service import (
+    DeveloperAdminService,
+)
+from app.application.developer_admin.developer_admin_transaction_service import (
+    DeveloperAdminTransactionService,
+)
+from app.application.developer_admin.developer_admin_uow_factory import (
+    DeveloperAdminUnitOfWorkFactory,
+)
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.identity.transaction_authorization import (
+    TransactionAuthorizationApplicationService,
+)
+from app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from app.application.health.production_health_service import (
+    ProductionHealthService,
+)
+from app.application.operations_center.dashboard_composition import (
+    create_operations_center_composition,
+)
+from app.application.persistence_operations import (
+    PersistenceDiagnosticsService,
+)
+from app.application.privacy.privacy_governance_composition import (
+    get_privacy_governance_composition,
+)
+from app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+from app.application.study_material.service import (
+    StudyMaterialService,
+)
+from app.application.uai.world.world_resolver import (
+    WorldResolver,
+)
+from app.application.world_catalogue.service import (
+    LearningWorldCatalogueService,
+)
+
+from app.api.academy_questionnaires import (
+    router as academy_questionnaires_router,
+)
+from app.api.questionnaire_runtime import (
+    create_questionnaire_runtime_router,
+)
+from app.application.learning_assessment.questionnaire_runtime_composition import (
+    create_questionnaire_runtime,
+)
+from app.api.private_chat import router as private_chat_router
+from app.api.learner_context import (
+    router as learner_context_router,
+)
+from app.api.study_material import (
+    router as study_material_router,
+)
+from app.api.authentication import (
+    router as authentication_router,
+)
+from app.api.dependencies.authorization import require_permission
+from app.api.operations_center import (
+    create_operations_center_router,
+)
+from app.api.routes.persistence_operations_routes import (
+    create_persistence_operations_router,
+)
+from app.api.routes.developer_admin_routes import (
+    router as developer_admin_router,
+)
+from app.api.operations_center_email_workflows import (
+    create_email_workflows_router,
+)
+from app.api.privacy_governance import (
+    router as privacy_governance_router,
+)
+from app.api.privacy_screening import (
+    create_privacy_screening_router,
+)
+from app.api.provider_management_controls import (
+    router as provider_management_controls_router,
+)
+from app.api.voice_call_trigger import (
+    router as voice_call_trigger_router,
+)
+from app.api.voice_calls import (
+    router as voice_calls_router,
+)
+from app.api.voice_notification_acceptance import (
+    router as voice_notification_acceptance_router,
+)
+from app.api.voice_reconnect_router import (
+    router as voice_reconnect_router,
+)
+
+from app.application.privacy.beta1_processing_catalog import (
+    create_beta1_processing_registry,
+)
+from app.application.privacy.screening.adapter import (
+    ProcessingActivityScreeningAdapter,
+)
+from app.application.privacy.screening.service import (
+    ScreeningService,
+)
+
+from app.infrastructure.auth.postgresql_auth_repository import (
+    PostgreSQLAuthenticationRepository,
+)
+from app.infrastructure.developer_admin.postgresql_developer_admin_uow_factory import (
+    PostgreSQLDeveloperAdminUnitOfWorkFactory,
+)
+from app.infrastructure.email.authentication_email_sender import (
+    AuthenticationEmailSenderAdapter,
+)
+from app.infrastructure.persistence.database import (
+    Base,
+    create_async_database_engine,
+    create_async_session_factory,
+    create_database_engine,
+    create_session_factory,
+)
+from app.infrastructure.persistence.postgresql_functionality_control_repository import (
+    PostgreSQLFunctionalityControlRepository,
+)
+from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+    PostgreSQLLearningWorldCatalogueRepository,
+)
+from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+    PostgreSQLProviderUsageRepository,
+)
+from app.infrastructure.persistence.postgresql_study_material_repository import (
+    PostgreSQLStudyMaterialRepository,
+)
+from app.infrastructure.persistence.postgresql_user_policy_profile_repository import (
+    PostgreSQLUserPolicyProfileRepository,
+)
+from app.infrastructure.security.trusted_clock import SystemTrustedClock
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.transaction_authorization import (
+    TransactionAuthorizationConsumer,
+    TransactionAuthorizationRegistry,
+)
+from app.infrastructure.telegram.telegram_announcement_client import (
+    TelegramAnnouncementClient,
+)
+from app.infrastructure.telegram.telegram_announcement_publisher import (
+    TelegramAnnouncementPublisher,
+)
+from app.infrastructure.worlds.yaml_world_repository import (
+    YamlWorldRepository,
+)
+
+from app.project_control_center.api.project_control_router import (
+    create_project_control_router,
+)
+from app.project_control_center.api.project_registry_router import (
+    create_project_registry_router,
+)
+from app.project_control_center.application.project_registry_service import (
+    ProjectRegistryService,
+)
+from app.project_control_center.application.project_discovery_service import (
+    ProjectDiscoveryService,
+)
+from app.project_control_center.api.project_discovery_router import (
+    create_project_discovery_router,
+)
+from app.project_control_center.infrastructure.composition import (
+    create_project_control_service,
+)
+from app.project_control_center.infrastructure.in_memory import (
+    InMemorySnapshotRepository,
+)
+from app.infrastructure.persistence.postgresql_project_registry import (
+    PostgreSQLProjectRegistry,
+)
+from app.infrastructure.persistence.postgresql_project_discovery import (
+    PostgreSQLProjectDiscoveryRepository,
+)
+
+from cybersecurity.email.email_provider_manager import (
+    EmailProviderManager,
+)
+from cybersecurity.scheduler.cybersecurity_scheduler_factory import (
+    create_cybersecurity_scheduler_runtime,
+)
+
+from governance.api.governance_audit_api import (
+    router as governance_audit_router,
+)
+from governance.api.governance_change_lifecycle_api import (
+    router as governance_change_lifecycle_router,
+)
+from governance.api.governance_evidence_api import (
+    router as governance_evidence_router,
+)
+from governance.api.governance_operations_api import (
+    router as governance_operations_router,
+)
+
+from app.api.cybersecurity_decision_support import (
+    router as cybersecurity_decision_support_router,
+)
+from app.api.cybersecurity_intelligence import (
+    router as cybersecurity_intelligence_router,
+)
+from app.api.cybersecurity_live_reports import (
+    router as cybersecurity_live_reports_router,
+)
+from app.api.cybersecurity_reports import (
+    router as cybersecurity_reports_router,
+)
+
+
+def _required_environment(name: str) -> str:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required for authentication email composition."
+        )
+
+    return value
+
+
+def _create_announcement_components():
+    telegram_client = TelegramAnnouncementClient()
+
+    announcement_publisher = TelegramAnnouncementPublisher(
+        telegram_client=telegram_client,
+    )
+
+    return (
+        telegram_client,
+        announcement_publisher,
+    )
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    scheduler_runtime = application.state.scheduler_runtime
+
+    try:
+        await scheduler_runtime.start()
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler startup failed:",
+            exc,
+        )
+
+    yield
+
+    try:
+        await scheduler_runtime.stop()
+    except Exception as exc:
+        print(
+            "Cybersecurity scheduler shutdown failed:",
+            exc,
+        )
+
+    finally:
+        telegram_client = getattr(
+            application.state,
+            "announcement_telegram_client",
+            None,
+        )
+
+        if telegram_client is not None:
+            try:
+                await telegram_client.close()
+            except Exception as exc:
+                print(
+                    "Telegram announcement client shutdown failed:",
+                    exc,
+                )
+
+        auth_engine = getattr(
+            application.state,
+            "auth_engine",
+            None,
+        )
+
+        if auth_engine is not None:
+            try:
+                await auth_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL authentication engine shutdown failed:",
+                    exc,
+                )
+
+        provider_usage_engine = getattr(
+            application.state,
+            "provider_usage_engine",
+            None,
+        )
+
+        if provider_usage_engine is not None:
+            try:
+                provider_usage_engine.dispose()
+            except Exception as exc:
+                print(
+                    "PostgreSQL provider-usage engine shutdown failed:",
+                    exc,
+                )
+
+
+def create_application() -> FastAPI:
+    academy_config = (
+        AcademyActivationConfig.from_environment()
+    )
+
+    auth_engine = create_async_database_engine()
+
+    auth_session_factory = (
+        create_async_session_factory(
+            auth_engine,
+        )
+    )
+
+    auth_repository = (
+        PostgreSQLAuthenticationRepository(
+            auth_session_factory,
+        )
+    )
+
+    email_provider_manager = EmailProviderManager()
+
+    authentication_email_sender = AuthenticationEmailSenderAdapter(
+        provider_manager=email_provider_manager,
+    )
+
+    authentication_email_service = AuthenticationEmailService(
+        authentication_email_sender,
+        frontend_base_url=_required_environment(
+            "EASYCHATBOT_PORTAL_URL",
+        ),
+    )
+
+    authentication_service = AuthenticationService(
+        auth_repository,
+        email_service=authentication_email_service,
+    )
+
+    # ------------------------------------------------------------------
+    # Developer Administration
+    #
+    # Production path:
+    #
+    #   DeveloperAdminService
+    #          |
+    #          +--> DeveloperAdminUnitOfWorkFactory
+    #                  |
+    #                  +--> fresh PostgreSQLDeveloperAdminUnitOfWork
+    #                          |
+    #                          +--> fresh AsyncSession
+    #                          |
+    #                          +--> fresh transaction
+    #                          |
+    #                          +--> auth_user_roles
+    #                          |
+    #                          +--> developer_admin_audit_events
+    #          |
+    #          +--> DeveloperAdminAuditService
+    #
+    # Each Developer Admin mutation receives a fresh Unit-of-Work
+    # instance. The role mutation and its security audit evidence
+    # therefore remain within the same database transaction while
+    # mutable UoW/session state is never shared between operations.
+    #
+    # The standalone audit repository owns transactions only when its
+    # standalone ``record`` operation is used. The production Developer
+    # Admin mutation uses ``record_in_session`` through the UoW.
+    # ------------------------------------------------------------------
+
+    developer_admin_unit_of_work_factory = (
+        PostgreSQLDeveloperAdminUnitOfWorkFactory(
+            auth_session_factory,
+        )
+    )
+
+    developer_admin_audit_service = (
+        DeveloperAdminAuditService()
+    )
+
+    developer_admin_service = DeveloperAdminService(
+        repository=auth_repository,
+        unit_of_work_factory=developer_admin_unit_of_work_factory,
+        audit_service=developer_admin_audit_service,
+    )
+
+    # ------------------------------------------------------------------
+    # W15.2.1 Transaction Authorization
+    #
+    # Transaction authorization is composed once at the application root.
+    # The registry and consumer are application-lifetime components and
+    # provide their own synchronization boundaries.
+    #
+    # Authentication assurance remains a separate trusted-evidence
+    # boundary. This composition does not manufacture MFA/A2 evidence.
+    # ------------------------------------------------------------------
+
+    authorization_service = AuthorizationService()
+
+    transaction_authorization_registry = (
+        TransactionAuthorizationRegistry()
+    )
+
+    transaction_authorization_consumer = (
+        TransactionAuthorizationConsumer(
+            transaction_authorization_registry,
+        )
+    )
+
+    transaction_authorization_service = (
+        TransactionAuthorizationApplicationService(
+            authorization_service=authorization_service,
+            registry=transaction_authorization_registry,
+            consumer=transaction_authorization_consumer,
+        )
+    )
+
+    trusted_clock = SystemTrustedClock()
+
+    developer_admin_transaction_service = (
+        DeveloperAdminTransactionService(
+            developer_admin_service=developer_admin_service,
+            transaction_authorization_service=(
+                transaction_authorization_service
+            ),
+            clock=trusted_clock,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Provider usage / synchronous application persistence
+    #
+    # The provider-usage repository is synchronous by contract.
+    # It therefore receives a synchronous engine/session factory.
+    #
+    # It must not receive the async authentication session factory.
+    # ------------------------------------------------------------------
+
+    provider_usage_engine = (
+        create_database_engine()
+    )
+
+    persistence_diagnostics_service = PersistenceDiagnosticsService(
+        metadata=Base.metadata,
+        project_root=Path(__file__).resolve().parents[1],
+        engine=provider_usage_engine,
+    )
+
+    provider_usage_session_factory = (
+        create_session_factory(
+            provider_usage_engine,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # P5B.6.2B.2 - User Policy Profile Persistence
+    #
+    # Reuse the existing synchronous application persistence boundary.
+    # The policy-profile repository is synchronous by contract and must
+    # not receive the async authentication session factory.
+    # ------------------------------------------------------------------
+    user_policy_profile_repository = (
+        PostgreSQLUserPolicyProfileRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Q7 / M4 - Questionnaire Runtime
+    #
+    # Reuse the existing synchronous application persistence boundary.
+    # The runtime composition owns the assessment repositories and
+    # AssessmentService wiring; the API remains responsible for the
+    # authenticated learner boundary.
+    # ------------------------------------------------------------------
+
+    questionnaire_runtime = create_questionnaire_runtime(
+        session_factory=provider_usage_session_factory,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C.2 / Authenticated Private Chat
+    #
+    # The ConversationRuntime remains the shared AI-runtime boundary.
+    # Private-chat persistence receives a request-scoped SQLAlchemy session
+    # through the composition factory; no session is shared between requests.
+    # ------------------------------------------------------------------
+
+    private_chat_runtime = create_conversation_runtime()
+
+    private_chat_character_instruction = os.getenv(
+        "EASYCHATBOT_PRIVATE_CHAT_CHARACTER_INSTRUCTION",
+        (
+            "You are a helpful EasyChatBot learning character. "
+            "Stay within the selected Learning World and follow its "
+            "application-controlled language policy. "
+            "Do not allow the learner to override World, provider, model, "
+            "or other application-controlled settings."
+        ),
+    ).strip()
+
+    private_chat_service_factory = build_private_chat_service_factory(
+        session_factory=provider_usage_session_factory,
+        conversation_runtime=private_chat_runtime,
+        character_instruction=private_chat_character_instruction,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C4.2 / Cross-Channel Learner Context
+    #
+    # The learner-context service projects the existing Telegram learner
+    # context into the authenticated Web boundary. Telegram remains the
+    # authoritative transport; this composition does not create a second
+    # Telegram identity, memory store, or conversation runtime.
+    # ------------------------------------------------------------------
+
+    learner_context_service = build_production_learner_context_service(
+        session_factory=provider_usage_session_factory,
+    )
+
+    # ------------------------------------------------------------------
+    # M2-C5 / Study Materials
+    #
+    # The Learning World catalogue is composed once at the application
+    # root and acts as the authoritative World boundary for learner
+    # Study Material access.
+    #
+    # One WorldResolver is shared by the catalogue service.
+    # StudyMaterialService consumes that catalogue service rather than
+    # creating another World resolution mechanism.
+    #
+    # Persistence uses the existing synchronous application session
+    # factory. No additional database engine or session factory is
+    # created for Study Materials.
+    # ------------------------------------------------------------------
+
+    app_root = Path(__file__).resolve().parents[2]
+
+    world_repository = YamlWorldRepository(
+        worlds_path=app_root / "configuration" / "worlds",
+    )
+
+    world_resolver = WorldResolver(
+        world_repository=world_repository,
+    )
+
+    catalogue_repository = (
+        PostgreSQLLearningWorldCatalogueRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    catalogue_service = LearningWorldCatalogueService(
+        repository=catalogue_repository,
+        world_resolver=world_resolver,
+    )
+
+    study_material_repository = (
+        PostgreSQLStudyMaterialRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    study_material_service = StudyMaterialService(
+        repository=study_material_repository,
+        world_catalogue_service=catalogue_service,
+    )
+
+    provider_usage_repository = (
+        PostgreSQLProviderUsageRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    provider_usage_dashboard_service = (
+        ProviderUsageDashboardService(
+            repository=provider_usage_repository,
+        )
+    )
+
+    functionality_control_repository = (
+        PostgreSQLFunctionalityControlRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    functionality_control_authorizer = (
+        AuthorizationFunctionalityControlAuthorizer()
+    )
+
+    functionality_control_service = (
+        FunctionalityOperationalControlService(
+            authorizer=functionality_control_authorizer,
+            repository=functionality_control_repository,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Project Control / operational health composition
+    #
+    # Project Control is read-only. It consumes application-owned health
+    # and operational services and owns only its own PCD registry and
+    # snapshot repository.
+    # ------------------------------------------------------------------
+
+    production_health_configuration = (
+        ProductionHealthConfiguration(
+            database_engine=provider_usage_engine,
+            telegram_bot_factory=None,
+            llm_provider=None,
+            llm_request_get=None,
+        )
+    )
+
+    production_health_service = (
+        ProductionHealthService(
+            configuration=production_health_configuration,
+        )
+    )
+
+    production_readiness_service = (
+        production_health_service._readiness_service
+    )
+
+    operational_health_snapshot_service = (
+        OperationalHealthSnapshotService(
+            readiness_service=production_readiness_service,
+        )
+    )
+
+    operational_event_service = (
+        OperationalEventService()
+    )
+
+    operational_dashboard_service = (
+        OperationalDashboardService(
+            health_snapshot_service=operational_health_snapshot_service,
+            event_service=operational_event_service,
+        )
+    )
+
+    privacy_governance_composition = (
+        get_privacy_governance_composition()
+    )
+
+    project_registry = PostgreSQLProjectRegistry(
+        provider_usage_session_factory,
+    )
+
+    project_registry_service = ProjectRegistryService(
+        project_registry,
+    )
+
+    project_discovery_repository = PostgreSQLProjectDiscoveryRepository(
+        provider_usage_session_factory,
+    )
+
+    project_discovery_service = ProjectDiscoveryService(
+        discovery_repository=project_discovery_repository,
+        project_registry=project_registry_service,
+    )
+
+    project_snapshot_repository = (
+        InMemorySnapshotRepository()
+    )
+
+    project_control_service = (
+        create_project_control_service(
+            registry=project_registry,
+            snapshots=project_snapshot_repository,
+            health_service=production_health_service,
+            dashboard_service=operational_dashboard_service,
+            case_registry=(
+                privacy_governance_composition.case_registry
+            ),
+        )
+    )
+
+    academy_one_week_workflow = None
+    announcement_telegram_client = None
+
+    if academy_config.activation_allowed:
+        academy_session_factory = (
+            auth_session_factory
+        )
+
+        (
+            announcement_telegram_client,
+            _announcement_publisher,
+        ) = _create_announcement_components()
+
+        academy_one_week_workflow = (
+            create_academy_one_week_workflow(
+                session_factory=academy_session_factory,
+                telegram_bot=announcement_telegram_client,
+            )
+        )
+
+    scheduler_runtime = (
+        create_cybersecurity_scheduler_runtime(
+            academy_one_week_workflow=academy_one_week_workflow,
+        )
+    )
+
+    application = FastAPI(
+        title="EasyChatBot API",
+        description="AI character learning platform API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    application.state.scheduler_runtime = (
+        scheduler_runtime
+    )
+
+    application.state.auth_repository = (
+        auth_repository
+    )
+
+    application.state.authentication_service = (
+        authentication_service
+    )
+
+    application.state.developer_admin_service = (
+        developer_admin_service
+    )
+
+    application.state.developer_admin_transaction_service = (
+        developer_admin_transaction_service
+    )
+
+    application.state.auth_engine = (
+        auth_engine
+    )
+
+    application.state.provider_usage_engine = (
+        provider_usage_engine
+    )
+
+    application.state.user_policy_profile_repository = (
+        user_policy_profile_repository
+    )
+
+    application.state.provider_usage_dashboard_service = (
+        provider_usage_dashboard_service
+    )
+
+    application.state.functionality_control_service = (
+        functionality_control_service
+    )
+
+    application.state.private_chat_service_factory = (
+        private_chat_service_factory
+    )
+
+    application.state.learner_context_service = (
+        learner_context_service
+    )
+
+    application.state.study_material_service = (
+        study_material_service
+    )
+
+    application.state.private_chat_character_instruction = (
+        private_chat_character_instruction
+    )
+
+    application.state.project_control_service = (
+        project_control_service
+    )
+
+    application.state.project_discovery_service = (
+        project_discovery_service
+    )
+
+    application.state.production_health_service = (
+        production_health_service
+    )
+
+    application.state.operational_dashboard_service = (
+        operational_dashboard_service
+    )
+
+    application.state.announcement_telegram_client = (
+        announcement_telegram_client
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.include_router(
+        authentication_router,
+    )
+
+    application.include_router(
+        private_chat_router,
+        prefix="/api",
+    )
+
+    application.include_router(
+        learner_context_router,
+        prefix="/api",
+    )
+
+    application.include_router(
+        study_material_router,
+    )
+
+    application.include_router(
+        developer_admin_router,
+    )
+
+    application.include_router(
+        voice_calls_router,
+    )
+
+    application.include_router(
+        voice_reconnect_router,
+    )
+
+    application.include_router(
+        voice_call_trigger_router,
+    )
+
+    application.include_router(
+        voice_notification_acceptance_router,
+    )
+
+    operations_center_composition = (
+        create_operations_center_composition(
+            provider_usage_dashboard_service=(
+                provider_usage_dashboard_service
+            ),
+            functionality_control_service=(
+                functionality_control_service
+            ),
+        )
+    )
+
+    application.include_router(
+        create_operations_center_router(
+            composition=operations_center_composition,
+        ),
+    )
+
+    application.include_router(
+        create_persistence_operations_router(
+            persistence_diagnostics_service,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        )
+    )
+
+    application.include_router(
+        create_project_control_router(
+            project_control=project_control_service,
+        ),
+    )
+
+    application.include_router(
+        create_project_registry_router(
+            project_registry=project_registry_service,
+        ),
+    )
+
+    application.include_router(
+        create_project_discovery_router(
+            project_discovery=project_discovery_service,
+        ),
+    )
+
+    application.include_router(
+        create_email_workflows_router(
+            session_factory=provider_usage_session_factory,
+            operator_dependency=require_permission(
+                Permission.INTERNAL_DATA_READ,
+            ),
+        ),
+    )
+
+    application.include_router(
+        privacy_governance_router,
+    )
+
+    processing_registry = (
+        create_beta1_processing_registry()
+    )
+
+    screening_service = ScreeningService()
+
+    screening_adapter = (
+        ProcessingActivityScreeningAdapter(
+            screening_service,
+        )
+    )
+
+    application.include_router(
+        create_privacy_screening_router(
+            processing_registry=processing_registry,
+            screening_adapter=screening_adapter,
+        ),
+    )
+
+    application.include_router(
+        provider_management_controls_router,
+    )
+
+    application.include_router(
+        governance_audit_router,
+    )
+
+    application.include_router(
+        governance_operations_router,
+    )
+
+    application.include_router(
+        governance_evidence_router,
+    )
+
+    application.include_router(
+        governance_change_lifecycle_router,
+    )
+
+    application.include_router(
+        cybersecurity_intelligence_router,
+    )
+
+    application.include_router(
+        cybersecurity_decision_support_router,
+    )
+
+    application.include_router(
+        cybersecurity_reports_router,
+    )
+
+    application.include_router(
+        cybersecurity_live_reports_router,
+    )
+
+    # Q7 / M4 - Questionnaire Runtime
+    #
+    # Authenticated learner runtime endpoint:
+    # POST /api/academy/questionnaires/answers
+    #
+    # Learner identity is derived server-side from the authenticated
+    # principal. The runtime reuses the existing AssessmentService and
+    # synchronous PostgreSQL persistence boundary.
+    application.include_router(
+        create_questionnaire_runtime_router(
+            runtime=questionnaire_runtime,
+        ),
+    )
+
+    # Academy World - Static Questionnaires
+    #
+    # This exposes:
+    # GET /api/academy/worlds/{world_id}/questionnaires
+    #
+    # Questionnaire content remains controlled/static.
+    # Recommendation metadata is handled separately.
+
+    application.include_router(
+        academy_questionnaires_router,
+    )
+
+    return application
+
+
+app = create_application()
+
+
+__all__ = [
+    "app",
+    "create_application",
+]
+
+
+
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_apscheduler_adapter.py
+---------------------------------------------------------------------
+"""
+Cybersecurity APScheduler Adapter.
+
+Infrastructure boundary for scheduled workflows.
+
+Responsibilities:
+- register existing cybersecurity jobs;
+- optionally register privacy governance reminders;
+- optionally register Academy notification workflows;
+- start and stop the single APScheduler instance.
+
+Does NOT:
+- own Academy eligibility;
+- own Academy delivery state;
+- send emails directly;
+- send Telegram messages directly;
+- make governance decisions;
+- create a second scheduler.
+"""
+
+from __future__ import annotations
+
+from cybersecurity.scheduler.scheduler_configuration import (
+    DAILY_REPORT_HOUR,
+    DAILY_REPORT_MINUTE,
+    WEEKLY_REPORT_DAY,
+    WEEKLY_REPORT_HOUR,
+    WEEKLY_REPORT_MINUTE,
+)
+
+
+class CybersecurityAPSchedulerAdapter:
+    """APScheduler implementation boundary.
+
+    All scheduled application workflows share this single scheduler.
+
+    Optional workflows remain dependency-injected so existing
+    cybersecurity-only tests and deployments remain backwards compatible.
+    """
+
+    def __init__(
+        self,
+        scheduler,
+        workflow_service,
+        governance_reminder_workflow=None,
+        governance_reminder_interval_minutes: int = 60,
+        academy_one_week_workflow=None,
+        academy_one_week_hour: int = 8,
+        academy_one_week_minute: int = 15,
+    ) -> None:
+        if scheduler is None:
+            raise ValueError("scheduler cannot be None.")
+
+        if workflow_service is None:
+            raise ValueError("workflow_service cannot be None.")
+
+        if governance_reminder_interval_minutes <= 0:
+            raise ValueError(
+                "governance_reminder_interval_minutes must be > 0."
+            )
+
+        if not 0 <= academy_one_week_hour <= 23:
+            raise ValueError(
+                "academy_one_week_hour must be between 0 and 23."
+            )
+
+        if not 0 <= academy_one_week_minute <= 59:
+            raise ValueError(
+                "academy_one_week_minute must be between 0 and 59."
+            )
+
+        self.scheduler = scheduler
+        self.workflow_service = workflow_service
+
+        self.governance_reminder_workflow = (
+            governance_reminder_workflow
+        )
+        self.governance_reminder_interval_minutes = (
+            governance_reminder_interval_minutes
+        )
+
+        self.academy_one_week_workflow = (
+            academy_one_week_workflow
+        )
+        self.academy_one_week_hour = academy_one_week_hour
+        self.academy_one_week_minute = academy_one_week_minute
+
+    def register_jobs(self) -> None:
+        """Register all enabled workflows on the single scheduler."""
+
+        self.scheduler.add_job(
+            self.workflow_service.create_daily_report,
+            trigger="cron",
+            hour=DAILY_REPORT_HOUR,
+            minute=DAILY_REPORT_MINUTE,
+            id="cybersecurity_daily_report",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            self.workflow_service.create_weekly_report,
+            trigger="cron",
+            day_of_week=WEEKLY_REPORT_DAY,
+            hour=WEEKLY_REPORT_HOUR,
+            minute=WEEKLY_REPORT_MINUTE,
+            id="cybersecurity_weekly_report",
+            replace_existing=True,
+        )
+
+        if self.governance_reminder_workflow is not None:
+            self.scheduler.add_job(
+                self.governance_reminder_workflow.run,
+                trigger="interval",
+                minutes=self.governance_reminder_interval_minutes,
+                id="privacy_governance_reminder",
+                replace_existing=True,
+            )
+
+        if self.academy_one_week_workflow is not None:
+            self.scheduler.add_job(
+                self.academy_one_week_workflow.run,
+                trigger="cron",
+                hour=self.academy_one_week_hour,
+                minute=self.academy_one_week_minute,
+                id="academy_one_week_milestone",
+                replace_existing=True,
+            )
+
+    def register_critical_handler(self, handler) -> None:
+        self.critical_handler = handler
+
+    async def trigger_critical_event(self, event: dict):
+        if not hasattr(self, "critical_handler"):
+            return None
+
+        return await self.critical_handler(event)
+
+    def start(self) -> None:
+        if not self.scheduler.running:
+            self.scheduler.start()
+
+    def shutdown(self) -> None:
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+
+
+__all__ = [
+    "CybersecurityAPSchedulerAdapter",
+]
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_factory.py
+---------------------------------------------------------------------
+"""
+Cybersecurity Scheduler Factory.
+
+Creates the single shared scheduler runtime.
+
+Academy is composed as an optional application workflow and
+registered on the existing scheduler. No second scheduler is created.
+"""
+
+from __future__ import annotations
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from cybersecurity.scheduler.cybersecurity_scheduler_runtime import (
+    CybersecuritySchedulerRuntime,
+)
+
+from cybersecurity.scheduler.cybersecurity_apscheduler_adapter import (
+    CybersecurityAPSchedulerAdapter,
+)
+
+from cybersecurity.scheduler.scheduler_configuration import (
+    SCHEDULER_TIMEZONE,
+)
+
+from cybersecurity.scheduler.cybersecurity_scheduler_workflow import (
+    CybersecuritySchedulerWorkflow,
+)
+
+from cybersecurity.email.cybersecurity_email_service import (
+    CybersecurityEmailService,
+)
+
+from app.application.composition.academy_production import (
+    create_academy_one_week_workflow,
+)
+
+
+def create_cybersecurity_scheduler_runtime(
+    workflow_service=None,
+    *,
+    academy_one_week_workflow=None,
+) -> CybersecuritySchedulerRuntime:
+    """Create the single shared scheduler runtime."""
+
+    if workflow_service is None:
+        email_service = CybersecurityEmailService(
+            recipient="davdbarbero1999@gmail.com",
+        )
+
+        workflow_service = CybersecuritySchedulerWorkflow(
+            email_service=email_service,
+        )
+
+    scheduler = AsyncIOScheduler(
+        timezone=SCHEDULER_TIMEZONE,
+    )
+
+    # Academy production composition is explicit and injectable.
+    #
+    # It is deliberately NOT created here automatically because the
+    # application import path must remain safe when PostgreSQL is not
+    # configured in a development/test environment.
+    #
+    # Production composition may inject the completed Academy workflow.
+
+    adapter = CybersecurityAPSchedulerAdapter(
+        scheduler=scheduler,
+        workflow_service=workflow_service,
+        academy_one_week_workflow=academy_one_week_workflow,
+    )
+
+    return CybersecuritySchedulerRuntime(
+        scheduler_adapter=adapter,
+    )
+
+
+__all__ = [
+    "create_cybersecurity_scheduler_runtime",
+]
+
+
+---------------------------------------------------------------------
+FILE: C:\AI Folder\EasyChatBot-Hackathon\backend\cybersecurity\scheduler\cybersecurity_scheduler_runtime.py
+---------------------------------------------------------------------
+"""
+Cybersecurity Scheduler Runtime.
+
+Lifecycle manager for cybersecurity scheduling.
+
+Responsibilities:
+- start scheduler;
+- register jobs;
+- stop scheduler;
+- expose runtime state.
+
+Does NOT:
+- execute reports;
+- send emails;
+- make security decisions;
+- perform remediation.
+"""
+
+from __future__ import annotations
+
+
+from cybersecurity.scheduler.cybersecurity_job_registry import (
+    CybersecurityJobRegistry,
+)
+
+
+
+class CybersecuritySchedulerRuntime:
+    """
+    Scheduler lifecycle boundary.
+
+    Supports:
+
+    - registry based execution/testing;
+    - production scheduler adapter.
+
+    Architecture:
+
+        FastAPI lifespan
+              |
+              v
+    CybersecuritySchedulerRuntime
+              |
+              +----------------+
+              |                |
+              v                v
+
+        Job Registry     Scheduler Adapter
+
+          (tests)          (production)
+
+    """
+
+
+
+    def __init__(
+        self,
+        scheduler_adapter=None,
+        job_registry: CybersecurityJobRegistry | None = None,
+    ) -> None:
+        """
+        Initialize scheduler runtime.
+        """
+
+
+        self.scheduler_adapter = (
+            scheduler_adapter
+        )
+
+
+        self.job_registry = (
+            job_registry
+            or CybersecurityJobRegistry()
+        )
+
+
+        self._started = False
+
+
+
+    async def start(
+        self,
+    ) -> None:
+        """
+        Start scheduler runtime.
+
+        Registers scheduled cybersecurity workflows.
+        """
+
+
+        if self.scheduler_adapter is not None:
+
+            #
+            # Production scheduler boundary.
+            #
+            # Example:
+            # APScheduler adapter
+            #
+
+            self.scheduler_adapter.register_jobs()
+
+            self.scheduler_adapter.start()
+
+
+        else:
+
+            #
+            # Registry mode.
+            #
+            # Used for testing and controlled execution.
+            #
+
+            self.job_registry.register(
+
+                name=(
+                    "cybersecurity_daily_report"
+                ),
+
+                schedule=(
+                    "daily_08:00"
+                ),
+
+            )
+
+
+            self.job_registry.register(
+
+                name=(
+                    "cybersecurity_weekly_report"
+                ),
+
+                schedule=(
+                    "weekly_monday_08:00"
+                ),
+
+            )
+
+
+            self.job_registry.register(
+
+                name=(
+                    "cybersecurity_critical_alert"
+                ),
+
+                schedule=(
+                    "event_immediate"
+                ),
+
+            )
+
+
+
+        self._started = True
+
+
+
+    async def stop(
+        self,
+    ) -> None:
+        """
+        Stop scheduler runtime.
+        """
+
+
+        if self.scheduler_adapter is not None:
+
+            self.scheduler_adapter.shutdown()
+
+
+
+        self._started = False
+
+
+
+    def status(
+        self,
+    ) -> dict:
+        """
+        Return scheduler runtime status.
+
+        Provides backward-compatible fields:
+
+        - jobs
+        - registered_jobs
+        """
+
+
+        jobs = (
+            self.job_registry.list_jobs()
+        )
+
+
+
+        return {
+
+            "started":
+                self._started,
+
+
+            "adapter_enabled":
+                self.scheduler_adapter is not None,
+
+
+            #
+            # Existing test contract
+            #
+            "jobs":
+                jobs,
+
+
+            #
+            # Extended API contract
+            #
+            "registered_jobs":
+                jobs,
+
+        }
+
+
+=====================================================================
+37. TARGETED TEST EVIDENCE
+=====================================================================

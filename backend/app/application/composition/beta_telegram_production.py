@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿
+from __future__ import annotations
 
 import logging
 import os
@@ -68,6 +69,9 @@ from app.infrastructure.persistence.postgresql_beta_access_repository import (
 )
 from app.infrastructure.persistence.postgresql_conversation_event_repository import (
     PostgreSQLConversationEventRepository,
+)
+from app.infrastructure.persistence.postgresql_telegram_update_idempotency_repository import (
+    PostgreSQLTelegramUpdateIdempotencyRepository,
 )
 from app.infrastructure.persistence.postgresql_learner_world_access_repository import (
     PostgreSQLLearnerWorldAccessRepository,
@@ -304,6 +308,16 @@ def create_production_beta_telegram_composition(
     )
 
     # ------------------------------------------------------------------
+    # W19.10 Telegram inbound update idempotency
+    # ------------------------------------------------------------------
+
+    telegram_update_idempotency = (
+        PostgreSQLTelegramUpdateIdempotencyRepository(
+            session_factory=session_factory,
+        )
+    )
+
+    # ------------------------------------------------------------------
     # Canonical World infrastructure
     # ------------------------------------------------------------------
 
@@ -394,7 +408,9 @@ def create_production_beta_telegram_composition(
         WorldTelegramCommunityConversationBoundary(
             world_access_service=world_access_service,
             world_catalogue_repository=catalogue_repository,
-            destination_repository=world_telegram_destination_repository,
+            destination_repository=(
+                world_telegram_destination_repository
+            ),
             membership_service=world_telegram_membership_service,
         )
     )
@@ -480,6 +496,9 @@ def create_production_beta_telegram_composition(
         conversation_event_repository=(
             conversation_event_repository
         ),
+        telegram_update_idempotency=(
+            telegram_update_idempotency
+        ),
         privacy_identifier_service=(
             privacy_identifier_service
         ),
@@ -515,7 +534,8 @@ def create_production_beta_telegram_composition(
         "W19.3 controlled World Telegram community access, "
         "W19.4 community conversation boundary, "
         "durable usage ledger, functionality control, "
-        "and Study Material service."
+        "Study Material service, and W19.10 inbound "
+        "Telegram update idempotency."
     )
 
     return BetaTelegramProductionComposition(

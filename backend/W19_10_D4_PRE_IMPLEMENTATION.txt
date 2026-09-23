@@ -1,0 +1,1964 @@
+﻿=== PROVIDER FAILURE ===
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.providers.provider_result import ProviderResult
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailure(RuntimeError):
+    """Application-level typed representation of a failed LLM request."""
+
+    code: str
+    provider_id: str
+    provider_request_id: str | None
+    message: str
+    retryable: bool = True
+
+    def __post_init__(self) -> None:
+        if self.code != "PROVIDER_TEMPORARILY_UNAVAILABLE":
+            raise ValueError(
+                "W19.10-D4 ProviderFailure currently supports only "
+                "PROVIDER_TEMPORARILY_UNAVAILABLE."
+            )
+        if not self.provider_id.strip():
+            raise ValueError("provider_id is required.")
+        if not self.message.strip():
+            raise ValueError("message is required.")
+
+        RuntimeError.__init__(self, self.message)
+
+    @classmethod
+    def from_result(cls, result: ProviderResult) -> "ProviderFailure":
+        if result.success:
+            raise ValueError(
+                "ProviderFailure cannot be created from a successful ProviderResult."
+            )
+
+        return cls(
+            code="PROVIDER_TEMPORARILY_UNAVAILABLE",
+            provider_id=result.provider_id,
+            provider_request_id=result.provider_request_id,
+            message=(
+                "The configured AI provider is temporarily unavailable."
+            ),
+            retryable=True,
+        )
+
+
+__all__ = ["ProviderFailure"]
+
+
+=== BOUNDARY ===
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Protocol
+
+from app.application.beta_access.beta_access_service import (
+    BetaAccessService,
+)
+from app.application.beta_access.policies.telegram_policy_messages import (
+    TelegramPolicyMessageService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.private_chat.telegram_private_chat_bridge import (
+    TelegramPrivateChatBridge,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramPolicy(Protocol):
+    async def allow(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> bool:
+        ...
+
+
+class TelegramObservability(Protocol):
+    async def record(
+        self,
+        *,
+        event_type: str,
+        telegram_user_id: int,
+        outcome: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        ...
+
+
+class BetaTelegramConversationBoundary:
+    """Application policy boundary for Beta Telegram conversations."""
+
+    MAX_TELEGRAM_MESSAGE_LENGTH = 4096
+
+    TELEGRAM_FUNCTIONALITY_ID = "telegram"
+    TELEGRAM_OPERATIONS_ENVIRONMENT = "adults"
+
+    SAFE_ERROR_RESPONSE = (
+        "Sorry, something went wrong while processing your message. "
+        "Please try again later."
+    )
+
+    UNAUTHORIZED_RESPONSE = (
+        "Sorry, this Telegram account is not authorized "
+        "and is not approved for Beta access."
+    )
+
+    FUNCTIONALITY_DISABLED_RESPONSE = (
+        "Sorry, the Telegram classroom is temporarily unavailable. "
+        "Please try again later."
+    )
+
+    def __init__(
+        self,
+        *,
+        conversation_service: Any,
+        beta_access_service: BetaAccessService,
+        rate_limiter: TelegramPolicy | None = None,
+        abuse_protector: TelegramPolicy | None = None,
+        observability: TelegramObservability | None = None,
+        policy_message_service: TelegramPolicyMessageService | None = None,
+        functionality_control_service: (
+            FunctionalityOperationalControlService | None
+        ) = None,
+        private_chat_bridge: TelegramPrivateChatBridge | None = None,
+    ) -> None:
+        if conversation_service is None:
+            raise ValueError(
+                "conversation_service cannot be None."
+            )
+
+        if beta_access_service is None:
+            raise ValueError(
+                "beta_access_service cannot be None."
+            )
+
+        self._conversation_service = conversation_service
+        self._beta_access_service = beta_access_service
+        self._rate_limiter = rate_limiter
+        self._abuse_protector = abuse_protector
+        self._observability = observability
+        self._policy_message_service = (
+            policy_message_service
+            or TelegramPolicyMessageService()
+        )
+        self._functionality_control_service = (
+            functionality_control_service
+        )
+        self._private_chat_bridge = private_chat_bridge
+
+    async def _record(
+        self,
+        *,
+        event_type: str,
+        telegram_user_id: int,
+        outcome: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self._observability is None:
+            return
+
+        try:
+            await self._observability.record(
+                event_type=event_type,
+                telegram_user_id=telegram_user_id,
+                outcome=outcome,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception(
+                "Telegram observability failure for event_type=%s.",
+                event_type,
+            )
+
+    async def _functionality_is_enabled(
+        self,
+        *,
+        telegram_user_id: int,
+    ) -> bool:
+        control_service = self._functionality_control_service
+
+        # Legacy/unit-test compositions may omit operational control.
+        # Production composition always supplies it.
+        if control_service is None:
+            return True
+
+        environment = self.TELEGRAM_OPERATIONS_ENVIRONMENT
+        environment_value = getattr(
+            environment,
+            "value",
+            environment,
+        )
+
+        try:
+            availability = await asyncio.to_thread(
+                control_service.get_availability,
+                environment=environment,
+                functionality_id=self.TELEGRAM_FUNCTIONALITY_ID,
+            )
+
+        except Exception as exc:
+            await self._record(
+                event_type="telegram_classroom_functionality_control",
+                telegram_user_id=telegram_user_id,
+                outcome="error",
+                metadata={
+                    "functionality_id": self.TELEGRAM_FUNCTIONALITY_ID,
+                    "environment": environment_value,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            logger.exception(
+                "Telegram functionality-control lookup failed."
+            )
+
+            # Fail closed: an unavailable control plane must not
+            # permit Telegram classroom processing.
+            return False
+
+        enabled = availability == "enabled"
+
+        await self._record(
+            event_type="telegram_classroom_functionality_control",
+            telegram_user_id=telegram_user_id,
+            outcome="allowed" if enabled else "blocked",
+            metadata={
+                "functionality_id": self.TELEGRAM_FUNCTIONALITY_ID,
+                "environment": environment_value,
+            },
+        )
+
+        return enabled
+
+    async def handle_message(
+        self,
+        *,
+        telegram_user_id: int,
+        message: str,
+    ) -> Any:
+        self._validate_telegram_user_id(
+            telegram_user_id,
+        )
+
+        clean_message = self._validate_message(
+            message,
+        )
+
+        # ---------------------------------------------------------------
+        # Beta authorization / World context
+        # ---------------------------------------------------------------
+        try:
+            context = await (
+                self._beta_access_service
+                .get_conversation_context(
+                    telegram_user_id,
+                )
+            )
+
+        except PermissionError:
+            await self._record(
+                event_type="telegram_classroom_authorization",
+                telegram_user_id=telegram_user_id,
+                outcome="denied",
+            )
+
+            return self.UNAUTHORIZED_RESPONSE
+
+        except Exception as exc:
+            await self._record(
+                event_type="telegram_classroom_authorization",
+                telegram_user_id=telegram_user_id,
+                outcome="error",
+                metadata={
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            logger.exception(
+                "Telegram Beta access/context resolution failed."
+            )
+
+            return self.SAFE_ERROR_RESPONSE
+
+        # ---------------------------------------------------------------
+        # Functionality operational control
+        # ---------------------------------------------------------------
+        #
+        # This deliberately occurs after authorization/context resolution
+        # but before rate limiting, abuse protection, persistence or AI.
+        #
+        if not await self._functionality_is_enabled(
+            telegram_user_id=telegram_user_id,
+        ):
+            return self.FUNCTIONALITY_DISABLED_RESPONSE
+
+        # ---------------------------------------------------------------
+        # Rate limiting
+        # ---------------------------------------------------------------
+        if self._rate_limiter is not None:
+            try:
+                allowed = await self._rate_limiter.allow(
+                    telegram_user_id=telegram_user_id,
+                )
+
+            except Exception as exc:
+                await self._record(
+                    event_type="telegram_classroom_rate_limit",
+                    telegram_user_id=telegram_user_id,
+                    outcome="error",
+                    metadata={
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+                logger.exception(
+                    "Telegram rate limiter failed."
+                )
+
+                return self.SAFE_ERROR_RESPONSE
+
+            if not allowed:
+                await self._record(
+                    event_type="telegram_classroom_rate_limit",
+                    telegram_user_id=telegram_user_id,
+                    outcome="blocked",
+                    metadata={
+                        "world_id": context.world_id,
+                    },
+                )
+
+                return (
+                    self._policy_message_service
+                    .rate_limit_message(
+                        context=context,
+                        retry_after_seconds=(
+                            self._get_rate_limit_retry_after_seconds()
+                        ),
+                    )
+                )
+
+        # ---------------------------------------------------------------
+        # Abuse protection
+        # ---------------------------------------------------------------
+        if self._abuse_protector is not None:
+            try:
+                allowed = await self._abuse_protector.allow(
+                    telegram_user_id=telegram_user_id,
+                )
+
+            except Exception as exc:
+                await self._record(
+                    event_type=(
+                        "telegram_classroom_abuse_protection"
+                    ),
+                    telegram_user_id=telegram_user_id,
+                    outcome="error",
+                    metadata={
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+                logger.exception(
+                    "Telegram abuse protection failed."
+                )
+
+                return self.SAFE_ERROR_RESPONSE
+
+            if not allowed:
+                await self._record(
+                    event_type=(
+                        "telegram_classroom_abuse_protection"
+                    ),
+                    telegram_user_id=telegram_user_id,
+                    outcome="blocked",
+                    metadata={
+                        "world_id": context.world_id,
+                    },
+                )
+
+                return (
+                    self._policy_message_service
+                    .abuse_protection_message(
+                        context=context,
+                        retry_after_seconds=(
+                            self._get_abuse_retry_after_seconds()
+                        ),
+                    )
+                )
+
+        # ---------------------------------------------------------------
+        # Accepted classroom message
+        # ---------------------------------------------------------------
+        await self._record(
+            event_type="telegram_classroom_message",
+            telegram_user_id=telegram_user_id,
+            outcome="accepted",
+            metadata={
+                "world_id": context.world_id,
+                "character": context.character,
+                "level": context.level,
+            },
+        )
+
+        # ---------------------------------------------------------------
+        # Conversation / AI Runtime
+        # ---------------------------------------------------------------
+        try:
+            if self._private_chat_bridge is not None:
+                user = getattr(context, "user", None)
+                user_id = getattr(user, "id", None)
+
+                if user_id is None:
+                    raise RuntimeError(
+                        "Telegram conversation context has no authenticated user id."
+                    )
+
+                response = await self._private_chat_bridge.handle_message(
+                    user_id=str(user_id),
+                    world_id=context.world_id,
+                    message=clean_message,
+                )
+
+            else:
+                context_handler = getattr(
+                    self._conversation_service,
+                    "handle_telegram_message_with_context",
+                    None,
+                )
+
+                if context_handler is not None:
+                    response = await context_handler(
+                        telegram_user_id=telegram_user_id,
+                        message=clean_message,
+                        context=context,
+                    )
+
+                else:
+                    response = await (
+                        self._conversation_service
+                        .handle_telegram_message(
+                            telegram_user_id=telegram_user_id,
+                            message=clean_message,
+                        )
+                    )
+
+        except Exception as exc:
+            await self._record(
+                event_type="telegram_classroom_conversation",
+                telegram_user_id=telegram_user_id,
+                outcome="error",
+                metadata={
+                    "world_id": context.world_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            logger.exception(
+                "Telegram conversation processing failed."
+            )
+
+            return self.SAFE_ERROR_RESPONSE
+
+        # ---------------------------------------------------------------
+        # Successful completion
+        # ---------------------------------------------------------------
+        await self._record(
+            event_type="telegram_classroom_conversation",
+            telegram_user_id=telegram_user_id,
+            outcome="success",
+            metadata={
+                "world_id": context.world_id,
+                "character": context.character,
+                "level": context.level,
+            },
+        )
+
+        return response
+
+    def _get_rate_limit_retry_after_seconds(self) -> int:
+        limiter = self._rate_limiter
+
+        if limiter is None:
+            return 60
+
+        window = getattr(
+            limiter,
+            "window_seconds",
+            60,
+        )
+
+        try:
+            return max(
+                1,
+                int(float(window)),
+            )
+        except (TypeError, ValueError):
+            return 60
+
+    def _get_abuse_retry_after_seconds(self) -> int:
+        protector = self._abuse_protector
+
+        if protector is None:
+            return 60
+
+        window = getattr(
+            protector,
+            "window_seconds",
+            60,
+        )
+
+        try:
+            return max(
+                1,
+                int(float(window)),
+            )
+        except (TypeError, ValueError):
+            return 60
+
+    @classmethod
+    def _validate_telegram_user_id(
+        cls,
+        telegram_user_id: int,
+    ) -> None:
+        if isinstance(telegram_user_id, bool):
+            raise ValueError(
+                "Telegram user ID must be a positive integer."
+            )
+
+        if not isinstance(
+            telegram_user_id,
+            int,
+        ):
+            raise TypeError(
+                "Telegram user ID must be a positive integer."
+            )
+
+        if telegram_user_id <= 0:
+            raise ValueError(
+                "Telegram user ID must be a positive integer."
+            )
+
+    @classmethod
+    def _validate_message(
+        cls,
+        message: str,
+    ) -> str:
+        if message is None:
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+        if not isinstance(
+            message,
+            str,
+        ):
+            raise TypeError(
+                "Telegram message must be a string."
+            )
+
+        if not message or not message.strip():
+            raise ValueError(
+                "Telegram message cannot be empty."
+            )
+
+        clean_message = message.strip()
+
+        if len(clean_message) > cls.MAX_TELEGRAM_MESSAGE_LENGTH:
+            raise ValueError(
+                "Telegram message is too long. Maximum length is "
+                f"{cls.MAX_TELEGRAM_MESSAGE_LENGTH} characters."
+            )
+
+        return clean_message
+
+
+__all__ = [
+    "BetaTelegramConversationBoundary",
+]
+
+
+
+
+=== ADAPTER ===
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from app.application.beta_access.beta_telegram_conversation_boundary import (
+    BetaTelegramConversationBoundary,
+)
+from app.application.world_telegram.world_telegram_start_router import (
+    WorldTelegramStartRouter,
+)
+from app.interfaces.telegram.private_chat_gate import (
+    BetaPrivateChatGate,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class BetaTelegramAdapter:
+    """
+    Telegram transport adapter for the Beta private classroom.
+
+    Responsibilities:
+    - handle Telegram transport metadata;
+    - enforce private-chat-only classroom access;
+    - authorize Telegram identity through BetaPrivateChatGate;
+    - forward authorized messages to BetaTelegramConversationBoundary;
+    - deliver safe user-facing Telegram responses.
+
+    Response ownership:
+
+        Conversation Boundary
+                |
+                v
+             response
+                |
+                v
+        BetaTelegramAdapter
+                |
+                +----> Telegram reply_text()
+                |
+                v
+             response
+
+    IMPORTANT:
+
+    The adapter is the SINGLE owner of classroom Telegram response
+    delivery.
+
+    The returned response is provided to the direct caller for
+    testing, observability, and application-level inspection.
+
+    The caller MUST NOT send the returned response to Telegram again.
+
+    This adapter MUST NOT:
+    - call an LLM/provider directly;
+    - access persistence directly;
+    - modify Beta user state directly;
+    - bypass BetaAccessService;
+    - process group/channel messages through the AI path.
+    """
+
+    def __init__(
+        self,
+        *,
+        start_handler: Any,
+        private_chat_gate: BetaPrivateChatGate,
+        conversation_boundary: (
+            BetaTelegramConversationBoundary | None
+        ) = None,
+        world_start_router: WorldTelegramStartRouter | None = None,
+    ) -> None:
+        if start_handler is None:
+            raise ValueError(
+                "start_handler cannot be None."
+            )
+
+        if private_chat_gate is None:
+            raise ValueError(
+                "private_chat_gate cannot be None."
+            )
+
+        self._start_handler = start_handler
+        self._private_chat_gate = private_chat_gate
+        self._conversation_boundary = conversation_boundary
+        self._world_start_router = world_start_router
+
+    # =========================================================
+    # Telegram /start
+    # =========================================================
+
+    async def handle_start(
+        self,
+        update: Any,
+        context: Any,
+    ) -> None:
+        user = getattr(
+            update,
+            "effective_user",
+            None,
+        )
+
+        chat = getattr(
+            update,
+            "effective_chat",
+            None,
+        )
+
+        message = getattr(
+            update,
+            "effective_message",
+            None,
+        )
+
+        if user is None or chat is None:
+            return
+
+        telegram_user_id = getattr(
+            user,
+            "id",
+            None,
+        )
+
+        chat_id = getattr(
+            chat,
+            "id",
+            None,
+        )
+
+        chat_type = getattr(
+            chat,
+            "type",
+            None,
+        )
+
+        if (
+            telegram_user_id is None
+            or chat_id is None
+        ):
+            return
+
+        if chat_type != "private":
+            await self._reply(
+                message,
+                (
+                    "Please connect to the "
+                    "EasyChatBot Academy from a "
+                    "private Telegram chat."
+                ),
+            )
+            return
+
+        token = self._extract_start_token(
+            context,
+        )
+
+        async def reply(
+            text: str,
+            user_override: Any = None,
+        ) -> None:
+            await self._reply(
+                message,
+                text,
+            )
+
+        if self._world_start_router is not None:
+            try:
+                world_route = self._world_start_router.resolve(token)
+            except ValueError as exc:
+                await reply(str(exc))
+                return
+            except Exception:
+                logger.exception(
+                    "Telegram World start routing failed."
+                )
+                await reply(
+                    "We could not resolve that Learning World. "
+                    "Please try again."
+                )
+                return
+
+            if world_route is not None:
+                await reply(
+                    "ðŸŒ Learning World route resolved: "
+                    f"{world_route.world_identifier}"
+                )
+                return
+
+        await self._start_handler.handle(
+            token=token,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            reply=reply,
+        )
+
+    # =========================================================
+    # Private classroom message flow
+    # =========================================================
+
+    async def handle_message(
+        self,
+        update: Any,
+        context: Any = None,
+    ) -> str | None:
+        """
+        Process one Telegram classroom message.
+
+        Response ownership is exclusively inside this adapter.
+
+        Successful flow:
+
+            transport validation
+                    |
+                    v
+            private-chat authorization
+                    |
+                    v
+            conversation boundary
+                    |
+                    v
+              application response
+                    |
+                    +----> Telegram reply_text()
+                    |
+                    v
+              return response
+
+        The response is delivered exactly once.
+
+        The caller may inspect the returned response but MUST NOT
+        send it to Telegram again.
+        """
+
+        if self._conversation_boundary is None:
+            raise RuntimeError(
+                "conversation_boundary is not configured."
+            )
+
+        user = getattr(
+            update,
+            "effective_user",
+            None,
+        )
+
+        chat = getattr(
+            update,
+            "effective_chat",
+            None,
+        )
+
+        message = getattr(
+            update,
+            "effective_message",
+            None,
+        )
+
+        if (
+            user is None
+            or chat is None
+            or message is None
+        ):
+            return None
+
+        telegram_user_id = getattr(
+            user,
+            "id",
+            None,
+        )
+
+        chat_type = getattr(
+            chat,
+            "type",
+            None,
+        )
+
+        if telegram_user_id is None:
+            return None
+
+        # =====================================================
+        # HARD TRANSPORT BOUNDARY
+        # =====================================================
+
+        if chat_type != "private":
+            return None
+
+        # =====================================================
+        # MESSAGE VALIDATION
+        # =====================================================
+
+        text = getattr(
+            message,
+            "text",
+            None,
+        )
+
+        if not isinstance(
+            text,
+            str,
+        ):
+            return None
+
+        text = text.strip()
+
+        if not text:
+            return None
+
+        # =====================================================
+        # BETA ACCESS AUTHORIZATION
+        # =====================================================
+
+        try:
+            authorized = await (
+                self._private_chat_gate.authorize(
+                    telegram_user_id=telegram_user_id,
+                    chat_type=chat_type,
+                )
+            )
+
+        except Exception:
+            logger.exception(
+                "Telegram private-chat authorization failed."
+            )
+
+            await self._reply(
+                message,
+                (
+                    "We could not verify your "
+                    "EasyChatBot Academy access. "
+                    "Please try again."
+                ),
+            )
+
+            return None
+
+        if not authorized:
+            await self._reply(
+                message,
+                (
+                    "Your EasyChatBot Academy Telegram "
+                    "access is not authorized and is not "
+                    "approved for Beta access."
+                ),
+            )
+
+            return None
+
+        # =====================================================
+        # CONVERSATION BOUNDARY
+        # =====================================================
+
+        try:
+            response = await (
+                self._conversation_boundary.handle_message(
+                    telegram_user_id=telegram_user_id,
+                    message=text,
+                )
+            )
+
+        except Exception:
+            logger.exception(
+                "Telegram classroom conversation processing failed."
+            )
+
+            await self._reply(
+                message,
+                (
+                    "Sorry, I could not process "
+                    "your classroom message. "
+                    "Please try again."
+                ),
+            )
+
+            return None
+
+        # =====================================================
+        # SINGLE RESPONSE DELIVERY POINT
+        # =====================================================
+
+        if (
+            isinstance(response, str)
+            and response.strip()
+        ):
+            await self._reply(
+                message,
+                response,
+            )
+
+            # Delivery has already happened exactly once.
+            #
+            # Return only for observability/testing.
+            #
+            # The runtime MUST ignore this value.
+            return response
+
+        return None
+
+    # =========================================================
+    # Helpers
+    # =========================================================
+
+    @staticmethod
+    def _extract_start_token(
+        context: Any,
+    ) -> str | None:
+        args = getattr(
+            context,
+            "args",
+            None,
+        )
+
+        if not args:
+            return None
+
+        if not isinstance(
+            args,
+            (list, tuple),
+        ):
+            return None
+
+        if not args[0]:
+            return None
+
+        return str(
+            args[0]
+        )
+
+    @staticmethod
+    async def _reply(
+        message: Any,
+        text: str,
+    ) -> None:
+        if message is None:
+            return
+
+        reply_text = getattr(
+            message,
+            "reply_text",
+            None,
+        )
+
+        if reply_text is None:
+            return
+
+        await reply_text(
+            text,
+        )
+
+
+__all__ = [
+    "BetaTelegramAdapter",
+]
+
+
+=== EXISTING TELEGRAM TESTS ===
+
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:4:import pytest
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:5:
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:6:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\application\beta_access\test_beta_telegram_private_chat_integration.py:7:    BetaTelegramConversationBoundary,
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:8:)
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:9:from app.application.private_chat.telegram_private_chat_bridge import (
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:10:    TelegramPrivateChatBridge,
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:11:)
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:12:
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:13:
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:103:        private_chat_service_factory=lambda: service,
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:104:    )
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:105:
+> tests\application\beta_access\test_beta_telegram_private_chat_integration.py:106:    boundary = BetaTelegramConversationBoundary(
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:107:        conversation_service=SimpleNamespace(),
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:108:        beta_access_service=FakeBetaAccessService(),
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:109:        rate_limiter=AllowPolicy(),
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:110:        abuse_protector=AllowPolicy(),
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:111:        observability=FakeObservability(),
+  tests\application\beta_access\test_beta_telegram_private_chat_integration.py:112:        private_chat_bridge=bridge,
+  tests\application\composition\test_w19_5_private_chat_composition.py:71:    )
+  tests\application\composition\test_w19_5_private_chat_composition.py:72:    monkeypatch.setattr(
+  tests\application\composition\test_w19_5_private_chat_composition.py:73:        composition,
+> tests\application\composition\test_w19_5_private_chat_composition.py:74:        "BetaTelegramConversationBoundary",
+  tests\application\composition\test_w19_5_private_chat_composition.py:75:        FakeConversationBoundary,
+  tests\application\composition\test_w19_5_private_chat_composition.py:76:    )
+  tests\application\composition\test_w19_5_private_chat_composition.py:77:    monkeypatch.setattr(
+  tests\application\composition\test_w19_5_private_chat_composition.py:78:        composition,
+  tests\application\composition\test_w19_5_private_chat_composition.py:79:        "BetaPrivateChatGate",
+  tests\application\composition\test_w19_5_private_chat_composition.py:80:        FakePrivateChatGate,
+  tests\application\composition\test_w19_5_private_chat_composition.py:86:    )
+  tests\application\composition\test_w19_5_private_chat_composition.py:87:    monkeypatch.setattr(
+  tests\application\composition\test_w19_5_private_chat_composition.py:88:        composition,
+> tests\application\composition\test_w19_5_private_chat_composition.py:89:        "BetaTelegramAdapter",
+  tests\application\composition\test_w19_5_private_chat_composition.py:90:        FakeAdapter,
+  tests\application\composition\test_w19_5_private_chat_composition.py:91:    )
+  tests\application\composition\test_w19_5_private_chat_composition.py:92:    monkeypatch.setattr(
+  tests\application\composition\test_w19_5_private_chat_composition.py:93:        composition,
+  tests\application\composition\test_w19_5_private_chat_composition.py:94:        "TelegramBotRuntime",
+  tests\application\composition\test_w19_5_private_chat_composition.py:95:        FakeRuntime,
+  tests\beta_access\test_phase_b1_telegram_transport.py:142:@pytest.mark.asyncio
+  tests\beta_access\test_phase_b1_telegram_transport.py:143:async def test_adapter_start_passes_correct_contract():
+  tests\beta_access\test_phase_b1_telegram_transport.py:144:    from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_phase_b1_telegram_transport.py:145:        BetaTelegramAdapter,
+  tests\beta_access\test_phase_b1_telegram_transport.py:146:    )
+  tests\beta_access\test_phase_b1_telegram_transport.py:147:
+  tests\beta_access\test_phase_b1_telegram_transport.py:148:    calls = []
+  tests\beta_access\test_phase_b1_telegram_transport.py:149:
+  tests\beta_access\test_phase_b1_telegram_transport.py:150:    class Handler:
+  tests\beta_access\test_phase_b1_telegram_transport.py:151:        async def handle(self, **kwargs):
+  tests\beta_access\test_phase_b1_telegram_transport.py:155:        async def authorize(self, **kwargs):
+  tests\beta_access\test_phase_b1_telegram_transport.py:156:            return True
+  tests\beta_access\test_phase_b1_telegram_transport.py:157:
+> tests\beta_access\test_phase_b1_telegram_transport.py:158:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_phase_b1_telegram_transport.py:159:        start_handler=Handler(),
+  tests\beta_access\test_phase_b1_telegram_transport.py:160:        private_chat_gate=Gate(),
+  tests\beta_access\test_phase_b1_telegram_transport.py:161:    )
+  tests\beta_access\test_phase_b1_telegram_transport.py:162:
+  tests\beta_access\test_phase_b1_telegram_transport.py:163:    update = FakeUpdate(
+  tests\beta_access\test_phase_b1_telegram_transport.py:164:        effective_user=FakeUser(111),
+  tests\beta_access\test_private_chat_gate.py:142:@pytest.mark.asyncio
+  tests\beta_access\test_private_chat_gate.py:143:async def test_adapter_start_passes_correct_contract():
+  tests\beta_access\test_private_chat_gate.py:144:    from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_private_chat_gate.py:145:        BetaTelegramAdapter,
+  tests\beta_access\test_private_chat_gate.py:146:    )
+  tests\beta_access\test_private_chat_gate.py:147:
+  tests\beta_access\test_private_chat_gate.py:148:    calls = []
+  tests\beta_access\test_private_chat_gate.py:149:
+  tests\beta_access\test_private_chat_gate.py:150:    class Handler:
+  tests\beta_access\test_private_chat_gate.py:151:        async def handle(self, **kwargs):
+  tests\beta_access\test_private_chat_gate.py:155:        async def authorize(self, **kwargs):
+  tests\beta_access\test_private_chat_gate.py:156:            return True
+  tests\beta_access\test_private_chat_gate.py:157:
+> tests\beta_access\test_private_chat_gate.py:158:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_private_chat_gate.py:159:        start_handler=Handler(),
+  tests\beta_access\test_private_chat_gate.py:160:        private_chat_gate=Gate(),
+  tests\beta_access\test_private_chat_gate.py:161:    )
+  tests\beta_access\test_private_chat_gate.py:162:
+  tests\beta_access\test_private_chat_gate.py:163:    update = FakeUpdate(
+  tests\beta_access\test_private_chat_gate.py:164:        effective_user=FakeUser(111),
+  tests\beta_access\test_telegram_classroom_policy_controls.py:7:import pytest
+  tests\beta_access\test_telegram_classroom_policy_controls.py:8:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:9:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_telegram_classroom_policy_controls.py:10:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:11:)
+  tests\beta_access\test_telegram_classroom_policy_controls.py:12:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:13:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:14:@dataclass(frozen=True)
+  tests\beta_access\test_telegram_classroom_policy_controls.py:15:class FakePrincipal:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:16:    user_id: str = "test-user"
+  tests\beta_access\test_telegram_classroom_policy_controls.py:40:    *,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:41:    availability: str = "enabled",
+  tests\beta_access\test_telegram_classroom_policy_controls.py:42:) -> tuple[
+> tests\beta_access\test_telegram_classroom_policy_controls.py:43:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:44:    FakeFunctionalityControlService,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:45:]:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:46:    control_service = FakeFunctionalityControlService(
+  tests\beta_access\test_telegram_classroom_policy_controls.py:47:        availability=availability,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:48:    )
+  tests\beta_access\test_telegram_classroom_policy_controls.py:49:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:50:    conversation_service = MagicMock(name="conversation_service")
+  tests\beta_access\test_telegram_classroom_policy_controls.py:51:    beta_access_service = MagicMock(name="beta_access_service")
+  tests\beta_access\test_telegram_classroom_policy_controls.py:52:
+> tests\beta_access\test_telegram_classroom_policy_controls.py:53:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_telegram_classroom_policy_controls.py:54:        conversation_service=conversation_service,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:55:        beta_access_service=beta_access_service,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:56:        functionality_control_service=control_service,
+  tests\beta_access\test_telegram_classroom_policy_controls.py:57:    )
+  tests\beta_access\test_telegram_classroom_policy_controls.py:58:
+  tests\beta_access\test_telegram_classroom_policy_controls.py:59:    return boundary, control_service
+  tests\beta_access\test_telegram_runtime_integration.py:48:            )
+  tests\beta_access\test_telegram_runtime_integration.py:49:        )
+  tests\beta_access\test_telegram_runtime_integration.py:50:
+> tests\beta_access\test_telegram_runtime_integration.py:51:        # The real BetaTelegramAdapter owns Telegram response
+  tests\beta_access\test_telegram_runtime_integration.py:52:        # delivery. The fake must model the same contract.
+  tests\beta_access\test_telegram_runtime_integration.py:53:        if (
+  tests\beta_access\test_telegram_runtime_integration.py:54:            isinstance(response, str)
+  tests\beta_access\test_telegram_runtime_integration.py:55:            and response.strip()
+  tests\beta_access\test_telegram_runtime_integration.py:56:        ):
+> tests\beta_access\test_telegram_runtime_integration.py:57:            await message.reply_text(response)
+  tests\beta_access\test_telegram_runtime_integration.py:58:
+  tests\beta_access\test_telegram_runtime_integration.py:59:        return response
+  tests\beta_access\test_telegram_runtime_integration.py:60:
+  tests\beta_access\test_telegram_runtime_integration.py:61:
+  tests\beta_access\test_telegram_runtime_integration.py:62:@dataclass
+  tests\beta_access\test_telegram_runtime_integration.py:63:class FakeUser:
+  tests\beta_access\test_telegram_runtime_integration.py:78:        self.text = text
+  tests\beta_access\test_telegram_runtime_integration.py:79:        self.replies: list[str] = []
+  tests\beta_access\test_telegram_runtime_integration.py:80:
+> tests\beta_access\test_telegram_runtime_integration.py:81:    async def reply_text(
+  tests\beta_access\test_telegram_runtime_integration.py:82:        self,
+  tests\beta_access\test_telegram_runtime_integration.py:83:        message: str,
+  tests\beta_access\test_telegram_runtime_integration.py:84:    ) -> None:
+  tests\beta_access\test_telegram_runtime_integration.py:85:        self.replies.append(message)
+  tests\beta_access\test_telegram_runtime_integration.py:86:
+  tests\beta_access\test_telegram_runtime_integration.py:87:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:25:    WorldSelectionService,
+  tests\beta_access\test_w19_9_learner_journey_integration.py:26:)
+  tests\beta_access\test_w19_9_learner_journey_integration.py:27:from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_w19_9_learner_journey_integration.py:28:    BetaTelegramAdapter,
+  tests\beta_access\test_w19_9_learner_journey_integration.py:29:)
+  tests\beta_access\test_w19_9_learner_journey_integration.py:30:from app.infrastructure.telegram.telegram_bot_runtime import (
+  tests\beta_access\test_w19_9_learner_journey_integration.py:31:    TelegramBotRuntime,
+  tests\beta_access\test_w19_9_learner_journey_integration.py:32:)
+  tests\beta_access\test_w19_9_learner_journey_integration.py:33:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:34:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:167:        self.text = text
+  tests\beta_access\test_w19_9_learner_journey_integration.py:168:        self.replies: list[str] = []
+  tests\beta_access\test_w19_9_learner_journey_integration.py:169:
+> tests\beta_access\test_w19_9_learner_journey_integration.py:170:    async def reply_text(self, text: str) -> None:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:171:        self.replies.append(text)
+  tests\beta_access\test_w19_9_learner_journey_integration.py:172:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:173:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:174:@dataclass
+  tests\beta_access\test_w19_9_learner_journey_integration.py:175:class FakeTelegramUpdate:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:176:    effective_user: FakeTelegramUser
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1086:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1087:        assert isinstance(
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1088:            adapter,
+> tests\beta_access\test_w19_9_learner_journey_integration.py:1089:            BetaTelegramAdapter,
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1090:        )
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1091:
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1092:        # The production adapter must still expose its existing start handler.
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1093:        start_handler = getattr(
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1094:            adapter,
+  tests\beta_access\test_w19_9_learner_journey_integration.py:1095:            "_start_handler",
+  tests\beta_access\test_ws03_private_classroom_flow.py:8:    TelegramBotRuntime,
+  tests\beta_access\test_ws03_private_classroom_flow.py:9:)
+  tests\beta_access\test_ws03_private_classroom_flow.py:10:from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_ws03_private_classroom_flow.py:11:    BetaTelegramAdapter,
+  tests\beta_access\test_ws03_private_classroom_flow.py:12:)
+  tests\beta_access\test_ws03_private_classroom_flow.py:13:
+  tests\beta_access\test_ws03_private_classroom_flow.py:14:
+  tests\beta_access\test_ws03_private_classroom_flow.py:15:@dataclass
+  tests\beta_access\test_ws03_private_classroom_flow.py:16:class FakeUser:
+  tests\beta_access\test_ws03_private_classroom_flow.py:17:    id: int
+  tests\beta_access\test_ws03_private_classroom_flow.py:31:        self.text = text
+  tests\beta_access\test_ws03_private_classroom_flow.py:32:        self.replies: list[str] = []
+  tests\beta_access\test_ws03_private_classroom_flow.py:33:
+> tests\beta_access\test_ws03_private_classroom_flow.py:34:    async def reply_text(
+  tests\beta_access\test_ws03_private_classroom_flow.py:35:        self,
+  tests\beta_access\test_ws03_private_classroom_flow.py:36:        text: str,
+  tests\beta_access\test_ws03_private_classroom_flow.py:37:    ) -> None:
+  tests\beta_access\test_ws03_private_classroom_flow.py:38:        self.replies.append(text)
+  tests\beta_access\test_ws03_private_classroom_flow.py:39:
+  tests\beta_access\test_ws03_private_classroom_flow.py:40:
+  tests\beta_access\test_ws03_private_classroom_flow.py:98:    gate = FakeGate()
+  tests\beta_access\test_ws03_private_classroom_flow.py:99:    boundary = FakeBoundary()
+  tests\beta_access\test_ws03_private_classroom_flow.py:100:
+> tests\beta_access\test_ws03_private_classroom_flow.py:101:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws03_private_classroom_flow.py:102:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws03_private_classroom_flow.py:103:        private_chat_gate=gate,
+  tests\beta_access\test_ws03_private_classroom_flow.py:104:        conversation_boundary=boundary,
+  tests\beta_access\test_ws03_private_classroom_flow.py:105:    )
+  tests\beta_access\test_ws03_private_classroom_flow.py:106:
+  tests\beta_access\test_ws03_private_classroom_flow.py:107:    runtime = TelegramBotRuntime(
+  tests\beta_access\test_ws03_private_classroom_flow.py:152:    gate = FakeGate()
+  tests\beta_access\test_ws03_private_classroom_flow.py:153:    boundary = FakeBoundary()
+  tests\beta_access\test_ws03_private_classroom_flow.py:154:
+> tests\beta_access\test_ws03_private_classroom_flow.py:155:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws03_private_classroom_flow.py:156:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws03_private_classroom_flow.py:157:        private_chat_gate=gate,
+  tests\beta_access\test_ws03_private_classroom_flow.py:158:        conversation_boundary=boundary,
+  tests\beta_access\test_ws03_private_classroom_flow.py:159:    )
+  tests\beta_access\test_ws03_private_classroom_flow.py:160:
+  tests\beta_access\test_ws03_private_classroom_flow.py:161:    runtime = TelegramBotRuntime(
+  tests\beta_access\test_ws03_private_classroom_flow.py:191:    )
+  tests\beta_access\test_ws03_private_classroom_flow.py:192:    boundary = FakeBoundary()
+  tests\beta_access\test_ws03_private_classroom_flow.py:193:
+> tests\beta_access\test_ws03_private_classroom_flow.py:194:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws03_private_classroom_flow.py:195:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws03_private_classroom_flow.py:196:        private_chat_gate=gate,
+  tests\beta_access\test_ws03_private_classroom_flow.py:197:        conversation_boundary=boundary,
+  tests\beta_access\test_ws03_private_classroom_flow.py:198:    )
+  tests\beta_access\test_ws03_private_classroom_flow.py:199:
+  tests\beta_access\test_ws03_private_classroom_flow.py:200:    runtime = TelegramBotRuntime(
+  tests\beta_access\test_ws03_private_classroom_flow.py:240:    gate = FakeGate()
+  tests\beta_access\test_ws03_private_classroom_flow.py:241:    boundary = FakeBoundary()
+  tests\beta_access\test_ws03_private_classroom_flow.py:242:
+> tests\beta_access\test_ws03_private_classroom_flow.py:243:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws03_private_classroom_flow.py:244:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws03_private_classroom_flow.py:245:        private_chat_gate=gate,
+  tests\beta_access\test_ws03_private_classroom_flow.py:246:        conversation_boundary=boundary,
+  tests\beta_access\test_ws03_private_classroom_flow.py:247:    )
+  tests\beta_access\test_ws03_private_classroom_flow.py:248:
+  tests\beta_access\test_ws03_private_classroom_flow.py:249:    runtime = TelegramBotRuntime(
+  tests\beta_access\test_ws03_private_classroom_flow.py:274:
+  tests\beta_access\test_ws03_private_classroom_flow.py:275:@pytest.mark.asyncio
+  tests\beta_access\test_ws03_private_classroom_flow.py:276:async def test_adapter_requires_conversation_boundary_for_message_flow():
+> tests\beta_access\test_ws03_private_classroom_flow.py:277:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws03_private_classroom_flow.py:278:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws03_private_classroom_flow.py:279:        private_chat_gate=FakeGate(),
+  tests\beta_access\test_ws03_private_classroom_flow.py:280:    )
+  tests\beta_access\test_ws03_private_classroom_flow.py:281:
+  tests\beta_access\test_ws03_private_classroom_flow.py:282:    with pytest.raises(
+  tests\beta_access\test_ws03_private_classroom_flow.py:283:        RuntimeError,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:7:import pytest
+  tests\beta_access\test_ws04_private_classroom_conversation.py:8:
+  tests\beta_access\test_ws04_private_classroom_conversation.py:9:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws04_private_classroom_conversation.py:10:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:11:)
+  tests\beta_access\test_ws04_private_classroom_conversation.py:12:from app.application.beta_access.telegram_conversation_service import (
+  tests\beta_access\test_ws04_private_classroom_conversation.py:13:    TelegramConversationService,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:14:)
+  tests\beta_access\test_ws04_private_classroom_conversation.py:15:from app.application.uai.language.language_response_policy import (
+  tests\beta_access\test_ws04_private_classroom_conversation.py:16:    LanguageResponsePolicy,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:275:        authorized=authorized,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:276:    )
+  tests\beta_access\test_ws04_private_classroom_conversation.py:277:
+> tests\beta_access\test_ws04_private_classroom_conversation.py:278:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws04_private_classroom_conversation.py:279:        conversation_service=conversation_service,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:280:        beta_access_service=access,
+  tests\beta_access\test_ws04_private_classroom_conversation.py:281:    )
+  tests\beta_access\test_ws04_private_classroom_conversation.py:282:
+  tests\beta_access\test_ws04_private_classroom_conversation.py:283:    return (
+  tests\beta_access\test_ws04_private_classroom_conversation.py:284:        boundary,
+  tests\beta_access\test_ws05_conversation_persistence.py:5:import pytest
+  tests\beta_access\test_ws05_conversation_persistence.py:6:
+  tests\beta_access\test_ws05_conversation_persistence.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws05_conversation_persistence.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws05_conversation_persistence.py:9:)
+  tests\beta_access\test_ws05_conversation_persistence.py:10:
+  tests\beta_access\test_ws05_conversation_persistence.py:11:
+  tests\beta_access\test_ws05_conversation_persistence.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws05_conversation_persistence.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws05_conversation_persistence.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws05_conversation_persistence.py:85:
+  tests\beta_access\test_ws05_conversation_persistence.py:86:    conversation_service = FakeConversationService()
+  tests\beta_access\test_ws05_conversation_persistence.py:87:
+> tests\beta_access\test_ws05_conversation_persistence.py:88:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws05_conversation_persistence.py:89:        conversation_service=conversation_service,
+  tests\beta_access\test_ws05_conversation_persistence.py:90:        beta_access_service=access,
+  tests\beta_access\test_ws05_conversation_persistence.py:91:    )
+  tests\beta_access\test_ws05_conversation_persistence.py:92:
+  tests\beta_access\test_ws05_conversation_persistence.py:93:    return (
+  tests\beta_access\test_ws05_conversation_persistence.py:94:        boundary,
+  tests\beta_access\test_ws06_telegram_error_resilience.py:5:import pytest
+  tests\beta_access\test_ws06_telegram_error_resilience.py:6:
+  tests\beta_access\test_ws06_telegram_error_resilience.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws06_telegram_error_resilience.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws06_telegram_error_resilience.py:9:)
+  tests\beta_access\test_ws06_telegram_error_resilience.py:10:
+  tests\beta_access\test_ws06_telegram_error_resilience.py:11:
+  tests\beta_access\test_ws06_telegram_error_resilience.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws06_telegram_error_resilience.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws06_telegram_error_resilience.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws06_telegram_error_resilience.py:82:        error=conversation_error,
+  tests\beta_access\test_ws06_telegram_error_resilience.py:83:    )
+  tests\beta_access\test_ws06_telegram_error_resilience.py:84:
+> tests\beta_access\test_ws06_telegram_error_resilience.py:85:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws06_telegram_error_resilience.py:86:        conversation_service=conversation_service,
+  tests\beta_access\test_ws06_telegram_error_resilience.py:87:        beta_access_service=access,
+  tests\beta_access\test_ws06_telegram_error_resilience.py:88:    )
+  tests\beta_access\test_ws06_telegram_error_resilience.py:89:
+  tests\beta_access\test_ws06_telegram_error_resilience.py:90:    return (
+  tests\beta_access\test_ws06_telegram_error_resilience.py:91:        boundary,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:5:import pytest
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:6:
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:7:from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_ws07_private_classroom_response_delivery.py:8:    BetaTelegramAdapter,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:9:)
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:10:
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:11:
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:12:class FakeMessage:
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:13:    def __init__(
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:14:        self,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:17:        self.text = text
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:18:        self.replies: list[str] = []
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:19:
+> tests\beta_access\test_ws07_private_classroom_response_delivery.py:20:    async def reply_text(
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:21:        self,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:22:        text: str,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:23:    ):
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:24:        self.replies.append(text)
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:25:
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:26:        return SimpleNamespace(
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:133:        error=error,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:134:    )
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:135:
+> tests\beta_access\test_ws07_private_classroom_response_delivery.py:136:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:137:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:138:        private_chat_gate=gate,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:139:        conversation_boundary=boundary,
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:140:    )
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:141:
+  tests\beta_access\test_ws07_private_classroom_response_delivery.py:142:    return (
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:5:import pytest
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:6:
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws08_private_classroom_session_continuity.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:9:)
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:10:
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:11:
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:108:
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:109:    conversation_service = FakeConversationService()
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:110:
+> tests\beta_access\test_ws08_private_classroom_session_continuity.py:111:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:112:        conversation_service=conversation_service,
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:113:        beta_access_service=access,
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:114:    )
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:115:
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:116:    return (
+  tests\beta_access\test_ws08_private_classroom_session_continuity.py:117:        boundary,
+  tests\beta_access\test_ws09_telegram_classroom_security.py:5:import pytest
+  tests\beta_access\test_ws09_telegram_classroom_security.py:6:
+  tests\beta_access\test_ws09_telegram_classroom_security.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws09_telegram_classroom_security.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws09_telegram_classroom_security.py:9:)
+  tests\beta_access\test_ws09_telegram_classroom_security.py:10:
+  tests\beta_access\test_ws09_telegram_classroom_security.py:11:
+  tests\beta_access\test_ws09_telegram_classroom_security.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws09_telegram_classroom_security.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws09_telegram_classroom_security.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws09_telegram_classroom_security.py:109:
+  tests\beta_access\test_ws09_telegram_classroom_security.py:110:    conversation_service = FakeConversationService()
+  tests\beta_access\test_ws09_telegram_classroom_security.py:111:
+> tests\beta_access\test_ws09_telegram_classroom_security.py:112:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws09_telegram_classroom_security.py:113:        conversation_service=conversation_service,
+  tests\beta_access\test_ws09_telegram_classroom_security.py:114:        beta_access_service=access,
+  tests\beta_access\test_ws09_telegram_classroom_security.py:115:    )
+  tests\beta_access\test_ws09_telegram_classroom_security.py:116:
+  tests\beta_access\test_ws09_telegram_classroom_security.py:117:    return (
+  tests\beta_access\test_ws09_telegram_classroom_security.py:118:        boundary,
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:5:import pytest
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:6:
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws10_telegram_classroom_input_controls.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:9:)
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:10:
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:11:
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:62:    access = FakeBetaAccessService(approved=approved)
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:63:    conversation_service = FakeConversationService()
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:64:
+> tests\beta_access\test_ws10_telegram_classroom_input_controls.py:65:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:66:        conversation_service=conversation_service,
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:67:        beta_access_service=access,
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:68:    )
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:69:
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:70:    return boundary, access, conversation_service
+  tests\beta_access\test_ws10_telegram_classroom_input_controls.py:71:
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:5:import pytest
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:6:
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:9:)
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:10:
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:11:
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:119:        self._beta_access_service = beta_access_service
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:120:        self._rate_limiter = rate_limiter
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:121:
+> tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:122:        self._conversation_boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:123:            conversation_service=conversation_service,
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:124:            beta_access_service=beta_access_service,
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:125:        )
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:126:
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:127:    async def handle_message(
+  tests\beta_access\test_ws11_telegram_classroom_rate_limiting.py:128:        self,
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:5:import pytest
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:6:
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:9:)
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:10:
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:11:
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:119:        self._beta_access_service = beta_access_service
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:120:        self._abuse_protector = abuse_protector
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:121:
+> tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:122:        self._conversation_boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:123:            conversation_service=conversation_service,
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:124:            beta_access_service=beta_access_service,
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:125:        )
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:126:
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:127:    async def handle_message(
+  tests\beta_access\test_ws12_telegram_classroom_abuse_protection.py:128:        self,
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:5:import pytest
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:6:
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws13_telegram_classroom_observability.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:9:)
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:10:
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:11:
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:113:    application failure.
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:114:    """
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:115:
+> tests\beta_access\test_ws13_telegram_classroom_observability.py:116:    SAFE_ERROR_RESPONSE = (
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:117:        "Sorry, something went wrong while processing your message. "
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:118:        "Please try again later."
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:119:    )
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:120:
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:121:    UNAUTHORIZED_RESPONSE = (
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:122:        "Sorry, this Telegram account is not authorized "
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:231:                outcome="error",
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:232:            )
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:233:
+> tests\beta_access\test_ws13_telegram_classroom_observability.py:234:            return self.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:235:
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:236:        await self._record(
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:237:            event_type="telegram_classroom_conversation",
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:238:            telegram_user_id=telegram_user_id,
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:239:            outcome="success",
+  tests\beta_access\test_ws13_telegram_classroom_observability.py:240:        )
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:5:import pytest
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:6:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:7:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:8:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:9:)
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:10:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:11:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:12:@dataclass(frozen=True)
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:13:class FakeConversationContext:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:14:    world_id: str = "world-fr"
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:179:            policy=policy,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:180:        )
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:181:
+> tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:182:        self._conversation_boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:183:            conversation_service=conversation_service,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:184:            beta_access_service=beta_access_service,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:185:        )
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:186:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:187:    async def handle_message(
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:188:        self,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:192:    ) -> str:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:193:        # Reuse the established WS-10 input validation contract before
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:194:        # consuming any configured classroom allowance.
+> tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:195:        BetaTelegramConversationBoundary._validate_telegram_user_id(
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:196:            telegram_user_id,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:197:        )
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:198:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:199:        clean_message = (
+> tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:200:            BetaTelegramConversationBoundary._validate_message(
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:201:                message,
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:202:            )
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:203:        )
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:204:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:205:        if not self.policy.enabled:
+  tests\beta_access\test_ws14_telegram_classroom_policy_controls.py:206:            return self.POLICY_DISABLED_RESPONSE
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:8:    TelegramBotRuntime,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:9:)
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:10:from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:11:    BetaTelegramAdapter,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:12:)
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:13:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:14:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:15:@dataclass
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:16:class FakeUser:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:17:    id: int
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:28:        self.text = text
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:29:        self.replies: list[str] = []
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:30:
+> tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:31:    async def reply_text(self, text: str) -> None:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:32:        self.replies.append(text)
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:33:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:34:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:35:@dataclass
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:36:class FakeUpdate:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:37:    effective_user: FakeUser
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:134:    )
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:135:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:136:    from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:137:        BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:138:    )
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:139:
+> tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:140:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:141:        conversation_service=conversation_service,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:142:        beta_access_service=access,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:143:    )
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:144:
+> tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:145:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:146:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:147:        private_chat_gate=gate,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:148:        conversation_boundary=boundary,
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:149:    )
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:150:
+  tests\beta_access\test_ws15_beta_telegram_end_to_end_integration.py:151:    runtime = TelegramBotRuntime(
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:8:    TelegramBotRuntime,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:9:)
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:10:from app.interfaces.telegram.beta_telegram_adapter import (
+> tests\beta_access\test_ws16_beta_telegram_production_smoke.py:11:    BetaTelegramAdapter,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:12:)
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:13:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:14:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:15:@dataclass
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:16:class FakeUser:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:17:    id: int
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:28:        self.text = text
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:29:        self.replies: list[str] = []
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:30:
+> tests\beta_access\test_ws16_beta_telegram_production_smoke.py:31:    async def reply_text(self, text: str) -> None:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:32:        self.replies.append(text)
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:33:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:34:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:35:@dataclass
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:36:class FakeUpdate:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:37:    effective_user: FakeUser
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:130:    conversation_error: Exception | None = None,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:131:):
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:132:    from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws16_beta_telegram_production_smoke.py:133:        BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:134:    )
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:135:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:136:    gate = FakeGate(gate_allowed)
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:137:    access = FakeBetaAccessService(beta_approved)
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:138:    conversation_service = FakeConversationService(
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:139:        error=conversation_error,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:140:    )
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:141:
+> tests\beta_access\test_ws16_beta_telegram_production_smoke.py:142:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:143:        conversation_service=conversation_service,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:144:        beta_access_service=access,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:145:    )
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:146:
+> tests\beta_access\test_ws16_beta_telegram_production_smoke.py:147:    adapter = BetaTelegramAdapter(
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:148:        start_handler=FakeStartHandler(),
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:149:        private_chat_gate=gate,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:150:        conversation_boundary=boundary,
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:151:    )
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:152:
+  tests\beta_access\test_ws16_beta_telegram_production_smoke.py:153:    runtime = TelegramBotRuntime(
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:3:import pytest
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:4:
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:5:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws17_telegram_policy_wiring.py:6:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:7:)
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:8:from app.application.beta_access.policies.telegram_abuse_protector import (
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:9:    InMemoryTelegramAbuseProtector,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:10:)
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:11:from app.application.beta_access.policies.telegram_rate_limiter import (
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:12:    InMemoryTelegramRateLimiter,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:88:
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:89:    conversation = FakeConversation()
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:90:
+> tests\beta_access\test_ws17_telegram_policy_wiring.py:91:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:92:        conversation_service=conversation,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:93:        beta_access_service=FakeAccess(),
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:94:        rate_limiter=limiter,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:95:    )
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:96:
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:97:    await boundary.handle_message(
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:132:
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:133:    conversation = FakeConversation()
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:134:
+> tests\beta_access\test_ws17_telegram_policy_wiring.py:135:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:136:        conversation_service=conversation,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:137:        beta_access_service=FakeAccess(),
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:138:        rate_limiter=limiter,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:139:        abuse_protector=abuse,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:140:    )
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:141:
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:233:
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:234:    conversation = FakeConversation()
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:235:
+> tests\beta_access\test_ws17_telegram_policy_wiring.py:236:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:237:        conversation_service=conversation,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:238:        beta_access_service=FakeAccess(),
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:239:        rate_limiter=limiter,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:240:        abuse_protector=abuse,
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:241:    )
+  tests\beta_access\test_ws17_telegram_policy_wiring.py:242:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1141:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1142:            assert (
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1143:                response
+> tests\beta_access\test_ws19_production_telegram_full_stack.py:1144:                == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1145:            )
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1146:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1147:            assert "WS19-secret" not in response
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1148:            assert "password" not in response.lower()
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1149:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1150:        finally:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1171:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1172:        assert (
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1173:            composition.adapter.__class__.__name__
+> tests\beta_access\test_ws19_production_telegram_full_stack.py:1174:            == "BetaTelegramAdapter"
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1175:        )
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1176:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1177:    finally:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1178:        _dispose_composition(composition)
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1179:
+  tests\beta_access\test_ws19_production_telegram_full_stack.py:1180:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:26:import pytest
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:27:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:28:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:29:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:30:)
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:31:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:32:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:33:# ============================================================================
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:34:# Deterministic test doubles
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:35:# ============================================================================
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:176:        else None
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:177:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:178:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:179:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:180:        conversation_service=conversation,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:181:        beta_access_service=access,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:182:        rate_limiter=rate_limiter,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:183:        abuse_protector=abuse_protector,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:184:        observability=observability,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:185:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:220:        message="Bonjour",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:221:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:222:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:223:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:224:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:225:    assert access.calls == [1001]
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:226:    assert conversation.calls == []
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:227:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:228:    assert "postgresql" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:229:    assert "password" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:258:        message="Je veux pratiquer.",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:259:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:260:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:261:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:262:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:263:    assert access.calls == [1002]
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:264:    assert len(conversation.calls) == 1
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:265:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:266:    assert "WS213-secret" not in response
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:267:    assert "password" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:298:        message="Comment dit-on ceci ?",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:299:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:300:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:301:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:302:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:303:    assert len(conversation.calls) == 1
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:304:    assert "WS213-provider-secret" not in response
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:305:    assert "api_key" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:306:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:307:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:337:        message="Bonjour",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:338:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:339:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:340:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:341:    assert failing_limiter.calls == [1004]
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:342:    assert conversation.calls == []
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:343:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:344:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:345:# ============================================================================
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:346:# WS-21.3.5 â€” Abuse-protection dependency failure
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:373:        message="Bonjour",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:374:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:375:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:376:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:377:    assert failing_abuse.calls == [1005]
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:378:    assert conversation.calls == []
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:379:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:380:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:381:# ============================================================================
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:382:# WS-21.3.6 â€” Observability failure
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:429:    access = FakeBetaAccessService()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:430:    conversation = FakeConversationService()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:431:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:432:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:433:        conversation_service=conversation,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:434:        beta_access_service=access,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:435:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:436:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:437:    # First learner receives a normal response.
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:438:    first_response = await boundary.handle_message(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:455:        message="Bonjour",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:456:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:457:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:458:    assert second_response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:459:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:460:    # The first identity's completed request remains unaffected.
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:461:    assert access.calls == [2001, 2002]
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:462:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:463:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:464:# ============================================================================
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:481:        ),
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:482:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:483:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:484:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:485:        conversation_service=failing_conversation,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:486:        beta_access_service=access,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:487:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:488:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:489:    failed_response = await boundary.handle_message(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:490:        telegram_user_id=3001,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:493:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:494:    assert (
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:495:        failed_response
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:496:        == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:497:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:498:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:499:    healthy_conversation = FakeConversationService()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:500:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:501:    boundary._conversation_service = healthy_conversation
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:502:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:560:        message="Bonjour",
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:561:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:562:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:563:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:564:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:565:    assert "super-secret" not in response
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:566:    assert "password" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:567:    assert "telegram_bot_token" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:568:    assert "api_key" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:569:    assert "traceback" not in response.lower()
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:593:        ),
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:594:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:595:
+> tests\beta_access\test_ws21_3_operational_failure_resilience.py:596:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:597:        conversation_service=conversation,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:598:        beta_access_service=access,
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:599:    )
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:600:
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:601:    with pytest.raises(
+  tests\beta_access\test_ws21_3_operational_failure_resilience.py:602:        ValueError,
+  tests\beta_access\test_ws21_4_failure_recovery.py:20:import pytest
+  tests\beta_access\test_ws21_4_failure_recovery.py:21:
+  tests\beta_access\test_ws21_4_failure_recovery.py:22:from app.application.beta_access.beta_telegram_conversation_boundary import (
+> tests\beta_access\test_ws21_4_failure_recovery.py:23:    BetaTelegramConversationBoundary,
+  tests\beta_access\test_ws21_4_failure_recovery.py:24:)
+  tests\beta_access\test_ws21_4_failure_recovery.py:25:from app.application.beta_access.policies.telegram_abuse_protector import (
+  tests\beta_access\test_ws21_4_failure_recovery.py:26:    InMemoryTelegramAbuseProtector,
+  tests\beta_access\test_ws21_4_failure_recovery.py:27:)
+  tests\beta_access\test_ws21_4_failure_recovery.py:28:from app.application.beta_access.policies.telegram_rate_limiter import (
+  tests\beta_access\test_ws21_4_failure_recovery.py:29:    InMemoryTelegramRateLimiter,
+  tests\beta_access\test_ws21_4_failure_recovery.py:168:        conversation or RecoverableConversationService()
+  tests\beta_access\test_ws21_4_failure_recovery.py:169:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:170:
+> tests\beta_access\test_ws21_4_failure_recovery.py:171:    boundary = BetaTelegramConversationBoundary(
+  tests\beta_access\test_ws21_4_failure_recovery.py:172:        conversation_service=resolved_conversation,
+  tests\beta_access\test_ws21_4_failure_recovery.py:173:        beta_access_service=resolved_access,
+  tests\beta_access\test_ws21_4_failure_recovery.py:174:        rate_limiter=rate_limiter,
+  tests\beta_access\test_ws21_4_failure_recovery.py:175:        abuse_protector=abuse_protector,
+  tests\beta_access\test_ws21_4_failure_recovery.py:176:        observability=observability,
+  tests\beta_access\test_ws21_4_failure_recovery.py:177:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:204:        message="Bonjour",
+  tests\beta_access\test_ws21_4_failure_recovery.py:205:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:206:
+> tests\beta_access\test_ws21_4_failure_recovery.py:207:    assert failed_response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:208:
+  tests\beta_access\test_ws21_4_failure_recovery.py:209:    access.available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:210:
+  tests\beta_access\test_ws21_4_failure_recovery.py:211:    recovered_response = await boundary.handle_message(
+  tests\beta_access\test_ws21_4_failure_recovery.py:212:        telegram_user_id=7101,
+  tests\beta_access\test_ws21_4_failure_recovery.py:213:        message="Bonjour encore",
+  tests\beta_access\test_ws21_4_failure_recovery.py:241:        message="Bonjour",
+  tests\beta_access\test_ws21_4_failure_recovery.py:242:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:243:
+> tests\beta_access\test_ws21_4_failure_recovery.py:244:    assert failed_response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:245:    assert conversation.history == {}
+  tests\beta_access\test_ws21_4_failure_recovery.py:246:
+  tests\beta_access\test_ws21_4_failure_recovery.py:247:    conversation.available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:248:
+  tests\beta_access\test_ws21_4_failure_recovery.py:249:    recovered_response = await boundary.handle_message(
+  tests\beta_access\test_ws21_4_failure_recovery.py:250:        telegram_user_id=7102,
+  tests\beta_access\test_ws21_4_failure_recovery.py:279:        message="Message during outage",
+  tests\beta_access\test_ws21_4_failure_recovery.py:280:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:281:
+> tests\beta_access\test_ws21_4_failure_recovery.py:282:    assert failed_response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:283:    assert conversation.history == []
+  tests\beta_access\test_ws21_4_failure_recovery.py:284:
+  tests\beta_access\test_ws21_4_failure_recovery.py:285:    conversation.persistence_available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:286:
+  tests\beta_access\test_ws21_4_failure_recovery.py:287:    recovered_response = await boundary.handle_message(
+  tests\beta_access\test_ws21_4_failure_recovery.py:288:        telegram_user_id=7103,
+  tests\beta_access\test_ws21_4_failure_recovery.py:317:        message="Failed message",
+  tests\beta_access\test_ws21_4_failure_recovery.py:318:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:319:
+> tests\beta_access\test_ws21_4_failure_recovery.py:320:    assert response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:321:    assert conversation.history == {}
+  tests\beta_access\test_ws21_4_failure_recovery.py:322:
+  tests\beta_access\test_ws21_4_failure_recovery.py:323:    conversation.available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:324:
+  tests\beta_access\test_ws21_4_failure_recovery.py:325:    response = await boundary.handle_message(
+  tests\beta_access\test_ws21_4_failure_recovery.py:326:        telegram_user_id=7104,
+  tests\beta_access\test_ws21_4_failure_recovery.py:357:        message="Temporary failure",
+  tests\beta_access\test_ws21_4_failure_recovery.py:358:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:359:
+> tests\beta_access\test_ws21_4_failure_recovery.py:360:    assert failed_response == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:361:
+  tests\beta_access\test_ws21_4_failure_recovery.py:362:    failed_events = [
+  tests\beta_access\test_ws21_4_failure_recovery.py:363:        event
+  tests\beta_access\test_ws21_4_failure_recovery.py:364:        for event in observability.events
+  tests\beta_access\test_ws21_4_failure_recovery.py:365:        if event.get("event_type")
+  tests\beta_access\test_ws21_4_failure_recovery.py:366:        == "telegram_classroom_conversation"
+  tests\beta_access\test_ws21_4_failure_recovery.py:421:        message="A failed",
+  tests\beta_access\test_ws21_4_failure_recovery.py:422:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:423:
+> tests\beta_access\test_ws21_4_failure_recovery.py:424:    assert response_a_failed == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:425:
+  tests\beta_access\test_ws21_4_failure_recovery.py:426:    # Dependency recovers.
+  tests\beta_access\test_ws21_4_failure_recovery.py:427:    conversation.available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:428:
+  tests\beta_access\test_ws21_4_failure_recovery.py:429:    response_b = await boundary.handle_message(
+  tests\beta_access\test_ws21_4_failure_recovery.py:430:        telegram_user_id=7107,
+  tests\beta_access\test_ws21_4_failure_recovery.py:620:        message="Outage",
+  tests\beta_access\test_ws21_4_failure_recovery.py:621:    )
+  tests\beta_access\test_ws21_4_failure_recovery.py:622:
+> tests\beta_access\test_ws21_4_failure_recovery.py:623:    assert failed == boundary.SAFE_ERROR_RESPONSE
+  tests\beta_access\test_ws21_4_failure_recovery.py:624:
+  tests\beta_access\test_ws21_4_failure_recovery.py:625:    access.available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:626:    conversation.available = True
+  tests\beta_access\test_ws21_4_failure_recovery.py:627:
+  tests\beta_access\test_ws21_4_failure_recovery.py:628:    first_recovered = await boundary.handle_message(
+  tests\beta_access\test_ws21_4_failure_recovery.py:629:        telegram_user_id=7112,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:5:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:6:import pytest
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:7:
+> tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:8:from app.interfaces.telegram.beta_telegram_adapter import BetaTelegramAdapter
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:9:from app.application.world_telegram.world_telegram_start_router import (
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:10:    WorldTelegramRoute,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:11:)
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:12:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:13:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:14:@dataclass
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:27:        self.text = text
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:28:        self.replies: list[str] = []
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:29:
+> tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:30:    async def reply_text(self, text: str):
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:31:        self.replies.append(text)
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:32:        return SimpleNamespace(text=text)
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:33:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:34:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:35:@dataclass
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:36:class FakeUpdate:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:85:            runtime_world_id="french_world",
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:86:        )
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:87:    )
+> tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:88:    adapter = BetaTelegramAdapter(
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:89:        start_handler=start_handler,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:90:        private_chat_gate=FakePrivateChatGate(),
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:91:        world_start_router=router,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:92:    )
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:93:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:94:    message = FakeMessage()
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:111:async def test_non_world_start_payload_preserves_legacy_connection_handler():
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:112:    start_handler = FakeStartHandler()
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:113:    router = FakeWorldStartRouter(route=None)
+> tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:114:    adapter = BetaTelegramAdapter(
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:115:        start_handler=start_handler,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:116:        private_chat_gate=FakePrivateChatGate(),
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:117:        world_start_router=router,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:118:    )
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:119:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:120:    message = FakeMessage()
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:141:    router = FakeWorldStartRouter(
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:142:        error=ValueError("Unknown Learning World: french")
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:143:    )
+> tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:144:    adapter = BetaTelegramAdapter(
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:145:        start_handler=start_handler,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:146:        private_chat_gate=FakePrivateChatGate(),
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:147:        world_start_router=router,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:148:    )
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:149:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:150:    message = FakeMessage()
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:175:        async def authorize(self, **kwargs):
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:176:            raise AssertionError("World start routing must not authorize here.")
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:177:
+> tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:178:    adapter = BetaTelegramAdapter(
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:179:        start_handler=start_handler,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:180:        private_chat_gate=GateThatMustNotBeCalled(),
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:181:        world_start_router=router,
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:182:    )
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:183:
+  tests\interfaces\telegram\test_beta_telegram_world_start_routing.py:184:    message = FakeMessage()
+
+
+

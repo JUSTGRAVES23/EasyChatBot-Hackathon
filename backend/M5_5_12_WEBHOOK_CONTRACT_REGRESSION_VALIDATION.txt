@@ -1,0 +1,540 @@
+﻿=====================================================================
+M5.5.12 — WEBHOOK CONTRACT / REGRESSION VALIDATION
+=====================================================================
+
+NO PRODUCTION CODE CHANGES ARE PERMITTED.
+
+=====================================================================
+1. PROCESSSTRIPEWEBHOOK SOURCE — MUST REMAIN UNCHANGED
+=====================================================================
+
+from __future__ import annotations
+
+from app.application.payment.ports import EntitlementService, PaymentEventRepository, PaymentProvider
+from app.domain.payment.models import CheckoutRequest
+
+
+class CreateCheckoutSession:
+    def __init__(self, provider: PaymentProvider):
+        self.provider = provider
+
+    def execute(self, request: CheckoutRequest, *, stripe_customer_id: str | None):
+        return self.provider.create_checkout_session(request, customer_id=stripe_customer_id)
+
+
+class CreateBillingPortalSession:
+    def __init__(self, provider: PaymentProvider):
+        self.provider = provider
+
+    def execute(self, *, stripe_customer_id: str, return_url: str):
+        return self.provider.create_billing_portal_session(
+            customer_id=stripe_customer_id,
+            return_url=return_url,
+        )
+
+
+class ProcessStripeWebhook:
+    def __init__(self, provider: PaymentProvider, events: PaymentEventRepository, entitlements: EntitlementService):
+        self.provider = provider
+        self.events = events
+        self.entitlements = entitlements
+
+    def execute(self, *, payload: bytes, signature: str):
+        event = self.provider.construct_webhook_event(payload, signature)
+        if self.events.has_processed(event.event_id):
+            return {"status": "already_processed", "event_id": event.event_id}
+
+        self.events.record_received(event)
+        try:
+            self.entitlements.handle_payment_event(event)
+            self.events.mark_processed(event.event_id)
+            return {"status": "processed", "event_id": event.event_id}
+        except Exception as exc:
+            self.events.mark_failed(event.event_id, str(exc))
+            raise
+
+
+=====================================================================
+2. PAYMENT EVENT ROUTER
+=====================================================================
+
+from __future__ import annotations
+
+from app.application.payment.ports import EntitlementService
+from app.domain.payment.models import PaymentEvent
+
+
+class PaymentEventRouter(EntitlementService):
+    """Route verified payment events to the appropriate application handler.
+
+    This class does not:
+    - verify Stripe signatures;
+    - call the Stripe SDK;
+    - persist webhook events;
+    - decide whether Checkout succeeded.
+
+    Those responsibilities remain in their existing layers.
+    """
+
+    def __init__(
+        self,
+        subscription_entitlement_service,
+    ) -> None:
+        if subscription_entitlement_service is None:
+            raise ValueError(
+                "subscription_entitlement_service cannot be None."
+            )
+
+        self.subscription_entitlement_service = (
+            subscription_entitlement_service
+        )
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        if not isinstance(event, PaymentEvent):
+            raise TypeError("event must be a PaymentEvent.")
+
+        self.subscription_entitlement_service.handle_payment_event(event)
+
+
+__all__ = ["PaymentEventRouter"]
+
+
+=====================================================================
+3. ENTITLEMENT SERVICE RESULT CONTRACT
+=====================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from app.domain.payment.models import PaymentEvent
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionEntitlementResult:
+    """Authoritative result of applying a subscription entitlement event."""
+
+    beneficiary_user_id: str
+    plan_code: str
+    active: bool
+
+
+class SubscriptionEntitlementService:
+    """Apply verified Stripe subscription events to EASYWORLD persistence.
+
+    Stripe is the payment system of record.
+    EASYWORLD subscription and entitlement persistence is the access system
+    of record.
+
+    This service deliberately contains no Stripe SDK calls.
+
+    The service remains synchronous. World-access reconciliation is performed
+    by the separate SubscriptionEntitlementWorldAccessOrchestrator boundary.
+    """
+
+    SUBSCRIPTION_EVENTS = {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    }
+
+    def __init__(
+        self,
+        subscription_repository,
+        entitlement_repository,
+    ) -> None:
+        if subscription_repository is None:
+            raise ValueError("subscription_repository cannot be None.")
+
+        if entitlement_repository is None:
+            raise ValueError("entitlement_repository cannot be None.")
+
+        self.subscription_repository = subscription_repository
+        self.entitlement_repository = entitlement_repository
+
+    def handle_payment_event(
+        self,
+        event: PaymentEvent,
+    ) -> SubscriptionEntitlementResult | None:
+        """Apply a subscription event and return its authoritative state.
+
+        Non-subscription payment events remain ignored and return ``None``.
+
+        The returned result contains only the persisted entitlement state
+        required by the next application boundary. It does not perform
+        World-access authorization or invoke asynchronous services.
+        """
+        if not isinstance(event, PaymentEvent):
+            raise TypeError("event must be a PaymentEvent.")
+
+        if event.event_type not in self.SUBSCRIPTION_EVENTS:
+            return None
+
+        subscription = self._extract_subscription(event)
+
+        beneficiary_user_id = self._metadata_value(
+            subscription,
+            "easyworld_user_id",
+        )
+
+        if not beneficiary_user_id:
+            raise ValueError(
+                "Stripe subscription is missing easyworld_user_id metadata."
+            )
+
+        payer_user_id = self._metadata_value(
+            subscription,
+            "easyworld_payer_user_id",
+        ) or beneficiary_user_id
+
+        plan_code = self._metadata_value(
+            subscription,
+            "easyworld_plan_code",
+        )
+
+        if not plan_code:
+            raise ValueError(
+                "Stripe subscription is missing easyworld_plan_code metadata."
+            )
+
+        stripe_subscription_id = subscription.get("id")
+        stripe_customer_id = self._customer_id(
+            subscription.get("customer")
+        )
+        stripe_price_id = self._price_id(subscription)
+
+        if not stripe_subscription_id:
+            raise ValueError("Stripe subscription is missing id.")
+
+        if not stripe_customer_id:
+            raise ValueError("Stripe subscription is missing customer.")
+
+        if not stripe_price_id:
+            raise ValueError("Stripe subscription is missing price.")
+
+        status = str(subscription.get("status") or "unknown")
+
+        current_period_start = self._timestamp(
+            subscription.get("current_period_start")
+        )
+        current_period_end = self._timestamp(
+            subscription.get("current_period_end")
+        )
+
+        cancel_at_period_end = bool(
+            subscription.get("cancel_at_period_end", False)
+        )
+
+        self.subscription_repository.upsert(
+            beneficiary_user_id=beneficiary_user_id,
+            payer_user_id=payer_user_id,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=stripe_price_id,
+            plan_code=plan_code,
+            status=status,
+            current_period_start=current_period_start,
+            current_period_end=current_period_end,
+            cancel_at_period_end=cancel_at_period_end,
+        )
+
+        active = status in {
+            "trialing",
+            "active",
+        }
+
+        self.entitlement_repository.upsert(
+            user_id=beneficiary_user_id,
+            plan_code=plan_code,
+            active=active,
+        )
+
+        return SubscriptionEntitlementResult(
+            beneficiary_user_id=beneficiary_user_id,
+            plan_code=plan_code,
+            active=active,
+        )
+
+    @staticmethod
+    def _extract_subscription(
+        event: PaymentEvent,
+    ) -> dict[str, Any]:
+        data = event.payload.get("data")
+
+        if not isinstance(data, dict):
+            raise ValueError("Stripe event is missing data.")
+
+        obj = data.get("object")
+
+        if not isinstance(obj, dict):
+            raise ValueError("Stripe event is missing subscription object.")
+
+        return obj
+
+    @staticmethod
+    def _metadata_value(
+        subscription: dict[str, Any],
+        key: str,
+    ) -> str | None:
+        metadata = subscription.get("metadata")
+
+        if not isinstance(metadata, dict):
+            return None
+
+        value = metadata.get(key)
+
+        if value is None:
+            return None
+
+        value = str(value).strip()
+
+        return value or None
+
+    @staticmethod
+    def _customer_id(customer: Any) -> str | None:
+        if isinstance(customer, str):
+            return customer
+
+        if isinstance(customer, dict):
+            value = customer.get("id")
+            return str(value) if value else None
+
+        return None
+
+    @staticmethod
+    def _price_id(
+        subscription: dict[str, Any],
+    ) -> str | None:
+        items = subscription.get("items")
+
+        if not isinstance(items, dict):
+            return None
+
+        data = items.get("data")
+
+        if not isinstance(data, list) or not data:
+            return None
+
+        first_item = data[0]
+
+        if not isinstance(first_item, dict):
+            return None
+
+        price = first_item.get("price")
+
+        if isinstance(price, str):
+            return price
+
+        if isinstance(price, dict):
+            value = price.get("id")
+            return str(value) if value else None
+
+        return None
+
+    @staticmethod
+    def _timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (TypeError, ValueError, OSError) as exc:
+            raise ValueError(
+                f"Invalid Stripe timestamp: {value!r}."
+            ) from exc
+
+
+__all__ = [
+    "SubscriptionEntitlementResult",
+    "SubscriptionEntitlementService",
+]
+
+
+=====================================================================
+4. EXISTING ORCHESTRATOR — INTEGRITY CHECK
+=====================================================================
+
+"""Orchestrate subscription entitlement persistence and World access.
+
+This service is the async application boundary between:
+    payment entitlement state
+        -> Learning World access
+
+It deliberately does not contain Stripe/provider logic.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from app.application.learning.subscription_world_access_service import (
+    SubscriptionWorldAccessService,
+)
+
+
+class SubscriptionEntitlementWorldAccessOrchestrator:
+    """Synchronize World access from an authoritative subscription entitlement."""
+
+    def __init__(
+        self,
+        *,
+        subscription_world_access_service: SubscriptionWorldAccessService,
+    ) -> None:
+        if subscription_world_access_service is None:
+            raise ValueError(
+                "subscription_world_access_service cannot be None."
+            )
+
+        self._subscription_world_access_service = (
+            subscription_world_access_service
+        )
+
+    async def synchronize(
+        self,
+        *,
+        user_id: UUID,
+        plan_code: str,
+        active: bool,
+    ) -> None:
+        """Reconcile World access for the supplied entitlement state.
+
+        The underlying SubscriptionWorldAccessService remains responsible
+        for entitlement policy and WorldAccessService authorization.
+        """
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+        if not isinstance(plan_code, str) or not plan_code.strip():
+            raise ValueError("plan_code is required.")
+
+        await self._subscription_world_access_service.synchronize(
+            user_id=user_id,
+            plan_code=plan_code,
+            active=active,
+        )
+
+
+__all__ = ["SubscriptionEntitlementWorldAccessOrchestrator"]
+
+
+=====================================================================
+5. FORBIDDEN ASYNC / SCHEDULER INTRODUCTION SEARCH
+=====================================================================
+
+SEARCH: asyncio.run(
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\project_control_center\application\service.py:153: It does not call asyncio.run(), create a nested event loop,
+
+SEARCH: create_task(
+NO MATCHES
+
+SEARCH: asyncio.create_task(
+NO MATCHES
+
+SEARCH: BackgroundTasks
+NO MATCHES
+
+SEARCH: BackgroundTask
+NO MATCHES
+
+SEARCH: add_job(
+NO MATCHES
+
+SEARCH: AsyncIOScheduler(
+NO MATCHES
+
+SEARCH: BlockingScheduler(
+NO MATCHES
+
+SEARCH: AsyncScheduler(
+NO MATCHES
+
+SEARCH: sleep(
+NO MATCHES
+
+
+
+=====================================================================
+6. ORCHESTRATOR MODIFICATION / REFERENCE SEARCH
+=====================================================================
+
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\payment\subscription_entitlement_service.py:29: by the separate SubscriptionEntitlementWorldAccessOrchestrator boundary.
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\payment\subscription_entitlement_world_access_bridge.py:9: SubscriptionEntitlementWorldAccessOrchestrator,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\payment\subscription_entitlement_world_access_bridge.py:37: orchestrator: SubscriptionEntitlementWorldAccessOrchestrator,
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\payment\subscription_entitlement_world_access_orchestrator.py:19: class SubscriptionEntitlementWorldAccessOrchestrator:
+C:\AI Folder\EasyChatBot-Hackathon\backend\app\application\payment\subscription_entitlement_world_access_orchestrator.py:61: __all__ = ["SubscriptionEntitlementWorldAccessOrchestrator"]
+
+
+=====================================================================
+7. WEBHOOK / IDEMPOTENCY TESTS
+=====================================================================
+
+....                                                                     [100%]
+4 passed in 0.22s
+
+
+=====================================================================
+8. ENTITLEMENT TESTS
+=====================================================================
+
+....                                                                     [100%]
+4 passed in 0.18s
+
+
+=====================================================================
+9. WORLD ACCESS / ORCHESTRATOR TESTS
+=====================================================================
+
+....                                                                     [100%]
+4 passed in 0.25s
+
+
+=====================================================================
+10. M5.5 BASELINE — 61 TEST CONTRACT REGRESSION
+=====================================================================
+
+........................................................................ [ 93%]
+.....                                                                    [100%]
+77 passed in 1.68s
+
+
+=====================================================================
+11. FINAL SAFETY ASSERTIONS
+=====================================================================
+
+ProcessStripeWebhook remains synchronous.
+No asyncio.run() introduced.
+No background task introduced.
+No scheduler introduced.
+Existing orchestrator source remains untouched.
+Webhook idempotency tests pass.
+PaymentEventRouter tests pass.
+SubscriptionEntitlementService result contract tests pass.
+World-access/orchestrator tests pass.
+M5 regression baseline passes.
+NO production composition was changed.
+NO Alembic migration was changed.
+
+=====================================================================
+12. VALIDATION FILE
+=====================================================================
+
+VALIDATION FILE EXISTS: True
+
+
+FullName      : C:\AI Folder
+                \EasyChatBot
+                -Hackathon\b
+                ackend\M5_5_
+                12_WEBHOOK_C
+                ONTRACT_REGR
+                ESSION_VALID
+                ATION.txt
+Length        : 16866
+LastWriteTime : 9/23/2026 
+                9:54:05 PM
+
+
+
+

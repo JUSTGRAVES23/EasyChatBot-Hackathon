@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.application.failures.provider_failure import ProviderFailure
 
 from app.application.beta_access.beta_telegram_conversation_boundary import (
     BetaTelegramConversationBoundary,
@@ -70,6 +76,7 @@ class BetaTelegramAdapter:
             BetaTelegramConversationBoundary | None
         ) = None,
         world_start_router: WorldTelegramStartRouter | None = None,
+        failure_information_url: str | None = None,
     ) -> None:
         if start_handler is None:
             raise ValueError(
@@ -85,6 +92,14 @@ class BetaTelegramAdapter:
         self._private_chat_gate = private_chat_gate
         self._conversation_boundary = conversation_boundary
         self._world_start_router = world_start_router
+        self._failure_information_url = (
+            failure_information_url
+            if failure_information_url is not None
+            else os.getenv(
+                "EASYWORLD_TELEGRAM_FAILURE_INFORMATION_URL",
+                "",
+            )
+        ).strip()
 
     # =========================================================
     # Telegram /start
@@ -358,6 +373,29 @@ class BetaTelegramAdapter:
                 )
             )
 
+        except ProviderFailure as exc:
+            logger.warning(
+                "Telegram classroom provider failure.",
+                extra={
+                    "failure_code": getattr(
+                        exc,
+                        "code",
+                        "PROVIDER_TEMPORARILY_UNAVAILABLE",
+                    ),
+                    "provider_id": getattr(
+                        exc,
+                        "provider_id",
+                        None,
+                    ),
+                },
+            )
+
+            await self._reply_provider_failure(
+                message,
+            )
+
+            return None
+
         except Exception:
             logger.exception(
                 "Telegram classroom conversation processing failed."
@@ -425,6 +463,88 @@ class BetaTelegramAdapter:
         return str(
             args[0]
         )
+
+    async def _reply_provider_failure(
+        self,
+        message: Any,
+    ) -> None:
+        if message is None:
+            return
+
+        reply_photo = getattr(
+            message,
+            "reply_photo",
+            None,
+        )
+
+        asset_path = (
+            Path(__file__).resolve().parents[2]
+            / "assets"
+            / "failures"
+            / "Provider Temporarily Unavailable.png"
+        )
+
+        caption = (
+            "EasyWorld's AI service is temporarily unavailable.\n\n"
+            "We're working to restore it. Please try again shortly."
+        )
+
+        if reply_photo is None:
+            logger.warning(
+                "Telegram message does not support branded failure photo."
+            )
+            await self._reply(
+                message,
+                caption,
+            )
+            return
+
+        if not asset_path.is_file():
+            logger.error(
+                "Canonical provider failure asset is missing.",
+                extra={
+                    "asset_path": str(asset_path),
+                },
+            )
+            await self._reply(
+                message,
+                caption,
+            )
+            return
+
+        reply_markup = None
+
+        if self._failure_information_url:
+            reply_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "More information",
+                            url=self._failure_information_url,
+                        )
+                    ]
+                ]
+            )
+
+        try:
+            with asset_path.open("rb") as photo:
+                await reply_photo(
+                    photo=photo,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                )
+        except Exception:
+            logger.exception(
+                "Telegram provider failure response delivery failed."
+            )
+
+            # Do not expose transport or provider internals.
+            # Do not re-execute the AI request.
+            if reply_markup is not None:
+                await self._reply(
+                    message,
+                    caption,
+                )
 
     @staticmethod
     async def _reply(

@@ -72,6 +72,12 @@ from app.application.health.production_health_service import (
 from app.application.operations_center.dashboard_composition import (
     create_operations_center_composition,
 )
+from app.infrastructure.operations_center.platform_intelligence_authoritative_review_source import (
+    PostgreSQLPlatformIntelligenceReviewSource,
+)
+from app.infrastructure.operations_center.sqlalchemy_platform_intelligence_authoritative_state_repository import (
+    SqlAlchemyPlatformIntelligenceAuthoritativeStateRepository,
+)
 from app.application.persistence_operations import (
     PersistenceDiagnosticsService,
 )
@@ -188,6 +194,9 @@ from app.infrastructure.persistence.postgresql_provider_usage_repository import 
 )
 from app.infrastructure.persistence.postgresql_study_material_repository import (
     PostgreSQLStudyMaterialRepository,
+)
+from app.infrastructure.persistence.postgresql_user_policy_profile_repository import (
+    PostgreSQLUserPolicyProfileRepository,
 )
 from app.infrastructure.security.trusted_clock import SystemTrustedClock
 from app.domain.authorization.permissions import Permission
@@ -515,6 +524,19 @@ def create_application() -> FastAPI:
     )
 
     # ------------------------------------------------------------------
+    # P5B.6.2B.2 - User Policy Profile Persistence
+    #
+    # Reuse the existing synchronous application persistence boundary.
+    # The policy-profile repository is synchronous by contract and must
+    # not receive the async authentication session factory.
+    # ------------------------------------------------------------------
+    user_policy_profile_repository = (
+        PostgreSQLUserPolicyProfileRepository(
+            provider_usage_session_factory,
+        )
+    )
+
+    # ------------------------------------------------------------------
     # Q7 / M4 - Questionnaire Runtime
     #
     # Reuse the existing synchronous application persistence boundary.
@@ -786,12 +808,20 @@ def create_application() -> FastAPI:
         provider_usage_engine
     )
 
+    application.state.user_policy_profile_repository = (
+        user_policy_profile_repository
+    )
+
     application.state.provider_usage_dashboard_service = (
         provider_usage_dashboard_service
     )
 
     application.state.functionality_control_service = (
         functionality_control_service
+    )
+
+    application.state.platform_intelligence_review_source = (
+        platform_intelligence_review_source
     )
 
     application.state.private_chat_service_factory = (
@@ -881,6 +911,32 @@ def create_application() -> FastAPI:
         voice_notification_acceptance_router,
     )
 
+    # ------------------------------------------------------------------
+    # PI-5A.6 / Platform Intelligence authoritative review composition
+    #
+    # The authoritative PI state repository is read-only from the review
+    # boundary. It uses the existing async application database boundary and
+    # does not create a second engine/session factory.
+    #
+    # The review source is then injected into the existing Operations Center
+    # composition. This keeps PI review projection behind its established
+    # application boundary and preserves the protected Operations Center
+    # router/composition contract.
+    # ------------------------------------------------------------------
+    platform_intelligence_authoritative_state_repository = (
+        SqlAlchemyPlatformIntelligenceAuthoritativeStateRepository(
+            auth_session_factory,
+        )
+    )
+
+    platform_intelligence_review_source = (
+        PostgreSQLPlatformIntelligenceReviewSource(
+            repository=(
+                platform_intelligence_authoritative_state_repository
+            ),
+        )
+    )
+
     operations_center_composition = (
         create_operations_center_composition(
             provider_usage_dashboard_service=(
@@ -888,6 +944,9 @@ def create_application() -> FastAPI:
             ),
             functionality_control_service=(
                 functionality_control_service
+            ),
+            platform_intelligence_review_source=(
+                platform_intelligence_review_source
             ),
         )
     )
@@ -1029,5 +1088,6 @@ __all__ = [
     "app",
     "create_application",
 ]
+
 
 

@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .domain import EmailWorkflowDefinition, EmailWorkflowLifecycle, EmailWorkflowType
+from .domain import (
+    EmailWorkflowDefinition,
+    EmailWorkflowLifecycle,
+    EmailWorkflowType,
+)
 from .registry import EmailWorkflowRegistry
 
 
@@ -47,6 +51,20 @@ BUILT_IN_EMAIL_WORKFLOWS: tuple[dict[str, object], ...] = (
         "schedule": None,
         "template_id": "cybersecurity_critical_alert",
     },
+    {
+        "workflow_id": "platform_intelligence_escalation",
+        "name": "Platform Intelligence Escalation",
+        "description": (
+            "Event-driven human-review escalation notification for "
+            "governed Platform Intelligence recommendations."
+        ),
+        "workflow_type": EmailWorkflowType.EVENT_DRIVEN,
+        "lifecycle": EmailWorkflowLifecycle.ACTIVE,
+        "owner": "platform_intelligence",
+        "trigger": "escalation_recommendation",
+        "schedule": None,
+        "template_id": "platform_intelligence_escalation",
+    },
 )
 
 
@@ -56,8 +74,13 @@ class EmailWorkflowRegistryBootstrap:
             raise ValueError("registry is required.")
         self._registry = registry
 
-    def ensure_registered(self, *, now: datetime | None = None) -> BootstrapResult:
+    def ensure_registered(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> BootstrapResult:
         current = now or datetime.now(timezone.utc)
+
         if current.tzinfo is None:
             raise ValueError("now must be timezone-aware.")
 
@@ -66,6 +89,7 @@ class EmailWorkflowRegistryBootstrap:
 
         for raw in BUILT_IN_EMAIL_WORKFLOWS:
             workflow_id = str(raw["workflow_id"])
+
             if self._registry.get(workflow_id) is not None:
                 already_present.append(workflow_id)
                 continue
@@ -78,12 +102,17 @@ class EmailWorkflowRegistryBootstrap:
                 lifecycle=raw["lifecycle"],  # type: ignore[arg-type]
                 owner=str(raw["owner"]),
                 trigger=str(raw["trigger"]),
-                schedule=str(raw["schedule"]) if raw["schedule"] is not None else None,
+                schedule=(
+                    str(raw["schedule"])
+                    if raw["schedule"] is not None
+                    else None
+                ),
                 template_id=str(raw["template_id"]),
                 version=1,
                 created_at=current,
                 updated_at=current,
             )
+
             self._registry.create(workflow)
             created.append(workflow_id)
 
@@ -91,6 +120,3 @@ class EmailWorkflowRegistryBootstrap:
             created=tuple(created),
             already_present=tuple(already_present),
         )
-
-
-__all__ = ["BootstrapResult", "BUILT_IN_EMAIL_WORKFLOWS", "EmailWorkflowRegistryBootstrap"]

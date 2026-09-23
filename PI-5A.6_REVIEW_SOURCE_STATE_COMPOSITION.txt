@@ -1,0 +1,1514 @@
+============================================================
+PI-5A.6 REVIEW SOURCE / AUTHORITATIVE STATE COMPOSITION
+Generated: 2026-09-23 13:03:44
+============================================================
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_review_source.py
+############################################################
+"""Application port for the canonical Platform Intelligence review projection."""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from typing import Any
+
+
+class PlatformIntelligenceReviewSource(ABC):
+    """Read-only application port for PI human-review projections.
+
+    The backend deliberately depends on this port rather than importing or
+    constructing Platform Intelligence runtime services. A production adapter
+    can bind this port to the canonical ``ai_agents`` runtime integration.
+    """
+
+    @abstractmethod
+    def list_reviews(self) -> Sequence[Any]:
+        """Return current governed review projections."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_review(self, review_item_id: str) -> Any | None:
+        """Return one governed review projection, if available."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_escalations(self) -> Sequence[Any]:
+        """Return governed review projections with escalation recommendations."""
+        raise NotImplementedError
+
+
+class UnconfiguredPlatformIntelligenceReviewSource(PlatformIntelligenceReviewSource):
+    """Safe inert source object when the canonical PI integration is absent.
+
+    The application API intentionally uses ``source=None`` to distinguish
+    an unconfigured integration from a valid empty result set. This class is
+    retained as an explicit port implementation for composition/tests and is
+    not used as the default API source.
+    """
+
+    def list_reviews(self) -> Sequence[Any]:
+        return ()
+
+    def get_review(self, review_item_id: str) -> Any | None:
+        return None
+
+    def list_escalations(self) -> Sequence[Any]:
+        return ()
+
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_review_api.py
+############################################################
+"""Application service for Platform Intelligence human-review visibility."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from app.application.operations_center.platform_intelligence_review_source import (
+    PlatformIntelligenceReviewSource,
+)
+
+
+class PlatformIntelligenceReviewNotConfigured(RuntimeError):
+    """Raised when the canonical PI review source is not configured."""
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceReviewAPI:
+    """Read-only application boundary for PI review projections."""
+
+    source: PlatformIntelligenceReviewSource | None = None
+
+    @property
+    def configured(self) -> bool:
+        return self.source is not None
+
+    def _require_source(self) -> PlatformIntelligenceReviewSource:
+        if self.source is None:
+            raise PlatformIntelligenceReviewNotConfigured(
+                "Platform Intelligence review source is not configured."
+            )
+
+        return self.source
+
+    def list_reviews(self) -> dict[str, Any]:
+        source = self._require_source()
+
+        items = [
+            self._serialize_projection(item)
+            for item in source.list_reviews()
+        ]
+
+        return {
+            "status": "ready",
+            "count": len(items),
+            "items": items,
+        }
+
+    def get_review(self, review_item_id: str) -> dict[str, Any] | None:
+        if not review_item_id or not review_item_id.strip():
+            raise ValueError("review_item_id must not be blank.")
+
+        source = self._require_source()
+        item = source.get_review(review_item_id)
+
+        if item is None:
+            return None
+
+        return self._serialize_projection(item)
+
+    def list_escalations(self) -> dict[str, Any]:
+        source = self._require_source()
+
+        items = [
+            self._serialize_projection(item)
+            for item in source.list_escalations()
+        ]
+
+        recommended = [
+            item
+            for item in items
+            if item.get("recommendation_status") == "RECOMMENDED"
+        ]
+
+        return {
+            "status": "ready",
+            "count": len(recommended),
+            "items": recommended,
+        }
+
+    @staticmethod
+    def _serialize_projection(item: Any) -> dict[str, Any]:
+        """Expose only the approved PI review projection fields."""
+
+        def value(attribute: str) -> Any:
+            result = getattr(item, attribute, None)
+
+            if hasattr(result, "value"):
+                return result.value
+
+            return result
+
+        created_at = getattr(item, "created_at", None)
+        assigned_at = getattr(item, "assigned_at", None)
+        review_due_at = getattr(item, "review_due_at", None)
+
+        return {
+            "review_item_id": value("review_item_id"),
+            "risk_decision_id": value("risk_decision_id"),
+            "risk_assessment_id": value("risk_assessment_id"),
+            "scope": value("scope"),
+            "risk_level": value("risk_level"),
+            "risk_score": value("risk_score"),
+            "priority": value("priority"),
+            "review_status": value("review_status"),
+            "decision_status": value("decision_status"),
+            "quality_gate_status": value("quality_gate_status"),
+            "evidence_references": tuple(
+                value("evidence_references") or ()
+            ),
+            "historical_references": tuple(
+                value("historical_references") or ()
+            ),
+            "policy_id": value("policy_id"),
+            "policy_version": value("policy_version"),
+            "created_at": (
+                created_at.isoformat()
+                if created_at is not None
+                else None
+            ),
+            "assigned_reviewer": value("assigned_reviewer"),
+            "assigned_at": (
+                assigned_at.isoformat()
+                if assigned_at is not None
+                else None
+            ),
+            "review_due_at": (
+                review_due_at.isoformat()
+                if review_due_at is not None
+                else None
+            ),
+            "rationale": value("rationale"),
+            "recommendation_status": value("recommendation_status"),
+            "recommendation_route": value("recommendation_route"),
+            "recommendation_reasons": tuple(
+                value("recommendation_reasons") or ()
+            ),
+            "recommendation_id": value("recommendation_id"),
+        }
+
+    def __all_projection_fields(self) -> tuple[str, ...]:
+        """Private marker preventing accidental metadata expansion."""
+        return ()
+
+
+def create_platform_intelligence_review_api(
+    source: PlatformIntelligenceReviewSource | None = None,
+) -> PlatformIntelligenceReviewAPI:
+    """Create the governed PI review application boundary."""
+
+    return PlatformIntelligenceReviewAPI(source=source)
+
+
+__all__ = [
+    "PlatformIntelligenceReviewAPI",
+    "PlatformIntelligenceReviewNotConfigured",
+    "create_platform_intelligence_review_api",
+]
+
+
+############################################################
+FILE: .\backend\app\application\operations_center\dashboard_composition.py
+############################################################
+from __future__ import annotations
+
+from app.application.health.operational_dashboard_service import (
+    OperationalDashboardService,
+)
+from app.application.health.operational_event_service import (
+    OperationalEventService,
+)
+from app.application.health.operational_health_snapshot import (
+    OperationalHealthSnapshotService,
+)
+from app.application.health.production_health_configuration import (
+    ProductionHealthConfiguration,
+)
+from app.application.health.production_readiness_service import (
+    ProductionReadinessService,
+)
+from app.application.operations_center.platform_intelligence_review_api import (
+    create_platform_intelligence_review_api,
+)
+from app.application.operations_center.announcement_group_operations_api import (
+    AnnouncementGroupOperationsAPI,
+)
+from app.application.operations_center.chat_operations_dashboard_api import (
+    ChatOperationsDashboardAPI,
+)
+from app.application.operations_center.dashboard_api import (
+    OperationsCenterDashboardAPI,
+)
+from app.application.operations_center.dashboard_facade import (
+    OperationsCenterDashboardFacade,
+)
+from app.application.operations_center.private_classroom_operations_api import (
+    PrivateClassroomOperationsAPI,
+)
+from app.application.provider_management.functionality_control_authorizer import (
+    AuthorizationFunctionalityControlAuthorizer,
+)
+from app.application.provider_management.functionality_health_service import (
+    FunctionalityHealthService,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.application.provider_management.provider_usage_dashboard_service import (
+    ProviderUsageDashboardService,
+)
+
+
+class OperationsCenterComposition:
+    """Application-owned, reusable Operations Center dependency graph."""
+
+    def __init__(
+        self,
+        *,
+        provider_usage_dashboard_service: (
+            ProviderUsageDashboardService | None
+        ) = None,
+        functionality_control_service: (
+            FunctionalityOperationalControlService | None
+        ) = None,
+        platform_intelligence_review_source: PlatformIntelligenceReviewSource | None = None,
+        platform_intelligence_review_api: PlatformIntelligenceReviewAPI | None = None,
+    ) -> None:
+        configuration = ProductionHealthConfiguration()
+
+        readiness_service = ProductionReadinessService(
+            checks=configuration.build_checks(),
+        )
+
+        health_snapshot_service = OperationalHealthSnapshotService(
+            readiness_service=readiness_service,
+        )
+
+        event_service = OperationalEventService()
+
+        dashboard_service = OperationalDashboardService(
+            health_snapshot_service=health_snapshot_service,
+            event_service=event_service,
+        )
+
+        facade = OperationsCenterDashboardFacade(
+            dashboard_service=dashboard_service,
+        )
+
+        dashboard_api = OperationsCenterDashboardAPI(
+            facade=facade,
+        )
+
+        private_classroom_api = PrivateClassroomOperationsAPI(
+            dashboard_service=dashboard_service,
+        )
+
+        announcement_group_api = AnnouncementGroupOperationsAPI(
+            dashboard_service=dashboard_service,
+        )
+
+        chat_operations_api = ChatOperationsDashboardAPI(
+            dashboard_service=dashboard_service,
+            private_classroom_api=private_classroom_api,
+            announcement_group_api=announcement_group_api,
+        )
+
+        functionality_health_service = FunctionalityHealthService(
+            readiness_service=readiness_service,
+            functionality_control_service=functionality_control_service,
+        )
+
+        self._platform_intelligence_review_api = (
+            platform_intelligence_review_api
+            if platform_intelligence_review_api is not None
+            else create_platform_intelligence_review_api(
+                source=platform_intelligence_review_source
+            )
+        )
+        self._event_service = event_service
+        self._dashboard_service = dashboard_service
+        self._dashboard_api = dashboard_api
+        self._chat_operations_api = chat_operations_api
+        self._private_classroom_api = private_classroom_api
+        self._announcement_group_api = announcement_group_api
+        self._functionality_health_service = functionality_health_service
+        self._functionality_control_service = functionality_control_service
+        self._provider_usage_dashboard_service = (
+            provider_usage_dashboard_service
+        )
+
+    @property
+    def event_service(self) -> OperationalEventService:
+        return self._event_service
+
+    @property
+    def dashboard_service(self) -> OperationalDashboardService:
+        return self._dashboard_service
+
+    @property
+    def dashboard_api(self) -> OperationsCenterDashboardAPI:
+        return self._dashboard_api
+
+    @property
+    def chat_operations_api(self) -> ChatOperationsDashboardAPI:
+        return self._chat_operations_api
+
+    @property
+    def private_classroom_api(self) -> PrivateClassroomOperationsAPI:
+        return self._private_classroom_api
+
+    @property
+    def announcement_group_api(self) -> AnnouncementGroupOperationsAPI:
+        return self._announcement_group_api
+
+    @property
+    def functionality_health_service(self) -> FunctionalityHealthService:
+        return self._functionality_health_service
+
+    @property
+    def functionality_control_service(
+        self,
+    ) -> FunctionalityOperationalControlService:
+        return self._functionality_control_service
+
+    @property
+    def platform_intelligence_review_api(self) -> PlatformIntelligenceReviewAPI:
+        return self._platform_intelligence_review_api
+
+    @property
+    def provider_usage_dashboard_service(
+        self,
+    ) -> ProviderUsageDashboardService | None:
+        return self._provider_usage_dashboard_service
+
+
+def create_operations_center_composition(
+    *,
+    provider_usage_dashboard_service: (
+        ProviderUsageDashboardService | None
+    ) = None,
+    functionality_control_service: (
+        FunctionalityOperationalControlService | None
+    ) = None,
+    platform_intelligence_review_source: PlatformIntelligenceReviewSource | None = None,
+    platform_intelligence_review_api: PlatformIntelligenceReviewAPI | None = None,
+) -> OperationsCenterComposition:
+    return OperationsCenterComposition(
+        provider_usage_dashboard_service=provider_usage_dashboard_service,
+        functionality_control_service=functionality_control_service,
+        platform_intelligence_review_source=platform_intelligence_review_source,
+        platform_intelligence_review_api=platform_intelligence_review_api,
+    )
+
+
+def create_operations_center_dashboard_api() -> OperationsCenterDashboardAPI:
+    return OperationsCenterComposition().dashboard_api
+
+
+def create_chat_operations_dashboard_api() -> ChatOperationsDashboardAPI:
+    return OperationsCenterComposition().chat_operations_api
+
+
+def create_private_classroom_operations_api() -> PrivateClassroomOperationsAPI:
+    return OperationsCenterComposition().private_classroom_api
+
+
+def create_announcement_group_operations_api() -> AnnouncementGroupOperationsAPI:
+    return OperationsCenterComposition().announcement_group_api
+
+
+__all__ = [
+    "OperationsCenterComposition",
+    "create_operations_center_composition",
+    "create_operations_center_dashboard_api",
+    "create_chat_operations_dashboard_api",
+    "create_private_classroom_operations_api",
+    "create_announcement_group_operations_api",
+]
+
+
+
+
+
+
+
+
+############################################################
+FILE: .\backend\app\api\operations_center.py
+############################################################
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+from app.api.dependencies.authorization import require_permission
+from app.application.operations_center.dashboard_composition import (
+    OperationsCenterComposition,
+    create_operations_center_composition,
+)
+from app.application.operations_center.platform_intelligence_review_api import (
+    PlatformIntelligenceReviewNotConfigured,
+)
+from app.application.provider_management.environment import (
+    OperationsEnvironment,
+)
+from app.application.provider_management.functionality_operational_control_service import (
+    FunctionalityOperationalControlService,
+)
+from app.domain.authorization.permissions import Permission
+from app.domain.identity.principal import Principal
+
+
+class FunctionalityStopRequest(BaseModel):
+    environment: OperationsEnvironment
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class FunctionalityResumeRequest(BaseModel):
+    environment: OperationsEnvironment
+
+
+def _control_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Functionality operational control is not configured.",
+    )
+
+
+def _result_as_dict(result: Any) -> dict[str, Any]:
+    return {
+        "functionality_id": result.functionality_id,
+        "environment": result.environment,
+        "availability": result.availability,
+        "action": result.action,
+        "reason": result.reason,
+        "changed_at": result.changed_at.isoformat(),
+        "changed_by": result.changed_by,
+    }
+
+
+def create_operations_center_router(
+    *,
+    composition: OperationsCenterComposition | None = None,
+) -> APIRouter:
+    resolved_composition = composition or create_operations_center_composition()
+
+    dashboard_api = resolved_composition.dashboard_api
+    chat_operations_api = resolved_composition.chat_operations_api
+    functionality_health_service = resolved_composition.functionality_health_service
+    functionality_control_service = (
+        resolved_composition.functionality_control_service
+    )
+    event_service = resolved_composition.event_service
+    provider_usage_dashboard_service = (
+        resolved_composition.provider_usage_dashboard_service
+    )
+    platform_intelligence_review_api = (
+        resolved_composition.platform_intelligence_review_api
+    )
+
+    router = APIRouter(
+        prefix="/api/operations-center",
+        tags=["operations-center"],
+    )
+
+    @router.get("/dashboard")
+    async def get_dashboard() -> dict[str, Any]:
+        return await dashboard_api.get_dashboard()
+
+    @router.get("/chat-operations")
+    async def get_chat_operations_dashboard() -> dict[str, Any]:
+        return await chat_operations_api.get_dashboard()
+
+    @router.get("/chat-operations/private-classroom")
+    async def get_private_classroom_operations() -> dict[str, Any]:
+        return await chat_operations_api.get_private_classroom_details()
+
+    @router.get("/chat-operations/announcement-group")
+    async def get_announcement_group_operations() -> dict[str, Any]:
+        return await chat_operations_api.get_announcement_group_details()
+
+    @router.get("/functionality-health")
+    async def get_functionality_health(
+        environment: OperationsEnvironment | None = None,
+    ) -> dict[str, Any]:
+        return await functionality_health_service.get_health(
+            environment=environment
+        )
+
+    @router.post(
+        "/functionality/{functionality_id}/stop",
+        dependencies=[Depends(require_permission(Permission.FUNCTIONALITY_CONTROL))],
+    )
+    def stop_functionality(
+        functionality_id: str,
+        request: FunctionalityStopRequest,
+        principal: Principal = Depends(
+            require_permission(Permission.FUNCTIONALITY_CONTROL)
+        ),
+    ) -> dict[str, Any]:
+        if functionality_control_service is None:
+            raise _control_unavailable()
+
+        try:
+            result = functionality_control_service.stop(
+                actor=principal,
+                actor_name=principal.user_id,
+                environment=request.environment.value,
+                functionality_id=functionality_id,
+                reason=request.reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permission.",
+            ) from None
+
+        return _result_as_dict(result)
+
+    @router.post(
+        "/functionality/{functionality_id}/resume",
+        dependencies=[Depends(require_permission(Permission.FUNCTIONALITY_CONTROL))],
+    )
+    def resume_functionality(
+        functionality_id: str,
+        request: FunctionalityResumeRequest,
+        principal: Principal = Depends(
+            require_permission(Permission.FUNCTIONALITY_CONTROL)
+        ),
+    ) -> dict[str, Any]:
+        if functionality_control_service is None:
+            raise _control_unavailable()
+
+        try:
+            result = functionality_control_service.resume(
+                actor=principal,
+                actor_name=principal.user_id,
+                environment=request.environment.value,
+                functionality_id=functionality_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permission.",
+            ) from None
+
+        return _result_as_dict(result)
+
+
+
+    @router.get(
+        "/platform-intelligence/reviews",
+        dependencies=[Depends(require_permission(Permission.INTERNAL_DATA_READ))],
+    )
+    def get_platform_intelligence_reviews() -> dict[str, Any]:
+        try:
+            return platform_intelligence_review_api.list_reviews()
+        except PlatformIntelligenceReviewNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from None
+
+    @router.get(
+        "/platform-intelligence/reviews/{review_item_id}",
+        dependencies=[Depends(require_permission(Permission.INTERNAL_DATA_READ))],
+    )
+    def get_platform_intelligence_review(
+        review_item_id: str,
+    ) -> dict[str, Any]:
+        try:
+            result = platform_intelligence_review_api.get_review(review_item_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from None
+        except PlatformIntelligenceReviewNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from None
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Platform Intelligence review item not found.",
+            )
+        return result
+
+    @router.get(
+        "/platform-intelligence/escalations",
+        dependencies=[Depends(require_permission(Permission.INTERNAL_DATA_READ))],
+    )
+    def get_platform_intelligence_escalations() -> dict[str, Any]:
+        try:
+            return platform_intelligence_review_api.list_escalations()
+        except PlatformIntelligenceReviewNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from None
+
+    @router.get("/operational-events")
+    def get_operational_events() -> list[dict[str, Any]]:
+        incidents = event_service.list_incidents()
+        return [
+            event.as_dict()
+            for incident in incidents
+            for event in incident.events
+        ]
+
+    @router.get("/provider-usage")
+    def get_provider_usage() -> dict[str, Any]:
+        if provider_usage_dashboard_service is None:
+            return {
+                "status": "not_configured",
+                "reason": "provider_usage_dashboard_service_not_configured",
+            }
+        return provider_usage_dashboard_service.get_snapshot()
+
+    return router
+
+
+router = create_operations_center_router()
+
+__all__ = ["router", "create_operations_center_router"]
+
+
+
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestration.py
+############################################################
+"""Contracts for controlled PI escalation retry orchestration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from app.application.operations_center.platform_intelligence_escalation_dispatch import (
+    PlatformIntelligenceEscalationDispatchRequest,
+)
+
+
+class PlatformIntelligenceRetryRunStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryState:
+    """Authoritative state required immediately before retry dispatch."""
+
+    notification_key: str
+    recommendation_id: str
+    recommendation_status: str
+    review_status: str
+    decision_status: str
+    quality_gate_status: str
+    dispatch_request: PlatformIntelligenceEscalationDispatchRequest
+    email_request: Any
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "notification_key",
+            "recommendation_id",
+            "recommendation_status",
+            "review_status",
+            "decision_status",
+            "quality_gate_status",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be nonblank.")
+
+        if self.dispatch_request.notification_key != self.notification_key:
+            raise ValueError(
+                "dispatch_request.notification_key must match notification_key."
+            )
+        if self.dispatch_request.recommendation_id != self.recommendation_id:
+            raise ValueError(
+                "dispatch_request.recommendation_id must match recommendation_id."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceRetryRunResult:
+    notification_key: str
+    status: PlatformIntelligenceRetryRunStatus
+    reason: str
+    attempt: int | None = None
+    provider_message_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.notification_key.strip():
+            raise ValueError("notification_key must be nonblank.")
+        if not self.reason.strip():
+            raise ValueError("reason must be nonblank.")
+        if self.attempt is not None and self.attempt < 1:
+            raise ValueError("attempt must be at least 1.")
+
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_escalation_retry_orchestrator.py
+############################################################
+"""Controlled orchestration for one PI escalation retry candidate."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+
+from app.application.operations_center.platform_intelligence_escalation_retry_claim_service import (
+    PlatformIntelligenceEscalationRetryClaimService,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_candidates import (
+    PlatformIntelligenceEscalationRetryCandidate,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
+    PlatformIntelligenceEscalationRetryExecutionResult,
+    PlatformIntelligenceEscalationRetryExecutionService,
+    PlatformIntelligenceEscalationRetryExecutionStatus,
+)
+from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
+    PlatformIntelligenceRetryRunResult,
+    PlatformIntelligenceRetryRunStatus,
+    PlatformIntelligenceRetryState,
+)
+
+
+class PlatformIntelligenceRetryStateReader(Protocol):
+    async def get_retry_state(
+        self,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+    ) -> PlatformIntelligenceRetryState | None: ...
+
+
+class PlatformIntelligenceRetryPolicyEvaluator(Protocol):
+    async def evaluate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> bool: ...
+
+
+class PlatformIntelligenceRetryExecutor(Protocol):
+    async def retry(
+        self,
+        *,
+        request: object,
+        email_request: object,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceEscalationRetryExecutionResult: ...
+
+
+class PlatformIntelligenceEscalationRetryOrchestrator:
+    """Coordinates policy, durable claim, state revalidation and retry.
+
+    This service deliberately does not discover candidates, implement retry
+    policy, send email directly, or mutate human-review/risk state.
+
+    The canonical retry execution service remains the owner of retry-policy
+    enforcement and existing dispatch integration. The orchestrator only
+    supplies the authoritative dispatch context after the durable claim and
+    final state revalidation.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_reader: PlatformIntelligenceRetryStateReader,
+        policy_evaluator: PlatformIntelligenceRetryPolicyEvaluator,
+        claim_service: PlatformIntelligenceEscalationRetryClaimService,
+        retry_execution: PlatformIntelligenceRetryExecutor,
+    ) -> None:
+        self._state_reader = state_reader
+        self._policy_evaluator = policy_evaluator
+        self._claim_service = claim_service
+        self._retry_execution = retry_execution
+
+    async def run_candidate(
+        self,
+        *,
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reference_at: datetime,
+    ) -> PlatformIntelligenceRetryRunResult:
+        if reference_at.tzinfo is None or reference_at.utcoffset() is None:
+            raise ValueError("reference_at must be timezone-aware.")
+
+        eligible = await self._policy_evaluator.evaluate(
+            candidate=candidate,
+            reference_at=reference_at,
+        )
+        if not eligible:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_POLICY_NOT_ELIGIBLE",
+                attempt=candidate.attempt,
+            )
+
+        claim = await self._claim_service.claim(
+            notification_key=candidate.notification_key,
+            claimed_at=reference_at,
+        )
+        if claim is None:
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason="RETRY_CANDIDATE_ALREADY_CLAIMED",
+                attempt=candidate.attempt,
+            )
+
+        state = await self._state_reader.get_retry_state(
+            notification_key=candidate.notification_key,
+            recommendation_id=candidate.recommendation_id,
+        )
+        if state is None:
+            return self._skipped(candidate, "AUTHORITATIVE_STATE_NOT_FOUND")
+        if state.notification_key != candidate.notification_key:
+            return self._skipped(candidate, "NOTIFICATION_KEY_MISMATCH")
+        if state.recommendation_id != candidate.recommendation_id:
+            return self._skipped(candidate, "RECOMMENDATION_ID_MISMATCH")
+        if state.recommendation_status != "RECOMMENDED":
+            return self._skipped(
+                candidate, "RECOMMENDATION_NO_LONGER_RECOMMENDED"
+            )
+        if state.review_status != "IN_REVIEW":
+            return self._skipped(candidate, "REVIEW_NOT_IN_REVIEW")
+        if state.decision_status != "PENDING_HUMAN_REVIEW":
+            return self._skipped(
+                candidate, "DECISION_NO_LONGER_PENDING_HUMAN_REVIEW"
+            )
+        if state.quality_gate_status != "PASSED":
+            return self._skipped(
+                candidate, "QUALITY_GATE_NO_LONGER_PASSED"
+            )
+
+        execution = await self._retry_execution.retry(
+            request=state.dispatch_request,
+            email_request=state.email_request,
+            reference_at=reference_at,
+        )
+
+        if (
+            execution.status
+            is PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED
+        ):
+            dispatch_result = execution.dispatch_result
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SUCCEEDED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+                provider_message_id=(
+                    dispatch_result.provider_message_id
+                    if dispatch_result is not None
+                    else None
+                ),
+            )
+
+        if execution.status in (
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_ELIGIBLE,
+            PlatformIntelligenceEscalationRetryExecutionStatus.NOT_DUE,
+        ):
+            return PlatformIntelligenceRetryRunResult(
+                notification_key=candidate.notification_key,
+                status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+                reason=execution.reason,
+                attempt=execution.attempt,
+            )
+
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.FAILED,
+            reason=execution.reason,
+            attempt=execution.attempt,
+        )
+
+    @staticmethod
+    def _skipped(
+        candidate: PlatformIntelligenceEscalationRetryCandidate,
+        reason: str,
+    ) -> PlatformIntelligenceRetryRunResult:
+        return PlatformIntelligenceRetryRunResult(
+            notification_key=candidate.notification_key,
+            status=PlatformIntelligenceRetryRunStatus.SKIPPED,
+            reason=reason,
+            attempt=candidate.attempt,
+        )
+
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_escalation_delivery.py
+############################################################
+"""Contracts for governed Platform Intelligence escalation delivery."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class PlatformIntelligenceEscalationDeliveryStatus(StrEnum):
+    STARTED = "STARTED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationDeliveryRecord:
+    """Durable state for one PI escalation notification key."""
+
+    notification_key: str
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    correlation_id: str
+    attempt: int
+    status: PlatformIntelligenceEscalationDeliveryStatus
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class PlatformIntelligenceEscalationDeliveryRepository:
+    """Application port for durable PI escalation delivery state."""
+
+    async def get_by_notification_key(
+        self,
+        notification_key: str,
+    ) -> PlatformIntelligenceEscalationDeliveryRecord | None:
+        raise NotImplementedError
+
+    async def create_started(
+        self,
+        *,
+        notification_key: str,
+        recommendation_id: str,
+        risk_decision_id: str,
+        review_item_id: str,
+        correlation_id: str,
+    ) -> PlatformIntelligenceEscalationDeliveryRecord:
+        raise NotImplementedError
+
+    async def mark_succeeded(
+        self,
+        *,
+        notification_key: str,
+        provider_message_id: str | None,
+    ) -> PlatformIntelligenceEscalationDeliveryRecord:
+        raise NotImplementedError
+
+    async def mark_failed(
+        self,
+        *,
+        notification_key: str,
+        error_code: str,
+    ) -> PlatformIntelligenceEscalationDeliveryRecord:
+        raise NotImplementedError
+
+    async def start_retry(
+        self,
+        *,
+        notification_key: str,
+    ) -> PlatformIntelligenceEscalationDeliveryRecord:
+        raise NotImplementedError
+
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_escalation_email.py
+############################################################
+"""Governed Platform Intelligence escalation email workflow.
+
+This application service prepares and dispatches an escalation notification only
+when a governed PI escalation recommendation is present.
+
+It does not create, accept, reject, or otherwise change the underlying
+risk decision.
+"""
+
+from __future__ import annotations
+
+import inspect
+from dataclasses import dataclass, replace
+from typing import Any, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformIntelligenceEscalationEmailRequest:
+    """Immutable, traceable email request for a PI escalation recommendation."""
+
+    recommendation_id: str
+    risk_decision_id: str
+    review_item_id: str
+    scope: str
+    risk_level: str
+    risk_score: float
+    quality_gate_status: str
+    review_status: str
+    decision_status: str
+    route: str
+    reasons: tuple[str, ...]
+    evidence_references: tuple[str, ...]
+    historical_references: tuple[str, ...]
+    policy_id: str
+    policy_version: str
+    rationale: str
+    generated_at: str
+    review_url: str | None = None
+    notification_key: str = ""
+    delivery: Any | None = None
+
+    def __post_init__(self) -> None:
+        required = {
+            "recommendation_id": self.recommendation_id,
+            "risk_decision_id": self.risk_decision_id,
+            "review_item_id": self.review_item_id,
+            "scope": self.scope,
+            "risk_level": self.risk_level,
+            "quality_gate_status": self.quality_gate_status,
+            "review_status": self.review_status,
+            "decision_status": self.decision_status,
+            "route": self.route,
+            "policy_id": self.policy_id,
+            "policy_version": self.policy_version,
+            "rationale": self.rationale,
+            "generated_at": self.generated_at,
+        }
+
+        for name, value in required.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required.")
+
+        if not 0.0 <= self.risk_score <= 1.0:
+            raise ValueError("risk_score must be between 0 and 1.")
+
+        if self.quality_gate_status != "PASSED":
+            raise ValueError(
+                "Escalation email requires a passed quality gate."
+            )
+
+        if not self.notification_key.strip():
+            raise ValueError("notification_key is required.")
+
+        if self.decision_status != "PENDING_HUMAN_REVIEW":
+            raise ValueError(
+                "Escalation email requires a pending human decision."
+            )
+
+        if self.review_status != "IN_REVIEW":
+            raise ValueError(
+                "Escalation email requires an IN_REVIEW item."
+            )
+
+        if any(not value.strip() for value in self.reasons):
+            raise ValueError("reasons cannot contain blanks.")
+
+        if any(
+            not value.strip()
+            for value in self.evidence_references
+        ):
+            raise ValueError(
+                "evidence_references cannot contain blanks."
+            )
+
+        if any(
+            not value.strip()
+            for value in self.historical_references
+        ):
+            raise ValueError(
+                "historical_references cannot contain blanks."
+            )
+
+
+class PlatformIntelligenceEscalationEmailSender(Protocol):
+    """Provider-independent delivery boundary."""
+
+    def send(
+        self,
+        request: PlatformIntelligenceEscalationEmailRequest,
+        *,
+        subject: str,
+        body: str,
+        html_body: str,
+    ) -> object:
+        ...
+
+
+class PlatformIntelligenceEscalationEmailService:
+    """Prepare and dispatch governed PI escalation notifications.
+
+    The service requires the caller to supply the authoritative PI review
+    projection. It does not query the runtime, risk engine, or repositories.
+    """
+
+    workflow_id = "platform_intelligence_escalation"
+    template_id = "platform_intelligence_escalation"
+
+    def __init__(
+        self,
+        *,
+        sender: PlatformIntelligenceEscalationEmailSender,
+        workflow_active: bool = True,
+        frontend_base_url: str | None = None,
+    ) -> None:
+        if sender is None:
+            raise ValueError("sender is required.")
+
+        self._sender = sender
+        self._workflow_active = workflow_active
+        self._frontend_base_url = (
+            (frontend_base_url or "").strip().rstrip("/")
+        )
+
+    def prepare(
+        self,
+        request: PlatformIntelligenceEscalationEmailRequest,
+    ) -> PlatformIntelligenceEscalationEmailRequest:
+        if request is None:
+            raise ValueError("request is required.")
+
+        if not self._workflow_active:
+            raise ValueError(
+                "Platform Intelligence escalation email workflow "
+                "is not active."
+            )
+
+        if not request.route.strip():
+            raise ValueError("Escalation route is required.")
+
+        return request
+
+    def build_subject(
+        self,
+        request: PlatformIntelligenceEscalationEmailRequest,
+    ) -> str:
+        self.prepare(request)
+
+        return (
+            "[EasyWorld Platform Intelligence] "
+            f"{request.risk_level} escalation review required "
+            f"— {request.scope}"
+        )
+
+    def build_body(
+        self,
+        request: PlatformIntelligenceEscalationEmailRequest,
+    ) -> str:
+        self.prepare(request)
+
+        lines = [
+            "EASYWORLD · PLATFORM INTELLIGENCE",
+            "",
+            "HUMAN ESCALATION REVIEW REQUIRED",
+            "",
+            (
+                "A governed Platform Intelligence escalation "
+                "recommendation has been generated."
+            ),
+            (
+                "This notification is a recommendation for human "
+                "review only. It does not"
+            ),
+            (
+                "constitute approval, rejection, remediation "
+                "authorization, or production action."
+            ),
+            "",
+            "RISK",
+            f"Scope: {request.scope}",
+            f"Risk level: {request.risk_level}",
+            f"Risk score: {request.risk_score:.4f}",
+            f"Escalation route: {request.route}",
+            "",
+            "TRACEABILITY",
+            f"Recommendation ID: {request.recommendation_id}",
+            f"Risk decision ID: {request.risk_decision_id}",
+            f"Review item ID: {request.review_item_id}",
+            f"Generated at: {request.generated_at}",
+            "",
+            "GOVERNANCE",
+            f"Quality gate: {request.quality_gate_status}",
+            f"Review status: {request.review_status}",
+            f"Decision status: {request.decision_status}",
+            f"Policy: {request.policy_id} / {request.policy_version}",
+            "",
+            "ESCALATION REASONS",
+            *[
+                f"- {reason}"
+                for reason in request.reasons
+            ],
+            "",
+            "EVIDENCE REFERENCES",
+            *[
+                f"- {reference}"
+                for reference in request.evidence_references
+            ],
+            "",
+            "HISTORICAL REFERENCES",
+            *[
+                f"- {reference}"
+                for reference in request.historical_references
+            ],
+            "",
+            "ASSESSMENT RATIONALE",
+            request.rationale,
+            "",
+            "ACTION REQUIRED",
+            (
+                "Open the authoritative Platform Intelligence review "
+                "record and complete the human review in the controlled "
+                "system. Do not approve, reject, or authorize remediation "
+                "from the email itself. Any SLA or response target is "
+                "governed by the authoritative review record and "
+                "escalation policy."
+            ),
+            "",
+            "DECISION CONTROL",
+            (
+                "Email reply does not constitute acceptance, rejection, "
+                "or authorization."
+            ),
+        ]
+
+        if request.review_url:
+            lines.extend(
+                [
+                    "",
+                    "REVIEW",
+                    request.review_url,
+                ]
+            )
+
+        return "\n".join(lines)
+
+    def build_html(
+        self,
+        request: PlatformIntelligenceEscalationEmailRequest,
+    ) -> str:
+        self.prepare(request)
+        return _build_html(
+            request,
+            self._frontend_base_url,
+        )
+
+    def send(
+        self,
+        request: PlatformIntelligenceEscalationEmailRequest,
+    ) -> PlatformIntelligenceEscalationEmailRequest:
+        self.prepare(request)
+
+        subject = self.build_subject(request)
+        body = self.build_body(request)
+        html_body = self.build_html(request)
+
+        delivery = self._sender.send(
+            request,
+            subject=subject,
+            body=body,
+            html_body=html_body,
+        )
+
+        if inspect.isawaitable(delivery):
+            return replace(
+                request,
+                delivery=delivery,
+            )
+
+        return request
+
+
+def _build_html(
+    request: PlatformIntelligenceEscalationEmailRequest,
+    frontend_base_url: str,
+) -> str:
+    import html
+
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    def items(values: tuple[str, ...]) -> str:
+        return "".join(
+            f"<li>{esc(value)}</li>"
+            for value in values
+        )
+
+    review_url = request.review_url
+
+    if not review_url and frontend_base_url:
+        review_url = (
+            f"{frontend_base_url}"
+            "/operations-center/compliance/reviews"
+            f"?review_item_id={request.review_item_id}"
+        )
+
+    review_block = (
+        f'<p><a href="{esc(review_url)}">'
+        "Open Platform Intelligence Review"
+        "</a></p>"
+        if review_url
+        else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Platform Intelligence Escalation</title>
+</head>
+<body style="font-family:Arial,sans-serif;line-height:1.5;color:#172033;background:#f5f7fb;padding:24px;">
+  <div style="max-width:680px;margin:0 auto;background:#fff;border:1px solid #dfe5ef;border-radius:14px;padding:28px;">
+    <p style="font-size:12px;font-weight:700;letter-spacing:.12em;color:#64748b;">
+      EASYWORLD · PLATFORM INTELLIGENCE
+    </p>
+
+    <h1 style="font-size:24px;margin:8px 0 6px;">
+      Human Escalation Review Required
+    </h1>
+
+    <p>
+      A governed Platform Intelligence escalation recommendation
+      has been generated.
+    </p>
+
+    <p>
+      <strong>This is a recommendation for human review only.</strong>
+      It does not constitute approval, rejection, remediation
+      authorization, or production action.
+    </p>
+
+    <h2 style="font-size:16px;">Risk</h2>
+    <ul>
+      <li><strong>Scope:</strong> {esc(request.scope)}</li>
+      <li><strong>Risk level:</strong> {esc(request.risk_level)}</li>
+      <li><strong>Risk score:</strong> {request.risk_score:.4f}</li>
+      <li><strong>Escalation route:</strong> {esc(request.route)}</li>
+    </ul>
+
+    <h2 style="font-size:16px;">Traceability</h2>
+    <ul>
+      <li><strong>Recommendation:</strong> {esc(request.recommendation_id)}</li>
+      <li><strong>Risk decision:</strong> {esc(request.risk_decision_id)}</li>
+      <li><strong>Review item:</strong> {esc(request.review_item_id)}</li>
+      <li><strong>Generated:</strong> {esc(request.generated_at)}</li>
+    </ul>
+
+    <h2 style="font-size:16px;">Governance</h2>
+    <ul>
+      <li><strong>Quality gate:</strong> {esc(request.quality_gate_status)}</li>
+      <li><strong>Review status:</strong> {esc(request.review_status)}</li>
+      <li><strong>Decision status:</strong> {esc(request.decision_status)}</li>
+      <li><strong>Policy:</strong> {esc(request.policy_id)} / {esc(request.policy_version)}</li>
+    </ul>
+
+    <h2 style="font-size:16px;">Escalation Reasons</h2>
+    <ul>{items(request.reasons)}</ul>
+
+    <h2 style="font-size:16px;">Evidence References</h2>
+    <ul>{items(request.evidence_references)}</ul>
+
+    <h2 style="font-size:16px;">Historical References</h2>
+    <ul>{items(request.historical_references)}</ul>
+
+    <h2 style="font-size:16px;">Assessment Rationale</h2>
+    <p>{esc(request.rationale)}</p>
+
+    <h2 style="font-size:16px;">Action Required</h2>
+    <p>
+      Open the authoritative Platform Intelligence review record
+      and complete the human review in the controlled system.
+      Do not approve, reject, or authorize remediation from the
+      email itself. Any SLA or response target is governed by the
+      authoritative review record and escalation policy.
+    </p>
+
+    <h2 style="font-size:16px;">Decision Control</h2>
+    <p>
+      Email reply does not constitute acceptance, rejection,
+      or authorization.
+    </p>
+
+    {review_block}
+  </div>
+</body>
+</html>"""
+
+
+__all__ = [
+    "PlatformIntelligenceEscalationEmailRequest",
+    "PlatformIntelligenceEscalationEmailSender",
+    "PlatformIntelligenceEscalationEmailService",
+]
+
+############################################################
+FILE: .\backend\app\application\operations_center\platform_intelligence_recommendation.py
+############################################################
+FILE NOT FOUND
+
+############################################################
+FILE: .\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_review_repository.py
+############################################################
+FILE NOT FOUND
+
+############################################################
+FILE: .\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_risk_decision_repository.py
+############################################################
+FILE NOT FOUND
+
+############################################################
+FILE: .\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_human_review_repository.py
+############################################################
+FILE NOT FOUND
+
+############################################################
+FILE: .\backend\app\infrastructure\operations_center\sqlalchemy_platform_intelligence_recommendation_repository.py
+############################################################
+FILE NOT FOUND
+
+############################################################
+FILE: .\backend\app\application\composition\platform_intelligence_composition.py
+############################################################
+FILE NOT FOUND
+
+############################################################
+FILE: .\backend\tests\application\operations_center\test_platform_intelligence_review_source.py
+############################################################
+FILE NOT FOUND
+
+============================================================
+END OF INSPECTION
+============================================================

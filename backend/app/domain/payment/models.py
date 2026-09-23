@@ -42,6 +42,8 @@ class CheckoutRequest:
     mode: CheckoutMode
     success_url: str
     cancel_url: str
+    payer_user_id: str | None = None
+    plan_code: str | None = None
 
 
 @dataclass(frozen=True)

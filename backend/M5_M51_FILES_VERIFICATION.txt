@@ -1,0 +1,455 @@
+﻿=== FILE EXISTENCE ===
+app\domain\learning\world_access_tier.py : True
+app\application\world_catalogue\models.py : True
+app\infrastructure\persistence\learning_world_models.py : True
+app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py : True
+app\application\services\world_access_service.py : True
+=== FILE CONTENTS ===
+===== app\domain\learning\world_access_tier.py =====
+"""Access-tier policy for Learning Worlds."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class WorldAccessTier(StrEnum):
+    """Authoritative access tier assigned to a Learning World."""
+
+    NORMAL = "normal"
+    PREMIUM = "premium"
+    SPECIAL = "special"
+
+    @classmethod
+    def from_value(cls, value: str) -> "WorldAccessTier":
+        """Return the tier represented by a persisted value.
+
+        Unknown values fail closed rather than silently becoming another tier.
+        """
+        if not isinstance(value, str):
+            raise ValueError("World access tier must be a string.")
+
+        normalized = value.strip().lower()
+
+        try:
+            return cls(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                f"Unsupported World access tier: {value!r}."
+            ) from exc
+
+
+__all__ = ["WorldAccessTier"]
+===== app\application\world_catalogue\models.py =====
+"""Application model for the authoritative Learning World catalogue."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from uuid import UUID
+
+
+@dataclass(frozen=True, slots=True)
+class LearningWorldCatalogueEntry:
+    """Application representation of an authoritative Learning World."""
+
+    id: UUID
+    identifier: str
+    name: str
+    description: str
+    language: str
+    version: str
+    status: str
+    enabled: bool
+    world_type: str
+    learning_domain: str
+    runtime_world_id: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, UUID):
+            raise ValueError("Learning World catalogue id must be a UUID.")
+
+        for field_name in (
+            "identifier",
+            "name",
+            "version",
+            "status",
+            "world_type",
+            "learning_domain",
+        ):
+            if not getattr(self, field_name).strip():
+                raise ValueError(
+                    f"Learning World catalogue {field_name} cannot be empty."
+                )
+
+        if self.runtime_world_id is not None and not self.runtime_world_id.strip():
+            raise ValueError(
+                "runtime_world_id cannot be blank when provided."
+            )
+
+===== app\infrastructure\persistence\learning_world_models.py =====
+"""SQLAlchemy model for the authoritative Learning World catalogue."""
+from __future__ import annotations
+from datetime import datetime
+from uuid import UUID
+from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy.orm import Mapped, mapped_column
+from .database import Base
+
+class LearningWorldModel(Base):
+    __tablename__ = "learning_worlds"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    identifier: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    language: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    world_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    learning_domain: Mapped[str] = mapped_column(String(100), nullable=False)
+    runtime_world_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+===== app\infrastructure\persistence\postgresql_learning_world_catalogue_repository.py =====
+"""PostgreSQL adapter for the Learning World catalogue repository."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.application.world_catalogue.models import LearningWorldCatalogueEntry
+from app.application.world_catalogue.repositories import (
+    LearningWorldCatalogueRepository,
+)
+from app.domain.learning.world_access_tier import WorldAccessTier
+
+from .learning_world_models import LearningWorldModel
+
+
+class PostgreSQLLearningWorldCatalogueRepository(
+    LearningWorldCatalogueRepository
+):
+    """PostgreSQL implementation of the Learning World catalogue."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValueError("session_factory cannot be None.")
+
+        self._session_factory = session_factory
+
+    def get_by_identifier(
+        self,
+        identifier: str,
+    ) -> LearningWorldCatalogueEntry | None:
+        if not identifier or not identifier.strip():
+            raise ValueError("identifier is required.")
+
+        normalized_identifier = identifier.strip()
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LearningWorldModel).where(
+                    LearningWorldModel.identifier == normalized_identifier
+                )
+            )
+
+            return None if row is None else self._to_domain(row)
+
+    def get_by_id(
+        self,
+        world_id: UUID,
+    ) -> LearningWorldCatalogueEntry | None:
+        """Return a catalogue entry by its authoritative World UUID."""
+        if not isinstance(world_id, UUID):
+            raise ValueError("world_id must be a UUID.")
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LearningWorldModel).where(
+                    LearningWorldModel.id == world_id
+                )
+            )
+
+            return None if row is None else self._to_domain(row)
+
+    def list_all(self) -> tuple[LearningWorldCatalogueEntry, ...]:
+        """Return every configured World, including disabled Worlds."""
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(LearningWorldModel).order_by(
+                    LearningWorldModel.identifier
+                )
+            ).all()
+
+            return tuple(
+                self._to_domain(row)
+                for row in rows
+            )
+
+    @staticmethod
+    def _to_domain(
+        row: LearningWorldModel,
+    ) -> LearningWorldCatalogueEntry:
+        return LearningWorldCatalogueEntry(
+            id=row.id,
+            identifier=row.identifier,
+            name=row.name,
+            description=row.description,
+            language=row.language,
+            version=row.version,
+            status=row.status,
+            enabled=row.enabled,
+            world_type=row.world_type,
+            learning_domain=row.learning_domain,
+            runtime_world_id=row.runtime_world_id,
+            access_tier=WorldAccessTier.from_value(row.access_tier),
+        )
+
+
+__all__ = ["PostgreSQLLearningWorldCatalogueRepository"]
+===== app\application\services\world_access_service.py =====
+"""Application service for learner-to-learning-world authorization."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Protocol
+from uuid import UUID
+
+from app.domain.learning.learner_world_access import BETA, LearnerWorldAccess
+from app.domain.learning.learner_world_access_repository import (
+    LearnerWorldAccessRepository,
+)
+
+
+class CanonicalUserIdentityReader(Protocol):
+    """Minimal provider-neutral read boundary over canonical user identity."""
+
+    async def get_user_for_identity(self, user_id: UUID):
+        """Return the canonical user record or None."""
+        ...
+
+
+class WorldAccessError(ValueError):
+    """Expected World access validation failure."""
+
+
+class UserNotFoundError(WorldAccessError):
+    """The requested canonical user does not exist."""
+
+
+class LearningWorldNotFoundError(WorldAccessError):
+    """The requested Learning World does not exist."""
+
+
+class LearningWorldDisabledError(WorldAccessError):
+    """The requested Learning World is disabled for ordinary new grants."""
+
+
+class WorldAccessService:
+    """
+    Authorize learners for one or more Learning Worlds.
+
+    Important boundary:
+    - World access is durable authorization/membership.
+    - World ``enabled`` remains runtime availability.
+    - Ordinary direct grants still reject disabled Worlds.
+    - The explicit ``allow_disabled_world`` flag is reserved for a
+      higher-level provisioning policy such as Beta portfolio provisioning.
+    """
+
+    def __init__(
+        self,
+        *,
+        access_repository: LearnerWorldAccessRepository,
+        user_identity_reader: CanonicalUserIdentityReader,
+        learning_world_repository,
+    ) -> None:
+        if access_repository is None:
+            raise ValueError("access_repository is required.")
+        if user_identity_reader is None:
+            raise ValueError("user_identity_reader is required.")
+        if learning_world_repository is None:
+            raise ValueError("learning_world_repository is required.")
+
+        self._access_repository = access_repository
+        self._user_identity_reader = user_identity_reader
+        self._learning_world_repository = learning_world_repository
+
+    async def grant_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+        access_source: str = BETA,
+        allow_disabled_world: bool = False,
+    ) -> LearnerWorldAccess:
+        self._validate_user_id(user_id)
+        identifier = self._normalize_world_identifier(world_identifier)
+
+        user = await self._user_identity_reader.get_user_for_identity(user_id)
+        if user is None:
+            raise UserNotFoundError("Canonical user does not exist.")
+
+        world = await asyncio.to_thread(
+            self._learning_world_repository.get_by_identifier,
+            identifier,
+        )
+
+        if world is None:
+            raise LearningWorldNotFoundError(
+                f"Learning World does not exist: {identifier}"
+            )
+
+        if not world.enabled and not allow_disabled_world:
+            raise LearningWorldDisabledError(
+                f"Learning World is disabled: {identifier}"
+            )
+
+        world_id = self._world_id(world)
+
+        existing = await asyncio.to_thread(
+            self._access_repository.get_by_user_and_world,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        if existing is not None:
+            if existing.is_active():
+                return existing
+
+            revived = LearnerWorldAccess.grant(
+                user_id=user_id,
+                world_id=world_id,
+                access_source=access_source,
+                access_id=existing.access_id,
+            )
+            return await asyncio.to_thread(
+                self._access_repository.save,
+                revived,
+            )
+
+        access = LearnerWorldAccess.grant(
+            user_id=user_id,
+            world_id=world_id,
+            access_source=access_source,
+        )
+
+        return await asyncio.to_thread(
+            self._access_repository.save,
+            access,
+        )
+
+    async def has_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> bool:
+        access = await self.get_access(
+            user_id=user_id,
+            world_identifier=world_identifier,
+        )
+        return access is not None and access.is_active()
+
+    async def require_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> LearnerWorldAccess:
+        access = await self.get_access(
+            user_id=user_id,
+            world_identifier=world_identifier,
+        )
+
+        if access is None or not access.is_active():
+            raise PermissionError(
+                "Learner does not have active access to this Learning World."
+            )
+
+        return access
+
+    async def get_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> LearnerWorldAccess | None:
+        self._validate_user_id(user_id)
+        identifier = self._normalize_world_identifier(world_identifier)
+
+        world = await asyncio.to_thread(
+            self._learning_world_repository.get_by_identifier,
+            identifier,
+        )
+
+        if world is None:
+            return None
+
+        world_id = self._world_id(world)
+
+        return await asyncio.to_thread(
+            self._access_repository.get_by_user_and_world,
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+    async def list_world_access(
+        self,
+        *,
+        user_id: UUID,
+    ) -> tuple[LearnerWorldAccess, ...]:
+        self._validate_user_id(user_id)
+
+        return await asyncio.to_thread(
+            self._access_repository.list_by_user,
+            user_id=user_id,
+        )
+
+    @staticmethod
+    def _world_id(world) -> UUID:
+        world_id = getattr(world, "id", None)
+        if not isinstance(world_id, UUID):
+            raise WorldAccessError(
+                "Learning World catalogue entry must expose the "
+                "authoritative World UUID as 'id'."
+            )
+        return world_id
+
+    @staticmethod
+    def _validate_user_id(user_id: UUID) -> None:
+        if not isinstance(user_id, UUID):
+            raise ValueError("user_id must be a UUID.")
+
+    @staticmethod
+    def _normalize_world_identifier(world_identifier: str) -> str:
+        if not isinstance(world_identifier, str):
+            raise ValueError("world_identifier must be a string.")
+
+        identifier = world_identifier.strip()
+
+        if not identifier:
+            raise ValueError("world_identifier is required.")
+
+        if len(identifier) > 100:
+            raise ValueError("world_identifier is too long.")
+
+        return identifier
+
+
+__all__ = [
+    "CanonicalUserIdentityReader",
+    "LearningWorldDisabledError",
+    "LearningWorldNotFoundError",
+    "UserNotFoundError",
+    "WorldAccessError",
+    "WorldAccessService",
+]
+
+=== COMPILE CHECK ===
+PASS - python -m compileall -q app

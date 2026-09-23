@@ -1,0 +1,122 @@
+=== MAIN.PY IMPORTS: RELEVANT P5B/AUTH ===
+
+150: from app.api.voice_reconnect_router import (
+151:     router as voice_reconnect_router,
+152: )
+153: 
+154: from app.application.privacy.beta1_processing_catalog import (
+155:     create_beta1_processing_registry,
+156: )
+157: from app.application.privacy.screening.adapter import (
+158:     ProcessingActivityScreeningAdapter,
+159: )
+160: from app.application.privacy.screening.service import (
+161:     ScreeningService,
+162: )
+163: 
+164: from app.infrastructure.auth.postgresql_auth_repository import (
+165:     PostgreSQLAuthenticationRepository,
+166: )
+167: from app.infrastructure.developer_admin.postgresql_developer_admin_uow_factory import (
+168:     PostgreSQLDeveloperAdminUnitOfWorkFactory,
+169: )
+170: from app.infrastructure.email.authentication_email_sender import (
+171:     AuthenticationEmailSenderAdapter,
+172: )
+173: from app.infrastructure.persistence.database import (
+174:     Base,
+175:     create_async_database_engine,
+176:     create_async_session_factory,
+177:     create_database_engine,
+178:     create_session_factory,
+179: )
+180: from app.infrastructure.persistence.postgresql_functionality_control_repository import (
+181:     PostgreSQLFunctionalityControlRepository,
+182: )
+183: from app.infrastructure.persistence.postgresql_learning_world_catalogue_repository import (
+184:     PostgreSQLLearningWorldCatalogueRepository,
+185: )
+186: from app.infrastructure.persistence.postgresql_provider_usage_repository import (
+187:     PostgreSQLProviderUsageRepository,
+188: )
+189: from app.infrastructure.persistence.postgresql_study_material_repository import (
+190:     PostgreSQLStudyMaterialRepository,
+191: )
+192: from app.infrastructure.security.trusted_clock import SystemTrustedClock
+193: from app.domain.authorization.permissions import Permission
+194: from app.domain.identity.transaction_authorization import (
+195:     TransactionAuthorizationConsumer,
+196:     TransactionAuthorizationRegistry,
+197: )
+198: from app.infrastructure.telegram.telegram_announcement_client import (
+199:     TelegramAnnouncementClient,
+200: )
+201: from app.infrastructure.telegram.telegram_announcement_publisher import (
+202:     TelegramAnnouncementPublisher,
+203: )
+204: from app.infrastructure.worlds.yaml_world_repository import (
+205:     YamlWorldRepository,
+206: )
+207: 
+208: from app.project_control_center.api.project_control_router import (
+209:     create_project_control_router,
+210: )
+
+=== MAIN.PY AUTH DATABASE CONSTRUCTION ===
+
+350:             application.state,
+351:             "provider_usage_engine",
+352:             None,
+353:         )
+354: 
+355:         if provider_usage_engine is not None:
+356:             try:
+357:                 provider_usage_engine.dispose()
+358:             except Exception as exc:
+359:                 print(
+360:                     "PostgreSQL provider-usage engine shutdown failed:",
+361:                     exc,
+362:                 )
+363: 
+364: 
+365: def create_application() -> FastAPI:
+366:     academy_config = (
+367:         AcademyActivationConfig.from_environment()
+368:     )
+369: 
+370:     auth_engine = create_async_database_engine()
+371: 
+372:     auth_session_factory = (
+373:         create_async_session_factory(
+374:             auth_engine,
+375:         )
+376:     )
+377: 
+378:     auth_repository = (
+379:         PostgreSQLAuthenticationRepository(
+380:             auth_session_factory,
+381:         )
+382:     )
+383: 
+384:     email_provider_manager = EmailProviderManager()
+385: 
+386:     authentication_email_sender = AuthenticationEmailSenderAdapter(
+387:         provider_manager=email_provider_manager,
+388:     )
+389: 
+390:     authentication_email_service = AuthenticationEmailService(
+391:         authentication_email_sender,
+392:         frontend_base_url=_required_environment(
+393:             "EASYCHATBOT_PORTAL_URL",
+394:         ),
+395:     )
+396: 
+397:     authentication_service = AuthenticationService(
+398:         auth_repository,
+399:         email_service=authentication_email_service,
+400:     )
+401: 
+402:     # ------------------------------------------------------------------
+403:     # Developer Administration
+404:     #
+405:     # Production path:

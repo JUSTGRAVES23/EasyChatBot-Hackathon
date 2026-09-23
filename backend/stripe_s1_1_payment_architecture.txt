@@ -1,0 +1,942 @@
+﻿"""Payment application services."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class AuthorizationDecision(str, Enum):
+    AUTHORIZED = "authorized"
+    APPROVAL_REQUIRED = "approval_required"
+    NO_GUARDIAN = "no_guardian"
+    CONSENT_REQUIRED = "consent_required"
+    NOT_AUTHORIZED = "not_authorized"
+
+
+@dataclass(frozen=True)
+class PaymentAuthorizationDecision:
+    decision: AuthorizationDecision
+    beneficiary_user_id: str
+    payer_user_id: str | None = None
+
+
+__all__ = [
+    "AuthorizationDecision",
+    "PaymentAuthorizationDecision",
+]
+from __future__ import annotations
+
+from app.application.payment.checkout_models import (
+    CheckoutDecision,
+    CheckoutEligibility,
+)
+
+
+class CheckoutEligibilityService:
+    """Determine whether a user may initiate a billing checkout.
+
+    This service does not call Stripe and does not create access.
+    """
+
+    def __init__(
+        self,
+        billing_catalogue,
+        subscription_repository,
+    ) -> None:
+        if billing_catalogue is None:
+            raise ValueError("billing_catalogue cannot be None.")
+
+        if subscription_repository is None:
+            raise ValueError("subscription_repository cannot be None.")
+
+        self.billing_catalogue = billing_catalogue
+        self.subscription_repository = subscription_repository
+
+    def evaluate(
+        self,
+        *,
+        user_id: str,
+        plan_code: str,
+        billing_interval: str,
+        beneficiary_user_id: str | None = None,
+    ) -> CheckoutDecision:
+        if not user_id:
+            raise ValueError("user_id cannot be empty.")
+
+        if not plan_code:
+            raise ValueError("plan_code cannot be empty.")
+
+        if not billing_interval:
+            raise ValueError("billing_interval cannot be empty.")
+
+        try:
+            price = self.billing_catalogue.get_price(
+                plan_code=plan_code,
+                billing_interval=billing_interval,
+            )
+        except ValueError:
+            return CheckoutDecision(
+                eligibility=CheckoutEligibility.PLAN_NOT_AVAILABLE,
+                plan_code=plan_code,
+                beneficiary_user_id=beneficiary_user_id or user_id,
+            )
+
+        beneficiary = beneficiary_user_id or user_id
+
+        existing = self.subscription_repository.get_by_beneficiary_user_id(
+            beneficiary
+        )
+
+        active_statuses = {
+            "trialing",
+            "active",
+            "past_due",
+        }
+
+        if any(
+            subscription.status in active_statuses
+            and subscription.plan_code == plan_code
+            for subscription in existing
+        ):
+            return CheckoutDecision(
+                eligibility=CheckoutEligibility.ALREADY_SUBSCRIBED,
+                plan_code=plan_code,
+                price_id=price.stripe_price_id,
+                beneficiary_user_id=beneficiary,
+                payer_user_id=user_id,
+            )
+
+        # Current policy:
+        # A beneficiary purchasing for themselves can proceed directly.
+        # Parent/guardian approval rules will be connected through the
+        # relationship/policy layer in the next slice.
+        return CheckoutDecision(
+            eligibility=CheckoutEligibility.DIRECT_CHECKOUT,
+            plan_code=plan_code,
+            price_id=price.stripe_price_id,
+            beneficiary_user_id=beneficiary,
+            payer_user_id=user_id,
+        )
+
+
+__all__ = ["CheckoutEligibilityService"]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class CheckoutEligibility(str, Enum):
+    DIRECT_CHECKOUT = "direct_checkout"
+    PARENT_APPROVAL_REQUIRED = "parent_approval_required"
+    ALREADY_SUBSCRIBED = "already_subscribed"
+    NOT_ELIGIBLE = "not_eligible"
+    PLAN_NOT_AVAILABLE = "plan_not_available"
+
+
+@dataclass(frozen=True)
+class CheckoutDecision:
+    eligibility: CheckoutEligibility
+    plan_code: str
+    price_id: str | None = None
+    beneficiary_user_id: str | None = None
+    payer_user_id: str | None = None
+
+
+__all__ = [
+    "CheckoutDecision",
+    "CheckoutEligibility",
+]
+from __future__ import annotations
+
+from app.application.payment.checkout_models import CheckoutEligibility
+from app.application.payment.ports import PaymentProvider
+from app.domain.payment.models import CheckoutMode, CheckoutRequest
+
+
+class CreateCheckout:
+    """Create a Stripe Checkout session after eligibility has been established.
+
+    This service does not determine eligibility itself and does not grant
+    entitlements. PaymentProvider remains the Stripe abstraction boundary.
+    """
+
+    def __init__(
+        self,
+        provider: PaymentProvider,
+        eligibility_service,
+    ) -> None:
+        if provider is None:
+            raise ValueError("provider cannot be None.")
+
+        if eligibility_service is None:
+            raise ValueError("eligibility_service cannot be None.")
+
+        self.provider = provider
+        self.eligibility_service = eligibility_service
+
+    def execute(
+        self,
+        *,
+        user_id: str,
+        plan_code: str,
+        billing_interval: str,
+        success_url: str,
+        cancel_url: str,
+        stripe_customer_id: str | None = None,
+        beneficiary_user_id: str | None = None,
+    ):
+        decision = self.eligibility_service.evaluate(
+            user_id=user_id,
+            plan_code=plan_code,
+            billing_interval=billing_interval,
+            beneficiary_user_id=beneficiary_user_id,
+        )
+
+        if decision.eligibility != CheckoutEligibility.DIRECT_CHECKOUT:
+            raise ValueError(
+                f"Checkout is not permitted: "
+                f"{decision.eligibility.value}."
+            )
+
+        if not decision.price_id:
+            raise ValueError(
+                "Checkout decision is missing price_id."
+            )
+
+        beneficiary = (
+            decision.beneficiary_user_id
+            or beneficiary_user_id
+            or user_id
+        )
+
+        payer = (
+            decision.payer_user_id
+            or user_id
+        )
+
+        request = CheckoutRequest(
+            user_id=beneficiary,
+            price_id=decision.price_id,
+            mode=CheckoutMode.SUBSCRIPTION,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            payer_user_id=payer,
+            plan_code=decision.plan_code,
+        )
+
+        # CheckoutRequest currently carries the beneficiary identity only.
+        # Payer/plan metadata is added at the provider boundary through the
+        # provider implementation in the next integration slice.
+        #
+        # The service deliberately does not access Stripe SDK objects.
+
+        return self.provider.create_checkout_session(
+            request,
+            customer_id=stripe_customer_id,
+        )
+
+
+__all__ = ["CreateCheckout"]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class RegistrationPolicyClassification(str, Enum):
+    """
+    Product-neutral registration policy classifications.
+
+    These classifications are intentionally separated from payment and
+    Stripe concepts. The policy layer decides whether guardian involvement
+    is required; the payment layer consumes that decision.
+    """
+
+    ADULT = "adult"
+    MINOR = "minor"
+    STUDENT = "student"
+
+
+@dataclass(frozen=True)
+class GuardianRegistrationRequirement:
+    """
+    Result of registration-policy evaluation.
+
+    guardian_required is the authoritative decision consumed by onboarding
+    and, where applicable, family/payment authorization flows.
+    """
+
+    guardian_required: bool
+    guardian_email: str | None = None
+    policy_classification: RegistrationPolicyClassification | None = None
+
+    @property
+    def required(self) -> bool:
+        """
+        Backward-compatible read-only alias for the previous contract.
+        """
+        return self.guardian_required
+
+
+def evaluate_guardian_registration_requirement(
+    classification: RegistrationPolicyClassification,
+    guardian_email: str | None = None,
+    *,
+    guardian_required: bool = False,
+) -> GuardianRegistrationRequirement:
+    """
+    Evaluate whether guardian registration is required.
+
+    The decision is explicit rather than deriving legal meaning from a
+    hard-coded age bucket such as UNDER_15.
+
+    Age/jurisdiction policy can determine guardian_required upstream.
+    This function remains reusable by the P5B family/payment flow.
+    """
+
+    normalized_email = (
+        guardian_email.strip().lower()
+        if guardian_email and guardian_email.strip()
+        else None
+    )
+
+    if guardian_required:
+        return GuardianRegistrationRequirement(
+            guardian_required=True,
+            guardian_email=normalized_email,
+            policy_classification=classification,
+        )
+
+    return GuardianRegistrationRequirement(
+        guardian_required=False,
+        guardian_email=None,
+        policy_classification=classification,
+    )
+
+
+__all__ = [
+    "RegistrationPolicyClassification",
+    "GuardianRegistrationRequirement",
+    "evaluate_guardian_registration_requirement",
+]
+from __future__ import annotations
+
+from app.application.payment.authorization_models import (
+    AuthorizationDecision,
+    PaymentAuthorizationDecision,
+)
+
+
+class PaymentAuthorizationService:
+    """Determine whether a beneficiary may initiate paid checkout.
+
+    Relationship, consent and payment authorization remain separate concepts.
+    """
+
+    def __init__(
+        self,
+        relationship_repository,
+        consent_repository,
+    ) -> None:
+        if relationship_repository is None:
+            raise ValueError("relationship_repository cannot be None.")
+
+        if consent_repository is None:
+            raise ValueError("consent_repository cannot be None.")
+
+        self.relationship_repository = relationship_repository
+        self.consent_repository = consent_repository
+
+    def evaluate(
+        self,
+        *,
+        beneficiary_user_id: str,
+        requires_parental_authorization: bool,
+    ) -> PaymentAuthorizationDecision:
+        if not beneficiary_user_id:
+            raise ValueError(
+                "beneficiary_user_id cannot be empty."
+            )
+
+        if not requires_parental_authorization:
+            return PaymentAuthorizationDecision(
+                decision=AuthorizationDecision.AUTHORIZED,
+                beneficiary_user_id=beneficiary_user_id,
+                payer_user_id=beneficiary_user_id,
+            )
+
+        relationships = (
+            self.relationship_repository
+            .get_active_parents_for_child(
+                beneficiary_user_id
+            )
+        )
+
+        if not relationships:
+            return PaymentAuthorizationDecision(
+                decision=AuthorizationDecision.NO_GUARDIAN,
+                beneficiary_user_id=beneficiary_user_id,
+            )
+
+        for relationship in relationships:
+            parent_user_id = relationship.parent_user_id
+
+            if self.consent_repository.has_active_payment_consent(
+                parent_user_id=parent_user_id,
+                child_user_id=beneficiary_user_id,
+            ):
+                return PaymentAuthorizationDecision(
+                    decision=AuthorizationDecision.AUTHORIZED,
+                    beneficiary_user_id=beneficiary_user_id,
+                    payer_user_id=parent_user_id,
+                )
+
+        return PaymentAuthorizationDecision(
+            decision=AuthorizationDecision.APPROVAL_REQUIRED,
+            beneficiary_user_id=beneficiary_user_id,
+        )
+
+
+__all__ = ["PaymentAuthorizationService"]
+from __future__ import annotations
+
+from app.application.payment.ports import EntitlementService
+from app.domain.payment.models import PaymentEvent
+
+
+class PaymentEventRouter(EntitlementService):
+    """Route verified payment events to the appropriate application handler.
+
+    This class does not:
+    - verify Stripe signatures;
+    - call the Stripe SDK;
+    - persist webhook events;
+    - decide whether Checkout succeeded.
+
+    Those responsibilities remain in their existing layers.
+    """
+
+    def __init__(
+        self,
+        subscription_entitlement_service,
+    ) -> None:
+        if subscription_entitlement_service is None:
+            raise ValueError(
+                "subscription_entitlement_service cannot be None."
+            )
+
+        self.subscription_entitlement_service = (
+            subscription_entitlement_service
+        )
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        if not isinstance(event, PaymentEvent):
+            raise TypeError("event must be a PaymentEvent.")
+
+        self.subscription_entitlement_service.handle_payment_event(event)
+
+
+__all__ = ["PaymentEventRouter"]
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from app.domain.payment.models import (
+    BillingPortalSession,
+    CheckoutRequest,
+    CheckoutSession,
+    PaymentEvent,
+)
+
+
+class PaymentProvider(ABC):
+    @abstractmethod
+    def create_customer(self, *, user_id: str, email: str, name: str | None = None) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_checkout_session(self, request: CheckoutRequest, *, customer_id: str | None) -> CheckoutSession:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_billing_portal_session(self, *, customer_id: str, return_url: str) -> BillingPortalSession:
+        raise NotImplementedError
+
+    @abstractmethod
+    def construct_webhook_event(self, payload: bytes, signature: str) -> PaymentEvent:
+        raise NotImplementedError
+
+
+class PaymentEventRepository(ABC):
+    @abstractmethod
+    def has_processed(self, event_id: str) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_received(self, event: PaymentEvent) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_processed(self, event_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_failed(self, event_id: str, error: str) -> None:
+        raise NotImplementedError
+
+
+class EntitlementService(ABC):
+    @abstractmethod
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        raise NotImplementedError
+from __future__ import annotations
+
+from app.application.payment.ports import EntitlementService, PaymentEventRepository, PaymentProvider
+from app.domain.payment.models import CheckoutRequest
+
+
+class CreateCheckoutSession:
+    def __init__(self, provider: PaymentProvider):
+        self.provider = provider
+
+    def execute(self, request: CheckoutRequest, *, stripe_customer_id: str | None):
+        return self.provider.create_checkout_session(request, customer_id=stripe_customer_id)
+
+
+class CreateBillingPortalSession:
+    def __init__(self, provider: PaymentProvider):
+        self.provider = provider
+
+    def execute(self, *, stripe_customer_id: str, return_url: str):
+        return self.provider.create_billing_portal_session(
+            customer_id=stripe_customer_id,
+            return_url=return_url,
+        )
+
+
+class ProcessStripeWebhook:
+    def __init__(self, provider: PaymentProvider, events: PaymentEventRepository, entitlements: EntitlementService):
+        self.provider = provider
+        self.events = events
+        self.entitlements = entitlements
+
+    def execute(self, *, payload: bytes, signature: str):
+        event = self.provider.construct_webhook_event(payload, signature)
+        if self.events.has_processed(event.event_id):
+            return {"status": "already_processed", "event_id": event.event_id}
+
+        self.events.record_received(event)
+        try:
+            self.entitlements.handle_payment_event(event)
+            self.events.mark_processed(event.event_id)
+            return {"status": "processed", "event_id": event.event_id}
+        except Exception as exc:
+            self.events.mark_failed(event.event_id, str(exc))
+            raise
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from app.domain.payment.models import PaymentEvent
+
+
+class SubscriptionEntitlementService:
+    """Apply verified Stripe subscription events to EASYWORLD persistence.
+
+    Stripe is the payment system of record.
+    EASYWORLD subscription and entitlement persistence is the access system
+    of record.
+
+    This service deliberately contains no Stripe SDK calls.
+    """
+
+    SUBSCRIPTION_EVENTS = {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    }
+
+    def __init__(
+        self,
+        subscription_repository,
+        entitlement_repository,
+    ) -> None:
+        if subscription_repository is None:
+            raise ValueError("subscription_repository cannot be None.")
+
+        if entitlement_repository is None:
+            raise ValueError("entitlement_repository cannot be None.")
+
+        self.subscription_repository = subscription_repository
+        self.entitlement_repository = entitlement_repository
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        if not isinstance(event, PaymentEvent):
+            raise TypeError("event must be a PaymentEvent.")
+
+        if event.event_type not in self.SUBSCRIPTION_EVENTS:
+            return
+
+        subscription = self._extract_subscription(event)
+
+        beneficiary_user_id = self._metadata_value(
+            subscription,
+            "easyworld_user_id",
+        )
+
+        if not beneficiary_user_id:
+            raise ValueError(
+                "Stripe subscription is missing easyworld_user_id metadata."
+            )
+
+        payer_user_id = self._metadata_value(
+            subscription,
+            "easyworld_payer_user_id",
+        ) or beneficiary_user_id
+
+        plan_code = self._metadata_value(
+            subscription,
+            "easyworld_plan_code",
+        )
+
+        if not plan_code:
+            raise ValueError(
+                "Stripe subscription is missing easyworld_plan_code metadata."
+            )
+
+        stripe_subscription_id = subscription.get("id")
+        stripe_customer_id = self._customer_id(subscription.get("customer"))
+        stripe_price_id = self._price_id(subscription)
+
+        if not stripe_subscription_id:
+            raise ValueError("Stripe subscription is missing id.")
+
+        if not stripe_customer_id:
+            raise ValueError("Stripe subscription is missing customer.")
+
+        if not stripe_price_id:
+            raise ValueError("Stripe subscription is missing price.")
+
+        status = str(subscription.get("status") or "unknown")
+
+        current_period_start = self._timestamp(
+            subscription.get("current_period_start")
+        )
+        current_period_end = self._timestamp(
+            subscription.get("current_period_end")
+        )
+
+        cancel_at_period_end = bool(
+            subscription.get("cancel_at_period_end", False)
+        )
+
+        self.subscription_repository.upsert(
+            beneficiary_user_id=beneficiary_user_id,
+            payer_user_id=payer_user_id,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=stripe_price_id,
+            plan_code=plan_code,
+            status=status,
+            current_period_start=current_period_start,
+            current_period_end=current_period_end,
+            cancel_at_period_end=cancel_at_period_end,
+        )
+
+        active = status in {
+            "trialing",
+            "active",
+        }
+
+        self.entitlement_repository.upsert(
+            user_id=beneficiary_user_id,
+            plan_code=plan_code,
+            active=active,
+        )
+
+    @staticmethod
+    def _extract_subscription(event: PaymentEvent) -> dict[str, Any]:
+        data = event.payload.get("data")
+
+        if not isinstance(data, dict):
+            raise ValueError("Stripe event is missing data.")
+
+        obj = data.get("object")
+
+        if not isinstance(obj, dict):
+            raise ValueError("Stripe event is missing subscription object.")
+
+        return obj
+
+    @staticmethod
+    def _metadata_value(
+        subscription: dict[str, Any],
+        key: str,
+    ) -> str | None:
+        metadata = subscription.get("metadata")
+
+        if not isinstance(metadata, dict):
+            return None
+
+        value = metadata.get(key)
+
+        if value is None:
+            return None
+
+        value = str(value).strip()
+
+        return value or None
+
+    @staticmethod
+    def _customer_id(customer: Any) -> str | None:
+        if isinstance(customer, str):
+            return customer
+
+        if isinstance(customer, dict):
+            value = customer.get("id")
+            return str(value) if value else None
+
+        return None
+
+    @staticmethod
+    def _price_id(subscription: dict[str, Any]) -> str | None:
+        items = subscription.get("items")
+
+        if not isinstance(items, dict):
+            return None
+
+        data = items.get("data")
+
+        if not isinstance(data, list) or not data:
+            return None
+
+        first_item = data[0]
+
+        if not isinstance(first_item, dict):
+            return None
+
+        price = first_item.get("price")
+
+        if isinstance(price, str):
+            return price
+
+        if isinstance(price, dict):
+            value = price.get("id")
+            return str(value) if value else None
+
+        return None
+
+    @staticmethod
+    def _timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (TypeError, ValueError, OSError):
+            raise ValueError(
+                f"Invalid Stripe timestamp: {value!r}."
+            )
+
+
+__all__ = ["SubscriptionEntitlementService"]
+"""Payment domain."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+
+class BillingInterval(str, Enum):
+    MONTH = "month"
+    YEAR = "year"
+
+
+class CheckoutMode(str, Enum):
+    PAYMENT = "payment"
+    SUBSCRIPTION = "subscription"
+
+
+class SubscriptionStatus(str, Enum):
+    INCOMPLETE = "incomplete"
+    TRIALING = "trialing"
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELED = "canceled"
+    UNPAID = "unpaid"
+    PAUSED = "paused"
+
+
+@dataclass(frozen=True)
+class PaymentPlan:
+    key: str
+    display_name: str
+    stripe_price_id: str | None
+    mode: CheckoutMode
+    interval: BillingInterval | None = None
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class CheckoutRequest:
+    user_id: str
+    price_id: str
+    mode: CheckoutMode
+    success_url: str
+    cancel_url: str
+    payer_user_id: str | None = None
+    plan_code: str | None = None
+
+
+@dataclass(frozen=True)
+class CheckoutSession:
+    provider_session_id: str
+    checkout_url: str
+
+
+@dataclass(frozen=True)
+class BillingPortalSession:
+    provider_session_id: str
+    portal_url: str
+
+
+@dataclass(frozen=True)
+class PaymentEvent:
+    event_id: str
+    event_type: str
+    payload: dict[str, Any]
+"""Payment infrastructure adapters."""
+"""Framework-neutral route blueprint.
+
+Adapt these handlers to the canonical EASYWORLD FastAPI router instead of creating a second API stack.
+"""
+
+from app.application.payment.services import CreateBillingPortalSession, CreateCheckoutSession, ProcessStripeWebhook
+from app.domain.payment.models import CheckoutMode, CheckoutRequest
+
+
+def create_checkout(*, service: CreateCheckoutSession, user_id: str, stripe_customer_id: str | None, price_id: str, success_url: str, cancel_url: str, mode: str):
+    request = CheckoutRequest(
+        user_id=user_id,
+        price_id=price_id,
+        mode=CheckoutMode(mode),
+        success_url=success_url,
+        cancel_url=cancel_url,
+    )
+    return service.execute(request, stripe_customer_id=stripe_customer_id)
+
+
+def create_portal(*, service: CreateBillingPortalSession, stripe_customer_id: str, return_url: str):
+    return service.execute(stripe_customer_id=stripe_customer_id, return_url=return_url)
+
+
+def stripe_webhook(*, service: ProcessStripeWebhook, payload: bytes, signature: str):
+    return service.execute(payload=payload, signature=signature)
+from __future__ import annotations
+
+from app.domain.payment.models import PaymentEvent
+
+
+class InMemoryPaymentEventRepository:
+    """Development/test implementation. Replace with the canonical EASYWORLD DB repository."""
+
+    def __init__(self):
+        self.events: dict[str, PaymentEvent] = {}
+        self.status: dict[str, str] = {}
+        self.errors: dict[str, str] = {}
+
+    def has_processed(self, event_id: str) -> bool:
+        return self.status.get(event_id) == "processed"
+
+    def record_received(self, event: PaymentEvent) -> None:
+        self.events.setdefault(event.event_id, event)
+        self.status.setdefault(event.event_id, "received")
+
+    def mark_processed(self, event_id: str) -> None:
+        self.status[event_id] = "processed"
+
+    def mark_failed(self, event_id: str, error: str) -> None:
+        self.status[event_id] = "failed"
+        self.errors[event_id] = error
+from __future__ import annotations
+
+from app.domain.payment.models import PaymentEvent
+
+
+class NoOpEntitlementService:
+    """Safe P1â€“P4 placeholder while EASYWORLD remains free.
+
+    Webhooks can be verified and recorded in tests without granting paid access.
+    Replace with the real EASYWORLD entitlement service in the paid-readiness milestone.
+    """
+
+    def handle_payment_event(self, event: PaymentEvent) -> None:
+        return None
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import stripe
+
+from app.application.payment.ports import PaymentProvider
+from app.domain.payment.models import BillingPortalSession, CheckoutRequest, CheckoutSession, PaymentEvent
+
+
+class StripePaymentProvider(PaymentProvider):
+    """Stripe infrastructure adapter. Keep Stripe-specific SDK usage here."""
+
+    def __init__(self, secret_key: str | None = None, webhook_secret: str | None = None):
+        self.secret_key = secret_key or os.environ["STRIPE_SECRET_KEY"]
+        self.webhook_secret = webhook_secret or os.environ["STRIPE_WEBHOOK_SECRET"]
+        stripe.api_key = self.secret_key
+
+    def create_customer(self, *, user_id: str, email: str, name: str | None = None) -> str:
+        customer = stripe.Customer.create(
+            email=email,
+            name=name,
+            metadata={"easyworld_user_id": user_id},
+        )
+        return customer.id
+
+    def create_checkout_session(self, request: CheckoutRequest, *, customer_id: str | None) -> CheckoutSession:
+        params: dict[str, Any] = {
+            "mode": request.mode.value,
+            "line_items": [{"price": request.price_id, "quantity": 1}],
+            "success_url": request.success_url,
+            "cancel_url": request.cancel_url,
+            "metadata": {
+                "easyworld_user_id": request.user_id,
+                "easyworld_price_id": request.price_id,
+            },
+        }
+        if customer_id:
+            params["customer"] = customer_id
+
+        session = stripe.checkout.Session.create(**params)
+        return CheckoutSession(
+            provider_session_id=session.id,
+            checkout_url=session.url,
+        )
+
+    def create_billing_portal_session(self, *, customer_id: str, return_url: str) -> BillingPortalSession:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=return_url,
+        )
+        return BillingPortalSession(
+            provider_session_id=session.id,
+            portal_url=session.url,
+        )
+
+    def construct_webhook_event(self, payload: bytes, signature: str) -> PaymentEvent:
+        event = stripe.Webhook.construct_event(payload, signature, self.webhook_secret)
+        return PaymentEvent(
+            event_id=event["id"],
+            event_type=event["type"],
+            payload=event.to_dict_recursive(),
+        )

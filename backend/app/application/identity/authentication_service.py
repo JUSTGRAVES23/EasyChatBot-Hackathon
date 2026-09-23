@@ -275,7 +275,7 @@ class AuthenticationService:
 
         await self._email_service.send_password_reset_email(
             email=user.email,
-            username=user.email,
+            username=user.username,
             reset_token=reset_token,
         )
 
@@ -297,17 +297,17 @@ class AuthenticationService:
                 "Password reset token is required."
             )
 
-        user = await self._repository.get_password_reset_user(
-            normalized_token,
+        context = await self._repository.get_password_reset_context(
+            token=normalized_token,
         )
 
-        if user is None:
+        if context is None:
             raise AuthenticationError(
                 "Invalid or expired password reset token."
             )
 
         return PasswordResetContext(
-            email=user.email,
+            email=context.email,
         )
 
     @staticmethod
@@ -357,31 +357,20 @@ class AuthenticationService:
                 "Password reset token is required."
             )
 
-        user = await self._repository.get_password_reset_user(
-            normalized_token,
+        context = await self._repository.get_password_reset_context(
+            token=normalized_token,
         )
 
-        if user is None:
+        if context is None:
             raise AuthenticationError(
                 "Invalid or expired password reset token."
-            )
-
-        # PasswordResetContextRecord exposes the authenticated account
-        # identifier as user_id, not id.
-        credential = await self._repository.get_password_credential(
-            user.user_id,
-        )
-
-        if credential is None:
-            raise AuthenticationError(
-                "Password reset is not available for this account."
             )
 
         self._validate_password_reset_password(new_password)
 
         if self._password_hasher.verify(
             new_password,
-            credential.password_hash,
+            context.password_hash,
         ):
             raise AuthenticationError(
                 "New password must be different from your previous password."
@@ -392,7 +381,7 @@ class AuthenticationService:
         reset = await self._repository.reset_password(
             token=normalized_token,
             password_hash=password_hash,
-            expected_password_hash=credential.password_hash,
+            expected_password_hash=context.password_hash,
         )
 
         if not reset:
@@ -410,8 +399,8 @@ class AuthenticationService:
         if self._email_service is not None:
             try:
                 await self._email_service.send_password_reset_confirmation_email(
-                    email=user.email,
-                    username=user.email,
+                    email=context.email,
+                    username=context.email,
                     reset_at=reset_at,
                 )
             except Exception:
@@ -423,12 +412,10 @@ class AuthenticationService:
         self,
         token: str,
     ) -> None:
-        """Verify an email address using a repository-managed token.
+        """Verify an application email address using a repository-managed token.
 
-        Token generation, hashing, expiration, single-use enforcement,
-        and persistence remain the responsibility of the repository.
-        The application service exposes the business operation without
-        depending on the persistence implementation.
+        Token validation, expiration and single-use enforcement remain inside
+        the authentication repository.
         """
         normalized_token = token.strip()
 
