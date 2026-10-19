@@ -274,6 +274,7 @@ from app.api.cybersecurity_live_reports import (
 from app.api.cybersecurity_reports import (
     router as cybersecurity_reports_router,
 )
+from app.api.billing_checkout import router as billing_checkout_router
 
 
 def _required_environment(name: str) -> str:
@@ -1077,6 +1078,10 @@ def create_application() -> FastAPI:
     application.include_router(
         academy_questionnaires_router,
     )
+    # Fail-closed: paid checkout remains disabled pending approval.
+    application.state.paid_checkout_enabled = False
+    application.state.payment_composition = None
+    application.include_router(billing_checkout_router)
 
     return application
 
