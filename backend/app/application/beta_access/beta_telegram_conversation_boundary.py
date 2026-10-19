@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Protocol
+from uuid import UUID
 
 from app.application.beta_access.beta_access_service import (
     BetaAccessService,
@@ -17,6 +18,7 @@ from app.application.private_chat.telegram_private_chat_bridge import (
     TelegramPrivateChatBridge,
 )
 from app.application.failures.provider_failure import ProviderFailure
+from app.application.services.world_access_service import WorldAccessService
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,7 @@ class BetaTelegramConversationBoundary:
             FunctionalityOperationalControlService | None
         ) = None,
         private_chat_bridge: TelegramPrivateChatBridge | None = None,
+        world_access_service: WorldAccessService | None = None,
     ) -> None:
         if conversation_service is None:
             raise ValueError(
@@ -101,7 +104,13 @@ class BetaTelegramConversationBoundary:
         self._functionality_control_service = (
             functionality_control_service
         )
+        if private_chat_bridge is not None and world_access_service is None:
+            raise ValueError(
+                "world_access_service is required when private_chat_bridge is configured."
+            )
+
         self._private_chat_bridge = private_chat_bridge
+        self._world_access_service = world_access_service
 
     async def _record(
         self,
@@ -238,6 +247,75 @@ class BetaTelegramConversationBoundary:
             return self.SAFE_ERROR_RESPONSE
 
         # ---------------------------------------------------------------
+        # Canonical World authorization for private-chat bridge
+        # ---------------------------------------------------------------
+        # This check must precede all private-chat lookup/creation and AI
+        # side effects. Beta onboarding alone does not grant World access.
+        if self._private_chat_bridge is not None:
+            raw_user_id = getattr(context, "user_id", None)
+            try:
+                if isinstance(raw_user_id, UUID):
+                    authenticated_user_id = raw_user_id
+                elif isinstance(raw_user_id, str) and raw_user_id.strip():
+                    authenticated_user_id = UUID(raw_user_id)
+                else:
+                    raise ValueError("Missing canonical user_id.")
+
+                world_identifier = context.world_id
+                if not isinstance(world_identifier, str) or not world_identifier.strip():
+                    raise ValueError("Missing canonical world identifier.")
+            except (ValueError, TypeError, AttributeError):
+                await self._record(
+                    event_type="telegram_world_authorization",
+                    telegram_user_id=telegram_user_id,
+                    outcome="denied",
+                    metadata={"reason": "invalid_authoritative_context"},
+                )
+                return self.UNAUTHORIZED_RESPONSE
+
+            world_access_service = self._world_access_service
+            if world_access_service is None:
+                # Defense in depth: a missing policy dependency must never
+                # permit a bridged private-chat request.
+                logger.error(
+                    "Telegram World authorization service is not configured."
+                )
+                return self.SAFE_ERROR_RESPONSE
+
+            try:
+                await world_access_service.require_access(
+                    user_id=authenticated_user_id,
+                    world_identifier=world_identifier,
+                )
+            except PermissionError:
+                await self._record(
+                    event_type="telegram_world_authorization",
+                    telegram_user_id=telegram_user_id,
+                    outcome="denied",
+                    metadata={"world_id": world_identifier},
+                )
+                return self.UNAUTHORIZED_RESPONSE
+            except Exception as exc:
+                await self._record(
+                    event_type="telegram_world_authorization",
+                    telegram_user_id=telegram_user_id,
+                    outcome="error",
+                    metadata={
+                        "world_id": world_identifier,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                logger.exception("Telegram World authorization failed.")
+                return self.SAFE_ERROR_RESPONSE
+
+            await self._record(
+                event_type="telegram_world_authorization",
+                telegram_user_id=telegram_user_id,
+                outcome="allowed",
+                metadata={"world_id": world_identifier},
+            )
+
+        # ---------------------------------------------------------------
         # Functionality operational control
         # ---------------------------------------------------------------
         #
@@ -362,13 +440,9 @@ class BetaTelegramConversationBoundary:
         # ---------------------------------------------------------------
         try:
             if self._private_chat_bridge is not None:
-                user = getattr(context, "user", None)
-                user_id = getattr(user, "id", None)
-
-                if user_id is None:
-                    raise RuntimeError(
-                        "Telegram conversation context has no authenticated user id."
-                    )
+                # The canonical context user_id was validated and authorized
+                # above; do not derive identity from a non-canonical `user`.
+                user_id = str(authenticated_user_id)
 
                 response = await self._private_chat_bridge.handle_message(
                     user_id=str(user_id),
@@ -555,5 +629,3 @@ class BetaTelegramConversationBoundary:
 __all__ = [
     "BetaTelegramConversationBoundary",
 ]
-
-

@@ -30,6 +30,15 @@ class PrivateChatRepository(Protocol):
     ) -> PrivateChatActiveConversation | None:
         ...
 
+    def get_or_create_active_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> PrivateChatActiveConversation:
+        ...
+
     def create_conversation(
         self,
         *,

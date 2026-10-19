@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai_runtime.conversation.conversation_runtime import ConversationRuntime
 from app.application.private_chat.service import PrivateChatService
+from app.application.services.world_access_service import WorldAccessService
 from app.application.uai.language.language_detector import LanguageDetector
 from app.application.uai.language.language_response_policy import (
     LanguageResponsePolicy,
@@ -23,6 +24,7 @@ def build_private_chat_service_factory(
     session_factory: sessionmaker[Session],
     conversation_runtime: ConversationRuntime,
     character_instruction: str,
+    world_access_service: WorldAccessService,
     language_detector: LanguageDetector | None = None,
 ) -> Callable[[], PrivateChatService]:
     """Build a request-scoped private-chat service factory.
@@ -38,6 +40,8 @@ def build_private_chat_service_factory(
         raise ValueError("conversation_runtime is required.")
     if not character_instruction or not character_instruction.strip():
         raise ValueError("character_instruction is required.")
+    if world_access_service is None:
+        raise ValueError("world_access_service is required.")
 
     app_root = Path(__file__).resolve().parents[2]
     world_repository = YamlWorldRepository(
@@ -59,6 +63,7 @@ def build_private_chat_service_factory(
             language_detector=language_detector,
             conversation_runtime=conversation_runtime,
             character_instruction=character_instruction,
+            world_access_service=world_access_service,
         )
 
     return factory

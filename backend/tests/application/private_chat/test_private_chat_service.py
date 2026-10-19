@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -106,22 +107,16 @@ class FakeConversationRuntime:
 class FakePrivateChatRepository:
     def __init__(self) -> None:
         self.conversations: dict[UUID, PrivateChatConversation] = {}
-        self.messages: list[PrivateChatMessage] = {}
+        self.messages: list[PrivateChatMessage] = []
 
         # Server-owned active conversation pointer:
-        #
         # (user_id, world_id) -> conversation_id
-        #
-        # This mirrors the production active-conversation concept without
-        # requiring a database for application-service unit tests.
         self.active_conversations: dict[tuple[str, str], UUID] = {}
 
         self.commit_count = 0
         self.rollback_count = 0
         self.close_count = 0
-
-        # Keep messages as a list for compatibility with the existing tests.
-        self.messages = []
+        self.recent_messages_calls = 0
 
     def get_conversation_for_user(
         self,
@@ -171,6 +166,41 @@ class FakePrivateChatRepository:
             messages=messages,
         )
 
+    def get_or_create_active_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> PrivateChatActiveConversation:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        existing = self.get_active_conversation(
+            user_id=user_id,
+            world_id=world_id,
+            limit=limit,
+        )
+
+        if existing is not None:
+            return existing
+
+        conversation = self.create_conversation(
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        self.set_active_conversation(
+            user_id=user_id,
+            world_id=world_id,
+            conversation_id=conversation.conversation_id,
+        )
+
+        return PrivateChatActiveConversation(
+            conversation=conversation,
+            messages=[],
+        )
+
     def create_conversation(
         self,
         *,
@@ -188,7 +218,6 @@ class FakePrivateChatRepository:
         )
 
         self.conversations[conversation.conversation_id] = conversation
-
         return conversation
 
     def set_active_conversation(
@@ -204,13 +233,9 @@ class FakePrivateChatRepository:
         )
 
         if conversation is None or conversation.world_id != world_id:
-            raise ValueError(
-                "Private chat conversation not found"
-            )
+            raise ValueError("Private chat conversation not found")
 
-        self.active_conversations[(user_id, world_id)] = (
-            conversation_id
-        )
+        self.active_conversations[(user_id, world_id)] = conversation_id
 
     def save_message(
         self,
@@ -229,7 +254,6 @@ class FakePrivateChatRepository:
             raise ValueError("Conversation not found")
 
         self.messages.append(message)
-
         return message
 
     def get_recent_messages(
@@ -240,6 +264,8 @@ class FakePrivateChatRepository:
         world_id: str,
         limit: int = 20,
     ) -> list[PrivateChatMessage]:
+        self.recent_messages_calls += 1
+
         if limit < 1:
             raise ValueError("limit must be greater than zero")
 
@@ -274,14 +300,12 @@ class FakePrivateChatRepository:
         if conversation is None or conversation.world_id != world_id:
             raise ValueError("Conversation not found")
 
-        self.conversations[conversation_id] = (
-            PrivateChatConversation(
-                conversation_id=conversation.conversation_id,
-                user_id=conversation.user_id,
-                world_id=conversation.world_id,
-                created_at=conversation.created_at,
-                updated_at=datetime.now(timezone.utc),
-            )
+        self.conversations[conversation_id] = PrivateChatConversation(
+            conversation_id=conversation.conversation_id,
+            user_id=conversation.user_id,
+            world_id=conversation.world_id,
+            created_at=conversation.created_at,
+            updated_at=datetime.now(timezone.utc),
         )
 
     def commit(self) -> None:
@@ -292,6 +316,30 @@ class FakePrivateChatRepository:
 
     def close(self) -> None:
         self.close_count += 1
+
+
+class FakeWorldAccessService:
+    """Test double for the mandatory World authorization dependency."""
+
+    def __init__(self, *, deny: bool = False) -> None:
+        self.deny = deny
+        self.calls: list[tuple[UUID, str]] = []
+
+    async def require_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> None:
+        self.calls.append((user_id, world_identifier))
+
+        if self.deny:
+            raise PermissionError("World access denied")
+
+
+@pytest.fixture
+def world_access_service():
+    return FakeWorldAccessService()
 
 
 @pytest.fixture
@@ -315,7 +363,13 @@ def runtime():
 
 
 @pytest.fixture
-def service(repository, world_resolver, language_policy, runtime):
+def service(
+    repository,
+    world_resolver,
+    language_policy,
+    runtime,
+    world_access_service,
+):
     return PrivateChatService(
         repository=repository,
         world_resolver=world_resolver,
@@ -323,6 +377,7 @@ def service(repository, world_resolver, language_policy, runtime):
         language_detector=FakeLanguageDetector(),
         conversation_runtime=runtime,
         character_instruction="You are Yeti.",
+        world_access_service=world_access_service,
     )
 
 
@@ -331,18 +386,18 @@ def test_authenticated_user_can_create_polish_conversation(
     repository,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     assert conversation.world_id == "polish_world"
-    assert conversation.user_id == "user-1"
+    assert conversation.user_id == "00000000-0000-0000-0000-000000000001"
     assert conversation.conversation_id in repository.conversations
 
     # Creating a conversation explicitly is also the Restart operation,
     # therefore the new conversation must become active.
     assert repository.active_conversations[
-        ("user-1", "polish_world")
+        ("00000000-0000-0000-0000-000000000001", "polish_world")
     ] == conversation.conversation_id
 
     assert repository.commit_count == 1
@@ -353,17 +408,17 @@ def test_first_active_lookup_creates_and_activates_conversation(
     repository,
 ):
     active = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
-    assert active.conversation.user_id == "user-1"
+    assert active.conversation.user_id == "00000000-0000-0000-0000-000000000001"
     assert active.conversation.world_id == "polish_world"
     assert active.messages == []
 
     assert (
         repository.active_conversations[
-            ("user-1", "polish_world")
+            ("00000000-0000-0000-0000-000000000001", "polish_world")
         ]
         == active.conversation.conversation_id
     )
@@ -377,14 +432,14 @@ def test_repeated_active_lookup_returns_same_conversation(
     repository,
 ):
     first = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     first_id = first.conversation.conversation_id
 
     second = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -396,9 +451,9 @@ def test_repeated_active_lookup_returns_same_conversation(
     # than creating another conversation.
     assert len(repository.conversations) == 1
 
-    # No additional commit is required when simply resuming an existing
-    # active conversation.
-    assert repository.commit_count == 1
+    # The application service owns the transaction boundary and commits
+    # after each successful get-or-create operation.
+    assert repository.commit_count == 2
 
 
 def test_active_lookup_returns_existing_history(
@@ -406,20 +461,20 @@ def test_active_lookup_returns_existing_history(
     repository,
 ):
     conversation = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation.conversation_id,
             message="Cześć!",
         )
     )
 
     resumed = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -440,7 +495,7 @@ def test_restart_creates_new_active_conversation_and_preserves_old_one(
     repository,
 ):
     first = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -448,14 +503,14 @@ def test_restart_creates_new_active_conversation_and_preserves_old_one(
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=first_id,
             message="Cześć!",
         )
     )
 
     restarted = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -465,7 +520,7 @@ def test_restart_creates_new_active_conversation_and_preserves_old_one(
 
     # The new conversation is active.
     assert repository.active_conversations[
-        ("user-1", "polish_world")
+        ("00000000-0000-0000-0000-000000000001", "polish_world")
     ] == second_id
 
     # The old conversation remains persisted.
@@ -488,7 +543,6 @@ def test_restart_creates_new_active_conversation_and_preserves_old_one(
     ]
 
     assert new_messages == []
-
     assert len(repository.conversations) == 2
 
 
@@ -497,19 +551,19 @@ def test_send_message_does_not_change_active_conversation(
     repository,
 ):
     active = service.get_active_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     conversation_id = active.conversation.conversation_id
 
     assert repository.active_conversations[
-        ("user-1", "polish_world")
+        ("00000000-0000-0000-0000-000000000001", "polish_world")
     ] == conversation_id
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation_id,
             message="Dzień dobry!",
         )
@@ -517,7 +571,7 @@ def test_send_message_does_not_change_active_conversation(
 
     # Sending messages must not silently switch the active pointer.
     assert repository.active_conversations[
-        ("user-1", "polish_world")
+        ("00000000-0000-0000-0000-000000000001", "polish_world")
     ] == conversation_id
 
 
@@ -527,13 +581,13 @@ def test_polish_world_produces_pl(
     repository,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     result = run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation_id,
             message="Dzień dobry!",
         )
@@ -550,7 +604,7 @@ def test_world_is_derived_from_persisted_conversation(
     world_resolver,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -561,7 +615,7 @@ def test_world_is_derived_from_persisted_conversation(
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation_id,
             message="Cześć!",
         )
@@ -572,14 +626,14 @@ def test_world_is_derived_from_persisted_conversation(
 
 def test_another_user_cannot_access_conversation(service):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     with pytest.raises(ValueError, match="Conversation not found"):
         run_async(
             service.send_message(
-                user_id="user-2",
+                user_id="00000000-0000-0000-0000-000000000002",
                 conversation_id=conversation.conversation_id,
                 message="Cześć!",
             )
@@ -588,7 +642,7 @@ def test_another_user_cannot_access_conversation(service):
 
 def test_client_cannot_change_world_of_existing_conversation(service):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -596,7 +650,7 @@ def test_client_cannot_change_world_of_existing_conversation(service):
     with pytest.raises(TypeError):
         run_async(
             service.send_message(
-                user_id="user-1",
+                user_id="00000000-0000-0000-0000-000000000001",
                 conversation_id=conversation.conversation_id,
                 message="Bonjour!",
                 world_id="french_world",
@@ -609,13 +663,13 @@ def test_response_language_is_application_controlled(
     language_policy,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     result = run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation_id,
             message="Please answer in English.",
         )
@@ -630,7 +684,7 @@ def test_message_length_is_enforced_before_runtime(
     runtime,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -640,7 +694,7 @@ def test_message_length_is_enforced_before_runtime(
     ):
         run_async(
             service.send_message(
-                user_id="user-1",
+                user_id="00000000-0000-0000-0000-000000000001",
                 conversation_id=conversation.conversation_id,
                 message="x" * 10_001,
             )
@@ -654,13 +708,13 @@ def test_runtime_uses_server_controlled_character_instruction(
     runtime,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation_id,
             message="Dzień dobry!",
         )
@@ -673,6 +727,51 @@ def test_runtime_uses_server_controlled_character_instruction(
     assert runtime.context.world_id == "polish_world"
     assert runtime.context.response_language == "pl"
     assert runtime.context.history == ()
+
+
+def test_denied_world_access_stops_before_resolution_history_and_ai(
+    repository,
+    world_resolver,
+    language_policy,
+    runtime,
+):
+    access_service = FakeWorldAccessService(deny=True)
+
+    service = PrivateChatService(
+        repository=repository,
+        world_resolver=world_resolver,
+        language_response_policy=language_policy,
+        language_detector=FakeLanguageDetector(),
+        conversation_runtime=runtime,
+        character_instruction="You are Yeti.",
+        world_access_service=access_service,
+    )
+
+    conversation = service.create_conversation(
+        user_id="00000000-0000-0000-0000-000000000001",
+        world_id="polish_world",
+    )
+
+    # Ignore the resolver call made when the conversation was created.
+    world_resolver.calls.clear()
+    repository.recent_messages_calls = 0
+
+    with pytest.raises(PermissionError, match="World access denied"):
+        run_async(
+            service.send_message(
+                user_id="00000000-0000-0000-0000-000000000001",
+                conversation_id=conversation.conversation_id,
+                message="Cześć!",
+            )
+        )
+
+    assert access_service.calls == [
+        (UUID("00000000-0000-0000-0000-000000000001"), "polish_world")
+    ]
+    assert world_resolver.calls == []
+    assert repository.recent_messages_calls == 0
+    assert runtime.calls == []
+    assert repository.messages == []
 
 
 def test_runtime_failure_does_not_persist_messages(
@@ -696,10 +795,11 @@ def test_runtime_failure_does_not_persist_messages(
         language_detector=FakeLanguageDetector(),
         conversation_runtime=FailingRuntime(),
         character_instruction="You are Yeti.",
+        world_access_service=FakeWorldAccessService(),
     )
 
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
@@ -709,7 +809,7 @@ def test_runtime_failure_does_not_persist_messages(
     ):
         run_async(
             service.send_message(
-                user_id="user-1",
+                user_id="00000000-0000-0000-0000-000000000001",
                 conversation_id=conversation.conversation_id,
                 message="Cześć!",
             )
@@ -723,21 +823,21 @@ def test_service_closes_request_scoped_repository(
     repository,
 ):
     service.close()
-
     assert repository.close_count == 1
+
 
 def test_runtime_receives_persisted_conversation_history(
     service,
     runtime,
 ):
     conversation = service.create_conversation(
-        user_id="user-1",
+        user_id="00000000-0000-0000-0000-000000000001",
         world_id="polish_world",
     )
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation_id,
             message="Pierwsza wiadomość",
         )
@@ -745,7 +845,7 @@ def test_runtime_receives_persisted_conversation_history(
 
     run_async(
         service.send_message(
-            user_id="user-1",
+            user_id="00000000-0000-0000-0000-000000000001",
             conversation_id=conversation.conversation_id,
             message="Druga wiadomość",
         )

@@ -15,6 +15,7 @@ from app.application.private_chat.models import (
     PrivateChatResponse,
 )
 from app.application.private_chat.repository import PrivateChatRepository
+from app.application.services.world_access_service import WorldAccessService
 from app.application.uai.language.language_detector import LanguageDetector
 from app.application.uai.language.language_response_policy import (
     LanguageResponsePolicy,
@@ -41,6 +42,9 @@ class PrivateChatService:
     A transaction-scoped repository is supplied by the composition layer.
     The service commits successful persistence and rolls back failed
     persistence without knowing the underlying database implementation.
+
+    World authorization is mandatory. The service cannot be instantiated
+    without a valid world access service.
     """
 
     def __init__(
@@ -52,9 +56,13 @@ class PrivateChatService:
         language_detector: LanguageDetector | None,
         conversation_runtime: ConversationRuntime,
         character_instruction: str,
+        world_access_service: WorldAccessService,
     ) -> None:
         if not character_instruction or not character_instruction.strip():
             raise ValueError("character_instruction is required")
+
+        if world_access_service is None:
+            raise ValueError("world_access_service is required")
 
         self._repository = repository
         self._world_resolver = world_resolver
@@ -62,6 +70,7 @@ class PrivateChatService:
         self._language_detector = language_detector
         self._conversation_runtime = conversation_runtime
         self._character_instruction = character_instruction.strip()
+        self._world_access_service = world_access_service
 
     def get_active_conversation(
         self,
@@ -71,10 +80,15 @@ class PrivateChatService:
     ) -> PrivateChatActiveConversation:
         """Return the active conversation for a user/World pair.
 
-        If the user has never opened private chat for this World, a new
-        conversation is created and becomes active. Subsequent visits to the
-        same World resolve to that same conversation until Restart explicitly
-        creates another one.
+        If the user has never opened private chat for this World, the
+        persistence layer atomically creates the first conversation and makes
+        it active.
+
+        Concurrent first-message requests for the same user/World pair
+        therefore resolve to one authoritative conversation.
+
+        Subsequent visits to the same World resolve to that same conversation
+        until Restart explicitly creates another one.
         """
         if not user_id or not user_id.strip():
             raise ValueError("user_id is required")
@@ -86,36 +100,20 @@ class PrivateChatService:
         normalized_world_id = world_id.strip()
 
         world = self._world_resolver.resolve(normalized_world_id)
-
         del world
 
         try:
-            active_conversation = self._repository.get_active_conversation(
-                user_id=normalized_user_id,
-                world_id=normalized_world_id,
-                limit=MAX_ACTIVE_PRIVATE_CHAT_MESSAGES,
-            )
-
-            if active_conversation is not None:
-                return active_conversation
-
-            conversation = self._repository.create_conversation(
-                user_id=normalized_user_id,
-                world_id=normalized_world_id,
-            )
-
-            self._repository.set_active_conversation(
-                user_id=normalized_user_id,
-                world_id=normalized_world_id,
-                conversation_id=conversation.conversation_id,
+            active_conversation = (
+                self._repository.get_or_create_active_conversation(
+                    user_id=normalized_user_id,
+                    world_id=normalized_world_id,
+                    limit=MAX_ACTIVE_PRIVATE_CHAT_MESSAGES,
+                )
             )
 
             self._repository.commit()
+            return active_conversation
 
-            return PrivateChatActiveConversation(
-                conversation=conversation,
-                messages=[],
-            )
         except Exception:
             self._repository.rollback()
             raise
@@ -157,8 +155,8 @@ class PrivateChatService:
             )
 
             self._repository.commit()
-
             return conversation
+
         except Exception:
             self._repository.rollback()
             raise
@@ -186,8 +184,8 @@ class PrivateChatService:
         normalized_user_id = user_id.strip()
         normalized_message = message.strip()
 
-        # World is deliberately derived from the persisted conversation.
-        # The client cannot choose or override the World while sending.
+        # Resolve the conversation through an ownership-scoped repository
+        # lookup. Never trust a client-supplied World identifier.
         conversation = self._repository.get_conversation_for_user(
             conversation_id=conversation_id,
             user_id=normalized_user_id,
@@ -196,6 +194,23 @@ class PrivateChatService:
         if conversation is None:
             raise ValueError("Conversation not found")
 
+        # Fail closed if authorization is unavailable. This is deliberately
+        # checked before World resolution, history retrieval, or AI execution.
+        access_service = self._world_access_service
+        if access_service is None:
+            raise RuntimeError(
+                "World access authorization is unavailable"
+            )
+
+        # Authorize against the World stored on the owned conversation.
+        # PermissionError propagates to the API boundary, which maps it to 403.
+        await access_service.require_access(
+            user_id=UUID(normalized_user_id),
+            world_identifier=conversation.world_id,
+        )
+
+        # No World resolution, history retrieval, or AI call occurs until
+        # authorization succeeds.
         world = self._world_resolver.resolve(conversation.world_id)
 
         response_language = (
@@ -230,6 +245,7 @@ class PrivateChatService:
         )
 
         # Runtime/provider execution happens before persistence.
+        # If it fails, neither message is saved.
         response = await self._conversation_runtime.respond(
             character_instruction=self._character_instruction,
             learner_message=normalized_message,
@@ -274,6 +290,7 @@ class PrivateChatService:
             )
 
             self._repository.commit()
+
         except Exception:
             self._repository.rollback()
             raise

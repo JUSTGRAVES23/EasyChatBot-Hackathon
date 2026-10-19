@@ -445,6 +445,7 @@ def create_production_beta_telegram_composition(
     study_material_service = StudyMaterialService(
         repository=study_material_repository,
         world_catalogue_service=catalogue_service,
+        world_access_service=world_access_service,
     )
 
     # ------------------------------------------------------------------
@@ -462,10 +463,14 @@ def create_production_beta_telegram_composition(
         ),
     )
 
+    if conversation_runtime is None and conversation_runtime_factory is not None:
+        conversation_runtime = conversation_runtime_factory()
+        conversation_runtime_factory = None
+
     if conversation_runtime is None:
         raise ValueError(
-            "conversation_runtime is required for production "
-            "private-chat composition."
+            "conversation_runtime or conversation_runtime_factory is required "
+            "for production private-chat composition."
         )
 
     private_chat_service_factory = (
@@ -473,6 +478,7 @@ def create_production_beta_telegram_composition(
             session_factory=session_factory,
             conversation_runtime=conversation_runtime,
             character_instruction=private_chat_character_instruction,
+            world_access_service=world_access_service,
             language_detector=language_detector,
         )
     )
@@ -508,6 +514,7 @@ def create_production_beta_telegram_composition(
         beta_world_access_service=(
             beta_world_access_service
         ),
+        world_access_service=world_access_service,
         expiration_minutes=expiration_minutes,
         conversation_runtime=conversation_runtime,
         conversation_runtime_factory=(

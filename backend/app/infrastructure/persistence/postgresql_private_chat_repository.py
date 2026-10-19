@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.application.private_chat.models import (
@@ -122,10 +123,121 @@ class PostgreSQLPrivateChatRepository(PrivateChatRepository):
             limit=limit,
         )
 
-        return PrivateChatActiveConversation(
-            conversation=self._to_conversation(conversation_record),
-            messages=messages,
+        return self._to_active_conversation(
+            active_record,
+            conversation_record,
+            messages,
         )
+
+    def get_or_create_active_conversation(
+        self,
+        *,
+        user_id: str,
+        world_id: str,
+        limit: int = 20,
+    ) -> PrivateChatActiveConversation:
+        """
+        Atomically return the active conversation for a user/World pair,
+        creating it when no active conversation exists.
+
+        The active-conversation table has a composite primary key on
+        (user_id, world_id). PostgreSQL therefore acts as the concurrency
+        authority for first-message creation.
+
+        A candidate conversation is created first because the active
+        pointer has a foreign-key relationship to the conversation.
+        The pointer is then inserted with ON CONFLICT DO NOTHING.
+
+        If this transaction wins the pointer race, its candidate
+        conversation becomes authoritative.
+
+        If another transaction wins the race, this transaction removes
+        its unreferenced candidate conversation and returns the
+        authoritative conversation selected from the active pointer.
+
+        The caller owns the final transaction commit/rollback.
+        """
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        # Fast path: the authoritative active pointer already exists.
+        existing = self.get_active_conversation(
+            user_id=user_id,
+            world_id=world_id,
+            limit=limit,
+        )
+
+        if existing is not None:
+            return existing
+
+        # No active pointer exists in this transaction's current view.
+        # Create a candidate conversation. It remains inside the current
+        # transaction until the caller commits.
+        candidate = self.create_conversation(
+            user_id=user_id,
+            world_id=world_id,
+        )
+
+        # The composite primary key on (user_id, world_id) is the
+        # concurrency authority. PostgreSQL will serialize conflicting
+        # inserts for the same user/World pair.
+        statement = (
+            insert(PrivateChatActiveConversationRecord)
+            .values(
+                user_id=user_id,
+                world_id=world_id,
+                conversation_id=candidate.conversation_id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    PrivateChatActiveConversationRecord.user_id,
+                    PrivateChatActiveConversationRecord.world_id,
+                ]
+            )
+            .returning(
+                PrivateChatActiveConversationRecord.conversation_id
+            )
+        )
+
+        winning_conversation_id = self._session.scalar(statement)
+
+        if winning_conversation_id == candidate.conversation_id:
+            # This transaction won the race. The candidate is now the
+            # authoritative active conversation.
+            return PrivateChatActiveConversation(
+                conversation=candidate,
+                messages=[],
+            )
+
+        # Another transaction won the active-pointer race. Our candidate
+        # is not referenced by the active pointer and must not remain as
+        # an orphan historical conversation.
+        self._session.execute(
+            delete(PrivateChatConversationRecord).where(
+                PrivateChatConversationRecord.conversation_id
+                == candidate.conversation_id,
+                PrivateChatConversationRecord.user_id == user_id,
+                PrivateChatConversationRecord.world_id == world_id,
+            )
+        )
+        self._session.flush()
+
+        # Re-read the authoritative pointer/conversation. The competing
+        # PostgreSQL transaction has committed before ON CONFLICT returns
+        # for the conflicting unique key.
+        authoritative = self.get_active_conversation(
+            user_id=user_id,
+            world_id=world_id,
+            limit=limit,
+        )
+
+        if authoritative is None:
+            raise RuntimeError(
+                "Active private chat conversation disappeared after "
+                "successful concurrency resolution"
+            )
+
+        return authoritative
 
     def create_conversation(
         self,

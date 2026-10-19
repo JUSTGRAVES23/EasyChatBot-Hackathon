@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -62,20 +62,42 @@ class FakePrivateChatService:
         self.closed += 1
 
 
+USER_ID = UUID("12345678-1234-5678-1234-567812345678")
+
+
 class FakeBetaAccessService:
     async def get_conversation_context(
         self,
         telegram_user_id: int,
     ):
         return SimpleNamespace(
-            user=SimpleNamespace(
-                id="user-123",
-            ),
+            user_id=str(USER_ID),
             telegram_user_id=telegram_user_id,
             world_id="french_world",
             character="Alix",
             level="B1",
         )
+
+
+class FakeWorldAccessService:
+    def __init__(self, *, deny: bool = False) -> None:
+        self.deny = deny
+        self.calls: list[dict[str, object]] = []
+
+    async def require_access(
+        self,
+        *,
+        user_id: UUID,
+        world_identifier: str,
+    ) -> None:
+        self.calls.append(
+            {
+                "user_id": user_id,
+                "world_identifier": world_identifier,
+            }
+        )
+        if self.deny:
+            raise PermissionError("World access denied.")
 
 
 class AllowPolicy:
@@ -103,6 +125,7 @@ async def test_private_chat_boundary_uses_authoritative_private_chat_bridge() ->
         private_chat_service_factory=lambda: service,
     )
 
+    world_access_service = FakeWorldAccessService()
     boundary = BetaTelegramConversationBoundary(
         conversation_service=SimpleNamespace(),
         beta_access_service=FakeBetaAccessService(),
@@ -110,6 +133,7 @@ async def test_private_chat_boundary_uses_authoritative_private_chat_bridge() ->
         abuse_protector=AllowPolicy(),
         observability=FakeObservability(),
         private_chat_bridge=bridge,
+        world_access_service=world_access_service,
     )
 
     response = await boundary.handle_message(
@@ -118,13 +142,60 @@ async def test_private_chat_boundary_uses_authoritative_private_chat_bridge() ->
     )
 
     assert response == "Bonjour depuis le World privé !"
+    assert world_access_service.calls == [
+        {
+            "user_id": USER_ID,
+            "world_identifier": "french_world",
+        }
+    ]
 
     assert service.sent == [
         {
-            "user_id": "user-123",
+            "user_id": str(USER_ID),
             "conversation_id": service.conversation.conversation_id,
             "message": "Bonjour",
         }
     ]
 
     assert service.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_denied_world_access_prevents_private_chat_side_effects() -> None:
+    service = FakePrivateChatService()
+    factory_calls = 0
+
+    def private_chat_service_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return service
+
+    bridge = TelegramPrivateChatBridge(
+        private_chat_service_factory=private_chat_service_factory,
+    )
+    world_access_service = FakeWorldAccessService(deny=True)
+    boundary = BetaTelegramConversationBoundary(
+        conversation_service=SimpleNamespace(),
+        beta_access_service=FakeBetaAccessService(),
+        rate_limiter=AllowPolicy(),
+        abuse_protector=AllowPolicy(),
+        observability=FakeObservability(),
+        private_chat_bridge=bridge,
+        world_access_service=world_access_service,
+    )
+
+    response = await boundary.handle_message(
+        telegram_user_id=987654,
+        message="Bonjour",
+    )
+
+    assert response == boundary.UNAUTHORIZED_RESPONSE
+    assert world_access_service.calls == [
+        {
+            "user_id": USER_ID,
+            "world_identifier": "french_world",
+        }
+    ]
+    assert factory_calls == 0
+    assert service.sent == []
+    assert service.closed == 0

@@ -38,6 +38,7 @@ from app.application.providers.provider_usage_capture import (
 from app.application.services.beta_world_access_service import (
     BetaWorldAccessService,
 )
+from app.application.services.world_access_service import WorldAccessService
 from app.application.uai.language.language_detector import (
     LanguageDetector,
 )
@@ -83,6 +84,7 @@ class BetaTelegramComposition:
     start_handler: BetaTelegramStartHandler
     adapter: BetaTelegramAdapter
     runtime: TelegramBotRuntime
+    world_access_service: WorldAccessService | None = None
     rate_limiter: Any | None = None
     abuse_protector: Any | None = None
     observability: Any | None = None
@@ -157,6 +159,7 @@ def create_beta_telegram_composition(
     language_response_policy: LanguageResponsePolicy | None = None,
     language_detector: LanguageDetector | None = None,
     private_chat_service_factory: Callable[[], Any] | None = None,
+    world_access_service: WorldAccessService | None = None,
     world_start_router: WorldTelegramStartRouter | None = None,
     telegram_update_idempotency: (
         TelegramUpdateIdempotencyPort | None
@@ -348,6 +351,11 @@ def create_beta_telegram_composition(
     private_chat_bridge = None
 
     if private_chat_service_factory is not None:
+        if world_access_service is None:
+            raise ValueError(
+                "world_access_service is required when "
+                "private_chat_service_factory is configured."
+            )
         private_chat_bridge = TelegramPrivateChatBridge(
             private_chat_service_factory=private_chat_service_factory,
         )
@@ -360,6 +368,7 @@ def create_beta_telegram_composition(
         observability=resolved_observability,
         functionality_control_service=functionality_control_service,
         private_chat_bridge=private_chat_bridge,
+        world_access_service=world_access_service,
     )
 
     private_chat_gate = BetaPrivateChatGate(
@@ -392,6 +401,7 @@ def create_beta_telegram_composition(
         conversation_service=conversation_service,
         conversation_boundary=conversation_boundary,
         private_chat_bridge=private_chat_bridge,
+        world_access_service=world_access_service,
         private_chat_gate=private_chat_gate,
         start_handler=start_handler,
         adapter=adapter,

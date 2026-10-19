@@ -33,6 +33,33 @@ def _get_private_chat_service(request: Request):
     return factory()
 
 
+async def _require_world_access(
+    request: Request,
+    principal: Principal,
+    world_id: str,
+) -> None:
+    access_service = getattr(
+        request.app.state,
+        "world_access_service",
+        None,
+    )
+    if access_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="World access authorization is unavailable",
+        )
+    try:
+        await access_service.require_access(
+            user_id=principal.user_id,
+            world_identifier=world_id,
+        )
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this Learning World",
+        ) from None
+
+
 @router.get(
     "/conversations/active",
     response_model=ActivePrivateChatConversationResponse,
@@ -48,13 +75,15 @@ async def get_active_private_chat(
     If no conversation exists yet for this user/World pair, the service
     creates the initial conversation and makes it active.
     """
-    service = _get_private_chat_service(request)
-
     try:
+        await _require_world_access(request, principal, world_id)
+        service = _get_private_chat_service(request)
         active = service.get_active_conversation(
             user_id=str(principal.user_id),
             world_id=world_id,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         detail = str(exc)
         code = (
@@ -99,13 +128,15 @@ async def create_private_chat(
     This is the Restart/new-conversation operation. Existing conversations
     and their messages remain persisted.
     """
-    service = _get_private_chat_service(request)
-
     try:
+        await _require_world_access(request, principal, payload.world_id)
+        service = _get_private_chat_service(request)
         conversation = service.create_conversation(
             user_id=str(principal.user_id),
             world_id=payload.world_id,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -138,6 +169,11 @@ async def send_private_chat_message(
             conversation_id=payload.conversation_id,
             message=payload.message,
         )
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this Learning World",
+        ) from None
     except ValueError as exc:
         detail = str(exc)
 

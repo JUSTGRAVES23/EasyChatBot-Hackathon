@@ -29,6 +29,7 @@ class FakePrivateChatService:
         self.created_world_ids: list[str] = []
         self.sent_calls: list[dict[str, object]] = []
         self.conversation_id = uuid4()
+        self.deny_send = False
 
     def create_conversation(
         self,
@@ -64,6 +65,9 @@ class FakePrivateChatService:
         The World is derived from the authenticated conversation rather than
         trusting a client-supplied World or language on every message.
         """
+        if self.deny_send:
+            raise PermissionError("World access denied")
+
         self.sent_calls.append(
             {
                 "user_id": user_id,
@@ -149,6 +153,7 @@ def client(
         get_current_principal
     ] = fake_get_current_principal
 
+    app.state.world_access_service = _PrivateChatTestWorldAccessService()
     return TestClient(app)
 
 
@@ -261,6 +266,26 @@ def test_send_private_chat_message_returns_response(
     assert sent_call["message"] == "Bonjour"
 
 
+def test_send_private_chat_message_maps_world_access_denial_to_403(
+    client: TestClient,
+    private_chat_service: FakePrivateChatService,
+) -> None:
+    private_chat_service.deny_send = True
+
+    response = client.post(
+        "/private-chat/messages",
+        json={
+            "conversation_id": str(private_chat_service.conversation_id),
+            "message": "Bonjour",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You do not have access to this Learning World"
+    )
+    assert private_chat_service.sent_calls == []
+
 def test_send_private_chat_message_requires_authentication(
     app: FastAPI,
     private_chat_service: FakePrivateChatService,
@@ -363,3 +388,9 @@ def test_send_private_chat_message_rejects_client_provider_and_model(
     )
 
     assert response.status_code == 422
+
+class _PrivateChatTestWorldAccessService:
+    async def require_access(self, *, user_id, world_identifier):
+        # Endpoint contract tests use a permissive test double.
+        # Authorization denial belongs in dedicated denial-path tests.
+        return None
