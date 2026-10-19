@@ -57,6 +57,7 @@ class FakeRepository:
         *,
         notification_key: str,
         provider_message_id: str | None,
+        claim_token: str | None = None,
     ) -> DeliveryRecord:
         self.succeeded += 1
 
@@ -71,6 +72,7 @@ class FakeRepository:
         *,
         notification_key: str,
         error_code: str,
+        claim_token: str | None = None,
     ) -> DeliveryRecord:
         self.failed += 1
 
@@ -84,6 +86,7 @@ class FakeRepository:
         self,
         *,
         notification_key: str,
+        claim_token: str,
     ) -> DeliveryRecord:
         self.retries += 1
 
@@ -224,6 +227,7 @@ async def test_failed_delivery_is_retryable():
     second = await service.dispatch(
         request=make_request(),
         email_request=object(),
+        claim_token="test-claim-token",
     )
 
     assert second.status.value == "SENT"

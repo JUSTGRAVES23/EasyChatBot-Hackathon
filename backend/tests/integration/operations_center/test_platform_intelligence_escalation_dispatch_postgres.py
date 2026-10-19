@@ -189,8 +189,8 @@ async def test_started_delivery_is_retried_after_service_restart() -> None:
     finally:
         await _dispose(engine_one)
 
-    # The STARTED record represents an interrupted attempt. A new service
-    # instance must recover it and complete delivery without creating a row.
+    # A STARTED record after restart has an ambiguous provider outcome.
+    # Never automatically resend it; require explicit reconciliation.
     engine_two = create_async_database_engine()
 
     try:
@@ -208,18 +208,26 @@ async def test_started_delivery_is_retried_after_service_restart() -> None:
             email_request=object(),
         )
 
-        assert result.status.value == "SENT"
-        assert result.provider_message_id == "provider-message-recovered"
+        assert result.status.value == "FAILED"
+        assert (
+            getattr(result, "error_code", None)
+            or getattr(result, "error", None)
+            or getattr(result, "reason", None)
+        ) in {
+            "DELIVERY_OUTCOME_AMBIGUOUS_REQUIRES_RECONCILIATION",
+            "RECONCILIATION_REQUIRED",
+        }
+        assert workflow_two.calls == []
+        assert result.provider_message_id is None
         assert result.attempt == 1
-        assert len(workflow_two.calls) == 1
 
         persisted = await repository_two.get_by_notification_key(
             request.notification_key
         )
         assert persisted is not None
-        assert persisted.status is PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED
+        assert persisted.status is PlatformIntelligenceEscalationDeliveryStatus.STARTED
         assert persisted.attempt == 1
-        assert persisted.provider_message_id == "provider-message-recovered"
+        assert persisted.provider_message_id is None
     finally:
         await _dispose(engine_two)
 

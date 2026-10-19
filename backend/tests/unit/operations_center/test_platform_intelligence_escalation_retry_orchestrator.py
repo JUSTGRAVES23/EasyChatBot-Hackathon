@@ -94,7 +94,7 @@ class FakeStateReader:
 
 @dataclass(frozen=True)
 class FakeClaim:
-    token: str = "claim-token"
+    claim_token: str = "claim-token"
 
 
 class FakeRetryExecution:
@@ -251,7 +251,7 @@ async def test_valid_state_executes_after_claim() -> None:
             dispatch_result=type(
                 "DispatchResult",
                 (),
-                {"provider_message_id": "provider-message-2"},
+                {"status": "SENT", "provider_message_id": "provider-message-2"},
             )(),
         )
     )

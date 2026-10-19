@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -174,6 +174,7 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
 
     async def mark_succeeded(
         self, *, notification_key: str, provider_message_id: str | None,
+        claim_token: str | None = None,
     ):
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
@@ -189,6 +190,15 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
                         claimed_at = NULL,
                         lease_expires_at = NULL
                     WHERE notification_key = :notification_key
+                      AND status = :started
+                      AND (
+                          (CAST(:claim_token AS TEXT) IS NULL AND claim_token IS NULL)
+                          OR (
+                              CAST(:claim_token AS TEXT) IS NOT NULL
+                              AND claim_token = :claim_token
+                              AND lease_expires_at > :updated_at
+                          )
+                      )
                     RETURNING notification_key, recommendation_id,
                               risk_decision_id, review_item_id, correlation_id,
                               attempt, status, provider_message_id,
@@ -197,6 +207,8 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
                 ),
                 {
                     "notification_key": notification_key,
+                    "claim_token": claim_token,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
                     "status": PlatformIntelligenceEscalationDeliveryStatus.SUCCEEDED.value,
                     "provider_message_id": provider_message_id,
                     "updated_at": now,
@@ -227,7 +239,10 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
             await session.commit()
             return record
 
-    async def mark_failed(self, *, notification_key: str, error_code: str):
+    async def mark_failed(
+        self, *, notification_key: str, error_code: str,
+        claim_token: str | None = None,
+    ):
         if not error_code.strip():
             raise ValueError("error_code must be nonblank.")
         now = datetime.now(timezone.utc)
@@ -244,6 +259,15 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
                         claimed_at = NULL,
                         lease_expires_at = NULL
                     WHERE notification_key = :notification_key
+                      AND status = :started
+                      AND (
+                          (CAST(:claim_token AS TEXT) IS NULL AND claim_token IS NULL)
+                          OR (
+                              CAST(:claim_token AS TEXT) IS NOT NULL
+                              AND claim_token = :claim_token
+                              AND lease_expires_at > :updated_at
+                          )
+                      )
                     RETURNING notification_key, recommendation_id,
                               risk_decision_id, review_item_id, correlation_id,
                               attempt, status, provider_message_id,
@@ -252,6 +276,8 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
                 ),
                 {
                     "notification_key": notification_key,
+                    "claim_token": claim_token,
+                    "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
                     "status": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
                     "error_code": error_code,
                     "updated_at": now,
@@ -278,7 +304,7 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
             await session.commit()
             return record
 
-    async def start_retry(self, *, notification_key: str):
+    async def start_retry(self, *, notification_key: str, claim_token: str):
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             result = await session.execute(
@@ -289,12 +315,11 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
                         status = :started,
                         provider_message_id = NULL,
                         error_code = NULL,
-                        updated_at = :updated_at,
-                        claim_token = NULL,
-                        claimed_at = NULL,
-                        lease_expires_at = NULL
+                        updated_at = :updated_at
                     WHERE notification_key = :notification_key
                       AND status = :failed
+                      AND claim_token = :claim_token
+                      AND lease_expires_at > :updated_at
                     RETURNING notification_key, recommendation_id,
                               risk_decision_id, review_item_id, correlation_id,
                               attempt, status, provider_message_id,
@@ -303,6 +328,7 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
                 ),
                 {
                     "notification_key": notification_key,
+                    "claim_token": claim_token,
                     "started": PlatformIntelligenceEscalationDeliveryStatus.STARTED.value,
                     "failed": PlatformIntelligenceEscalationDeliveryStatus.FAILED.value,
                     "updated_at": now,
@@ -312,7 +338,8 @@ class SqlAlchemyPlatformIntelligenceEscalationDeliveryRepository(
             if row is None:
                 await session.rollback()
                 raise RuntimeError(
-                    "PI escalation delivery can only be retried from FAILED."
+                    "PI escalation retry claim is stale, expired, or no longer "
+                    "eligible; delivery state was not changed."
                 )
 
             record = self._to_record(row)

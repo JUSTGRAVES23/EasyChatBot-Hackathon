@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 
 import os
 from uuid import uuid4
@@ -52,10 +53,24 @@ async def test_delivery_lifecycle_is_durably_audited():
             notification_key=key,
             error_code="PROVIDER_ERROR",
         )
-        await delivery.start_retry(notification_key=key)
+        now = datetime.now(timezone.utc)
+        claim_token = f"retry-{uuid4()}"
+        claimed = await delivery.claim_retry_candidate(
+            notification_key=key,
+            claim_token=claim_token,
+            claimed_at=now,
+            lease_expires_at=now + timedelta(minutes=5),
+        )
+        assert claimed is True
+
+        await delivery.start_retry(
+            notification_key=key,
+            claim_token=claim_token,
+        )
         await delivery.mark_succeeded(
             notification_key=key,
             provider_message_id="provider-audit-2",
+            claim_token=claim_token,
         )
 
         events = await audit.list_by_notification_key(key)

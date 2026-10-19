@@ -23,6 +23,7 @@ class PlatformIntelligenceEscalationRetryExecutionStatus(StrEnum):
     NOT_ELIGIBLE = "NOT_ELIGIBLE"
     NOT_DUE = "NOT_DUE"
     RETRIED = "RETRIED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +80,11 @@ class PlatformIntelligenceEscalationRetryExecutionService:
         request: PlatformIntelligenceEscalationDispatchRequest,
         email_request: object,
         reference_at: datetime,
+        claim_token: str,
     ) -> PlatformIntelligenceEscalationRetryExecutionResult:
+        if not isinstance(claim_token, str) or not claim_token.strip():
+            raise ValueError("claim_token must be nonblank.")
+
         record = await self._repository.get_by_notification_key(
             request.notification_key
         )
@@ -92,6 +97,14 @@ class PlatformIntelligenceEscalationRetryExecutionService:
         if record.notification_key != request.notification_key:
             raise ValueError(
                 "Delivery record notification key does not match request."
+            )
+
+        if record.status is PlatformIntelligenceEscalationDeliveryStatus.STARTED:
+            return PlatformIntelligenceEscalationRetryExecutionResult(
+                status=PlatformIntelligenceEscalationRetryExecutionStatus.RECONCILIATION_REQUIRED,
+                notification_key=record.notification_key,
+                attempt=record.attempt,
+                reason="DELIVERY_OUTCOME_AMBIGUOUS_REQUIRES_RECONCILIATION",
             )
 
         policy_result = self._retry_policy.evaluate(
@@ -138,20 +151,12 @@ class PlatformIntelligenceEscalationRetryExecutionService:
                 reason=policy_result.reason,
             )
 
-        if (
-            record.status
-            is PlatformIntelligenceEscalationDeliveryStatus.FAILED
-        ):
-            await self._repository.start_retry(
-                notification_key=record.notification_key,
-            )
-
-        # STARTED recovery deliberately does not call start_retry().
-        # The durable attempt remains the same because this is recovery
-        # of the interrupted attempt rather than a new FAILED retry.
+        # Dispatch owns the one fenced FAILED->STARTED transition.
+        # An already-STARTED record is ambiguous and must not be resent.
         dispatch_result = await self._dispatch_service.dispatch(
             request=request,
             email_request=email_request,
+            claim_token=claim_token,
         )
 
         return PlatformIntelligenceEscalationRetryExecutionResult(

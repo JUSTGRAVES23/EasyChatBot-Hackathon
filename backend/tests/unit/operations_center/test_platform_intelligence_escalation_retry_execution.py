@@ -72,7 +72,7 @@ class Repository:
 
         return None
 
-    async def start_retry(self, *, notification_key):
+    async def start_retry(self, *, notification_key, claim_token):
         self.retries += 1
 
         self.record.attempt += 1
@@ -89,7 +89,7 @@ class Dispatch:
     def __init__(self):
         self.calls = 0
 
-    async def dispatch(self, *, request, email_request):
+    async def dispatch(self, *, request, email_request, claim_token=None):
         self.calls += 1
 
         return PlatformIntelligenceEscalationDispatchResult(
@@ -188,6 +188,7 @@ async def test_failed_delivery_retries_only_when_due():
             30,
             tzinfo=timezone.utc,
         ),
+        claim_token="test-claim-token",
     )
 
     assert (
@@ -203,6 +204,7 @@ async def test_failed_delivery_retries_only_when_due():
         request=request(),
         email_request=object(),
         reference_at=REFERENCE,
+        claim_token="test-claim-token",
     )
 
     assert (
@@ -211,7 +213,8 @@ async def test_failed_delivery_retries_only_when_due():
         .RETRIED
     )
 
-    assert repository.retries == 1
+    # Dispatch owns the FAILED -> STARTED transition.
+    assert repository.retries == 0
     assert dispatch.calls == 1
 
 
@@ -236,6 +239,7 @@ async def test_non_retryable_failure_does_not_dispatch():
         request=request(),
         email_request=object(),
         reference_at=REFERENCE,
+        claim_token="test-claim-token",
     )
 
     assert (
@@ -269,17 +273,18 @@ async def test_started_recovery_does_not_increment_attempt():
         request=request(),
         email_request=object(),
         reference_at=REFERENCE,
+        claim_token="test-claim-token",
     )
 
     assert (
         result.status
         is PlatformIntelligenceEscalationRetryExecutionStatus
-        .RETRIED
+        .RECONCILIATION_REQUIRED
     )
-
+    assert result.reason == "DELIVERY_OUTCOME_AMBIGUOUS_REQUIRES_RECONCILIATION"
     assert repository.retries == 0
     assert repository.record.attempt == 1
-    assert dispatch.calls == 1
+    assert dispatch.calls == 0
 
 
 @pytest.mark.asyncio
@@ -303,6 +308,7 @@ async def test_max_attempts_prevents_retry():
         request=request(),
         email_request=object(),
         reference_at=REFERENCE,
+        claim_token="test-claim-token",
     )
 
     assert (
@@ -334,4 +340,5 @@ async def test_retry_requires_existing_durable_record():
             request=request(),
             email_request=object(),
             reference_at=REFERENCE,
+            claim_token="test-claim-token",
         )

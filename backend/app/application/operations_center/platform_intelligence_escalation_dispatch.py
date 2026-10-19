@@ -137,7 +137,12 @@ class PlatformIntelligenceEscalationDispatchService:
         *,
         request: PlatformIntelligenceEscalationDispatchRequest,
         email_request: Any,
+        claim_token: str | None = None,
     ) -> PlatformIntelligenceEscalationDispatchResult:
+        if claim_token is not None and (
+            not isinstance(claim_token, str) or not claim_token.strip()
+        ):
+            raise ValueError("claim_token must be nonblank when provided.")
         self._revalidate(request)
 
         existing = await self._repository.get_by_notification_key(
@@ -188,17 +193,33 @@ class PlatformIntelligenceEscalationDispatchService:
             existing.status
             is PlatformIntelligenceEscalationDeliveryStatus.FAILED
         ):
+            if not claim_token:
+                return PlatformIntelligenceEscalationDispatchResult(
+                    status=PlatformIntelligenceEscalationDispatchStatus.FAILED,
+                    notification_key=request.notification_key,
+                    error_code="RETRY_CLAIM_TOKEN_REQUIRED",
+                    attempt=existing.attempt,
+                )
             await self._repository.start_retry(
-                notification_key=request.notification_key
+                notification_key=request.notification_key,
+                claim_token=claim_token,
             )
 
         elif (
             existing.status
             is PlatformIntelligenceEscalationDeliveryStatus.STARTED
         ):
-            # An interrupted attempt is retryable, following the
-            # established durable execution convention.
-            pass
+            # A STARTED record has an ambiguous delivery outcome.
+            # Do not resend automatically: the provider may already
+            # have accepted the message. Reconciliation is required.
+            return PlatformIntelligenceEscalationDispatchResult(
+                status=PlatformIntelligenceEscalationDispatchStatus.FAILED,
+                notification_key=request.notification_key,
+                error_code=(
+                    "DELIVERY_OUTCOME_AMBIGUOUS_REQUIRES_RECONCILIATION"
+                ),
+                attempt=existing.attempt,
+            )
 
         try:
             workflow_result = self._email_workflow.send(
@@ -237,6 +258,7 @@ class PlatformIntelligenceEscalationDispatchService:
             await self._repository.mark_failed(
                 notification_key=request.notification_key,
                 error_code=error_code,
+                claim_token=claim_token,
             )
 
             return PlatformIntelligenceEscalationDispatchResult(
@@ -251,6 +273,7 @@ class PlatformIntelligenceEscalationDispatchService:
         await self._repository.mark_succeeded(
             notification_key=request.notification_key,
             provider_message_id=provider_message_id,
+            claim_token=claim_token,
         )
 
         record = (

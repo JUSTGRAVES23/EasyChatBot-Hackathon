@@ -117,8 +117,19 @@ async def test_failed_delivery_can_retry_with_incremented_attempt() -> None:
         assert failed.attempt == 1
         assert failed.error_code == "PROVIDER_ERROR"
 
+        now = datetime.now(timezone.utc)
+        claim_token = f"retry-{uuid4()}"
+        claimed = await repository.claim_retry_candidate(
+            notification_key=key,
+            claim_token=claim_token,
+            claimed_at=now,
+            lease_expires_at=now + timedelta(minutes=5),
+        )
+        assert claimed is True
+
         retried = await repository.start_retry(
             notification_key=key,
+            claim_token=claim_token,
         )
 
         assert retried.status is PlatformIntelligenceEscalationDeliveryStatus.STARTED

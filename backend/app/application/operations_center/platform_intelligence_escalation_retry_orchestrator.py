@@ -13,7 +13,6 @@ from app.application.operations_center.platform_intelligence_escalation_retry_ca
 )
 from app.application.operations_center.platform_intelligence_escalation_retry_execution import (
     PlatformIntelligenceEscalationRetryExecutionResult,
-    PlatformIntelligenceEscalationRetryExecutionService,
     PlatformIntelligenceEscalationRetryExecutionStatus,
 )
 from app.application.operations_center.platform_intelligence_escalation_retry_orchestration import (
@@ -48,6 +47,7 @@ class PlatformIntelligenceRetryExecutor(Protocol):
         request: object,
         email_request: object,
         reference_at: datetime,
+        claim_token: str,
     ) -> PlatformIntelligenceEscalationRetryExecutionResult: ...
 
 
@@ -138,6 +138,7 @@ class PlatformIntelligenceEscalationRetryOrchestrator:
             request=state.dispatch_request,
             email_request=state.email_request,
             reference_at=reference_at,
+            claim_token=claim.claim_token,
         )
 
         if (
@@ -145,6 +146,31 @@ class PlatformIntelligenceEscalationRetryOrchestrator:
             is PlatformIntelligenceEscalationRetryExecutionStatus.RETRIED
         ):
             dispatch_result = execution.dispatch_result
+
+            dispatch_status = (
+                getattr(
+                    dispatch_result.status,
+                    "value",
+                    dispatch_result.status,
+                )
+                if dispatch_result is not None
+                else None
+            )
+
+            if dispatch_status not in {"SENT", "IDEMPOTENT_REPLAY"}:
+                return PlatformIntelligenceRetryRunResult(
+                    notification_key=candidate.notification_key,
+                    status=PlatformIntelligenceRetryRunStatus.FAILED,
+                    reason=(
+                        dispatch_result.error_code
+                        if dispatch_result is not None
+                        and dispatch_result.error_code
+                        else "RETRY_DISPATCH_NOT_CONFIRMED_SUCCESS"
+                    ),
+                    attempt=execution.attempt,
+                    provider_message_id=None,
+                )
+
             return PlatformIntelligenceRetryRunResult(
                 notification_key=candidate.notification_key,
                 status=PlatformIntelligenceRetryRunStatus.SUCCEEDED,

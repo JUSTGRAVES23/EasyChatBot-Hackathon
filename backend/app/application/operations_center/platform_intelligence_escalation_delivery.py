@@ -55,6 +55,7 @@ class PlatformIntelligenceEscalationDeliveryRepository:
         *,
         notification_key: str,
         provider_message_id: str | None,
+        claim_token: str | None = None,
     ) -> PlatformIntelligenceEscalationDeliveryRecord:
         raise NotImplementedError
 
@@ -63,6 +64,7 @@ class PlatformIntelligenceEscalationDeliveryRepository:
         *,
         notification_key: str,
         error_code: str,
+        claim_token: str | None = None,
     ) -> PlatformIntelligenceEscalationDeliveryRecord:
         raise NotImplementedError
 
@@ -70,5 +72,6 @@ class PlatformIntelligenceEscalationDeliveryRepository:
         self,
         *,
         notification_key: str,
+        claim_token: str,
     ) -> PlatformIntelligenceEscalationDeliveryRecord:
         raise NotImplementedError
